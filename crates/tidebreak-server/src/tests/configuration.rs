@@ -1,5 +1,28 @@
 use super::*;
 
+struct AppearingGatewaySecrets {
+    gateway: String,
+    reads: AtomicUsize,
+}
+
+#[async_trait]
+impl SecretProvider for AppearingGatewaySecrets {
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        if key != crate::connectors::GATEWAY_SECRET_KEY {
+            return Ok(None);
+        }
+        Ok((self.reads.fetch_add(1, Ordering::SeqCst) > 0).then(|| self.gateway.clone()))
+    }
+
+    async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_secret(&self, _key: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_model_takes_precedence_over_the_default() {
     let recorder = RecordingProvider::default();
@@ -1924,9 +1947,9 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
 /// Roles resolve on read, against whatever the user has credentialed: the
 /// ordered defaults skip providers that cannot serve a request, a pin overrides
 /// them, and enabling a provider changes the answer without a restart. When the
-/// profile flips to managed, both roles' reads re-route to entitled gateway
-/// models rather than reporting selections no turn could serve — and a message
-/// sent against the stale default runs on the re-routed model.
+/// profile flips to managed, utility re-routes to an entitled gateway model.
+/// An unresolved explicit chat pin remains unresolved until the user chooses,
+/// while an implicit boot default may still use the gateway's first model.
 #[tokio::test]
 async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let dir = tempfile::tempdir().unwrap();
@@ -2180,12 +2203,18 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "openai::gpt-5.6-sol"
     );
 
-    // A managed flip with a BYOK chat pin carried in from before it: the pin
-    // stays stored — a profile returned to the open experience gets it back —
-    // but both roles' effective resolutions move to entitled gateway models.
-    // Chat lands on the first model the gateway lists (the row the composer
-    // picker offers first); utility keeps #901's cheapest-first walk.
+    // A managed flip with BYOK chat choices carried in from before it. Direct
+    // selections remain durable; managed reads and turns resolve a unique
+    // current gateway equivalent without rewriting them.
     configure_provider("openai", serde_json::json!({"enabled": true})).await;
+    configure_provider(
+        "anthropic",
+        serde_json::json!({
+            "enabled": true,
+            "credential": {"type": "api_key", "key": "sk-anthropic"}
+        }),
+    )
+    .await;
     let pinned = put_role(
         "chat",
         serde_json::json!({"selection": "openai::gpt-5.6-sol"}),
@@ -2211,6 +2240,23 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(overridden_response.status(), StatusCode::CREATED);
     let overridden: Chat = json_body(overridden_response).await;
+    let gateway_overridden_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"model": "anthropic::claude-opus-5"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_overridden_response.status(), StatusCode::CREATED);
+    let gateway_overridden: Chat = json_body(gateway_overridden_response).await;
 
     crate::managed_policy::provision(
         &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
@@ -2234,8 +2280,9 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         &*store,
         &providers::GatewayModelSnapshot {
             gateway_url: "https://corp.gateway/".to_string(),
-            // Flagship-first, as a gateway well might list them: chat takes
-            // the gateway's first pick, utility must not.
+            installation_id: Some("install-1".into()),
+            // Flagship-first, as a gateway well might list them: an implicit
+            // chat default takes the first pick, while utility must not.
             models: vec![
                 providers::CustomModelConfig {
                     id: "gateway-flagship".to_string(),
@@ -2265,17 +2312,60 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
     let roles = role_rows().await;
     let chat = role_row(&roles, "chat");
     assert_eq!(chat["selection"], "openai::gpt-5.6-sol");
-    assert_eq!(chat["resolved_key"], "model_gateway::gateway-flagship");
+    assert_eq!(chat["resolved_key"], serde_json::Value::Null);
     assert_eq!(
         role_row(&roles, "utility")["resolved_key"],
         "model_gateway::gateway-haiku"
     );
 
-    // The label is what the turn gets: a message sent against that stale BYOK
-    // default is accepted and frozen on the gateway model the roles read
-    // named, not refused with `model_provider_unavailable`. This is the
-    // field-reported failure — remove the re-route from the accept path and
-    // this send 409s.
+    // The explicit per-chat canonical selection is portable. The durable row
+    // remains canonical while this turn freezes the unique current gateway
+    // route that represents it.
+    let gateway_override_turn = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            gateway_overridden.id,
+            gateway_override_turn,
+            "hello"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    let gateway_override_model = store
+        .get_turn_run(gateway_override_turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(gateway_override_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
+    assert_eq!(
+        providers::resolve_model_policy(&*store, &gateway_override_model, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "gateway-flagship"
+    );
+    assert_eq!(
+        store
+            .get_chat(gateway_overridden.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("anthropic::claude-opus-5")
+    );
+
+    // Clear the global pin: the explicit canonical sticky choice made by the
+    // prior chat survives independently and resolves through the same unique
+    // gateway route without being rewritten.
+    let cleared = put_role("chat", serde_json::json!({"selection": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let cleared: serde_json::Value = json_body(cleared).await;
+    assert_eq!(cleared["resolved_key"], "model_gateway::gateway-flagship");
     let chat_response = router
         .clone()
         .oneshot(
@@ -2291,20 +2381,109 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(chat_response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(chat_response).await;
-    let turn_id = TurnId::new();
+    assert_eq!(chat.model.as_deref(), Some("anthropic::claude-opus-5"));
+    let sticky_turn = TurnId::new();
     assert_eq!(
-        send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await,
+        send_message_with_id(&router, &bearer, chat.id, sticky_turn, "hello").await,
         StatusCode::ACCEPTED
     );
+    let sticky_model = store
+        .get_turn_run(sticky_turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(sticky_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
-        "model_gateway::gateway-flagship"
+        providers::resolve_model_policy(&*store, &sticky_model, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "gateway-flagship"
     );
 
-    // The re-route covers exactly what the roles read labels: the default. A
-    // per-chat override is the user's explicit pick, and its pill still names
-    // it — a dead one is refused honestly rather than silently swapped, and
-    // the picker offers only gateway models to fix it.
+    // An unmatched sticky choice remains explicit and is refused honestly
+    // instead of degrading to the first gateway model.
+    store
+        .set_setting(
+            "chat_default.model",
+            &serde_json::Value::String("openai::gpt-5.6-sol".into()),
+        )
+        .await
+        .unwrap();
+    let unmatched_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unmatched_response.status(), StatusCode::CREATED);
+    let unmatched: Chat = json_body(unmatched_response).await;
+    assert_eq!(unmatched.model.as_deref(), Some("openai::gpt-5.6-sol"));
+    assert_eq!(
+        send_message_with_id(&router, &bearer, unmatched.id, TurnId::new(), "hello").await,
+        StatusCode::CONFLICT
+    );
+
+    // Clearing the sticky value restores automatic behavior. The boot default
+    // is process state rather than persisted user intent, so managed chat may
+    // fall back to the gateway's first entitled model.
+    store
+        .set_setting("chat_default.model", &serde_json::Value::Null)
+        .await
+        .unwrap();
+    let fallback_chat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback_chat_response.status(), StatusCode::CREATED);
+    let fallback_chat: Chat = json_body(fallback_chat_response).await;
+    let fallback_turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            fallback_chat.id,
+            fallback_turn_id,
+            "hello"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    let fallback_model = store
+        .get_turn_run(fallback_turn_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(fallback_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
+    assert_eq!(
+        providers::resolve_model_policy(&*store, &fallback_model, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "gateway-flagship"
+    );
+
+    // An unmatched per-chat override remains explicit and is refused honestly.
     assert_eq!(
         send_message_with_id(&router, &bearer, overridden.id, TurnId::new(), "hello").await,
         StatusCode::CONFLICT
@@ -3444,9 +3623,30 @@ async fn a_superseded_gateway_session_never_reads_usable() {
         .unwrap();
     assert!(!gateway.has_credential);
 
-    // A session for the policy's own deployment — trailing slash included,
-    // per the shared normalization — reads usable again.
+    // A session and catalog for the policy's own deployment — trailing slash
+    // included, per the shared normalization — read usable again. A matching
+    // session alone is intentionally insufficient because no executable model
+    // route can be admitted until its installation-bound catalog is present.
     seed(secrets.clone(), "https://corp.gateway/").await;
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".to_string(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "sample-claude".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            }],
+            model_protocols: std::collections::BTreeMap::new(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(providers::provider_is_usable(
         &*store,
         &*secrets,
@@ -3455,6 +3655,92 @@ async fn a_superseded_gateway_session_never_reads_usable() {
     )
     .await
     .unwrap());
+}
+
+#[tokio::test]
+async fn a_credential_appearance_cannot_admit_a_plain_gateway_execution_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("gateway-admission-race.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let credentials: crate::connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    let secrets: Arc<dyn SecretProvider> = Arc::new(AppearingGatewaySecrets {
+        gateway: serde_json::to_string(&credentials).unwrap(),
+        reads: AtomicUsize::new(0),
+    });
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+    let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+        Arc::new(crate::managed_policy::NoOsPolicy);
+    let gateway = crate::gateway_runtime::GatewayRuntime::new(
+        store.clone(),
+        secrets.clone(),
+        provisioned.clone(),
+        os_policy.clone(),
+    );
+    let resolver = Arc::new(resolver::ConfiguredResolver::new(
+        store.clone(),
+        secrets.clone(),
+        gateway,
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
+        provisioned.clone(),
+        os_policy.clone(),
+    ));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        resolver,
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        AgentConfig::default(),
+    );
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".into(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "gateway-opus".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {}", state.token);
+    let chat = make_chat(&router, &bearer).await;
+    store
+        .set_chat_model(chat.id, Some("model_gateway::gateway-opus".into()))
+        .await
+        .unwrap();
+    let chat = store.get_chat(chat.id).await.unwrap().unwrap();
+
+    let error = crate::routes::resolve_executable_chat_model(&state, &chat)
+        .await
+        .expect_err("a transiently unavailable managed route must not fall back to its plain key");
+    assert_eq!(error.kind(), "model_provider_unavailable");
 }
 
 /// A router whose state carries a code-execution provider loaded from the

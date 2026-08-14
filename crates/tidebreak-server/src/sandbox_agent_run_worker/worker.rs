@@ -401,6 +401,11 @@ impl SandboxAgentRunWorker {
                     "sandbox model is not registered for its provider",
                 ));
             };
+            if !crate::providers::is_valid_execution_policy(&policy) {
+                return Err(AgentError::config(
+                    "managed gateway execution requires a frozen model identity",
+                ));
+            }
             let supports_vendor_web_search = policy.supports_vendor_web_search;
             crate::providers::apply_model_policy(
                 &mut agent_config,

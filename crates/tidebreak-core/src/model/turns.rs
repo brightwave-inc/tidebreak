@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
@@ -407,6 +408,67 @@ impl TurnClientWaitStatus {
 
 /// One message accepted while its chat had a live turn, waiting its turn.
 ///
+/// Immutable client request identity reserved before mutable turn admission.
+///
+/// The request deliberately carries only caller-supplied identity. Model
+/// routing, skill availability, blob metadata, document ownership, and model
+/// capabilities are mutable admission prerequisites and therefore never enter
+/// this fingerprint. An exact retry can compare this record without consulting
+/// any of those moving catalogs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnAdmissionRequest {
+    pub id: TurnId,
+    pub chat_id: ChatId,
+    pub content: String,
+    pub attachments: Vec<Uuid>,
+    pub file_attachments: Vec<crate::id::DocumentId>,
+    pub invoked_skills: Vec<String>,
+    pub voice_input_used: bool,
+}
+
+impl TurnAdmissionRequest {
+    /// Versioned canonical fingerprint of the exact caller request.
+    ///
+    /// Every variable-length field is length-prefixed and every ordered list
+    /// carries its element count, so concatenation cannot create aliases. The
+    /// turn id is the table key; the owning chat remains both a column and part
+    /// of the fingerprint as defense in depth.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 32] {
+        fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+
+        let mut digest = Sha256::new();
+        digest.update(b"tidebreak-turn-admission-v1\0");
+        digest.update(self.chat_id.0.as_bytes());
+        put_bytes(&mut digest, self.content.as_bytes());
+        digest.update((self.attachments.len() as u64).to_be_bytes());
+        for id in &self.attachments {
+            digest.update(id.as_bytes());
+        }
+        digest.update((self.file_attachments.len() as u64).to_be_bytes());
+        for id in &self.file_attachments {
+            digest.update(id.0.as_bytes());
+        }
+        digest.update((self.invoked_skills.len() as u64).to_be_bytes());
+        for skill in &self.invoked_skills {
+            put_bytes(&mut digest, skill.as_bytes());
+        }
+        digest.update([u8::from(self.voice_input_used)]);
+        digest.finalize().into()
+    }
+}
+
+/// Exact ownership token for one unresolved durable admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnAdmissionLease {
+    pub id: TurnId,
+    pub lease_token: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
 /// The id is the client-generated turn id promotion will accept under, so an
 /// ambiguous promotion retry resolves to `Existing` rather than a duplicate
 /// turn. Rows are FIFO by `position` within a chat and fully durable: a queue
@@ -438,6 +500,17 @@ pub struct QueuedTurn {
 impl QueuedTurn {
     /// Maximum queued messages one chat may hold.
     pub const MAX_PER_CHAT: usize = 32;
+
+    /// Exact caller payload identity, excluding queue-assigned metadata.
+    pub fn same_request(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.chat_id == other.chat_id
+            && self.content == other.content
+            && self.attachments == other.attachments
+            && self.file_attachments == other.file_attachments
+            && self.invoked_skills == other.invoked_skills
+            && self.voice_input_used == other.voice_input_used
+    }
 }
 
 /// One durably accepted steering instruction for an active turn.

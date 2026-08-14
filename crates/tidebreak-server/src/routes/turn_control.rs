@@ -6,20 +6,20 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use tidebreak_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, ChatId, DocumentId, RequestTurnCancellationOutcome,
-    TurnId, TurnSteer, TurnSteerId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginTurnAdmissionOutcome, ChatId, DocumentId,
+    PromoteQueuedTurnOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
+    ReservedTurnAcceptanceOutcome, TurnAdmissionRequest, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::model_roles::{self};
 use crate::providers::{self};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 use super::agent_runs::signal_origin_sandbox_runs_after_commit;
 use super::image_attachment;
-use super::providers_models::{resolve_chat_model, validate_model_selection};
+use super::providers_models::resolve_executable_chat_model;
 
 /// Body of `POST /chats/{id}/messages`.
 #[derive(Debug, Deserialize)]
@@ -69,10 +69,7 @@ pub struct PostMessage {
 /// name refuses the whole submission before any model call — the same posture
 /// as a turn carrying images a model cannot see. The refusal names the skill
 /// so a client can drop it and resubmit.
-async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Result<(), ServerError> {
-    if invoked.is_empty() {
-        return Ok(());
-    }
+fn validate_invoked_skill_identity(invoked: &[String]) -> Result<(), ServerError> {
     if invoked.len() > tidebreak_core::TurnRun::MAX_INVOKED_SKILLS {
         return Err(ServerError::bad_request_kind(
             "too_many_invoked_skills",
@@ -90,6 +87,13 @@ async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Resul
                 format!("skill `{name}` was invoked more than once"),
             ));
         }
+    }
+    Ok(())
+}
+
+async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Result<(), ServerError> {
+    if invoked.is_empty() {
+        return Ok(());
     }
     let available = match state.code_execution.as_ref() {
         Some(exec) => exec.skill_catalog().await,
@@ -219,6 +223,34 @@ async fn require_image_capable_model(state: &AppState, model: &str) -> Result<()
     require_image_input(&policy)
 }
 
+fn turn_admission_from_message(chat_id: ChatId, body: &PostMessage) -> TurnAdmissionRequest {
+    TurnAdmissionRequest {
+        id: body.turn_id,
+        chat_id,
+        content: body.content.clone(),
+        attachments: body.attachments.clone(),
+        file_attachments: body.file_attachments.clone(),
+        invoked_skills: body.invoked_skills.clone(),
+        voice_input_used: body.voice_input_used,
+    }
+}
+
+fn queued_turn_from_message(chat_id: ChatId, body: &PostMessage) -> tidebreak_core::QueuedTurn {
+    let now = Utc::now();
+    tidebreak_core::QueuedTurn {
+        id: body.turn_id,
+        chat_id,
+        content: body.content.clone(),
+        attachments: body.attachments.clone(),
+        file_attachments: body.file_attachments.clone(),
+        invoked_skills: body.invoked_skills.clone(),
+        voice_input_used: body.voice_input_used,
+        position: 0,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 /// The capability decision itself, separated so it can be exercised against a
 /// constructed policy rather than only against whatever the registry happens to
 /// advertise today.
@@ -299,44 +331,12 @@ pub async fn post_message(
             "message content must be non-empty and contain no NUL characters",
         ));
     }
-    let chat = store.require_chat(id).await?;
-
-    // An ambiguous HTTP retry names only its turn and content, not the resolved
-    // model snapshot. Reuse the first acceptance's immutable model so a settings
-    // change between attempts cannot turn the same request into a conflict.
-    let model = if let Some(existing) = store.get_turn_run(body.turn_id).await? {
-        if existing.chat_id != id {
-            return Err(ServerError::conflict(format!(
-                "turn {} was already accepted by another chat",
-                body.turn_id
-            )));
-        }
-        existing.model
-    } else {
-        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        // The managed re-route the roles read applies, on exactly the domain
-        // that read labels: the role default, and only for a managed profile.
-        // Unmanaged sends pass through untouched — free-form ids included —
-        // and a per-chat override is the user's explicit pick, so a dead one
-        // gets the honest validation refusal below rather than a silent swap
-        // out from under the label the pill still shows; the picker offers
-        // only gateway models to fix it. A managed profile with nothing
-        // entitled also keeps the raw selection, refused with the real reason.
-        let managed =
-            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed && chat.model.is_none() {
-            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
-                .await?
-                .map_or(selected, |policy| policy.key)
-        } else {
-            selected
-        };
-        validate_model_selection(&state, &selected, true).await?
-    };
-    require_invocable_skills(&state, &body.invoked_skills).await?;
-    let images = resolve_message_attachments(&state, &body.attachments).await?;
-    let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
-    if images.len().saturating_add(documents.len()) > tidebreak_core::MAX_MESSAGE_ATTACHMENTS {
+    if body
+        .attachments
+        .len()
+        .saturating_add(body.file_attachments.len())
+        > tidebreak_core::MAX_MESSAGE_ATTACHMENTS
+    {
         return Err(ServerError::bad_request_kind(
             "too_many_attachments",
             format!(
@@ -345,85 +345,102 @@ pub async fn post_message(
             ),
         ));
     }
-    if !images.is_empty() {
-        require_image_capable_model(&state, &model).await?;
-    }
-    match store
-        .accept_turn_with_message_context(
-            body.turn_id,
-            id,
-            &model,
-            &body.content,
-            &images,
-            &documents,
-            &body.invoked_skills,
-            body.voice_input_used,
-        )
-        .await?
-    {
-        AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
-            state.turn_job_wake.notify_one();
-            Ok(StatusCode::ACCEPTED)
-        }
-        AcceptTurnOutcome::IdentityConflict => {
-            // Concurrent identical requests can resolve different mutable model
-            // defaults before either commits. Retry against the winner's immutable
-            // model so the wire identity remains `(chat, turn_id, content)`.
-            let Some(existing) = store.get_turn_run(body.turn_id).await? else {
-                return Err(ServerError::conflict(format!(
-                    "turn {} was accepted with conflicting request data",
-                    body.turn_id
-                )));
-            };
-            if existing.chat_id == id
-                && matches!(
-                    store
-                        .accept_turn_with_message_context(
-                            body.turn_id,
-                            id,
-                            &existing.model,
-                            &body.content,
-                            &images,
-                            &documents,
-                            &body.invoked_skills,
-                            body.voice_input_used,
-                        )
-                        .await?,
-                    AcceptTurnOutcome::Existing(_)
-                )
-            {
-                state.turn_job_wake.notify_one();
-                Ok(StatusCode::ACCEPTED)
-            } else {
-                Err(ServerError::conflict(format!(
-                    "turn {} was already accepted with different input",
-                    body.turn_id
-                )))
+    validate_invoked_skill_identity(&body.invoked_skills)?;
+    let _admission = state.active_turns.serialize_admission(body.turn_id).await;
+    let chat = store.require_chat(id).await?;
+    let request = turn_admission_from_message(id, &body);
+
+    'reserve: loop {
+        let lease_token = uuid::Uuid::new_v4();
+        let lease = match state
+            .store
+            .begin_turn_admission(&request, lease_token, chrono::Duration::seconds(30))
+            .await?
+        {
+            BeginTurnAdmissionOutcome::Acquired(lease) => lease,
+            BeginTurnAdmissionOutcome::Pending { .. } => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                continue 'reserve;
             }
-        }
-        AcceptTurnOutcome::ChatBusy(active) => {
-            if body.queue {
-                store
-                    .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
-                        id: body.turn_id,
-                        chat_id: id,
-                        content: body.content.clone(),
-                        attachments: body.attachments.clone(),
-                        file_attachments: body.file_attachments.clone(),
-                        invoked_skills: body.invoked_skills.clone(),
-                        voice_input_used: body.voice_input_used,
-                        // Assigned durably at insert; echoes back in the row.
-                        position: 0,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                    })
-                    .await?;
+            BeginTurnAdmissionOutcome::Accepted => {
+                state.turn_job_wake.notify_one();
                 return Ok(StatusCode::ACCEPTED);
             }
-            Err(ServerError::conflict(format!(
-                "chat {id} already has active turn {}",
-                active.id
-            )))
+            BeginTurnAdmissionOutcome::Queued => return Ok(StatusCode::ACCEPTED),
+            BeginTurnAdmissionOutcome::IdentityConflict => {
+                return Err(ServerError::conflict(format!(
+                    "turn {} was already reserved with different input or by another chat",
+                    body.turn_id
+                )));
+            }
+        };
+
+        let prepared = async {
+            let model = resolve_executable_chat_model(&state, &chat).await?;
+            require_invocable_skills(&state, &body.invoked_skills).await?;
+            let images = resolve_message_attachments(&state, &body.attachments).await?;
+            let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
+            if !images.is_empty() {
+                require_image_capable_model(&state, &model).await?;
+            }
+            Ok::<_, ServerError>((model, images, documents))
+        }
+        .await;
+        let (model, images, documents) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = state.store.release_turn_admission(lease).await;
+                return Err(error);
+            }
+        };
+
+        match state
+            .store
+            .accept_reserved_turn_with_message_context(
+                lease,
+                id,
+                &model,
+                &body.content,
+                &images,
+                &documents,
+                &body.invoked_skills,
+                body.voice_input_used,
+            )
+            .await?
+        {
+            ReservedTurnAcceptanceOutcome::LeaseLost => continue 'reserve,
+            ReservedTurnAcceptanceOutcome::Outcome(outcome) => match *outcome {
+                AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
+                    state.turn_job_wake.notify_one();
+                    return Ok(StatusCode::ACCEPTED);
+                }
+                AcceptTurnOutcome::IdentityConflict => {
+                    let _ = state.store.release_turn_admission(lease).await;
+                    return Err(ServerError::conflict(format!(
+                        "turn {} was already reserved with different input",
+                        body.turn_id
+                    )));
+                }
+                AcceptTurnOutcome::ChatBusy(active) => {
+                    if body.queue {
+                        match state
+                            .store
+                            .enqueue_reserved_turn(lease, &queued_turn_from_message(id, &body))
+                            .await?
+                        {
+                            ReservedQueuedTurnOutcome::Queued(_) => {
+                                return Ok(StatusCode::ACCEPTED)
+                            }
+                            ReservedQueuedTurnOutcome::LeaseLost => continue 'reserve,
+                        }
+                    }
+                    let _ = state.store.release_turn_admission(lease).await;
+                    return Err(ServerError::conflict(format!(
+                        "chat {id} already has active turn {}",
+                        active.id
+                    )));
+                }
+            },
         }
     }
 }
@@ -707,16 +724,10 @@ pub async fn post_cancel(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// One promotion sweep: for every chat holding queued messages and no live
-/// turn, try to accept the oldest row as a real turn and delete it on
-/// success.
-///
-/// Promotion is deliberately try-based rather than fenced: acceptance is
-/// idempotent under the queued row's own turn id, so `ChatBusy` leaves the
-/// row for the next sweep, a crash between acceptance and deletion re-runs
-/// into `Existing`, and a row whose id was somehow reused for different input
-/// is dropped rather than retried forever. A row whose attachments or skills
-/// no longer resolve is dropped too — its turn could never be accepted.
+/// One promotion sweep: for every chat holding queued messages, prepare the
+/// oldest snapshot and ask storage to promote that exact unchanged FIFO head.
+/// Storage rechecks beneath the chat lock and commits ownership, turn creation,
+/// and queue removal atomically, so stale snapshots are harmless.
 pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerError> {
     for chat_id in state.store.chats_with_queued_turns().await? {
         if read_queue_paused(&*state.store, chat_id).await? {
@@ -734,69 +745,57 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
         else {
             continue;
         };
-        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        let managed =
-            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed && chat.model.is_none() {
-            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
-                .await?
-                .map_or(selected, |policy| policy.key)
-        } else {
-            selected
-        };
         let dropped = |reason: &str| {
             eprintln!(
                 "tidebreak: dropping queued message {} for chat {chat_id}: {reason}",
                 next.id
             );
         };
-        let model = match validate_model_selection(state, &selected, true).await {
-            Ok(model) => model,
-            Err(_) => {
-                // The chat's model became unusable; leave the row so fixing
-                // the model releases the queue rather than losing messages.
+        // A crash after acceptance but before deleting the queued row must
+        // replay against the accepted turn's immutable execution selector.
+        // Re-resolving here could turn a catalog change into an identity
+        // conflict and strand or drop input that already committed.
+        let model = match state.store.get_turn_run(next.id).await? {
+            Some(existing) if existing.chat_id == chat_id => existing.model,
+            Some(_) => {
+                dropped("its turn id was already accepted by another chat");
+                state.store.delete_queued_turn_if_current(&next).await?;
                 continue;
             }
+            None => match resolve_executable_chat_model(state, &chat).await {
+                Ok(model) => model,
+                Err(_) => {
+                    // The chat's model became unusable; leave the row so fixing
+                    // the model releases the queue rather than losing messages.
+                    continue;
+                }
+            },
         };
         if require_invocable_skills(state, &next.invoked_skills)
             .await
             .is_err()
         {
             dropped("an invoked skill is no longer available");
-            state.store.delete_queued_turn(chat_id, next.id).await?;
+            state.store.delete_queued_turn_if_current(&next).await?;
             continue;
         }
         let images = match resolve_message_attachments(state, &next.attachments).await {
             Ok(images) => images,
             Err(_) => {
                 dropped("an image attachment no longer resolves");
-                state.store.delete_queued_turn(chat_id, next.id).await?;
+                state.store.delete_queued_turn_if_current(&next).await?;
                 continue;
             }
         };
         match state
             .store
-            .accept_turn_with_message_context(
-                next.id,
-                chat_id,
-                &model,
-                &next.content,
-                &images,
-                &next.file_attachments,
-                &next.invoked_skills,
-                next.voice_input_used,
-            )
+            .promote_queued_turn_with_message_context(&next, &model, &images)
             .await?
         {
-            AcceptTurnOutcome::Accepted(_) | AcceptTurnOutcome::Existing(_) => {
-                state.store.delete_queued_turn(chat_id, next.id).await?;
+            PromoteQueuedTurnOutcome::Promoted(_) | PromoteQueuedTurnOutcome::Existing(_) => {
                 state.turn_job_wake.notify_one();
             }
-            AcceptTurnOutcome::ChatBusy(_) => {}
-            AcceptTurnOutcome::IdentityConflict => {
-                dropped("its turn id was already used with different input");
-                state.store.delete_queued_turn(chat_id, next.id).await?;
-            }
+            PromoteQueuedTurnOutcome::ChatBusy(_) | PromoteQueuedTurnOutcome::Stale => {}
         }
     }
     Ok(())

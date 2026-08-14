@@ -15,13 +15,13 @@ use std::time::Duration;
 use crate::connectors::{
     is_sign_in_required, CredentialVault, GatewayApp, GatewayAuth, GatewayAuthConfig,
     GatewayCatalogFetch, GatewayConnection, GatewayOperationSummary, MEMBER_CATALOG_V1,
-    RESOURCE_LLM,
+    RESOURCE_CONTROL, RESOURCE_LLM,
 };
 use async_trait::async_trait;
 use serde::Serialize;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store};
-use tidebreak_router::BearerTokenSource;
-use tokio::sync::Mutex;
+use tidebreak_router::{BearerTokenSource, ModelRouteLease};
+use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 
 use crate::providers::{self, CustomModelConfig};
 
@@ -50,6 +50,15 @@ pub(crate) struct GatewayRuntime {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// One connection per configured base URL; rebuilt when the URL changes.
     cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
+    /// Shared by every request-leg route lease and every local mutation of
+    /// gateway execution authority. Request setup takes a read lease through
+    /// dispatch; catalog sync, sign-out, deprovision, and session replacement
+    /// take the write side. A writer therefore runs either before a leg
+    /// validates and mints its bearer or after that leg has dispatched, never
+    /// in the security-sensitive gap between them. Catalog sync deliberately
+    /// keeps the write side across its fetch so older responses cannot commit
+    /// after newer ones.
+    model_sync: Arc<RwLock<()>>,
     /// The one in-flight browser sign-in, if any.
     sign_in: Mutex<SignInProgress>,
     /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
@@ -66,6 +75,15 @@ pub(crate) struct GatewayRuntime {
     /// shell through [`crate::register_pending_pairing`] — the renderer can
     /// read and dismiss it, never set it or choose its URL.
     pending_pairing: Mutex<Option<PendingPairing>>,
+    #[cfg(test)]
+    sync_commit_pause: Mutex<Option<Arc<MigrationPause>>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MigrationPause {
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 /// The shell-registered pairing a sign-in may commit.
@@ -171,9 +189,12 @@ impl GatewayRuntime {
             provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
+            model_sync: Arc::new(RwLock::new(())),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
+            #[cfg(test)]
+            sync_commit_pause: Mutex::new(None),
         })
     }
 
@@ -544,12 +565,32 @@ impl GatewayRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let finished = pending.finish(SIGN_IN_TIMEOUT).await;
-            // Hold the state lock across the generation check and every
-            // effect: `sign_out` bumps the generation and revokes under this
-            // same lock, so a completion racing a sign-out either observes
-            // the bump here and abandons, or finishes entirely before the
-            // sign-out proceeds — a signed-out session can never be
-            // resurrected between check and store.
+            let session = match finished {
+                Ok(session) => session,
+                Err(error) => {
+                    let mut sign_in = runtime.sign_in.lock().await;
+                    if runtime
+                        .sign_in_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == generation
+                    {
+                        *sign_in = SignInProgress::Failed {
+                            message: error.to_string(),
+                        };
+                    }
+                    return;
+                }
+            };
+
+            // Lock order for every locally controlled authority mutation is
+            // model authority -> pairing (when policy may move) -> sign-in
+            // state. The write lease waits for already-authorized request legs
+            // to dispatch, then excludes new ones through the policy commit,
+            // old-session retirement, and new-session store. Acquiring the
+            // pairing lock before sign-in state also matches registration and
+            // deprovision, avoiding the former sign-in/pairing inversion.
+            let _authority = runtime.lock_model_authority_mutation().await;
+            let _pairing = crate::pairing::lock_pairing_mutation().await;
             let mut sign_in = runtime.sign_in.lock().await;
             if runtime
                 .sign_in_generation
@@ -558,62 +599,54 @@ impl GatewayRuntime {
             {
                 return;
             }
-            *sign_in = match finished {
-                Ok(session) => {
-                    // A pairing commits before its session persists: if the
-                    // provision cannot be written (an MDM push claimed the
-                    // profile mid-flow), no session lands on a profile the
-                    // pairing's gateway does not manage. The generation
-                    // being current is what proves the pairing was neither
-                    // dismissed nor replaced while the browser flow ran —
-                    // both bump it under this same lock.
-                    let committed = match &pairing {
-                        Some(pending) => runtime.commit_pairing(pending).await,
-                        None => Ok(()),
-                    };
-                    let stored = match committed {
-                        Ok(()) => connection.store_session(&session).await,
-                        Err(error) => Err(error),
-                    };
-                    match stored {
-                        Ok(()) => {
-                            // Best-effort: a failed first sync leaves an
-                            // explicit refresh affordance, not a failed
-                            // sign-in — but say so in the log, or support
-                            // cannot tell an empty model list from a sync
-                            // that never ran.
-                            if let Err(error) = runtime.sync_models().await {
-                                tracing::warn!(
-                                    "gateway model sync after sign-in failed \
-                                     (the background sync will retry): {}",
-                                    error.message()
-                                );
-                            }
-                            // Likewise: mount-by-default must never fail a
-                            // sign-in, and the background sync retries it.
-                            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
-                                tracing::warn!(
-                                    "gateway endpoint auto-mount after sign-in failed \
-                                     (the background sync will retry): {error}"
-                                );
-                            }
-                            // The `create_app` roster's gateway section reads
-                            // through this same session, so a fresh sign-in
-                            // has to republish it — otherwise the door keeps
-                            // telling the model there is no gateway session
-                            // until something unrelated rebuilds the registry.
-                            mcp.refresh_connected_app_roster().await;
-                            SignInProgress::Idle
-                        }
-                        Err(error) => SignInProgress::Failed {
-                            message: error.to_string(),
-                        },
-                    }
-                }
-                Err(error) => SignInProgress::Failed {
-                    message: error.to_string(),
-                },
+
+            // A pairing commits before its session persists: if the provision
+            // cannot be written (an MDM push claimed the profile mid-flow), no
+            // session lands on a profile the pairing's gateway does not manage.
+            let committed = match &pairing {
+                Some(pending) => runtime.commit_pairing_locked(pending).await,
+                None => Ok(()),
             };
+            let stored = match committed {
+                Ok(()) => connection.store_session(&session).await,
+                Err(error) => Err(error),
+            };
+            let stored = match stored {
+                Ok(()) => {
+                    *sign_in = SignInProgress::Idle;
+                    true
+                }
+                Err(error) => {
+                    *sign_in = SignInProgress::Failed {
+                        message: error.to_string(),
+                    };
+                    false
+                }
+            };
+            drop(sign_in);
+            drop(_pairing);
+            drop(_authority);
+
+            if !stored {
+                return;
+            }
+            // These are post-commit refreshes, not authority mutations. Run
+            // them after releasing the writer so healthy inference is not
+            // serialized behind model and endpoint network reads.
+            if let Err(error) = runtime.sync_models().await {
+                tracing::warn!(
+                    "gateway model sync after sign-in failed \
+                     (the background sync will retry): {}",
+                    error.message()
+                );
+            }
+            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
+                tracing::warn!(
+                    "gateway endpoint auto-mount after sign-in failed \
+                     (the background sync will retry): {error}"
+                );
+            }
+            mcp.refresh_connected_app_roster().await;
         });
         Ok(authorization_url)
     }
@@ -621,8 +654,8 @@ impl GatewayRuntime {
     /// Commit the pairing a finishing sign-in consented to, then clear it.
     /// Runs from the exchange task with the sign-in state lock held, so it
     /// cannot interleave with a dismissal or re-registration.
-    async fn commit_pairing(&self, pending: &PendingPairing) -> Result<()> {
-        crate::pairing::commit_signed_in_pairing(
+    async fn commit_pairing_locked(&self, pending: &PendingPairing) -> Result<()> {
+        crate::pairing::commit_signed_in_pairing_locked(
             &*self.provisioned_policy,
             &*self.os_policy,
             self.secrets.clone(),
@@ -635,11 +668,45 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Take the exclusive side of the request-leg authority fence.
+    ///
+    /// Callers that also need the pairing or sign-in locks must take them
+    /// after this guard, in that order. The owned guard lets pairing code hold
+    /// the fence across its compare-and-swap and session retirement without
+    /// exposing the lock itself.
+    pub(crate) async fn lock_model_authority_mutation(&self) -> OwnedRwLockWriteGuard<()> {
+        self.model_sync.clone().write_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn commit_signed_in_pairing_for_test(
+        &self,
+        mcp: &crate::mcp_config::McpRuntime,
+        base_url: &str,
+        replaces: Option<&str>,
+    ) -> Result<()> {
+        let _authority = self.lock_model_authority_mutation().await;
+        let _pairing = crate::pairing::lock_pairing_mutation().await;
+        let _sign_in = self.sign_in.lock().await;
+        crate::pairing::commit_signed_in_pairing_locked(
+            &*self.provisioned_policy,
+            &*self.os_policy,
+            self.secrets.clone(),
+            mcp,
+            base_url,
+            replaces,
+        )
+        .await
+    }
+
     /// Revoke the session (best-effort at the gateway), clear local state, and
     /// drop the synced model snapshot. Managed-only, like sign-in.
     pub(crate) async fn sign_out(&self) -> Result<()> {
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
-        let base_url = require_managed(&policy)?;
+        // Authority is always outermost: an already-authorized request leg
+        // dispatches before this writer proceeds, while a later leg observes
+        // the cleared session and snapshot. The sign-in state lock nests
+        // inside it, matching sign-in completion.
+        let _model_sync = self.lock_model_authority_mutation().await;
         // Take the state lock for the whole operation and invalidate any
         // pending browser flow before revoking anything: an exchange that
         // completes during the revoke round-trip serializes behind this lock
@@ -648,6 +715,8 @@ impl GatewayRuntime {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let base_url = require_managed(&policy)?;
         self.connection_at(base_url.clone())
             .await?
             .sign_out()
@@ -666,6 +735,7 @@ impl GatewayRuntime {
                     &*self.store,
                     &providers::GatewayModelSnapshot {
                         gateway_url: base_url,
+                        installation_id: None,
                         models: Vec::new(),
                         model_protocols: Default::default(),
                         member_catalog: None,
@@ -698,7 +768,10 @@ impl GatewayRuntime {
     /// revoked (best-effort) and cleared (unconditionally). Thin wrapper so
     /// callers without the secrets handle can reach
     /// [`retire_superseded_gateway_session`].
-    pub(crate) async fn retire_session_for_current_policy(&self) -> Result<()> {
+    pub(crate) async fn retire_session_for_current_policy(
+        &self,
+        _authority: &OwnedRwLockWriteGuard<()>,
+    ) -> Result<()> {
         let policy = self.policy()?;
         retire_superseded_gateway_session(self.secrets.clone(), &policy).await
     }
@@ -757,10 +830,17 @@ impl GatewayRuntime {
     /// that deployment is stored. `None` keeps the gateway route out of the
     /// router entirely — including on unmanaged profiles and when the stored
     /// session belongs to a different gateway than the policy URL.
-    pub(crate) async fn route_token_source(&self) -> Option<Arc<dyn BearerTokenSource>> {
+    pub(crate) async fn route_token_source(self: &Arc<Self>) -> Option<Arc<dyn BearerTokenSource>> {
         let connection = self.connection().await.ok().flatten()?;
-        connection.stored_credentials().await.ok().flatten()?;
-        Some(Arc::new(GatewayTokenSource(connection)))
+        let credentials = connection.stored_credentials().await.ok().flatten()?;
+        Some(Arc::new(GatewayTokenSource {
+            connection,
+            installation_id: credentials.installation_id,
+            store: self.store.clone(),
+            provisioned_policy: self.provisioned_policy.clone(),
+            os_policy: self.os_policy.clone(),
+            model_sync: self.model_sync.clone(),
+        }))
     }
 
     /// Fetch the entitled models and persist them as the stored snapshot,
@@ -773,9 +853,23 @@ impl GatewayRuntime {
     pub(crate) async fn sync_models(
         &self,
     ) -> std::result::Result<usize, crate::error::ServerError> {
+        // The lock covers the fetch, not merely the write tail. Otherwise two
+        // callers can start from the same ETag and commit in response order,
+        // allowing an older response to replace a newer catalog.
+        let _sync = self.model_sync.write().await;
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
+        // Populate the control-token cache before taking the credential
+        // fingerprint. The catalog call then reuses that token instead of
+        // rotating this session's refresh token after we captured it.
+        connection.access_token(RESOURCE_CONTROL).await?;
+        let session = connection.stored_credentials().await?.ok_or_else(|| {
+            crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway session changed during model sync",
+            )
+        })?;
         // The stored snapshot's ETag makes an unchanged catalog a 304: the
         // background loop runs this every few minutes, and most ticks change
         // nothing. Read before the row lock — like the fetch itself, the
@@ -783,6 +877,9 @@ impl GatewayRuntime {
         let held = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?;
         let held_etag = held
             .as_ref()
+            .filter(|snapshot| {
+                snapshot.installation_id.as_deref() == Some(&session.installation_id)
+            })
             .and_then(|snapshot| snapshot.catalog_etag.clone());
         // Fetch the full entitled set before the row lock is taken. The
         // member catalog is preferred: one envelope, merged protocols per
@@ -795,8 +892,17 @@ impl GatewayRuntime {
         let models: Vec<CustomModelConfig> = match connection.catalog(held_etag.as_deref()).await? {
             GatewayCatalogFetch::NotModified => {
                 // Nothing moved since the held revision; the snapshot the
-                // policy already honors stays as it is.
-                return Ok(held.map(|snapshot| snapshot.models.len()).unwrap_or_default());
+                // policy already honors stays as it is. Recheck the policy and
+                // session before accepting the response so sign-out, session
+                // replacement, and MDM repoints fence every sync outcome.
+                let count = held
+                    .as_ref()
+                    .map(|snapshot| snapshot.models.len())
+                    .unwrap_or_default();
+                self.pause_sync_commit_for_test().await;
+                let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
+                self.recheck_sync_context(&base_url, &session).await?;
+                return Ok(count);
             }
             GatewayCatalogFetch::Fresh { catalog, etag } => {
                 member_catalog = Some(MEMBER_CATALOG_V1.to_owned());
@@ -878,25 +984,18 @@ impl GatewayRuntime {
             AgentError::config(format!("gateway model sync rejected: {error:?}"))
         })?;
         let count = models.len();
+        self.pause_sync_commit_for_test().await;
         let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
         // The fetch ran outside the lock, so the policy authority (an MDM
         // push) may have re-pointed the deployment while it was in flight.
         // Re-resolve under the lock and refuse to stamp a snapshot the new
         // policy never entitled.
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
-        if policy.gateway_url.as_deref() != Some(base_url.as_str()) {
-            // A benign, retryable race — the deployment was re-pointed while
-            // the fetch was in flight — not an internal fault. The stable
-            // kind lets clients branch on it, as with `managed_profile`.
-            return Err(crate::error::ServerError::conflict_kind(
-                "gateway_changed",
-                "the model gateway configuration changed during model sync",
-            ));
-        }
+        self.recheck_sync_context(&base_url, &session).await?;
         providers::write_gateway_snapshot(
             &*self.store,
             &providers::GatewayModelSnapshot {
-                gateway_url: base_url,
+                gateway_url: base_url.clone(),
+                installation_id: Some(session.installation_id.clone()),
                 models,
                 model_protocols,
                 member_catalog,
@@ -906,6 +1005,58 @@ impl GatewayRuntime {
         .await?;
         Ok(count)
     }
+
+    fn recheck_sync_policy(
+        &self,
+        base_url: &str,
+    ) -> std::result::Result<crate::managed_policy::ManagedPolicy, crate::error::ServerError> {
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        if policy.gateway_url.as_deref() != Some(base_url) {
+            // A benign, retryable race — the deployment was re-pointed while
+            // the fetch was in flight — not an internal fault. The stable
+            // kind lets clients branch on it, as with `managed_profile`.
+            return Err(crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway configuration changed during model sync",
+            ));
+        }
+        Ok(policy)
+    }
+
+    /// Revalidate both authorities that made a catalog response admissible.
+    /// The policy URL alone does not distinguish sign-out or replacement by a
+    /// different session at the same deployment.
+    async fn recheck_sync_context(
+        &self,
+        base_url: &str,
+        expected_session: &crate::connectors::GatewayCredentials,
+    ) -> std::result::Result<crate::managed_policy::ManagedPolicy, crate::error::ServerError> {
+        let policy = self.recheck_sync_policy(base_url)?;
+        let current = CredentialVault::new(self.secrets.clone()).load().await?;
+        let unchanged = current.as_ref().is_some_and(|credentials| {
+            credentials.matches_base_url(base_url)
+                && same_gateway_session(credentials, expected_session)
+        });
+        if !unchanged {
+            return Err(crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway session changed during model sync",
+            ));
+        }
+        Ok(policy)
+    }
+
+    #[cfg(test)]
+    async fn pause_sync_commit_for_test(&self) {
+        let pause = self.sync_commit_pause.lock().await.take();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn pause_sync_commit_for_test(&self) {}
 
     /// Keep the entitled-model snapshot fresh without a manual refresh: sync
     /// once immediately (the boot case) and then on a long interval, for as
@@ -1309,6 +1460,24 @@ pub(crate) async fn retire_superseded_gateway_session(
     CredentialVault::new(secrets).clear().await
 }
 
+/// Compare the durable parts of two credentials while ignoring only cached
+/// access tokens. The refresh token is intentionally included: a replacement
+/// session for the same user and installation must still invalidate a catalog
+/// response authorized by the old session. A concurrent token rotation may
+/// conservatively reject a sync; the next background tick retries safely.
+fn same_gateway_session(
+    left: &crate::connectors::GatewayCredentials,
+    right: &crate::connectors::GatewayCredentials,
+) -> bool {
+    fn durable(credentials: &crate::connectors::GatewayCredentials) -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(credentials).ok()?;
+        value.as_object_mut()?.remove("access_tokens");
+        Some(value)
+    }
+
+    durable(left) == durable(right)
+}
+
 /// The one refusal for every managed-only gateway surface: unmanaged
 /// profiles have no gateway (policy is the only source), and a managed
 /// policy without a usable URL is misconfigured rather than open.
@@ -1335,12 +1504,104 @@ fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
 
 /// Router-facing supplier of the gateway's `llm`-resource token. Refresh and
 /// rotation live inside [`GatewayConnection`]; this is just the seam.
-struct GatewayTokenSource(Arc<GatewayConnection>);
+struct GatewayTokenSource {
+    connection: Arc<GatewayConnection>,
+    installation_id: String,
+    store: Arc<dyn Store>,
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    model_sync: Arc<RwLock<()>>,
+}
+
+impl GatewayTokenSource {
+    /// Resolve one frozen selector against live policy/session/catalog state.
+    /// Callers decide which authority guard they retain; this helper never
+    /// acquires `model_sync`, so post-mint validation cannot recursively take
+    /// a fair read lock while a writer waits.
+    async fn resolve_model_route(
+        &self,
+        route_model: &str,
+    ) -> Result<Option<providers::ResolvedModelPolicy>> {
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let Some(snapshot) = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?
+        else {
+            return Ok(None);
+        };
+        if snapshot.installation_id.as_deref() != Some(&self.installation_id) {
+            return Ok(None);
+        }
+        let Some(credentials) = self.connection.stored_credentials().await? else {
+            return Ok(None);
+        };
+        if credentials.installation_id != self.installation_id {
+            return Ok(None);
+        }
+        let selection = crate::model_registry::selection_key(
+            providers::ProviderKind::ModelGateway,
+            route_model,
+        );
+        let Some(resolved) = providers::gateway_execution_policy(&snapshot, &selection) else {
+            return Ok(None);
+        };
+        Ok((resolved.route_model == route_model).then_some(resolved))
+    }
+
+    fn route_lease(
+        resolved: providers::ResolvedModelPolicy,
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> ModelRouteLease {
+        ModelRouteLease::with_request_shaping_model(
+            resolved.id,
+            resolved.request_shaping_model,
+            guard,
+        )
+    }
+}
 
 #[async_trait]
 impl BearerTokenSource for GatewayTokenSource {
+    fn binding_id(&self) -> Option<&str> {
+        Some(&self.installation_id)
+    }
+
+    fn requires_model_route_lease(&self) -> bool {
+        true
+    }
+
+    async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
+        let guard = self.model_sync.clone().read_owned().await;
+        Ok(self
+            .resolve_model_route(route_model)
+            .await?
+            .map(|resolved| Self::route_lease(resolved, guard)))
+    }
+
+    async fn authorize_model_route(
+        &self,
+        route_model: &str,
+        conversation: Option<tidebreak_core::id::ChatId>,
+    ) -> Result<(String, Option<ModelRouteLease>)> {
+        let guard = self.model_sync.clone().read_owned().await;
+        if self.resolve_model_route(route_model).await?.is_none() {
+            return Ok((String::new(), None));
+        }
+        let token = self.bearer_token_for(conversation).await?;
+        // OS/MDM policy does not participate in the process-local lock and may
+        // repoint while the network mint is delayed. Re-read every live input
+        // after that slow operation, using the guard already held so local
+        // sign-out/re-pair/deprovision remains fenced without recursive read
+        // acquisition.
+        let lease = self
+            .resolve_model_route(route_model)
+            .await?
+            .map(|resolved| Self::route_lease(resolved, guard));
+        Ok((token, lease))
+    }
+
     async fn bearer_token(&self) -> Result<String> {
-        self.0.access_token(RESOURCE_LLM).await
+        self.connection
+            .access_token_for_installation(RESOURCE_LLM, &self.installation_id)
+            .await
     }
 
     /// A chat's inference rides a token minted inside that chat's
@@ -1354,8 +1615,12 @@ impl BearerTokenSource for GatewayTokenSource {
     ) -> Result<String> {
         match conversation {
             Some(chat) => {
-                self.0
-                    .attested_access_token(RESOURCE_LLM, &chat.to_string())
+                self.connection
+                    .attested_access_token_for_installation(
+                        RESOURCE_LLM,
+                        &chat.to_string(),
+                        &self.installation_id,
+                    )
                     .await
             }
             None => self.bearer_token().await,
@@ -1373,8 +1638,9 @@ mod tests {
     use axum::response::{IntoResponse, Json, Response};
     use axum::routing::{get, post};
     use axum::Router as AxumRouter;
+    use futures::StreamExt;
     use serde_json::{json, Value};
-    use tidebreak_core::DbStore;
+    use tidebreak_core::{ChatMessage, ChatRequest, DbStore, ModelProvider, ProviderId, Role};
 
     use super::*;
 
@@ -1452,6 +1718,290 @@ mod tests {
         /// How many catalog fetches arrived with a matching `If-None-Match`
         /// and were answered 304.
         catalog_not_modified: AtomicUsize,
+    }
+
+    struct RepointableOs(std::sync::Mutex<String>);
+
+    impl RepointableOs {
+        fn new(base_url: String) -> Self {
+            Self(std::sync::Mutex::new(base_url))
+        }
+
+        fn repoint(&self, base_url: &str) {
+            *self.0.lock().unwrap() = base_url.to_owned();
+        }
+    }
+
+    impl crate::managed_policy::OsPolicySource for RepointableOs {
+        fn gateway_url(&self) -> Result<Option<String>> {
+            Ok(Some(self.0.lock().unwrap().clone()))
+        }
+    }
+
+    struct DelayedInferenceGateway {
+        delay_mint: usize,
+        mint_arrived: tokio::sync::Notify,
+        release_mint: tokio::sync::Notify,
+        llm_mints: AtomicUsize,
+        anthropic_requests: AtomicUsize,
+        responses_requests: AtomicUsize,
+        pause_first_anthropic_request: bool,
+    }
+
+    impl DelayedInferenceGateway {
+        fn new(delay_mint: usize, pause_first_anthropic_request: bool) -> Self {
+            Self {
+                delay_mint,
+                mint_arrived: tokio::sync::Notify::new(),
+                release_mint: tokio::sync::Notify::new(),
+                llm_mints: AtomicUsize::new(0),
+                anthropic_requests: AtomicUsize::new(0),
+                responses_requests: AtomicUsize::new(0),
+                pause_first_anthropic_request,
+            }
+        }
+    }
+
+    async fn delayed_inference_token(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Json<Value> {
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        let resource = form.get("resource").cloned().unwrap_or_default();
+        let mint = gateway.llm_mints.fetch_add(1, Ordering::SeqCst);
+        if mint == gateway.delay_mint {
+            gateway.mint_arrived.notify_one();
+            gateway.release_mint.notified().await;
+        }
+        Json(json!({
+            "access_token": format!("mg_at_{resource}_{mint}"),
+            "token_type": "Bearer",
+            // Below the refresh leeway so every continuation performs the
+            // network-backed mint that the race is about.
+            "expires_in": 1,
+            "refresh_token": format!("mg_rt_{mint}"),
+            "scope": "inference:invoke",
+            "resource": resource,
+            "installation_id": "install-1",
+        }))
+    }
+
+    async fn delayed_anthropic_inference(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+    ) -> Response {
+        let request = gateway.anthropic_requests.fetch_add(1, Ordering::SeqCst);
+        let stop_reason = if gateway.pause_first_anthropic_request && request == 0 {
+            "pause_turn"
+        } else {
+            "end_turn"
+        };
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            format!(
+                "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop_reason}\"}}}}\n\n"
+            ),
+        )
+            .into_response()
+    }
+
+    async fn delayed_responses_inference(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+    ) -> Response {
+        gateway.responses_requests.fetch_add(1, Ordering::SeqCst);
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        )
+            .into_response()
+    }
+
+    async fn managed_router_with_delayed_inference(
+        protocol: providers::GatewayModelProtocol,
+        gateway: Arc<DelayedInferenceGateway>,
+    ) -> (
+        tidebreak_router::Router,
+        String,
+        Arc<RepointableOs>,
+        tempfile::TempDir,
+    ) {
+        let app = AxumRouter::new()
+            .route("/oauth/token", post(delayed_inference_token))
+            .route(
+                "/compat/anthropic/v1/messages",
+                post(delayed_anthropic_inference),
+            )
+            .route(
+                "/compat/openai/v1/responses",
+                post(delayed_responses_inference),
+            )
+            .with_state(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let os = Arc::new(RepointableOs::new(base.clone()));
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
+        let policy = runtime.policy().unwrap();
+        let (model, upstream) = match protocol {
+            providers::GatewayModelProtocol::AnthropicMessages => {
+                ("anthropic-us-claude-opus-5", "us.anthropic.claude-opus-5")
+            }
+            providers::GatewayModelProtocol::OpenaiResponses => {
+                ("gateway-gpt-5-6-sol", "gpt-5.6-sol")
+            }
+        };
+        let snapshot = providers::GatewayModelSnapshot {
+            gateway_url: policy.gateway_url.clone().unwrap(),
+            installation_id: Some("install-1".into()),
+            models: vec![CustomModelConfig {
+                id: model.into(),
+                upstream_id: Some(upstream.into()),
+                ..Default::default()
+            }],
+            model_protocols: std::collections::BTreeMap::from([(model.into(), protocol)]),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        };
+        providers::write_gateway_snapshot(&*store, &snapshot)
+            .await
+            .unwrap();
+        let frozen = providers::gateway_execution_policy(
+            &snapshot,
+            &crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, model),
+        )
+        .unwrap()
+        .route_model;
+        let routes = providers::collect_routes(
+            &*store,
+            &*runtime.secrets,
+            runtime.route_token_source().await,
+            None,
+            &policy,
+        )
+        .await;
+        (
+            tidebreak_router::Router::build(routes),
+            frozen,
+            os,
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn external_policy_repoint_during_bearer_mint_blocks_gateway_initial_egress() {
+        for protocol in [
+            providers::GatewayModelProtocol::AnthropicMessages,
+            providers::GatewayModelProtocol::OpenaiResponses,
+        ] {
+            let gateway = Arc::new(DelayedInferenceGateway::new(0, false));
+            let (router, frozen, os, _directory) =
+                managed_router_with_delayed_inference(protocol, gateway.clone()).await;
+            let request = ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen,
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            };
+            let dispatch = tokio::spawn(async move { router.stream(request).await });
+
+            tokio::time::timeout(Duration::from_secs(2), gateway.mint_arrived.notified())
+                .await
+                .expect("the inference token mint reaches gateway A");
+            os.repoint("https://gateway-b.example.test");
+            gateway.release_mint.notify_one();
+
+            let result = tokio::time::timeout(Duration::from_secs(2), dispatch)
+                .await
+                .expect("authorization finishes after the delayed mint")
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "a token minted by a gateway retired during refresh must not authorize egress"
+            );
+            assert_eq!(
+                gateway.anthropic_requests.load(Ordering::SeqCst),
+                0,
+                "Anthropic request data must not reach retired gateway A"
+            );
+            assert_eq!(
+                gateway.responses_requests.load(Ordering::SeqCst),
+                0,
+                "Responses request data must not reach retired gateway A"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_policy_repoint_during_continuation_mint_blocks_anthropic_egress() {
+        let gateway = Arc::new(DelayedInferenceGateway::new(1, true));
+        let (router, frozen, os, _directory) = managed_router_with_delayed_inference(
+            providers::GatewayModelProtocol::AnthropicMessages,
+            gateway.clone(),
+        )
+        .await;
+        let stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen,
+                vendor_web_search: Some(tidebreak_core::provider::VendorWebSearch { max_uses: 1 }),
+                messages: vec![ChatMessage::text(Role::User, "search")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(gateway.anthropic_requests.load(Ordering::SeqCst), 1);
+
+        let continuation = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
+        tokio::time::timeout(Duration::from_secs(2), gateway.mint_arrived.notified())
+            .await
+            .expect("the continuation starts its fresh token mint");
+        os.repoint("https://gateway-b.example.test");
+        gateway.release_mint.notify_one();
+
+        let events = tokio::time::timeout(Duration::from_secs(2), continuation)
+            .await
+            .expect("the continuation refuses the retired route")
+            .unwrap();
+        assert_eq!(
+            gateway.anthropic_requests.load(Ordering::SeqCst),
+            1,
+            "only the leg dispatched before the MDM repoint may reach gateway A"
+        );
+        assert_eq!(gateway.llm_mints.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            events.last(),
+            Some(tidebreak_core::ProviderEvent::Failed { .. })
+        ));
     }
 
     const CATALOG_ETAG: &str = "W/\"catalog-rev-1\"";
@@ -1858,6 +2408,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_model_syncs_serialize_before_the_second_fetch() {
+        let gateway = Arc::new(FakeGateway::default());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let catalog_route = {
+            let requests = requests.clone();
+            move |headers: HeaderMap| {
+                let requests = requests.clone();
+                let arrived = arrived_tx.clone();
+                async move {
+                    let bearer = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    assert!(bearer.starts_with("Bearer mg_at_control_"), "{bearer}");
+                    let request = requests.fetch_add(1, Ordering::SeqCst);
+                    arrived.send(request).expect("the test is listening");
+                    (
+                        [(axum::http::header::ETAG, format!("W/\"rev-{request}\""))],
+                        Json(sample_catalog()),
+                    )
+                        .into_response()
+                }
+            }
+        };
+        let app = AxumRouter::new()
+            .route("/oauth/token", post(token))
+            .route("/api/v1/me/catalog", get(catalog_route))
+            .with_state(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        let first_pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(first_pause.clone());
+
+        let first = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        assert_eq!(arrived_rx.recv().await, Some(0));
+        first_pause.arrived.notified().await;
+
+        let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                second_started_tx.send(()).unwrap();
+                runtime.sync_models().await
+            }
+        });
+        second_started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "the second sync must wait before issuing its catalog fetch"
+        );
+
+        first_pause.release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap(), 2);
+        assert_eq!(arrived_rx.recv().await, Some(1));
+        assert_eq!(second.await.unwrap().unwrap(), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            providers::read_gateway_snapshot(&*store)
+                .await
+                .unwrap()
+                .unwrap()
+                .catalog_etag
+                .as_deref(),
+            Some("W/\"rev-1\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_route_setups_share_read_leases_while_catalog_sync_waits() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        runtime.sync_models().await.unwrap();
+
+        let policy = runtime.policy().unwrap();
+        let snapshot = providers::gateway_snapshot_for_policy(&*store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+        let frozen = providers::gateway_execution_policy(&snapshot, "model_gateway::sample-claude")
+            .unwrap()
+            .route_model;
+        let source = runtime.route_token_source().await.unwrap();
+
+        let first = source
+            .lease_model_route(&frozen)
+            .await
+            .unwrap()
+            .expect("first request setup receives a route lease");
+        let second =
+            tokio::time::timeout(Duration::from_secs(1), source.lease_model_route(&frozen))
+                .await
+                .expect("a second request setup must not serialize behind the first")
+                .unwrap()
+                .expect("second request setup receives the same live route lease");
+
+        let mut writer = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writer)
+                .await
+                .is_err(),
+            "catalog mutation must wait while request legs hold read leases"
+        );
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 0);
+
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writer)
+                .await
+                .is_err(),
+            "every active request leg must release before the writer proceeds"
+        );
+        drop(second);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), writer)
+                .await
+                .expect("catalog sync proceeds after both dispatch leases end")
+                .unwrap()
+                .unwrap(),
+            2
+        );
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sign_out_waits_for_catalog_sync_then_clears_its_commit() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        let mut sign_out = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sign_out().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut sign_out)
+                .await
+                .is_err(),
+            "sign-out must wait for the in-flight catalog writer instead of deadlocking it"
+        );
+        pause.release.notify_one();
+        assert_eq!(sync.await.unwrap().unwrap(), 2);
+        tokio::time::timeout(Duration::from_secs(2), sign_out)
+            .await
+            .expect("sign-out proceeds after catalog sync releases the writer")
+            .unwrap()
+            .unwrap();
+
+        let policy = runtime.policy().unwrap();
+        assert!(providers::gateway_models(&*store, &policy)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(runtime
+            .connection()
+            .await
+            .unwrap()
+            .unwrap()
+            .stored_credentials()
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_response_cannot_commit_after_same_url_session_replacement() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        let replacement: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_replacement",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(runtime.secrets.clone())
+            .save(&replacement)
+            .await
+            .unwrap();
+        pause.release.notify_one();
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("the old session's response must not commit over its replacement");
+        assert_eq!(error.kind(), "gateway_changed");
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_never_rewrites_durable_model_selections() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        store
+            .set_setting(
+                "chat_default.model",
+                &serde_json::Value::String("claude-opus-5".into()),
+            )
+            .await
+            .unwrap();
+        let pinned = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&pinned).await.unwrap();
+
+        runtime.sync_models().await.unwrap();
+
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+        assert_eq!(
+            store.get_setting("chat_default.model").await.unwrap(),
+            Some(serde_json::Value::String("claude-opus-5".into()))
+        );
+        assert_eq!(
+            store
+                .get_chat(pinned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    #[tokio::test]
     async fn an_unchanged_catalog_answers_304_and_the_snapshot_stays() {
         let gateway = Arc::new(FakeGateway::default());
         *gateway.catalog.lock().unwrap() = Some(sample_catalog());
@@ -1871,6 +2740,63 @@ mod tests {
         assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
         let snapshot = providers::read_gateway_snapshot(&*store).await.unwrap();
         assert_eq!(snapshot.unwrap().models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_304_sync_racing_a_policy_repoint_is_rejected() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+
+        struct SwappableOs(std::sync::Mutex<String>);
+
+        impl crate::managed_policy::OsPolicySource for SwappableOs {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+        }
+
+        let (seed_runtime, store, directory) = signed_in_runtime(&base).await;
+        seed_runtime.sync_models().await.unwrap();
+        drop(seed_runtime);
+        let os = Arc::new(SwappableOs(std::sync::Mutex::new(base.clone())));
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
+        let held = providers::GATEWAY_STATE_WRITES.lock().await;
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        while gateway.catalog_not_modified.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        *os.0.lock().unwrap() = "https://gateway-b.test".to_owned();
+        drop(held);
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("a 304 sync must recheck policy before returning");
+        assert_eq!(error.kind(), "gateway_changed");
+        drop(directory);
     }
 
     #[tokio::test]
@@ -1981,6 +2907,7 @@ mod tests {
             &*store,
             &providers::GatewayModelSnapshot {
                 gateway_url: base.clone(),
+                installation_id: Some("install-1".into()),
                 models: vec![
                     CustomModelConfig {
                         id: "claude-opus-5".to_string(),
@@ -2061,6 +2988,10 @@ mod tests {
         assert_eq!(
             aliased.id, "anthropic-us-claude-opus-5",
             "the gateway's own id is what the request carries"
+        );
+        assert_eq!(
+            aliased.request_shaping_model, "claude-opus-5",
+            "the unambiguous canonical upstream identity shapes the request"
         );
         assert_eq!(
             aliased.vendor,
@@ -2196,6 +3127,16 @@ mod tests {
         assert!(!anthropic_route
             .curated_models
             .contains(&"sample-coder".to_string()));
+        let anthropic_frozen: Vec<_> = anthropic_route
+            .curated_models
+            .iter()
+            .filter(|model| model.starts_with("__tidebreak_gateway_v1."))
+            .collect();
+        assert_eq!(anthropic_frozen.len(), 1);
+        assert_eq!(
+            anthropic_route.model_rewrites.get(anthropic_frozen[0]),
+            Some(&"sample-claude".to_string())
+        );
         let openai_route = routes
             .iter()
             .find(|route| route.kind == tidebreak_router::RouteKind::ModelGatewayOpenai)
@@ -2205,7 +3146,19 @@ mod tests {
             Some(format!("{base}/compat/openai/v1").as_str())
         );
         assert!(openai_route.api_key.is_empty());
-        assert_eq!(openai_route.curated_models, ["sample-coder"]);
+        assert!(openai_route
+            .curated_models
+            .contains(&"sample-coder".to_string()));
+        let openai_frozen: Vec<_> = openai_route
+            .curated_models
+            .iter()
+            .filter(|model| model.starts_with("__tidebreak_gateway_v1."))
+            .collect();
+        assert_eq!(openai_frozen.len(), 1);
+        assert_eq!(
+            openai_route.model_rewrites.get(openai_frozen[0]),
+            Some(&"sample-coder".to_string())
+        );
         assert!(providers::provider_is_usable(
             &*store,
             &*runtime.secrets,
@@ -2214,6 +3167,31 @@ mod tests {
         )
         .await
         .unwrap());
+
+        let frozen = anthropic_frozen[0].as_str();
+        let lease = source
+            .lease_model_route(frozen)
+            .await
+            .unwrap()
+            .expect("the current frozen selector receives a live route lease");
+        assert_eq!(lease.wire_model(), "sample-claude");
+        assert_eq!(lease.request_shaping_model(), "sample-claude");
+        drop(lease);
+
+        let mut retargeted = providers::gateway_snapshot_for_policy(&*store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+        retargeted
+            .models
+            .iter_mut()
+            .find(|model| model.id == "sample-claude")
+            .unwrap()
+            .upstream_id = Some("gpt-5.6-sol".into());
+        providers::write_gateway_snapshot(&*store, &retargeted)
+            .await
+            .unwrap();
+        assert!(source.lease_model_route(frozen).await.unwrap().is_none());
     }
 
     /// The race #896 named, in its surviving form: with policy the only

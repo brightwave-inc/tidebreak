@@ -2907,6 +2907,326 @@ async fn turn_run_input_message_must_match_its_chat_and_turn() {
 }
 
 #[tokio::test]
+async fn turn_admission_reservation_is_global_exact_and_recoverable() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let request = TurnAdmissionRequest {
+        id: turn_id,
+        chat_id: first_chat.id,
+        content: "reserved input".into(),
+        attachments: vec![uuid::Uuid::new_v4()],
+        file_attachments: vec![DocumentId::new()],
+        invoked_skills: vec!["presentations".into()],
+        voice_input_used: true,
+    };
+    let first_token = uuid::Uuid::new_v4();
+    let first_lease = match store
+        .begin_turn_admission(&request, first_token, chrono::Duration::milliseconds(50))
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) => lease,
+        outcome => panic!("unexpected first reservation: {outcome:?}"),
+    };
+
+    assert!(matches!(
+        store
+            .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::Pending { .. }
+    ));
+    let mut changed = request.clone();
+    changed.content = "different".into();
+    assert_eq!(
+        store
+            .begin_turn_admission(&changed, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::IdentityConflict
+    );
+    let mut cross_chat = request.clone();
+    cross_chat.chat_id = second_chat.id;
+    assert_eq!(
+        store
+            .begin_turn_admission(
+                &cross_chat,
+                uuid::Uuid::new_v4(),
+                chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::IdentityConflict
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    let takeover_token = uuid::Uuid::new_v4();
+    let takeover_lease = match store
+        .begin_turn_admission(&request, takeover_token, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) if lease.lease_token == takeover_token => lease,
+        outcome => panic!("unexpected takeover reservation: {outcome:?}"),
+    };
+    assert!(!store.release_turn_admission(first_lease).await.unwrap());
+    assert!(store.release_turn_admission(takeover_lease).await.unwrap());
+}
+
+#[tokio::test]
+async fn turn_admission_rejects_an_unbounded_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let request = TurnAdmissionRequest {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: "bounded lease".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+    };
+
+    let error = store
+        .begin_turn_admission(
+            &request,
+            uuid::Uuid::new_v4(),
+            chrono::Duration::minutes(5) + chrono::Duration::milliseconds(1),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AgentError::Store(message) if message.contains("at most five minutes"))
+    );
+}
+
+#[tokio::test]
+async fn reserved_queue_promotion_keeps_one_global_turn_owner() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    let other_chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    store.create_chat(&other_chat).await.unwrap();
+    let queued = QueuedTurn {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: "queued admission".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+        position: 0,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let request = TurnAdmissionRequest {
+        id: queued.id,
+        chat_id: queued.chat_id,
+        content: queued.content.clone(),
+        attachments: queued.attachments.clone(),
+        file_attachments: queued.file_attachments.clone(),
+        invoked_skills: queued.invoked_skills.clone(),
+        voice_input_used: queued.voice_input_used,
+    };
+    let lease = match store
+        .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) => lease,
+        outcome => panic!("unexpected reservation outcome: {outcome:?}"),
+    };
+    assert!(matches!(
+        store.enqueue_reserved_turn(lease, &queued).await.unwrap(),
+        ReservedQueuedTurnOutcome::Queued(_)
+    ));
+    assert_eq!(
+        store
+            .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::Queued
+    );
+    let mut cross_chat = request.clone();
+    cross_chat.chat_id = other_chat.id;
+    assert_eq!(
+        store
+            .begin_turn_admission(
+                &cross_chat,
+                uuid::Uuid::new_v4(),
+                chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::IdentityConflict
+    );
+
+    let queued = store
+        .list_queued_turns(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(matches!(
+        store
+            .promote_queued_turn_with_message_context(&queued, "gpt-5", &[])
+            .await
+            .unwrap(),
+        PromoteQueuedTurnOutcome::Promoted(_)
+    ));
+    assert_eq!(
+        store
+            .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::Accepted
+    );
+    assert!(store.list_queued_turns(chat.id).await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::Accepted
+    );
+}
+
+#[tokio::test]
+async fn queued_promotion_refuses_deleted_edited_and_reordered_snapshots() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let make_queued = |content: &str| QueuedTurn {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: content.into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+        position: 0,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let deleted = store
+        .enqueue_queued_turn(&make_queued("delete me"))
+        .await
+        .unwrap();
+    assert!(store.delete_queued_turn(chat.id, deleted.id).await.unwrap());
+    assert_eq!(
+        store
+            .promote_queued_turn_with_message_context(&deleted, "gpt-5", &[])
+            .await
+            .unwrap(),
+        PromoteQueuedTurnOutcome::Stale
+    );
+    assert!(store.get_turn_run(deleted.id).await.unwrap().is_none());
+
+    let edited = store
+        .enqueue_queued_turn(&make_queued("before edit"))
+        .await
+        .unwrap();
+    let updated = store
+        .update_queued_turn(chat.id, edited.id, Some("after edit"), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .promote_queued_turn_with_message_context(&edited, "gpt-5", &[])
+            .await
+            .unwrap(),
+        PromoteQueuedTurnOutcome::Stale
+    );
+    assert_eq!(
+        store.list_queued_turns(chat.id).await.unwrap(),
+        vec![updated]
+    );
+
+    assert!(store.delete_queued_turn(chat.id, edited.id).await.unwrap());
+    let first = store
+        .enqueue_queued_turn(&make_queued("first"))
+        .await
+        .unwrap();
+    let second = store
+        .enqueue_queued_turn(&make_queued("second"))
+        .await
+        .unwrap();
+    store
+        .update_queued_turn(chat.id, second.id, None, Some(0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .promote_queued_turn_with_message_context(&first, "gpt-5", &[])
+            .await
+            .unwrap(),
+        PromoteQueuedTurnOutcome::Stale
+    );
+    let remaining = store.list_queued_turns(chat.id).await.unwrap();
+    assert_eq!(
+        remaining.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![second.id, first.id]
+    );
+}
+
+#[tokio::test]
+async fn expired_turn_admission_lease_cannot_queue_or_release() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let queued = QueuedTurn {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: "lease expires".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+        position: 0,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let request = TurnAdmissionRequest {
+        id: queued.id,
+        chat_id: queued.chat_id,
+        content: queued.content.clone(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+    };
+    let lease = match store
+        .begin_turn_admission(
+            &request,
+            uuid::Uuid::new_v4(),
+            chrono::Duration::milliseconds(20),
+        )
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) => lease,
+        outcome => panic!("unexpected reservation outcome: {outcome:?}"),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    assert_eq!(
+        store.enqueue_reserved_turn(lease, &queued).await.unwrap(),
+        ReservedQueuedTurnOutcome::LeaseLost
+    );
+    assert!(!store.release_turn_admission(lease).await.unwrap());
+    assert!(store.list_queued_turns(chat.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

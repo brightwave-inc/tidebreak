@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::connectors::GatewayAuthConfig;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::managed_policy;
 use crate::mcp_config::McpRuntime;
@@ -29,6 +29,16 @@ use crate::mcp_config::McpRuntime;
 /// server's instance lock guarantees it), so a process-local mutex is
 /// enough to make the check-then-write effectively atomic.
 static PAIRING: Mutex<()> = Mutex::const_new(());
+
+/// Take the process-wide pairing mutation lock.
+///
+/// Gateway authority writers acquire the runtime's model-authority fence
+/// before this lock, then sign-in state afterwards. Keeping that order shared
+/// by re-pair and deprovision prevents the old pairing/sign-in inversion while
+/// ensuring a policy change cannot land inside an authorized request leg.
+pub(crate) async fn lock_pairing_mutation() -> MutexGuard<'static, ()> {
+    PAIRING.lock().await
+}
 
 /// The process-local handles pairing needs.
 ///
@@ -301,7 +311,11 @@ pub async fn deprovision_provisioned_gateway(
     handle: &PairingHandle,
     expected_current: &str,
 ) -> Result<(), PairingError> {
-    let _guard = PAIRING.lock().await;
+    // Wait for request legs that already validated and minted a bearer to
+    // dispatch before deleting their authority. New legs wait until the
+    // policy and local session have both been retired, then fail closed.
+    let authority = handle.gateway.lock_model_authority_mutation().await;
+    let _guard = lock_pairing_mutation().await;
     let policy = handle.gateway.policy()?;
     if policy.source == crate::managed_policy::ManagedPolicySource::Os {
         return Err(PairingError::Conflict {
@@ -334,7 +348,10 @@ pub async fn deprovision_provisioned_gateway(
     // resurrect the disconnect — the local clear inside is unconditional and
     // the server-side session dies at refresh-token expiry — so only a store
     // read could error here, and that is worth surfacing.
-    handle.gateway.retire_session_for_current_policy().await?;
+    handle
+        .gateway
+        .retire_session_for_current_policy(&authority)
+        .await?;
     Ok(())
 }
 
@@ -359,7 +376,7 @@ pub async fn deprovision_provisioned_gateway(
 /// (best-effort revoke, unconditional local clear) before the exchange task
 /// stores the new one, so its refresh token does not stay live at a gateway
 /// this profile no longer answers to.
-pub(crate) async fn commit_signed_in_pairing(
+pub(crate) async fn commit_signed_in_pairing_locked(
     provisioned: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
     secrets: Arc<dyn SecretProvider>,
@@ -367,10 +384,10 @@ pub(crate) async fn commit_signed_in_pairing(
     base_url: &str,
     replaces: Option<&str>,
 ) -> tidebreak_core::Result<()> {
-    // PAIRING makes the policy re-read and the write atomic against another
-    // pairing path; no gateway-state lock, for the same reason the old
-    // probe-then-provision path took none — the snapshot stamp is the guard.
-    let _guard = PAIRING.lock().await;
+    // The caller holds the model-authority writer and PAIRING, in that order.
+    // The policy re-read and write are therefore atomic against every local
+    // pairing path, and any request leg authorized under the old policy has
+    // already dispatched before a re-pair can retire its session.
     let policy = managed_policy::resolve(provisioned, os_policy)?;
     if policy.managed && policy.gateway_url.as_deref() != Some(base_url) {
         let replacing = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned
@@ -402,6 +419,7 @@ mod tests {
 
     use serde_json::json;
     use tidebreak_core::{DbStore, SecretProvider};
+    use tidebreak_router::BearerTokenSource;
 
     use tidebreak_core::ToolRegistry;
 
@@ -456,18 +474,29 @@ mod tests {
         Arc<McpRuntime>,
         Arc<crate::gateway_runtime::GatewayRuntime>,
     ) {
+        test_handle_with_secrets(store, test_secrets())
+    }
+
+    fn test_handle_with_secrets(
+        store: &Arc<dyn Store>,
+        secrets: Arc<dyn SecretProvider>,
+    ) -> (
+        PairingHandle,
+        Arc<McpRuntime>,
+        Arc<crate::gateway_runtime::GatewayRuntime>,
+    ) {
         let provisioned = MemoryProvisionedPolicy::new();
         let mcp = Arc::new(McpRuntime::new(
             Arc::new(ToolRegistry::new()),
             store.clone(),
-            Arc::new(TestSecrets::default()),
+            secrets.clone(),
             Arc::new(NoGateway),
             provisioned.clone(),
             Arc::new(NoOsPolicy),
         ));
         let gateway = crate::gateway_runtime::GatewayRuntime::new(
             store.clone(),
-            Arc::new(TestSecrets::default()),
+            secrets,
             provisioned,
             Arc::new(NoOsPolicy),
         );
@@ -718,6 +747,7 @@ mod tests {
             &*store,
             &providers::GatewayModelSnapshot {
                 gateway_url: "https://old.gateway.test/".to_string(),
+                installation_id: Some("install-old".into()),
                 models: vec![providers::CustomModelConfig {
                     id: "stale-model".into(),
                     upstream_id: None,
@@ -734,16 +764,10 @@ mod tests {
         .await
         .unwrap();
 
-        commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            test_secrets(),
-            &mcp,
-            "https://gateway-a.invalid/",
-            None,
-        )
-        .await
-        .unwrap();
+        gateway
+            .commit_signed_in_pairing_for_test(&mcp, "https://gateway-a.invalid/", None)
+            .await
+            .unwrap();
 
         let policy = gateway.policy().unwrap();
         assert!(policy.managed);
@@ -760,16 +784,10 @@ mod tests {
             .is_empty());
 
         // A later sign-in against the same gateway re-commits harmlessly.
-        commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            test_secrets(),
-            &mcp,
-            "https://gateway-a.invalid/",
-            None,
-        )
-        .await
-        .unwrap();
+        gateway
+            .commit_signed_in_pairing_for_test(&mcp, "https://gateway-a.invalid/", None)
+            .await
+            .unwrap();
     }
 
     /// An authority that claimed the profile while the browser flow ran
@@ -781,17 +799,11 @@ mod tests {
         let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
         managed_policy::provision(&**gateway.provisioned_policy(), "https://mdm.invalid/").unwrap();
 
-        let error = commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            test_secrets(),
-            &mcp,
-            "https://pending.invalid/",
-            None,
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = gateway
+            .commit_signed_in_pairing_for_test(&mcp, "https://pending.invalid/", None)
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("https://mdm.invalid/"));
         assert!(!error.to_string().contains("pending.invalid"));
 
@@ -820,6 +832,20 @@ mod tests {
                 }),
             )
             .route(
+                "/oauth/token",
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "access_token": "mg_at_llm_pairing_fixture",
+                        "token_type": "Bearer",
+                        "expires_in": 600,
+                        "refresh_token": "mg_rt_rotated",
+                        "scope": "inference:invoke",
+                        "resource": "llm",
+                        "installation_id": "install-1",
+                    }))
+                }),
+            )
+            .route(
                 "/oauth/revoke",
                 axum::routing::post(move |body: String| {
                     let recorded = recorded.clone();
@@ -837,6 +863,53 @@ mod tests {
         (format!("http://{address}"), revoked)
     }
 
+    async fn seed_request_route(
+        store: &Arc<dyn Store>,
+        gateway: &Arc<crate::gateway_runtime::GatewayRuntime>,
+        secrets: &Arc<dyn SecretProvider>,
+        base_url: &str,
+    ) -> (Arc<dyn BearerTokenSource>, String) {
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base_url,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_request",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        crate::connectors::CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let mut model_protocols = std::collections::BTreeMap::new();
+        model_protocols.insert(
+            "sample-claude".to_string(),
+            providers::GatewayModelProtocol::AnthropicMessages,
+        );
+        let snapshot = providers::GatewayModelSnapshot {
+            gateway_url: base_url.to_string(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "sample-claude".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                display_name: Some("Sample Claude".into()),
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                ..Default::default()
+            }],
+            model_protocols,
+            member_catalog: Some("v1".into()),
+            catalog_etag: Some("fixture".into()),
+        };
+        providers::write_gateway_snapshot(&**store, &snapshot)
+            .await
+            .unwrap();
+        let frozen = providers::gateway_execution_policy(&snapshot, "model_gateway::sample-claude")
+            .unwrap()
+            .route_model;
+        (gateway.route_token_source().await.unwrap(), frozen)
+    }
+
     /// The whole point of the slice, at the commit seam: a replacing commit
     /// swaps the provisioned row to the new gateway and retires the old
     /// deployment's session — revoked at the old gateway and gone locally —
@@ -846,9 +919,9 @@ mod tests {
         let (old_base, revoked) = serve_revocable_gateway().await;
         let old_url = format!("{old_base}/");
         let (store, _directory) = test_store().await;
-        let (_handle, mcp, gateway) = test_handle_with_runtimes(&store);
-        managed_policy::provision(&**gateway.provisioned_policy(), &old_url).unwrap();
         let secrets = test_secrets();
+        let (_handle, mcp, gateway) = test_handle_with_secrets(&store, secrets.clone());
+        managed_policy::provision(&**gateway.provisioned_policy(), &old_url).unwrap();
         let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
             "base_url": old_url,
             "installation_id": "install-1",
@@ -862,16 +935,10 @@ mod tests {
             .await
             .unwrap();
 
-        commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            secrets.clone(),
-            &mcp,
-            "https://new-gw.invalid/",
-            Some(&old_url),
-        )
-        .await
-        .unwrap();
+        gateway
+            .commit_signed_in_pairing_for_test(&mcp, "https://new-gw.invalid/", Some(&old_url))
+            .await
+            .unwrap();
 
         let policy = gateway.policy().unwrap();
         assert!(policy.managed);
@@ -893,6 +960,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_replacing_commit_waits_for_an_authorized_request_leg_to_dispatch() {
+        let (old_base, _revoked) = serve_revocable_gateway().await;
+        let old_url = format!("{old_base}/");
+        let (store, _directory) = test_store().await;
+        let secrets = test_secrets();
+        let (_handle, mcp, gateway) = test_handle_with_secrets(&store, secrets.clone());
+        managed_policy::provision(&**gateway.provisioned_policy(), &old_url).unwrap();
+        let (source, frozen) = seed_request_route(&store, &gateway, &secrets, &old_url).await;
+        let lease = source
+            .lease_model_route(&frozen)
+            .await
+            .unwrap()
+            .expect("the old route is authorized before re-pair");
+        let bearer = source.bearer_token().await.unwrap();
+        assert!(bearer.starts_with("mg_at_llm_"), "{bearer}");
+
+        let mut repairing = tokio::spawn({
+            let gateway = gateway.clone();
+            let mcp = mcp.clone();
+            let old_url = old_url.clone();
+            async move {
+                gateway
+                    .commit_signed_in_pairing_for_test(
+                        &mcp,
+                        "https://new-gw.invalid/",
+                        Some(&old_url),
+                    )
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut repairing)
+                .await
+                .is_err(),
+            "re-pair must not replace authority between bearer mint and dispatch"
+        );
+        assert_eq!(
+            gateway.policy().unwrap().gateway_url.as_deref(),
+            Some(old_url.as_str())
+        );
+
+        drop(lease);
+        tokio::time::timeout(std::time::Duration::from_secs(2), repairing)
+            .await
+            .expect("re-pair proceeds after the request leg dispatches")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            gateway.policy().unwrap().gateway_url.as_deref(),
+            Some("https://new-gw.invalid/")
+        );
+    }
+
     /// The compare-and-swap the confirmation rests on: a provisioned row
     /// that moved to a third gateway while the browser flow ran wins, and
     /// the replacing commit refuses rather than writing over consent the
@@ -909,17 +1030,15 @@ mod tests {
             .write("https://third.invalid/")
             .unwrap();
 
-        let error = commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            test_secrets(),
-            &mcp,
-            "https://new-gw.invalid/",
-            Some("https://old.invalid/"),
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = gateway
+            .commit_signed_in_pairing_for_test(
+                &mcp,
+                "https://new-gw.invalid/",
+                Some("https://old.invalid/"),
+            )
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("https://third.invalid/"));
 
         let policy = gateway.policy().unwrap();
@@ -963,16 +1082,10 @@ mod tests {
         assert_eq!(mcp.info().await.servers[0].health, McpHealth::Healthy);
         assert!(mcp.snapshot().get("mcp__private_docs__lookup").is_some());
 
-        commit_signed_in_pairing(
-            &**gateway.provisioned_policy(),
-            &NoOsPolicy,
-            test_secrets(),
-            &mcp,
-            "https://gateway.invalid/",
-            None,
-        )
-        .await
-        .unwrap();
+        gateway
+            .commit_signed_in_pairing_for_test(&mcp, "https://gateway.invalid/", None)
+            .await
+            .unwrap();
 
         assert!(
             mcp.snapshot().get("mcp__private_docs__lookup").is_none(),
@@ -1167,5 +1280,48 @@ mod tests {
             !crate::connectors::has_stored_credentials(&*secrets).await,
             "the keychain session must not survive the disconnect"
         );
+    }
+
+    #[tokio::test]
+    async fn a_deprovision_waits_for_an_authorized_request_leg_to_dispatch() {
+        let (base, _revoked) = serve_revocable_gateway().await;
+        let gateway_url = format!("{base}/");
+        let (store, _directory) = test_store().await;
+        let secrets = test_secrets();
+        let (handle, _mcp, gateway) = test_handle_with_secrets(&store, secrets.clone());
+        managed_policy::provision(&**gateway.provisioned_policy(), &gateway_url).unwrap();
+        let (source, frozen) = seed_request_route(&store, &gateway, &secrets, &gateway_url).await;
+        let lease = source
+            .lease_model_route(&frozen)
+            .await
+            .unwrap()
+            .expect("the managed route is authorized before deprovision");
+        let bearer = source.bearer_token().await.unwrap();
+        assert!(bearer.starts_with("mg_at_llm_"), "{bearer}");
+
+        let mut deprovision = tokio::spawn({
+            let handle = handle.clone();
+            let gateway_url = gateway_url.clone();
+            async move { deprovision_provisioned_gateway(&handle, &gateway_url).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut deprovision)
+                .await
+                .is_err(),
+            "deprovision must not retire authority between bearer mint and dispatch"
+        );
+        assert_eq!(
+            gateway.policy().unwrap().gateway_url.as_deref(),
+            Some(gateway_url.as_str())
+        );
+
+        drop(lease);
+        tokio::time::timeout(std::time::Duration::from_secs(2), deprovision)
+            .await
+            .expect("deprovision proceeds after the request leg dispatches")
+            .unwrap()
+            .unwrap();
+        assert!(!gateway.policy().unwrap().managed);
+        assert!(!crate::connectors::has_stored_credentials(&*secrets).await);
     }
 }

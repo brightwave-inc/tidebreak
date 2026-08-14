@@ -8,9 +8,14 @@ use crate::error::{AgentError, AgentErrorInfo, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, ChatId, DocumentId, MessageId, TurnId};
 use crate::image::ImageRef;
-use crate::model::{user_message_llm_content, AgentRunStatus, TurnRun, TurnRunStatus};
+use crate::model::{
+    user_message_llm_content, AgentRunStatus, TurnAdmissionLease, TurnAdmissionRequest, TurnRun,
+    TurnRunStatus,
+};
 use crate::provider::Usage;
-use crate::storage::{AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome};
+use crate::storage::{
+    AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ReservedTurnAcceptanceOutcome,
+};
 
 use super::super::{entities, store_err, DbStore};
 use super::message_attachment as message_attachment_ops;
@@ -24,6 +29,7 @@ use super::{
     },
 };
 
+pub(in crate::db) mod admission;
 mod client_wait;
 mod multi_agent_run_wait;
 pub(in crate::db) mod queued;
@@ -117,9 +123,80 @@ pub(in crate::db) async fn accept_turn(
     invoked_skills: &[String],
     voice_input_used: bool,
 ) -> Result<AcceptTurnOutcome> {
+    match accept_turn_inner(
+        store,
+        None,
+        id,
+        chat_id,
+        model,
+        content,
+        images,
+        documents,
+        invoked_skills,
+        voice_input_used,
+    )
+    .await?
+    {
+        ReservedTurnAcceptanceOutcome::Outcome(outcome) => Ok(*outcome),
+        ReservedTurnAcceptanceOutcome::LeaseLost => Err(AgentError::Store(format!(
+            "turn {id} has an unresolved admission owned by another process"
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn accept_reserved_turn(
+    store: &DbStore,
+    lease: TurnAdmissionLease,
+    chat_id: ChatId,
+    model: &str,
+    content: &str,
+    images: &[ImageRef],
+    documents: &[DocumentId],
+    invoked_skills: &[String],
+    voice_input_used: bool,
+) -> Result<ReservedTurnAcceptanceOutcome> {
+    accept_turn_inner(
+        store,
+        Some(lease),
+        lease.id,
+        chat_id,
+        model,
+        content,
+        images,
+        documents,
+        invoked_skills,
+        voice_input_used,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accept_turn_inner(
+    store: &DbStore,
+    reservation: Option<TurnAdmissionLease>,
+    id: TurnId,
+    chat_id: ChatId,
+    model: &str,
+    content: &str,
+    images: &[ImageRef],
+    documents: &[DocumentId],
+    invoked_skills: &[String],
+    voice_input_used: bool,
+) -> Result<ReservedTurnAcceptanceOutcome> {
     validate_turn_input(id, model, content, invoked_skills)?;
     message_attachment_ops::validate(images)?;
     message_document_attachment_ops::validate_count(images.len(), documents)?;
+    let request = TurnAdmissionRequest {
+        id,
+        chat_id,
+        content: content.into(),
+        attachments: images.iter().map(|image| image.blob_id).collect(),
+        file_attachments: documents.to_vec(),
+        invoked_skills: invoked_skills.to_vec(),
+        voice_input_used,
+    };
+    admission::validate_request(&request)?;
 
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -128,6 +205,83 @@ pub(in crate::db) async fn accept_turn(
     let foreground = find_foreground_agent_run_on(&transaction, chat_id)
         .await?
         .ok_or_else(|| AgentError::Store(format!("chat {chat_id} has no foreground agent run")))?;
+
+    let admission_row = entities::turn_admission::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?;
+    if let Some(row) = admission_row.as_ref() {
+        if !admission::request_matches(row, &request) {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+                AcceptTurnOutcome::IdentityConflict,
+            )));
+        }
+        match row.state.as_str() {
+            admission::STATE_ACCEPTED => {
+                let existing = entities::turn_run::Entity::find_by_id(id.0)
+                    .one(&transaction)
+                    .await
+                    .map_err(store_err)?
+                    .ok_or_else(|| {
+                        AgentError::Store(format!(
+                            "accepted turn admission {id} is missing its turn"
+                        ))
+                    })?;
+                let existing = exact_accepted_turn_on(
+                    &transaction,
+                    existing,
+                    chat_id,
+                    foreground.id,
+                    model,
+                    content,
+                    images,
+                    documents,
+                    invoked_skills,
+                    voice_input_used,
+                )
+                .await?;
+                transaction.commit().await.map_err(store_err)?;
+                return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(existing)));
+            }
+            admission::STATE_PENDING => {
+                let Some(lease) = reservation else {
+                    transaction.rollback().await.map_err(store_err)?;
+                    return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
+                };
+                if !admission::lease_is_current_on(
+                    &transaction,
+                    lease,
+                    chat_id,
+                    request.fingerprint(),
+                )
+                .await?
+                {
+                    transaction.rollback().await.map_err(store_err)?;
+                    return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
+                }
+            }
+            admission::STATE_QUEUED => {
+                transaction.rollback().await.map_err(store_err)?;
+                return Ok(if reservation.is_some() {
+                    ReservedTurnAcceptanceOutcome::LeaseLost
+                } else {
+                    ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+                        AcceptTurnOutcome::IdentityConflict,
+                    ))
+                });
+            }
+            state => {
+                transaction.rollback().await.map_err(store_err)?;
+                return Err(AgentError::Store(format!(
+                    "turn admission {id} has invalid state {state}"
+                )));
+            }
+        }
+    } else if reservation.is_some() {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
+    }
 
     if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
         .one(&transaction)
@@ -148,7 +302,7 @@ pub(in crate::db) async fn accept_turn(
         )
         .await?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(existing);
+        return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(existing)));
     }
 
     if foreground.status != AgentRunStatus::Active {
@@ -160,13 +314,123 @@ pub(in crate::db) async fn accept_turn(
     if let Some(active) = find_active_turn_on(&transaction, chat_id).await? {
         let active = turn_run_from_model(active)?;
         transaction.commit().await.map_err(store_err)?;
-        return Ok(AcceptTurnOutcome::ChatBusy(active));
+        return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+            AcceptTurnOutcome::ChatBusy(active),
+        )));
     }
 
-    let now = canonical_db_timestamp(Utc::now())?;
+    let now = super::agent_run::database_now(&transaction).await?;
+    if let Some(lease) = reservation {
+        if !admission::transition_pending_on(&transaction, lease, admission::STATE_ACCEPTED).await?
+        {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
+        }
+    } else if admission_row.is_none() {
+        let inserted =
+            entities::turn_admission::Entity::insert(entities::turn_admission::ActiveModel {
+                id: Set(id.0),
+                chat_id: Set(chat_id.0),
+                fingerprint: Set(request.fingerprint().to_vec()),
+                state: Set(admission::STATE_ACCEPTED.into()),
+                lease_token: Set(None),
+                lease_expires_at: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            })
+            .on_conflict_do_nothing()
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(store_err)?;
+        if !matches!(inserted, TryInsertResult::Inserted(1)) {
+            transaction.rollback().await.map_err(store_err)?;
+            return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+                AcceptTurnOutcome::IdentityConflict,
+            )));
+        }
+    } else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+            AcceptTurnOutcome::IdentityConflict,
+        )));
+    }
+    let inserted = match insert_accepted_turn_on(
+        &transaction,
+        id,
+        chat_id,
+        foreground.id,
+        model,
+        content,
+        images,
+        documents,
+        invoked_skills,
+        voice_input_used,
+        now,
+    )
+    .await
+    {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            transaction.rollback().await.map_err(store_err)?;
+            if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?
+            {
+                return exact_accepted_turn_on(
+                    &store.conn,
+                    existing,
+                    chat_id,
+                    foreground.id,
+                    model,
+                    content,
+                    images,
+                    documents,
+                    invoked_skills,
+                    voice_input_used,
+                )
+                .await
+                .map(|outcome| ReservedTurnAcceptanceOutcome::Outcome(Box::new(outcome)));
+            }
+            if let Some(active) = find_active_turn_on(&store.conn, chat_id).await? {
+                return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+                    AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?),
+                )));
+            }
+            return Err(error);
+        }
+    };
+
+    transaction.commit().await.map_err(store_err)?;
+    Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
+        AcceptTurnOutcome::Accepted(turn_run_from_model(inserted)?),
+    )))
+}
+
+/// Persist the message, attachments, and queued turn beneath a caller-owned
+/// transaction and chat lock. Admission ownership is deliberately handled by
+/// the caller so ordinary acceptance and FIFO promotion share one creation
+/// path without weakening either fence.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn insert_accepted_turn_on<C>(
+    conn: &C,
+    id: TurnId,
+    chat_id: ChatId,
+    foreground_id: AgentRunId,
+    model: &str,
+    content: &str,
+    images: &[ImageRef],
+    documents: &[DocumentId],
+    invoked_skills: &[String],
+    voice_input_used: bool,
+    now: chrono::DateTime<Utc>,
+) -> Result<entities::turn_run::Model>
+where
+    C: ConnectionTrait,
+{
     let input_message_id = MessageId::new();
     if !reserve_message_identity_on(
-        &transaction,
+        conn,
         input_message_id,
         chat_id,
         id,
@@ -174,54 +438,29 @@ pub(in crate::db) async fn accept_turn(
     )
     .await?
     {
-        transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
             "turn input message identity {input_message_id} is already reserved"
         )));
     }
-    let message = entities::message::ActiveModel {
+    entities::message::ActiveModel {
         id: Set(input_message_id.0),
         chat_id: Set(chat_id.0),
         turn_id: Set(id.0),
-        seq: Set(next_message_seq_on(&transaction, chat_id).await?),
+        seq: Set(next_message_seq_on(conn, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
         llm_content: Set(None),
         reasoning: Set(None),
         turn_lease_token: Set(None),
         created_at: Set(now),
-    };
-    if let Err(error) = message.insert(&transaction).await {
-        transaction.rollback().await.map_err(store_err)?;
-        return Err(store_err(error));
     }
-    // Attachments join this transaction rather than following it. The message
-    // and its images are one submitted artifact: a partial commit would leave a
-    // turn whose replayed history no longer matches what the user sent, and
-    // would leave the referenced blobs momentarily unreferenced and eligible for
-    // retirement.
-    if let Err(error) =
-        message_attachment_ops::insert_on(&transaction, chat_id, input_message_id, images, now)
-            .await
-    {
-        transaction.rollback().await.map_err(store_err)?;
-        return Err(error);
-    }
-    let document_context = match message_document_attachment_ops::insert_on(
-        &transaction,
-        chat_id,
-        input_message_id,
-        documents,
-        now,
-    )
+    .insert(conn)
     .await
-    {
-        Ok(context) => context,
-        Err(error) => {
-            transaction.rollback().await.map_err(store_err)?;
-            return Err(error);
-        }
-    };
+    .map_err(store_err)?;
+    message_attachment_ops::insert_on(conn, chat_id, input_message_id, images, now).await?;
+    let document_context =
+        message_document_attachment_ops::insert_on(conn, chat_id, input_message_id, documents, now)
+            .await?;
     let llm_content = user_message_llm_content(
         content,
         images,
@@ -235,15 +474,15 @@ pub(in crate::db) async fn accept_turn(
             llm_content: Set(llm_content),
             ..Default::default()
         }
-        .update(&transaction)
+        .update(conn)
         .await
         .map_err(store_err)?;
     }
 
-    let run = entities::turn_run::ActiveModel {
+    entities::turn_run::ActiveModel {
         id: Set(id.0),
         chat_id: Set(chat_id.0),
-        agent_run_id: Set(foreground.id.0),
+        agent_run_id: Set(foreground_id.0),
         agent_run_depth: Set(0),
         input_message_id: Set(input_message_id.0),
         output_message_id: Set(None),
@@ -270,39 +509,10 @@ pub(in crate::db) async fn accept_turn(
         last_steer_applied_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
-    };
-    let inserted = match run.insert(&transaction).await {
-        Ok(inserted) => inserted,
-        Err(error) => {
-            transaction.rollback().await.map_err(store_err)?;
-            if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
-                .one(&store.conn)
-                .await
-                .map_err(store_err)?
-            {
-                return exact_accepted_turn_on(
-                    &store.conn,
-                    existing,
-                    chat_id,
-                    foreground.id,
-                    model,
-                    content,
-                    images,
-                    documents,
-                    invoked_skills,
-                    voice_input_used,
-                )
-                .await;
-            }
-            if let Some(active) = find_active_turn_on(&store.conn, chat_id).await? {
-                return Ok(AcceptTurnOutcome::ChatBusy(turn_run_from_model(active)?));
-            }
-            return Err(store_err(error));
-        }
-    };
-
-    transaction.commit().await.map_err(store_err)?;
-    Ok(AcceptTurnOutcome::Accepted(turn_run_from_model(inserted)?))
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)
 }
 
 pub(in crate::db) async fn claim_turn_run(
@@ -963,7 +1173,7 @@ fn turn_run_due_order(
         .then_with(|| left.id.cmp(&right.id))
 }
 
-fn validate_turn_input(
+pub(super) fn validate_turn_input(
     id: TurnId,
     model: &str,
     content: &str,
@@ -1013,7 +1223,7 @@ pub(in crate::db) fn validate_invoked_skills(invoked_skills: &[String]) -> Resul
     Ok(())
 }
 
-async fn find_active_turn_on<C>(
+pub(super) async fn find_active_turn_on<C>(
     conn: &C,
     chat_id: ChatId,
 ) -> Result<Option<entities::turn_run::Model>>
@@ -1038,7 +1248,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn exact_accepted_turn_on<C>(
+pub(super) async fn exact_accepted_turn_on<C>(
     conn: &C,
     existing: entities::turn_run::Model,
     chat_id: ChatId,

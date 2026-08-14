@@ -217,15 +217,26 @@ impl ModelProvider for OpenAiProvider {
         let url = reqwest::Url::parse(&url)
             .map_err(|_| AgentError::config("invalid Responses API endpoint"))?;
         let body = serde_json::to_vec(&body)?;
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let authorization = match &self.token_source {
+            Some(source) => Some(
+                crate::router::authorize_bearer_request(
+                    &**source,
+                    &req.model,
+                    req.wire_model(),
+                    req.conversation,
+                )
+                .await?,
+            ),
+            None => None,
         };
+        let api_key = authorization
+            .as_ref()
+            .map_or(self.api_key.as_str(), |(token, _lease)| token.as_str());
         let mut request = self
             .client
             .post(url.clone())
             .header("content-type", "application/json")
-            .bearer_auth(&api_key);
+            .bearer_auth(api_key);
         if let Some(account_id) = &self.chatgpt_account_id {
             request = request
                 .header("ChatGPT-Account-ID", account_id)
@@ -246,6 +257,7 @@ impl ModelProvider for OpenAiProvider {
             .send()
             .await
             .map_err(|_| AgentError::Provider(format!("{provider_label} request failed")))?;
+        drop(authorization);
 
         let status = response.status();
         if !status.is_success() {
@@ -338,7 +350,7 @@ pub(crate) fn build_request_json_for(
 ) -> Result<Value> {
     let input = build_input_for(req, profile)?;
     let mut body = json!({
-        "model": req.model,
+        "model": req.wire_model(),
         "input": input,
         "stream": true,
         "store": false,

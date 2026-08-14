@@ -112,15 +112,12 @@ impl ModelProvider for AnthropicProvider {
             Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
             _ => None,
         };
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
-        };
-
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
         // router can classify and fail over; the returned stream only yields
         // normalized events.
-        let response = self.send(&body, &api_key, req.conversation).await?;
+        let response = self
+            .send_authorized(&body, &req.model, req.wire_model(), req.conversation)
+            .await?;
 
         // Only a request that can pause needs its raw blocks kept, and only
         // Anthropic's own server tools pause a turn.
@@ -131,6 +128,8 @@ impl ModelProvider for AnthropicProvider {
         };
         let provider = self.clone();
         let conversation = req.conversation;
+        let route_model = req.model.clone();
+        let wire_model = req.wire_model().to_owned();
         let provider_name = self.provider_name();
         let ceiling = crate::http::timeouts().total_stream;
         let stream = async_stream::stream! {
@@ -225,7 +224,10 @@ impl ModelProvider for AnthropicProvider {
                         .unwrap_or_default();
                     replace_paused_assistant_message(&mut body, blocks, continuations == 1);
                     state.begin_continuation();
-                    match provider.send(&body, &api_key, conversation).await {
+                    match provider
+                        .send_authorized(&body, &route_model, &wire_model, conversation)
+                        .await
+                    {
                         Ok(next) => {
                             response = next;
                             continue 'legs;
@@ -254,6 +256,33 @@ impl ModelProvider for AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// Authorize and send one Messages leg.
+    ///
+    /// Managed-gateway requests revalidate their frozen selector and mint a
+    /// fresh installation-pinned bearer immediately before every HTTP leg.
+    /// The request-scoped lease stays alive until the response is established.
+    async fn send_authorized(
+        &self,
+        body: &Value,
+        route_model: &str,
+        wire_model: &str,
+        conversation: Option<tidebreak_core::id::ChatId>,
+    ) -> Result<reqwest::Response> {
+        match &self.token_source {
+            Some(source) => {
+                let (api_key, _route_lease) = crate::router::authorize_bearer_request(
+                    &**source,
+                    route_model,
+                    wire_model,
+                    conversation,
+                )
+                .await?;
+                self.send(body, &api_key, conversation).await
+            }
+            None => self.send(body, &self.api_key, conversation).await,
+        }
+    }
+
     /// POST one Messages request and hand back its streaming response.
     ///
     /// Every leg of a paused turn goes out through here, so the credential,
@@ -382,7 +411,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
 
     let mut body = json!({
-        "model": req.model,
+        "model": req.wire_model(),
         "max_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "messages": messages,
         "stream": true,
@@ -420,7 +449,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // advertised in the same turn.
     if let Some(search) = req.vendor_web_search {
         let vendor_tool = json!({
-            "type": web_search_tool_type(&req.model),
+            "type": web_search_tool_type(req.request_shaping_model()),
             "name": VENDOR_WEB_SEARCH_TOOL,
             "max_uses": search.max_uses,
         });
@@ -482,7 +511,10 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // API: with thinking on, `tool_choice` may only be `auto` or `none`. The
     // forcing is the caller's explicit ask and reasoning is a quality
     // preference, so the ask wins and this request does not think.
-    if req.reasoning_model && !forces_a_tool(req) && takes_adaptive_thinking(&req.model) {
+    if req.reasoning_model
+        && !forces_a_tool(req)
+        && takes_adaptive_thinking(req.request_shaping_model())
+    {
         // An omitted `thinking` means thinking is *off* on Opus 4.7 and later,
         // so a reasoning model only reasons when the request says so.
         //
@@ -507,8 +539,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
-            body["output_config"] =
-                json!({ "effort": wire_reasoning_effort(&req.model, effort).as_str() });
+            body["output_config"] = json!({ "effort": wire_reasoning_effort(req.request_shaping_model(), effort).as_str() });
         }
         attach_reasoning_blocks(&mut body, req);
     }

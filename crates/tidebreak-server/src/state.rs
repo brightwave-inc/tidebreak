@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tidebreak_core::{
     AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
@@ -736,10 +736,30 @@ struct TurnHandles {
 #[derive(Default)]
 pub struct TurnGuard {
     active: Mutex<HashMap<ChatId, TurnHandles>>,
+    admissions: Mutex<HashMap<TurnId, Weak<tokio::sync::Mutex<()>>>>,
     released: tokio::sync::Notify,
 }
 
 impl TurnGuard {
+    /// Serialize admission for one caller-supplied turn id so an ambiguous
+    /// concurrent retry observes the first request's durable decision before
+    /// consulting mutable model/catalog policy.
+    pub async fn serialize_admission(&self, turn_id: TurnId) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut admissions = self.admissions.lock().unwrap();
+            admissions.retain(|_, weak| weak.strong_count() > 0);
+            admissions
+                .get(&turn_id)
+                .and_then(Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    admissions.insert(turn_id, Arc::downgrade(&lock));
+                    lock
+                })
+        };
+        lock.lock_owned().await
+    }
+
     /// Register one exact local attempt, or refuse a conflicting local worker.
     pub fn register(
         self: &Arc<Self>,

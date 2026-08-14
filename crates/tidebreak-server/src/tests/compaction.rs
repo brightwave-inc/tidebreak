@@ -89,6 +89,149 @@ async fn wait_until_idle(store: &Arc<dyn Store>, chat: ChatId) {
     panic!("chat {chat} still has a running turn");
 }
 
+#[tokio::test]
+async fn managed_compaction_and_message_admission_share_the_frozen_gateway_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("managed-compaction.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let resolver_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let resolver_os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+        Arc::new(crate::managed_policy::NoOsPolicy);
+    let resolver = Arc::new(resolver::ConfiguredResolver::new(
+        store.clone(),
+        secrets.clone(),
+        crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            resolver_policy.clone(),
+            resolver_os_policy.clone(),
+        ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
+        resolver_policy,
+        resolver_os_policy,
+    ));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        resolver,
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "gpt-5.6-sol".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state.clone());
+
+    crate::managed_policy::provision(
+        &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
+        "https://corp.gateway",
+    )
+    .unwrap();
+    let credentials: crate::connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-compaction",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_compaction",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    crate::connectors::CredentialVault::new(secrets)
+        .save(&credentials)
+        .await
+        .unwrap();
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".into(),
+            installation_id: Some("install-compaction".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "gateway-opus".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                display_name: Some("Gateway Opus".into()),
+                // Deliberately unlike the curated Anthropic row: resolving
+                // the frozen key below proves compaction sees deployment
+                // policy rather than merely preserving the canonical label.
+                context_window: 123_456,
+                max_output_tokens: 12_345,
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: None,
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let admission_chat = make_chat(&router, &bearer).await;
+    let compaction_chat = make_chat(&router, &bearer).await;
+    for chat_id in [admission_chat.id, compaction_chat.id] {
+        store
+            .set_chat_model(chat_id, Some("anthropic::claude-opus-5".into()))
+            .await
+            .unwrap();
+    }
+    let compaction_chat = store.get_chat(compaction_chat.id).await.unwrap().unwrap();
+    let compaction_model = crate::routes::resolve_executable_chat_model(&state, &compaction_chat)
+        .await
+        .unwrap();
+    assert!(
+        compaction_model.starts_with("model_gateway::__tidebreak_gateway_v1."),
+        "managed execution should freeze the gateway route: {compaction_model}"
+    );
+    let compaction_policy = providers::resolve_model_policy(&*store, &compaction_model, true)
+        .await
+        .unwrap()
+        .expect("the frozen gateway selector should resolve against its snapshot");
+    assert_eq!(
+        compaction_policy.provider,
+        providers::ProviderKind::ModelGateway
+    );
+    assert_eq!(compaction_policy.id, "gateway-opus");
+    assert_eq!(compaction_policy.context_window, 123_456);
+
+    let turn_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            admission_chat.id,
+            turn_id,
+            "ordinary admission"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        compaction_model,
+        "ordinary admission and on-demand compaction must resolve one executable identity"
+    );
+
+    let response = post_json(
+        &router,
+        &bearer,
+        &format!("/chats/{}/compact", compaction_chat.id),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let run: serde_json::Value = json_body(response).await;
+    assert_eq!(run["compacted"], false);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn compacting_on_request_checkpoints_the_chat_and_journals_it() {
     let (router, token, store, _dir) = test_app_with(Arc::new(CheckpointProvider)).await;

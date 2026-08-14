@@ -22,7 +22,8 @@ use crate::model::{
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
     MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
     ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
+    ToolCallResolution, TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
+    TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
@@ -1641,6 +1642,28 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Reserve one globally unique client turn id before consulting mutable
+    /// model, skill, blob, document, or capability state.
+    ///
+    /// Exact contenders observe the existing state and never become a second
+    /// validator while a live lease owns admission. Once the lease expires, an
+    /// exact retry may atomically take it over so a crashed process cannot
+    /// wedge the id forever.
+    async fn begin_turn_admission(
+        &self,
+        _request: &crate::model::TurnAdmissionRequest,
+        _lease_token: uuid::Uuid,
+        _lease_ttl: chrono::Duration,
+    ) -> Result<BeginTurnAdmissionOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Release an unresolved admission after this exact owner refuses it.
+    /// Returns `false` when the lease no longer owns the pending row.
+    async fn release_turn_admission(&self, _lease: TurnAdmissionLease) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
     /// Count in-flight work across every chat: non-terminal turns plus live
     /// background-tier agent runs. See [`ActiveWorkSnapshot`] for what counts
     /// and why the definition is strict. Callers gating a host restart must
@@ -1737,6 +1760,23 @@ pub trait Store: Send + Sync {
         .await
     }
 
+    /// Atomically accept a turn and transition its exact durable admission from
+    /// `pending` to `accepted` under `lease_token`.
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_reserved_turn_with_message_context(
+        &self,
+        _lease: TurnAdmissionLease,
+        _chat_id: ChatId,
+        _model: &str,
+        _content: &str,
+        _images: &[ImageRef],
+        _documents: &[DocumentId],
+        _invoked_skills: &[String],
+        _voice_input_used: bool,
+    ) -> Result<ReservedTurnAcceptanceOutcome> {
+        turn_storage_unavailable()
+    }
+
     /// Perform one durable claim action under a fresh exact lease.
     ///
     /// `lease_token` is the caller's idempotency identity: retrying it while its
@@ -1801,6 +1841,38 @@ pub trait Store: Send + Sync {
     /// Durably queue a message to run as its own turn once the chat is free.
     /// An exact ambiguous retry returns the original row.
     async fn enqueue_queued_turn(&self, _queued: &QueuedTurn) -> Result<QueuedTurn> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically turn one exact pending admission into a FIFO queue row.
+    async fn enqueue_reserved_turn(
+        &self,
+        _lease: TurnAdmissionLease,
+        _queued: &QueuedTurn,
+    ) -> Result<ReservedQueuedTurnOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Atomically promote the exact unchanged FIFO head into a turn.
+    ///
+    /// Implementations must re-read `expected` under the same per-chat write
+    /// lock used for queue edits/deletes, verify its durable queued admission,
+    /// create or recover the exact turn, and remove the queue row in one
+    /// transaction. A stale snapshot returns [`PromoteQueuedTurnOutcome::Stale`]
+    /// without executing or deleting anything.
+    async fn promote_queued_turn_with_message_context(
+        &self,
+        _expected: &QueuedTurn,
+        _model: &str,
+        _images: &[ImageRef],
+    ) -> Result<PromoteQueuedTurnOutcome> {
+        turn_storage_unavailable()
+    }
+
+    /// Drop a promoter snapshot only while it is still the exact unchanged
+    /// FIFO head. This keeps mutable prerequisite failures from deleting an
+    /// edited or reordered message observed through a stale read.
+    async fn delete_queued_turn_if_current(&self, _expected: &QueuedTurn) -> Result<bool> {
         turn_storage_unavailable()
     }
 

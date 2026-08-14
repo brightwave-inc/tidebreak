@@ -743,6 +743,19 @@ pub(crate) enum Event {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum TurnAdmission {
+    Table,
+    Id,
+    ChatId,
+    Fingerprint,
+    State,
+    LeaseToken,
+    LeaseExpiresAt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum QueuedTurn {
     Table,
     Id,

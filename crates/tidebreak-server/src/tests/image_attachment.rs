@@ -540,6 +540,178 @@ async fn a_cancelled_and_a_retried_turn_leave_exactly_one_set_of_stored_bytes() 
 }
 
 #[tokio::test]
+async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
+    let (dir, store) = temp_db_store("gateway-image-retry.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    let gateway_url = "https://corp.gateway/";
+    let credentials: crate::connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": gateway_url,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    crate::connectors::CredentialVault::new(secrets.clone())
+        .save(&credentials)
+        .await
+        .unwrap();
+
+    let provisioned_policy = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::provision(&*provisioned_policy, gateway_url).unwrap();
+    let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+        Arc::new(crate::managed_policy::NoOsPolicy);
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: gateway_url.into(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "gateway-opus".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let gateway = crate::gateway_runtime::GatewayRuntime::new(
+        store.clone(),
+        secrets.clone(),
+        provisioned_policy.clone(),
+        os_policy.clone(),
+    );
+    let chatgpt = Arc::new(
+        crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+    );
+    let resolver = Arc::new(resolver::ConfiguredResolver::new(
+        store.clone(),
+        secrets.clone(),
+        gateway.clone(),
+        chatgpt.clone(),
+        provisioned_policy.clone(),
+        os_policy.clone(),
+    ));
+    let mut state = AppState::with_gateway_runtime(
+        Config::desktop(dir.path()),
+        store.clone(),
+        resolver,
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "anthropic::claude-opus-5".into(),
+            ..AgentConfig::default()
+        },
+        uuid::Uuid::new_v4(),
+        gateway,
+        chatgpt,
+        provisioned_policy,
+        os_policy,
+    )
+    .unwrap();
+    state.root_attachment_routes_enabled = false;
+    let bearer = format!("Bearer {}", state.token);
+    let router = app(state);
+    let chat = make_chat(&router, &bearer).await;
+    store
+        .set_chat_model(chat.id, Some("anthropic::claude-opus-5".into()))
+        .await
+        .unwrap();
+    let attachment_id = publish_png(&router, &bearer, chat.id, png_header(320, 240)).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "describe this",
+            &[attachment_id],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let accepted = store
+        .get_turn_run(turn_id)
+        .await
+        .unwrap()
+        .expect("the image turn was accepted");
+    assert!(accepted
+        .model
+        .starts_with("model_gateway::__tidebreak_gateway_v1."));
+    let original_model = accepted.model;
+
+    // The deployment reuses the same local id for a different upstream route.
+    // The accepted selector must no longer resolve, so execution remains
+    // fail-closed instead of silently following the retargeted catalog row.
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: gateway_url.into(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "gateway-opus".into(),
+                upstream_id: Some("claude-haiku-4-5-20251001".into()),
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: Some("v2".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        providers::resolve_model_policy(&*store, &original_model, false)
+            .await
+            .unwrap()
+            .is_none(),
+        "the accepted frozen route must not follow a retargeted local model id"
+    );
+
+    // Storage owns idempotency. A byte-for-byte retry remains accepted even
+    // though the immutable execution route has since become unavailable.
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            chat.id,
+            turn_id,
+            "describe this",
+            &[attachment_id],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store
+            .get_turn_run(turn_id)
+            .await
+            .unwrap()
+            .expect("the accepted turn remains durable")
+            .model,
+        original_model
+    );
+    assert_eq!(
+        store.list_message_attachments(chat.id).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn a_tool_preview_is_fetchable_only_through_its_chat() {
     let (router, token, _state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");

@@ -128,10 +128,21 @@ impl ModelProvider for OpenAiCompatProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let authorization = match &self.token_source {
+            Some(source) => Some(
+                crate::router::authorize_bearer_request(
+                    &**source,
+                    &req.model,
+                    req.wire_model(),
+                    req.conversation,
+                )
+                .await?,
+            ),
+            None => None,
         };
+        let api_key = authorization
+            .as_ref()
+            .map_or(self.api_key.as_str(), |(token, _lease)| token.as_str());
 
         let mut request = self
             .client
@@ -152,6 +163,7 @@ impl ModelProvider for OpenAiCompatProvider {
             // tenant-identifying parts; `AgentError` strings reach the client
             // via TurnFailed. Only the fact of a failed request surfaces.
             .map_err(|_| AgentError::Provider(format!("{} request failed", self.provider_id)))?;
+        drop(authorization);
 
         let status = response.status();
         if !status.is_success() {
@@ -274,7 +286,7 @@ fn build_request_json_for(req: &ChatRequest, provider_id: &str) -> Result<Value>
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let mut body = json!({
-        "model": req.model,
+        "model": req.wire_model(),
         "messages": messages,
         "stream": true,
     });
@@ -1663,6 +1675,7 @@ mod tests {
             },
             base_url: Some(format!("http://{address}/v1")),
             curated_models: vec!["hosted-model".to_string()],
+            model_rewrites: std::collections::HashMap::new(),
             token_source: is_gateway.then(|| {
                 std::sync::Arc::new(StaticGatewayTokenSource)
                     as std::sync::Arc<dyn crate::BearerTokenSource>
@@ -1844,6 +1857,7 @@ mod tests {
             api_key: String::new(),
             base_url: Some(format!("http://{address}/compat/openai/v1")),
             curated_models: vec!["gpt-fable-5".to_string()],
+            model_rewrites: std::collections::HashMap::new(),
             token_source: Some(source.clone()),
             chatgpt_account_id: None,
         }]);

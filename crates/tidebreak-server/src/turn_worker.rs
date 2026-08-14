@@ -727,6 +727,21 @@ impl TurnWorker {
                 )
                 .await;
         }
+        if model_policy
+            .as_ref()
+            .is_some_and(|policy| !crate::providers::is_valid_execution_policy(policy))
+        {
+            return self
+                .record_failure(
+                    &turn,
+                    lease_token,
+                    total_model_steps,
+                    total_usage,
+                    "model_provider_unavailable",
+                    "managed gateway execution requires a frozen model identity",
+                )
+                .await;
+        }
         let mut turn_agent_config = self.agent_config.clone();
         if let Some(policy) = model_policy.as_ref() {
             crate::providers::apply_model_policy(

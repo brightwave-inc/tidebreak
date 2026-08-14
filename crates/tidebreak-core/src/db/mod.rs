@@ -40,8 +40,8 @@ use crate::model::{
     DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
     NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
-    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnCheckpointProgress,
-    TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
+    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnAdmissionLease,
+    TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(test)]
 use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
@@ -50,15 +50,17 @@ use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AcceptTurnOutcome,
     AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, AppendClaimedMessageOutcome,
-    BeginRootAttachmentChangeOutcome, CheckpointSandboxSpawnOutcome, ClaimClientToolCallOutcome,
-    ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome, ClaimTurnRunOutcome,
-    CompleteTurnRunOutcome, DecideToolApprovalOutcome, DeleteChatOutcome, DeleteProjectOutcome,
-    FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
-    FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledToolApprovalOutcome, JournaledTurnOutcome, JournaledTurnSteerOutcome, MoveChatOutcome,
-    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
+    BeginRootAttachmentChangeOutcome, BeginTurnAdmissionOutcome, CheckpointSandboxSpawnOutcome,
+    ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome, ClaimSandboxToolCallOutcome,
+    ClaimTurnRunOutcome, CompleteTurnRunOutcome, DecideToolApprovalOutcome, DeleteChatOutcome,
+    DeleteProjectOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
+    FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
+    HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, MoveChatOutcome, OperationClaimOutcome,
+    OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PromoteQueuedTurnOutcome,
+    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome,
+    RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome,
     ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
     RetrySandboxToolCallOutcome, Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
@@ -1443,6 +1445,19 @@ impl Store for DbStore {
         ops::turn::list_turn_runs(self, chat_id).await
     }
 
+    async fn begin_turn_admission(
+        &self,
+        request: &TurnAdmissionRequest,
+        lease_token: uuid::Uuid,
+        lease_ttl: chrono::Duration,
+    ) -> Result<BeginTurnAdmissionOutcome> {
+        ops::turn::admission::begin(self, request, lease_token, lease_ttl).await
+    }
+
+    async fn release_turn_admission(&self, lease: TurnAdmissionLease) -> Result<bool> {
+        ops::turn::admission::release(self, lease).await
+    }
+
     async fn count_active_work(&self) -> Result<crate::storage::ActiveWorkSnapshot> {
         ops::active_work::count_active_work(self).await
     }
@@ -1506,6 +1521,31 @@ impl Store for DbStore {
         .await
     }
 
+    async fn accept_reserved_turn_with_message_context(
+        &self,
+        lease: TurnAdmissionLease,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+        images: &[ImageRef],
+        documents: &[DocumentId],
+        invoked_skills: &[String],
+        voice_input_used: bool,
+    ) -> Result<ReservedTurnAcceptanceOutcome> {
+        ops::turn::accept_reserved_turn(
+            self,
+            lease,
+            chat_id,
+            model,
+            content,
+            images,
+            documents,
+            invoked_skills,
+            voice_input_used,
+        )
+        .await
+    }
+
     async fn claim_turn_run(
         &self,
         lease_token: uuid::Uuid,
@@ -1536,6 +1576,27 @@ impl Store for DbStore {
 
     async fn enqueue_queued_turn(&self, queued: &QueuedTurn) -> Result<QueuedTurn> {
         ops::turn::queued::enqueue_turn(self, queued).await
+    }
+
+    async fn enqueue_reserved_turn(
+        &self,
+        lease: TurnAdmissionLease,
+        queued: &QueuedTurn,
+    ) -> Result<ReservedQueuedTurnOutcome> {
+        ops::turn::queued::enqueue_reserved_turn(self, lease, queued).await
+    }
+
+    async fn promote_queued_turn_with_message_context(
+        &self,
+        expected: &QueuedTurn,
+        model: &str,
+        images: &[ImageRef],
+    ) -> Result<PromoteQueuedTurnOutcome> {
+        ops::turn::queued::promote_turn(self, expected, model, images).await
+    }
+
+    async fn delete_queued_turn_if_current(&self, expected: &QueuedTurn) -> Result<bool> {
+        ops::turn::queued::delete_turn_if_current(self, expected).await
     }
 
     async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<QueuedTurn>> {

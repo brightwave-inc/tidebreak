@@ -7,8 +7,8 @@ use crate::event::SequencedEvent;
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, Message, MessageAttachment,
-    MessageDocumentAttachment, RootAttachmentChange, ToolCallRecord, TurnAgentRunWaitSet,
-    TurnClientWait, TurnFailureReceipt, TurnRun, TurnSteer,
+    MessageDocumentAttachment, RootAttachmentChange, ToolCallRecord, TurnAdmissionLease,
+    TurnAgentRunWaitSet, TurnClientWait, TurnFailureReceipt, TurnRun, TurnSteer,
 };
 use crate::provider::RefusalOutcome;
 
@@ -396,6 +396,58 @@ pub enum AcceptTurnOutcome {
     IdentityConflict,
     /// Another nonterminal turn already owns the chat's single live slot.
     ChatBusy(TurnRun),
+}
+
+/// Result of reserving one global client turn identity before mutable
+/// admission checks begin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginTurnAdmissionOutcome {
+    /// This caller owns the unresolved admission until the bounded lease ends.
+    Acquired(TurnAdmissionLease),
+    /// An exact request is already being admitted by another process.
+    Pending {
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The exact request already committed as a live or terminal turn.
+    Accepted,
+    /// The exact request already owns a durable FIFO queue position.
+    Queued,
+    /// The id belongs to another chat or to different immutable request data.
+    IdentityConflict,
+}
+
+/// Result of accepting a turn under its exact pending admission lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReservedTurnAcceptanceOutcome {
+    /// The lease still owned admission and ordinary atomic acceptance ran.
+    Outcome(Box<AcceptTurnOutcome>),
+    /// The lease expired, was released, or was taken over before commit.
+    LeaseLost,
+}
+
+/// Result of committing one pending admission into the durable FIFO queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReservedQueuedTurnOutcome {
+    /// The queue row and its durable ownership state committed together.
+    Queued(crate::model::QueuedTurn),
+    /// The lease expired, was released, or was taken over before commit.
+    LeaseLost,
+}
+
+/// Result of atomically promoting one unchanged FIFO queue head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoteQueuedTurnOutcome {
+    /// The queue row became a newly accepted turn in the same transaction that
+    /// removed it from the queue.
+    Promoted(TurnRun),
+    /// A legacy/ambiguous retry found the exact turn already accepted and
+    /// removed the matching stale queue row atomically.
+    Existing(TurnRun),
+    /// Another nonterminal turn still owns the chat's live slot.
+    ChatBusy(TurnRun),
+    /// The expected row was deleted, edited, reordered, or lost its exact
+    /// queued admission before the promotion lock was acquired.
+    Stale,
 }
 
 /// Result of atomically accepting one durable foreground or sandboxed agent run.
