@@ -95,9 +95,8 @@ pub fn is_computer_use_control_tool(name: &str) -> bool {
 }
 
 /// Shared guidance folded into the acting tools' descriptions: computer use is
-/// for seeing first and acting second, acting is slower and may need approval,
-/// and the user can stop it at any time.
-const ACTING_NOTE: &str = "\n\nActing is slower than reading and may need the user's approval; prefer reading first and act only when it moves the task. The user can stop control at any time.";
+/// primarily an observation surface, while GUI driving is a disruptive fallback.
+const ACTING_NOTE: &str = "\n\nUse GUI control sparingly. Clicking, typing, scrolling, and moving focus use the user's real interface and are slower, more brittle, and more disruptive than reading app content or using a dedicated tool. Read first, prefer a non-GUI path when one exists, and act only when it is necessary to complete the user's request. The user can stop control at any time.";
 
 /// Shared targeting guidance: prefer a Set-of-Marks number or an element
 /// identity over raw coordinates.
@@ -443,7 +442,7 @@ pub fn validate_computer_wait_arguments(arguments: &Value) -> bool {
 pub fn computer_list_windows_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerListWindowsArgs>(
         COMPUTER_LIST_WINDOWS_TOOL,
-        "List the on-screen windows, optionally for one app. Use this first to discover what is open and to find an app's bundle id before capturing or reading it.",
+        "List the on-screen windows, optionally for one app. Use this first when you do not know what is open or need an app's bundle id before reading or capturing it. Window ids are ephemeral, so use them promptly.",
     )
 }
 
@@ -452,7 +451,7 @@ pub fn computer_list_windows_tool_spec() -> ToolSpec {
 pub fn computer_capture_screen_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerCaptureScreenArgs>(
         COMPUTER_CAPTURE_SCREEN_TOOL,
-        "Capture the screen as an image — the whole display, or one app's windows. Annotates interactive elements with numbered marks so you can act on them by number. Use this to see what is on screen before acting.",
+        "Capture the screen as an image — the whole display, or one app's windows. Use this for visual layout, charts, images, or custom-drawn interfaces that the accessibility tree cannot convey. Prefer computer_read_app_content when you only need text or structure. Annotated captures include numbered marks that acting tools can target without guessing coordinates.",
     )
 }
 
@@ -461,7 +460,7 @@ pub fn computer_capture_screen_tool_spec() -> ToolSpec {
 pub fn computer_read_app_content_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerReadAppContentArgs>(
         COMPUTER_READ_APP_CONTENT_TOOL,
-        "Read an app's accessibility tree: on-screen text, element roles, values, and bounds. This is the primary way to see an app — cheaper and more reliable than a screenshot, and it yields the element ids and fingerprints the acting tools target.",
+        "Read an app's accessibility tree: on-screen text, element roles, values, and bounds. This is the primary way to see an app because structured content is cheaper and more precise than pixels, and it yields the marks, element ids, and fingerprints acting tools target. If the result is truncated, narrow max_depth or max_nodes; use a screenshot only when structure is incomplete or visual layout matters.",
     )
 }
 
@@ -501,7 +500,7 @@ pub fn computer_key_press_tool_spec() -> ToolSpec {
 pub fn computer_scroll_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerScrollArgs>(
         COMPUTER_SCROLL_TOOL,
-        &format!("Scroll an element or point by a pixel delta. {TARGETING_NOTE}"),
+        &format!("Scroll an element or point by a pixel delta. Use it to reveal content before reading or targeting it. {TARGETING_NOTE}{ACTING_NOTE}"),
     )
 }
 
@@ -510,7 +509,7 @@ pub fn computer_scroll_tool_spec() -> ToolSpec {
 pub fn computer_focus_window_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerFocusWindowArgs>(
         COMPUTER_FOCUS_WINDOW_TOOL,
-        "Bring an app (or one of its windows) to the front. Use this to return to an app after focus shifted away.",
+        &format!("Bring an app (or one of its windows) to the front. Use this only when focus must move to continue the task, such as before a key press or after another app took focus.{ACTING_NOTE}"),
     )
 }
 
@@ -519,7 +518,7 @@ pub fn computer_focus_window_tool_spec() -> ToolSpec {
 pub fn computer_return_to_tidebreak_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ComputerReturnToTidebreakArgs>(
         COMPUTER_RETURN_TO_TIDEBREAK_TOOL,
-        "Return focus to the Tidebreak window. Use after acting in another app when you need to read the transcript or report back.",
+        "Return focus to the Tidebreak window. Use after finishing work in another app so the user can see that the task is done and continue the conversation.",
     )
 }
 

@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
       bundleId: string;
       appName: string | null;
       capability: "capture_screen" | "read_app_content" | "control_app";
+      grantScope: "chat" | "project";
     }>,
     pendingConfirmations: [] as Array<{
       callId: string;
@@ -100,26 +101,50 @@ describe("ComputerUseIndicator", () => {
         bundleId: "com.apple.mail",
         appName: "Mail",
         capability: "control_app",
+        grantScope: "project",
       },
     ];
     render(<ComputerUseIndicator />);
 
-    // The consent card names the grant's real principal — the bundle id — with
-    // the app's self-reported name only as a parenthetical, so a spoofed name
-    // cannot mislabel what is being granted.
     expect(
-      screen.getByText(/Allow Tidebreak to control com\.apple\.mail \(Mail\)/),
+      screen.getByText(/Allow Tidebreak to control Mail/),
     ).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    expect(screen.getByText(/com\.apple\.mail/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Allow once" }));
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "once");
     await userEvent.click(
-      screen.getByRole("button", { name: "Always for this chat" }),
+      screen.getByRole("button", { name: "Allow for this chat" }),
     );
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "chat");
-    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Always in this project" }),
+    );
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "always");
-    await userEvent.click(screen.getByRole("button", { name: "Decline" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Don't allow" }),
+    );
     expect(mocks.consent).toHaveBeenCalledWith("call-1", "decline");
+  });
+
+  it("uses screen-specific copy and does not offer a duplicate wider scope", () => {
+    mocks.snapshot.pendingConsents = [
+      {
+        callId: "call-screen",
+        chatId: "chat-1",
+        bundleId: "",
+        appName: null,
+        capability: "capture_screen",
+        grantScope: "chat",
+      },
+    ];
+    render(<ComputerUseIndicator />);
+
+    expect(
+      screen.getByText("Allow Tidebreak to capture your entire screen?"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Always in this project" }),
+    ).toBeNull();
   });
 
   it("ignores a second decision while the first is still in flight", async () => {
@@ -134,18 +159,23 @@ describe("ComputerUseIndicator", () => {
         bundleId: "com.apple.mail",
         appName: "Mail",
         capability: "control_app",
+        grantScope: "project",
       },
     ];
     render(<ComputerUseIndicator />);
 
-    const once = screen.getByRole("button", { name: "Once" });
+    const once = screen.getByRole("button", { name: "Allow once" });
     await userEvent.click(once);
-    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Always in this project" }),
+    );
     expect(mocks.consent).toHaveBeenCalledOnce();
 
     resolveDecision();
     await waitFor(() => expect(once).not.toBeDisabled());
-    await userEvent.click(screen.getByRole("button", { name: "Always" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Always in this project" }),
+    );
     expect(mocks.consent).toHaveBeenCalledTimes(2);
     expect(mocks.consent).toHaveBeenLastCalledWith("call-1", "always");
   });
@@ -159,19 +189,20 @@ describe("ComputerUseIndicator", () => {
         bundleId: "com.apple.mail",
         appName: "Mail",
         capability: "control_app",
+        grantScope: "chat",
       },
     ];
     render(<ComputerUseIndicator />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    await userEvent.click(screen.getByRole("button", { name: "Allow once" }));
     expect(
       await screen.findByRole("alert"),
     ).toHaveTextContent(/Could not send your decision/);
     expect(
-      screen.getByRole("button", { name: "Once" }),
+      screen.getByRole("button", { name: "Allow once" }),
     ).not.toBeDisabled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Once" }));
+    await userEvent.click(screen.getByRole("button", { name: "Allow once" }));
     expect(mocks.consent).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -190,9 +221,9 @@ describe("ComputerUseIndicator", () => {
     render(<ComputerUseIndicator />);
 
     expect(screen.getByText(/“Send”/)).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await userEvent.click(screen.getByRole("button", { name: "Allow action" }));
     expect(mocks.confirmation).toHaveBeenCalledWith("call-9", true);
-    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.click(screen.getByRole("button", { name: "Don't allow" }));
     expect(mocks.confirmation).toHaveBeenCalledWith("call-9", false);
   });
 
@@ -210,7 +241,7 @@ describe("ComputerUseIndicator", () => {
     ];
     render(<ComputerUseIndicator />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await userEvent.click(screen.getByRole("button", { name: "Don't allow" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /Could not send your decision/,
     );
