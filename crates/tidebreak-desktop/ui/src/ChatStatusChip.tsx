@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { Bot, ChevronDown, FolderOpen, Shapes, Shield } from "lucide-react";
+import {
+  Activity as ActivityIcon,
+  Bot,
+  ChevronDown,
+  ChevronUp,
+  FolderOpen,
+  Shapes,
+  Shield,
+} from "lucide-react";
 
 import type { AgentRun } from "./api";
 import { RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
@@ -28,6 +36,8 @@ function liveRunDotClass(status: AgentRun["status"]): string {
 }
 
 export type ChatStatusChipProps = {
+  /** Collapse the persistent card while a side panel is using the canvas. */
+  compact?: boolean;
   /** How many outputs the conversation has produced. */
   outputCount: number;
   folders: readonly ChatFolderAccess[];
@@ -56,6 +66,7 @@ export type ChatStatusChipProps = {
  * those controls.
  */
 export function ChatStatusChip({
+  compact = false,
   outputCount,
   folders,
   runs,
@@ -66,6 +77,7 @@ export function ChatStatusChip({
   permissionCount,
 }: ChatStatusChipProps) {
   const [open, setOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const liveRuns = runs.filter((run) => RUNNING_AGENT_STATUSES.has(run.status));
   const overflowRuns = Math.max(0, liveRuns.length - MAX_STATUS_DOTS);
@@ -113,6 +125,55 @@ export function ChatStatusChip({
           ? "1 saved"
           : `${permissionCount} saved`;
 
+  const details = (
+    <ActivityDetails
+      outputsSummary={outputsSummary}
+      folderSummary={folderSummary}
+      permissionsSummary={permissionsSummary}
+      agentsSummary={agentsSummary}
+      onOpenOutputs={onOpenOutputs}
+      onOpenFolders={onOpenFolders}
+      onOpenPermissions={onOpenPermissions}
+      onOpenAgents={onOpenAgents}
+      onChoose={() => setOpen(false)}
+    />
+  );
+
+  if (!compact) {
+    if (collapsed) {
+      return (
+        <button
+          type="button"
+          className="activity-card-collapsed"
+          aria-label="Expand chat activity"
+          onClick={() => setCollapsed(false)}
+        >
+          <ActivityIcon className="size-4" aria-hidden="true" />
+        </button>
+      );
+    }
+
+    return (
+      <aside className="activity-card" aria-label="Chat activity">
+        <div className="activity-card-heading">
+          <div>
+            <p className="activity-card-kicker">Activity</p>
+            <p className="activity-card-summary">{faceLabel}</p>
+          </div>
+          <button
+            type="button"
+            className="activity-card-collapse-button"
+            aria-label="Collapse chat activity"
+            onClick={() => setCollapsed(true)}
+          >
+            <ChevronUp className="size-4" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="activity-card-rows">{details}</div>
+      </aside>
+    );
+  }
+
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -140,45 +201,66 @@ export function ChatStatusChip({
           <ChevronDown className="size-3.5 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 p-1">
-        <DetailRow
-          icon={<Shapes className="size-3.5" aria-hidden="true" />}
-          label="Outputs"
-          value={outputsSummary}
-          onClick={() => {
-            setOpen(false);
-            onOpenOutputs();
-          }}
-        />
-        <DetailRow
-          icon={<FolderOpen className="size-3.5" aria-hidden="true" />}
-          label="Folders"
-          value={folderSummary}
-          onClick={() => {
-            setOpen(false);
-            onOpenFolders();
-          }}
-        />
-        <DetailRow
-          icon={<Shield className="size-3.5" aria-hidden="true" />}
-          label="Permissions"
-          value={permissionsSummary}
-          onClick={() => {
-            setOpen(false);
-            onOpenPermissions();
-          }}
-        />
-        <DetailRow
-          icon={<Bot className="size-3.5" aria-hidden="true" />}
-          label="Agents"
-          value={agentsSummary}
-          onClick={() => {
-            setOpen(false);
-            onOpenAgents();
-          }}
-        />
+      <PopoverContent align="end" className="w-80 p-1.5">
+        {details}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function ActivityDetails({
+  outputsSummary,
+  folderSummary,
+  permissionsSummary,
+  agentsSummary,
+  onOpenOutputs,
+  onOpenFolders,
+  onOpenPermissions,
+  onOpenAgents,
+  onChoose,
+}: {
+  outputsSummary: string;
+  folderSummary: string;
+  permissionsSummary: string;
+  agentsSummary: string;
+  onOpenOutputs: () => void;
+  onOpenFolders: () => void;
+  onOpenPermissions: () => void;
+  onOpenAgents: () => void;
+  onChoose: () => void;
+}) {
+  const choose = (action: () => void) => {
+    onChoose();
+    action();
+  };
+
+  return (
+    <>
+      <DetailRow
+        icon={<Shapes className="size-4" aria-hidden="true" />}
+        label="Outputs"
+        value={outputsSummary}
+        onClick={() => choose(onOpenOutputs)}
+      />
+      <DetailRow
+        icon={<FolderOpen className="size-4" aria-hidden="true" />}
+        label="Folders"
+        value={folderSummary}
+        onClick={() => choose(onOpenFolders)}
+      />
+      <DetailRow
+        icon={<Shield className="size-4" aria-hidden="true" />}
+        label="Permissions"
+        value={permissionsSummary}
+        onClick={() => choose(onOpenPermissions)}
+      />
+      <DetailRow
+        icon={<Bot className="size-4" aria-hidden="true" />}
+        label="Agents"
+        value={agentsSummary}
+        onClick={() => choose(onOpenAgents)}
+      />
+    </>
   );
 }
 
@@ -194,16 +276,12 @@ function DetailRow({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
-      onClick={onClick}
-    >
-      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+    <button type="button" className="activity-card-row" onClick={onClick}>
+      <span className="activity-card-row-label">
         {icon}
         {label}
       </span>
-      <span className="min-w-0 truncate text-xs">{value}</span>
+      <span className="activity-card-row-value">{value}</span>
     </button>
   );
 }

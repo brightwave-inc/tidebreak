@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { getName } from "@tauri-apps/api/app";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Monitor,
@@ -12,6 +13,7 @@ import {
 
 import { useApp } from "@/AppContext";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { hasNativeHost } from "@/host";
 import { Logomark } from "@/Logomark";
 import {
   Sidebar as SidebarRail,
@@ -39,6 +41,20 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const [appName, setAppName] = useState("Tidebreak");
+
+  // Keep dev and staging windows distinguishable, but put that identity in
+  // the rail where it belongs instead of restoring a duplicate top header.
+  useEffect(() => {
+    if (!hasNativeHost()) return;
+    let cancelled = false;
+    getName().then((name) => {
+      if (!cancelled) setAppName(name);
+    }, () => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateReady = updateState.status === "ready";
 
@@ -61,7 +77,7 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
           />
           {!isCompact && (
             <span className="truncate font-mono text-sm font-medium leading-none">
-              Tidebreak
+              {appName}
             </span>
           )}
         </button>

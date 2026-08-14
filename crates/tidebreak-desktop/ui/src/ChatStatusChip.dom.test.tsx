@@ -27,6 +27,7 @@ function run(id: string, status: AgentRun["status"]): AgentRun {
 function renderChip({
   outputCount = 0,
   runs = [] as AgentRun[],
+  compact = false,
 } = {}) {
   const onOpenOutputs = vi.fn();
   const onOpenFolders = vi.fn();
@@ -34,6 +35,7 @@ function renderChip({
   const onOpenPermissions = vi.fn();
   render(
     <ChatStatusChip
+      compact={compact}
       outputCount={outputCount}
       folders={[folder]}
       runs={runs}
@@ -54,21 +56,27 @@ afterEach(() => {
 it("summarizes activity on its face and opens the chat-scoped places", async () => {
   const { onOpenOutputs, onOpenFolders, onOpenPermissions } = renderChip({ outputCount: 2 });
 
-  // No live work, so the face falls back to what the chat has produced.
-  const chip = screen.getByRole("button", { name: "Chat activity: 2 outputs" });
-
-  await userEvent.click(chip);
-  // The label span sits inside the row button, so the click lands on it.
+  // With the whole canvas available, the useful places are visible without a
+  // disclosure click and the summary falls back to what the chat produced.
+  expect(screen.getByLabelText("Chat activity")).toHaveTextContent("2 outputs");
   await userEvent.click(await screen.findByText("Outputs"));
   expect(onOpenOutputs).toHaveBeenCalled();
 
-  await userEvent.click(chip);
-  await userEvent.click(await screen.findByText("Folders"));
+  await userEvent.click(screen.getByText("Folders"));
   expect(onOpenFolders).toHaveBeenCalled();
 
-  await userEvent.click(chip);
-  await userEvent.click(await screen.findByText("Permissions"));
+  await userEvent.click(screen.getByText("Permissions"));
   expect(onOpenPermissions).toHaveBeenCalled();
+});
+
+it("folds the open card down to an icon and restores it", async () => {
+  renderChip({ outputCount: 2 });
+
+  await userEvent.click(screen.getByRole("button", { name: "Collapse chat activity" }));
+  expect(screen.queryByLabelText("Chat activity")).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand chat activity" }));
+  expect(screen.getByLabelText("Chat activity")).toHaveTextContent("2 outputs");
 });
 
 /**
@@ -78,6 +86,7 @@ it("summarizes activity on its face and opens the chat-scoped places", async () 
 it("counts live background runs and opens the agents table", async () => {
   const { onOpenAgents } = renderChip({
     runs: [run("run-1", "running"), run("run-2", "retry_wait"), run("run-3", "completed")],
+    compact: true,
   });
 
   const chip = screen.getByRole("button", { name: "Chat activity: 2 running" });

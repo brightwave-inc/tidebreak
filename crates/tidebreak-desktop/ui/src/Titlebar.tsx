@@ -1,6 +1,4 @@
-import { getName } from "@tauri-apps/api/app";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useEffect, useState } from "react";
 
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { DesktopNavigation } from "./DesktopNavigation";
@@ -10,9 +8,9 @@ import { cn } from "@/lib/utils";
  * The desktop titlebar: navigation stays available even where the native
  * window decorations do not provide browser-style history controls.
  *
- * It carries navigation and the app's name and nothing else. The rail's own
- * collapse control stays in the rail — it acts on the rail, and putting a
- * second copy up here left two buttons for one job on adjacent rows.
+ * It carries only native navigation. Product identity lives in the sidebar,
+ * so the window chrome can recede into the shell instead of reading as a
+ * second application header above it.
  */
 export function Titlebar({
   macOverlay,
@@ -21,21 +19,6 @@ export function Titlebar({
   macOverlay: boolean;
   navigation: DesktopNavigation;
 }) {
-  // The host owns the display name: debug reports "Tidebreak [dev]" and
-  // staging reports "Tidebreak [staging]" so those windows are
-  // distinguishable from an installed release. The titlebar only renders
-  // inside the native host, where `getName` is always available.
-  const [appName, setAppName] = useState("Tidebreak");
-  useEffect(() => {
-    let cancelled = false;
-    getName().then((name) => {
-      if (!cancelled) setAppName(name);
-    }, () => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   return (
     <div
       className={cn("titlebar", macOverlay && "is-mac-overlay")}
@@ -65,9 +48,6 @@ export function Titlebar({
           </button>
         </WithTooltip>
       </div>
-      <span className="titlebar-title" data-tauri-drag-region>
-        {appName}
-      </span>
     </div>
   );
 }
