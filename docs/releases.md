@@ -547,8 +547,9 @@ its local profile until this checklist is complete:
    window.
 2. Replace the pre-v1-only guard in
    `crates/tidebreak-server/src/desktop_schema.rs` with the durable v1 lifecycle.
-   Re-squash the in-place `Baseline` into a single clean first migration and
-   invert [decision record 2](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md)
+   Re-squash the in-place `Baseline` again into a single clean first
+   migration — the public-opening squash is not the last v0 edit — and invert
+   [decision record 2](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md)
    in the same change: the journal fixture's failure message flips back to
    "add an alias or write a migration", the baseline becomes the first entry
    in a real migration chain, and `reset_pre_v1_state` stops being reachable.
