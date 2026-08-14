@@ -1,5 +1,20 @@
 use super::*;
 
+/// A fixed test provider behind the same registry-enforcement boundary used by
+/// production routing.
+struct RegistryEnforcingResolver(Arc<dyn ModelProvider>);
+
+#[async_trait]
+impl ProviderResolver for RegistryEnforcingResolver {
+    async fn resolve(&self) -> Arc<dyn ModelProvider> {
+        self.0.clone()
+    }
+
+    fn enforces_model_registry(&self) -> bool {
+        true
+    }
+}
+
 /// Put a chat in `Allow` so a delegation runs without an approval card.
 async fn allow_delegation(store: &dyn Store, chat: ChatId) {
     store
@@ -681,6 +696,98 @@ async fn worker_drains_a_turn_queued_before_startup() {
         Some(AgentEvent::TurnCompleted { .. })
     ));
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_rejects_an_already_accepted_plain_gateway_model_before_egress() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("legacy-gateway-turn.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    providers::write_gateway_snapshot(
+        store.as_ref(),
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://gateway.example/".into(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "sample-claude".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: chrono::Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    assert!(matches!(
+        store
+            .accept_turn(
+                turn_id,
+                chat.id,
+                "model_gateway::sample-claude",
+                "queued by an older Tidebreak build",
+            )
+            .await
+            .unwrap(),
+        tidebreak_core::AcceptTurnOutcome::Accepted(_)
+    ));
+
+    let recorder = RecordingProvider::default();
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(RegistryEnforcingResolver(Arc::new(recorder.clone()))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig::default(),
+    );
+    spawn_turn_worker(&state);
+
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        AgentEvent::TurnFailed { error, .. } if error.kind == "model_provider_unavailable"
+    )));
+    let turn = store
+        .get_turn_run(turn_id)
+        .await
+        .unwrap()
+        .expect("the rejected legacy turn remains durable");
+    assert_eq!(turn.status, TurnRunStatus::Failed);
+    assert_eq!(
+        turn.last_error_code.as_deref(),
+        Some("model_provider_unavailable")
+    );
+    assert_eq!(
+        turn.last_error_detail.as_deref(),
+        Some("managed gateway execution requires a frozen model identity")
+    );
+    assert!(
+        recorder.models.lock().unwrap().is_empty(),
+        "the invalid legacy execution identity must be rejected before provider egress"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

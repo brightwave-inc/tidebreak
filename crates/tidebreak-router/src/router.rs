@@ -47,6 +47,12 @@ pub trait BearerTokenSource: Send + Sync {
         None
     }
 
+    /// Validate a host-only model selector against live route authority and
+    /// lease its provider wire id through request setup.
+    async fn lease_model_route(&self, _route_model: &str) -> Result<Option<ModelRouteLease>> {
+        Ok(None)
+    }
+
     /// A currently valid token, refreshing if the cached one is near expiry.
     async fn bearer_token(&self) -> Result<String>;
 
@@ -61,6 +67,25 @@ pub trait BearerTokenSource: Send + Sync {
     ) -> Result<String> {
         let _ = conversation;
         self.bearer_token().await
+    }
+}
+
+/// A live claim that one host execution selector still maps to one wire model.
+pub struct ModelRouteLease {
+    wire_model: String,
+    _guard: Box<dyn Send>,
+}
+
+impl ModelRouteLease {
+    pub fn new(wire_model: impl Into<String>, guard: impl Send + 'static) -> Self {
+        Self {
+            wire_model: wire_model.into(),
+            _guard: Box::new(guard),
+        }
+    }
+
+    pub fn wire_model(&self) -> &str {
+        &self.wire_model
     }
 }
 
@@ -197,6 +222,8 @@ pub struct Router {
     curated: HashMap<String, RouteKind>,
     /// Provider-qualified host selector to provider wire model id.
     model_rewrites: HashMap<String, String>,
+    /// Live authority for mutable catalog-backed model rewrites.
+    route_authorities: HashMap<RouteKind, Arc<dyn BearerTokenSource>>,
     has_openai_compat: bool,
     /// Fingerprint of the routes this was built from, for cache invalidation.
     fingerprint: String,
@@ -210,6 +237,7 @@ impl Router {
         let mut adapters: HashMap<RouteKind, Arc<dyn ModelProvider>> = HashMap::new();
         let mut curated: HashMap<String, RouteKind> = HashMap::new();
         let mut model_rewrites = HashMap::new();
+        let mut route_authorities = HashMap::new();
         let mut has_openai_compat = false;
 
         for route in routes {
@@ -225,6 +253,9 @@ impl Router {
             }
             if let Some(adapter) = build_adapter(&route) {
                 adapters.insert(route.kind, adapter);
+                if let Some(source) = route.token_source.clone() {
+                    route_authorities.insert(route.kind, source);
+                }
             }
         }
 
@@ -232,6 +263,7 @@ impl Router {
             adapters,
             curated,
             model_rewrites,
+            route_authorities,
             has_openai_compat,
             fingerprint,
         }
@@ -323,13 +355,39 @@ impl ModelProvider for Router {
             )));
         };
         let qualified = format!("{}::{}", kind.provider_id(), req.model);
-        if let Some(wire_model) = self.model_rewrites.get(&qualified) {
-            req.model = wire_model.clone();
-        }
+        let route_lease = if let Some(expected_wire) = self.model_rewrites.get(&qualified) {
+            let source = self.route_authorities.get(&kind).ok_or_else(|| {
+                AgentError::config(format!(
+                    "provider `{}` has no live authority for model `{}`",
+                    kind.provider_id(),
+                    req.model
+                ))
+            })?;
+            let lease = source.lease_model_route(&req.model).await?.ok_or_else(|| {
+                AgentError::config(format!(
+                    "provider `{}` no longer serves model `{}`",
+                    kind.provider_id(),
+                    req.model
+                ))
+            })?;
+            if lease.wire_model() != expected_wire {
+                return Err(AgentError::config(format!(
+                    "provider `{}` changed the route for model `{}`",
+                    kind.provider_id(),
+                    req.model
+                )));
+            }
+            req.wire_model = Some(lease.wire_model().to_owned());
+            Some(lease)
+        } else {
+            None
+        };
         // The route hint is host policy, not provider wire data. Adapters keep
         // it only to gate provider-native reasoning/tool replay; their request
         // builders enumerate wire fields explicitly and never serialize it.
-        adapter.stream(req).await
+        let stream = adapter.stream(req).await;
+        drop(route_lease);
+        stream
     }
 }
 
@@ -518,7 +576,9 @@ mod tests {
     use futures::StreamExt as _;
     #[cfg(feature = "xai")]
     use serde_json::json;
-    use tidebreak_core::provider::{ChatMessage, ContentBlock, MessageReasoning, ReasoningOrigin};
+    use tidebreak_core::provider::{
+        ChatMessage, ContentBlock, MessageReasoning, ProviderToolReplay, ReasoningOrigin,
+    };
     use tidebreak_core::{ImageAttachments, Role};
 
     fn route(kind: RouteKind, key: &str, models: &[&str], base: Option<&str>) -> Route {
@@ -695,6 +755,28 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct LiveRouteSource {
+        routes: std::sync::Mutex<HashMap<String, String>>,
+    }
+
+    #[async_trait]
+    impl BearerTokenSource for LiveRouteSource {
+        async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
+            Ok(self
+                .routes
+                .lock()
+                .unwrap()
+                .get(route_model)
+                .cloned()
+                .map(|wire| ModelRouteLease::new(wire, ())))
+        }
+
+        async fn bearer_token(&self) -> Result<String> {
+            Ok("mg_at_x".into())
+        }
+    }
+
+    #[derive(Default)]
     struct RecordingProvider {
         requests: std::sync::Mutex<Vec<ChatRequest>>,
     }
@@ -782,6 +864,7 @@ mod tests {
         let local_wire_model = "deployment-local-opus";
         let gateway = ProviderId::new("model_gateway");
         let recorder = Arc::new(RecordingProvider::default());
+        let authority = Arc::new(LiveRouteSource::default());
 
         let mut old_route = route(RouteKind::ModelGateway, "", &[old_selector], None);
         old_route
@@ -796,10 +879,21 @@ mod tests {
             Some(RouteKind::ModelGateway)
         );
 
-        let mut current_route = route(RouteKind::ModelGateway, "", &[new_selector], None);
+        let mut current_route = route(
+            RouteKind::ModelGateway,
+            "",
+            &[new_selector],
+            Some("http://127.0.0.1:9/compat/anthropic"),
+        );
         current_route
             .model_rewrites
             .insert(new_selector.into(), local_wire_model.into());
+        authority
+            .routes
+            .lock()
+            .unwrap()
+            .insert(new_selector.into(), local_wire_model.into());
+        current_route.token_source = Some(authority.clone());
         let mut current_router = Router::build(vec![current_route]);
         current_router
             .adapters
@@ -817,9 +911,25 @@ mod tests {
         {
             let requests = recorder.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].model, local_wire_model);
+            assert_eq!(requests[0].model, new_selector);
+            assert_eq!(requests[0].wire_model.as_deref(), Some(local_wire_model));
             assert_eq!(requests[0].provider.as_ref(), Some(&gateway));
         }
+
+        authority.routes.lock().unwrap().remove(new_selector);
+        let stale_error = match current_router
+            .stream(ChatRequest {
+                provider: Some(gateway.clone()),
+                model: new_selector.into(),
+                ..Default::default()
+            })
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a retained router must revalidate its frozen selector"),
+        };
+        assert!(stale_error.to_string().contains("no longer serves"));
+        assert_eq!(recorder.requests.lock().unwrap().len(), 1);
 
         let error = match current_router
             .stream(ChatRequest {
@@ -948,6 +1058,7 @@ mod tests {
             adapters,
             curated: HashMap::from([("xai::grok-test".into(), RouteKind::Xai)]),
             model_rewrites: HashMap::new(),
+            route_authorities: HashMap::new(),
             has_openai_compat: false,
             fingerprint: String::new(),
         };
@@ -1051,5 +1162,199 @@ mod tests {
 
         let body = rx.await.unwrap();
         assert_eq!(body["messages"][0]["content"][0]["type"], "thinking");
+    }
+
+    #[tokio::test]
+    async fn frozen_gateway_selector_preserves_native_reasoning_replay() {
+        use axum::body::Body;
+        use axum::extract::{Request, State};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use tokio::sync::oneshot;
+
+        async fn capture(
+            State(tx): State<Arc<std::sync::Mutex<Option<oneshot::Sender<serde_json::Value>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            }
+            (
+                [("content-type", "text/event-stream")],
+                Body::from(
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let app = axum::Router::new()
+            .fallback(post(capture))
+            .with_state(Arc::new(std::sync::Mutex::new(Some(tx))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let frozen = "__tidebreak_gateway_v1.deployment.installation.route";
+        let wire = "claude-opus-5";
+        let gateway = ProviderId::new("model_gateway");
+        let authority = Arc::new(LiveRouteSource::default());
+        authority
+            .routes
+            .lock()
+            .unwrap()
+            .insert(frozen.into(), wire.into());
+        let mut route = route(
+            RouteKind::ModelGateway,
+            "",
+            &[frozen],
+            Some(&format!("http://{address}/compat/anthropic")),
+        );
+        route.token_source = Some(authority);
+        route.model_rewrites.insert(frozen.into(), wire.into());
+        let router = Router::build(vec![route]);
+
+        let mut stream = router
+            .stream(ChatRequest {
+                provider: Some(gateway.clone()),
+                model: frozen.into(),
+                reasoning_model: true,
+                messages: vec![ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "answer".into(),
+                    }],
+                    reasoning: MessageReasoning::captured(
+                        ReasoningOrigin {
+                            provider: Some(gateway),
+                            model: frozen.into(),
+                        },
+                        vec![serde_json::json!({
+                            "type": "thinking",
+                            "thinking": "plan",
+                            "signature": "signed",
+                        })],
+                    ),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let body = rx.await.unwrap();
+        assert_eq!(body["model"], wire);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "thinking");
+    }
+
+    #[tokio::test]
+    async fn a_new_frozen_route_flattens_native_tool_replay_from_a_reused_local_id() {
+        use axum::body::Body;
+        use axum::extract::{Request, State};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use tokio::sync::oneshot;
+
+        async fn capture(
+            State(tx): State<Arc<std::sync::Mutex<Option<oneshot::Sender<serde_json::Value>>>>>,
+            request: Request,
+        ) -> impl IntoResponse {
+            let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            }
+            (
+                [("content-type", "text/event-stream")],
+                Body::from(
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                ),
+            )
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let app = axum::Router::new()
+            .fallback(post(capture))
+            .with_state(Arc::new(std::sync::Mutex::new(Some(tx))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let old_frozen = "__tidebreak_gateway_v1.deployment.installation.old-route";
+        let new_frozen = "__tidebreak_gateway_v1.deployment.installation.new-route";
+        let reused_wire = "deployment-local-opus";
+        let gateway = ProviderId::new("model_gateway");
+        let authority = Arc::new(LiveRouteSource::default());
+        authority
+            .routes
+            .lock()
+            .unwrap()
+            .insert(new_frozen.into(), reused_wire.into());
+        let mut route = route(
+            RouteKind::ModelGateway,
+            "",
+            &[new_frozen],
+            Some(&format!("http://{address}/compat/anthropic")),
+        );
+        route.token_source = Some(authority);
+        route
+            .model_rewrites
+            .insert(new_frozen.into(), reused_wire.into());
+        let router = Router::build(vec![route]);
+
+        let native = vec![
+            serde_json::json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "private old route query"},
+            }),
+            serde_json::json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1",
+                "content": [{
+                    "type": "web_search_result",
+                    "url": "https://old.example",
+                    "title": "Old route",
+                    "encrypted_content": "opaque-old-route",
+                }],
+            }),
+        ];
+        let mut stream = router
+            .stream(ChatRequest {
+                provider: Some(gateway.clone()),
+                model: new_frozen.into(),
+                messages: vec![ChatMessage {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ProviderExecutedToolCall {
+                        name: "web_search".into(),
+                        input: serde_json::json!({"query": "private old route query"}),
+                        output: serde_json::json!({
+                            "results": [{"title": "Old route", "url": "https://old.example"}]
+                        }),
+                        is_error: false,
+                        replay: Some(ProviderToolReplay::captured(
+                            ReasoningOrigin {
+                                provider: Some(gateway),
+                                model: old_frozen.into(),
+                            },
+                            native,
+                        )),
+                    }],
+                    reasoning: MessageReasoning::default(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+
+        let body = rx.await.unwrap();
+        assert_eq!(body["model"], reused_wire);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
     }
 }

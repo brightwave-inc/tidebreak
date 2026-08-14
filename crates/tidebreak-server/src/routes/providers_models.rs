@@ -72,15 +72,27 @@ pub(crate) async fn resolve_executable_chat_model(
         return Ok(selected);
     }
     let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-    let executable = model_roles::effective_chat_policy(
-        &*state.store,
-        &*state.secrets,
-        &managed,
-        &selected,
-        explicit,
-    )
-    .await?
-    .map_or(selected, |policy| policy.execution_key());
+    let executable = if managed.managed {
+        let policy = model_roles::effective_chat_policy(
+            &*state.store,
+            &*state.secrets,
+            &managed,
+            &selected,
+            explicit,
+        )
+        .await?
+        .ok_or_else(|| {
+            ServerError::conflict_kind(
+                "model_provider_unavailable",
+                format!(
+                    "the managed model gateway cannot serve selected model `{selected}` with its current catalog or credential"
+                ),
+            )
+        })?;
+        policy.execution_key()
+    } else {
+        selected
+    };
     validate_execution_selection(state, &executable, true).await
 }
 
@@ -97,6 +109,12 @@ async fn validate_execution_selection(
             unknown_model_message(value),
         ));
     };
+    if !providers::is_valid_execution_policy(&policy) {
+        return Err(ServerError::conflict_kind(
+            "model_provider_unavailable",
+            "managed gateway execution requires a frozen model identity",
+        ));
+    }
     let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
         return Err(ServerError::conflict_kind(

@@ -596,6 +596,11 @@ impl SandboxContainerRunner {
                     "container sandbox model is not registered for its provider",
                 ));
             };
+            if !crate::providers::is_valid_execution_policy(&policy) {
+                return Err(AgentError::config(
+                    "managed gateway execution requires a frozen model identity",
+                ));
+            }
             crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;
         } else {
             // A test or custom embedder that injects one provider keeps its

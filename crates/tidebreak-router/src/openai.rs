@@ -338,7 +338,7 @@ pub(crate) fn build_request_json_for(
 ) -> Result<Value> {
     let input = build_input_for(req, profile)?;
     let mut body = json!({
-        "model": req.model,
+        "model": req.wire_model(),
         "input": input,
         "stream": true,
         "store": false,

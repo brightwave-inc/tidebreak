@@ -20,7 +20,7 @@ use crate::connectors::{
 use async_trait::async_trait;
 use serde::Serialize;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store};
-use tidebreak_router::BearerTokenSource;
+use tidebreak_router::{BearerTokenSource, ModelRouteLease};
 use tokio::sync::Mutex;
 
 use crate::providers::{self, CustomModelConfig};
@@ -54,7 +54,7 @@ pub(crate) struct GatewayRuntime {
     /// snapshot read through the fetch and durable write. Serializing only the
     /// write tail lets an older, slower HTTP response overwrite a newer
     /// catalog, so the network round-trip deliberately lives inside this lock.
-    model_sync: Mutex<()>,
+    model_sync: Arc<Mutex<()>>,
     /// The one in-flight browser sign-in, if any.
     sign_in: Mutex<SignInProgress>,
     /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
@@ -185,7 +185,7 @@ impl GatewayRuntime {
             provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
-            model_sync: Mutex::new(()),
+            model_sync: Arc::new(Mutex::new(())),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
@@ -775,12 +775,16 @@ impl GatewayRuntime {
     /// that deployment is stored. `None` keeps the gateway route out of the
     /// router entirely — including on unmanaged profiles and when the stored
     /// session belongs to a different gateway than the policy URL.
-    pub(crate) async fn route_token_source(&self) -> Option<Arc<dyn BearerTokenSource>> {
+    pub(crate) async fn route_token_source(self: &Arc<Self>) -> Option<Arc<dyn BearerTokenSource>> {
         let connection = self.connection().await.ok().flatten()?;
         let credentials = connection.stored_credentials().await.ok().flatten()?;
         Some(Arc::new(GatewayTokenSource {
             connection,
             installation_id: credentials.installation_id,
+            store: self.store.clone(),
+            provisioned_policy: self.provisioned_policy.clone(),
+            os_policy: self.os_policy.clone(),
+            model_sync: self.model_sync.clone(),
         }))
     }
 
@@ -1448,12 +1452,45 @@ fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
 struct GatewayTokenSource {
     connection: Arc<GatewayConnection>,
     installation_id: String,
+    store: Arc<dyn Store>,
+    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    model_sync: Arc<Mutex<()>>,
 }
 
 #[async_trait]
 impl BearerTokenSource for GatewayTokenSource {
     fn binding_id(&self) -> Option<&str> {
         Some(&self.installation_id)
+    }
+
+    async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
+        let guard = self.model_sync.clone().lock_owned().await;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let Some(snapshot) = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?
+        else {
+            return Ok(None);
+        };
+        if snapshot.installation_id.as_deref() != Some(&self.installation_id) {
+            return Ok(None);
+        }
+        let Some(credentials) = self.connection.stored_credentials().await? else {
+            return Ok(None);
+        };
+        if credentials.installation_id != self.installation_id {
+            return Ok(None);
+        }
+        let selection = crate::model_registry::selection_key(
+            providers::ProviderKind::ModelGateway,
+            route_model,
+        );
+        let Some(resolved) = providers::gateway_execution_policy(&snapshot, &selection) else {
+            return Ok(None);
+        };
+        if resolved.route_model != route_model {
+            return Ok(None);
+        }
+        Ok(Some(ModelRouteLease::new(resolved.id, guard)))
     }
 
     async fn bearer_token(&self) -> Result<String> {
@@ -2654,6 +2691,30 @@ mod tests {
         )
         .await
         .unwrap());
+
+        let frozen = anthropic_frozen[0].as_str();
+        let lease = source
+            .lease_model_route(frozen)
+            .await
+            .unwrap()
+            .expect("the current frozen selector receives a live route lease");
+        assert_eq!(lease.wire_model(), "sample-claude");
+        drop(lease);
+
+        let mut retargeted = providers::gateway_snapshot_for_policy(&*store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+        retargeted
+            .models
+            .iter_mut()
+            .find(|model| model.id == "sample-claude")
+            .unwrap()
+            .upstream_id = Some("gpt-5.6-sol".into());
+        providers::write_gateway_snapshot(&*store, &retargeted)
+            .await
+            .unwrap();
+        assert!(source.lease_model_route(frozen).await.unwrap().is_none());
     }
 
     /// The race #896 named, in its surviving form: with policy the only

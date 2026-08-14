@@ -274,7 +274,7 @@ fn build_request_json_for(req: &ChatRequest, provider_id: &str) -> Result<Value>
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let mut body = json!({
-        "model": req.model,
+        "model": req.wire_model(),
         "messages": messages,
         "stream": true,
     });

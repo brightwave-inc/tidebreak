@@ -487,7 +487,18 @@ pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<crate::id::ChatId>,
     /// Provider-specific model identifier (e.g. `claude-opus-4-8`).
+    ///
+    /// This is the host execution identity used to gate native replay. A
+    /// composite route may set [`Self::wire_model`] to a deployment-local id
+    /// without changing the identity that produced opaque reasoning or tool
+    /// blocks.
     pub model: String,
+    /// Provider wire model when it differs from the host execution identity.
+    ///
+    /// Internal routing state only: it is never persisted or serialized as
+    /// part of Tidebreak's normalized request contract.
+    #[serde(skip)]
+    pub wire_model: Option<String>,
     /// Whether the resolved model uses a reasoning-model request shape.
     ///
     /// This is host-owned registry policy, rather than an adapter guess based
@@ -541,6 +552,13 @@ pub struct ChatRequest {
     /// missing rather than quietly sending a question about an absent image.
     #[serde(skip)]
     pub images: ImageAttachments,
+}
+
+impl ChatRequest {
+    /// Model id the adapter sends to the provider.
+    pub fn wire_model(&self) -> &str {
+        self.wire_model.as_deref().unwrap_or(&self.model)
+    }
 }
 
 /// Token accounting for a completion.

@@ -60,6 +60,22 @@ const GATEWAY_MODELS_KEY: &str = "gateway.models_v1";
 /// to the local id before egress.
 const FROZEN_GATEWAY_MODEL_PREFIX: &str = "__tidebreak_gateway_v1.";
 
+pub(crate) fn is_frozen_gateway_route_model(model: &str) -> bool {
+    model.starts_with(FROZEN_GATEWAY_MODEL_PREFIX)
+}
+
+/// Whether a resolved policy is safe to use for one already-admitted execution.
+///
+/// A plain Model Gateway catalog key is durable selection intent, not execution
+/// identity: its deployment-local id may be reused for another upstream route
+/// after the turn or agent run was accepted. Every registry-enforced execution
+/// seam therefore requires the frozen selector minted at admission. Direct
+/// providers have no gateway catalog indirection and remain valid as resolved.
+pub(crate) fn is_valid_execution_policy(policy: &ResolvedModelPolicy) -> bool {
+    policy.provider != ProviderKind::ModelGateway
+        || is_frozen_gateway_route_model(&policy.route_model)
+}
+
 /// The persisted snapshot of the managed gateway's entitled models, stamped
 /// with the deployment it was synced from. The stamp is what keeps the cache
 /// honest without coordinated clears: a snapshot synced from one gateway is
@@ -2208,6 +2224,34 @@ mod tests {
         assert_eq!(equivalent.key, "model_gateway::sample-claude");
         assert_eq!(equivalent.id, "sample-claude");
         assert_ne!(equivalent.route_model, equivalent.id);
+    }
+
+    #[tokio::test]
+    async fn already_admitted_plain_gateway_key_is_not_a_valid_execution_policy() {
+        let (store, _directory, policy) = gateway_migration_test_store().await;
+        let snapshot = gateway_snapshot_for_policy(&store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mutable = resolve_model_policy(&store, "model_gateway::sample-claude", false)
+            .await
+            .unwrap()
+            .expect("the current catalog still contains the local id");
+        assert_eq!(mutable.route_model, "sample-claude");
+        assert!(!is_valid_execution_policy(&mutable));
+
+        let frozen = unique_gateway_equivalent(&store, &snapshot, "claude-opus-5")
+            .await
+            .unwrap()
+            .expect("the canonical model has one gateway equivalent");
+        assert!(is_valid_execution_policy(&frozen));
+
+        let direct = resolve_model_policy(&store, "anthropic::claude-opus-5", false)
+            .await
+            .unwrap()
+            .expect("the direct curated route is registered");
+        assert!(is_valid_execution_policy(&direct));
     }
 
     #[tokio::test]

@@ -1,5 +1,28 @@
 use super::*;
 
+struct AppearingGatewaySecrets {
+    gateway: String,
+    reads: AtomicUsize,
+}
+
+#[async_trait]
+impl SecretProvider for AppearingGatewaySecrets {
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        if key != crate::connectors::GATEWAY_SECRET_KEY {
+            return Ok(None);
+        }
+        Ok((self.reads.fetch_add(1, Ordering::SeqCst) > 0).then(|| self.gateway.clone()))
+    }
+
+    async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_secret(&self, _key: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn chat_model_takes_precedence_over_the_default() {
     let recorder = RecordingProvider::default();
@@ -3632,6 +3655,92 @@ async fn a_superseded_gateway_session_never_reads_usable() {
     )
     .await
     .unwrap());
+}
+
+#[tokio::test]
+async fn a_credential_appearance_cannot_admit_a_plain_gateway_execution_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("gateway-admission-race.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let credentials: crate::connectors::GatewayCredentials =
+        serde_json::from_value(serde_json::json!({
+            "base_url": "https://corp.gateway/",
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+    let secrets: Arc<dyn SecretProvider> = Arc::new(AppearingGatewaySecrets {
+        gateway: serde_json::to_string(&credentials).unwrap(),
+        reads: AtomicUsize::new(0),
+    });
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+    let os_policy: Arc<dyn crate::managed_policy::OsPolicySource> =
+        Arc::new(crate::managed_policy::NoOsPolicy);
+    let gateway = crate::gateway_runtime::GatewayRuntime::new(
+        store.clone(),
+        secrets.clone(),
+        provisioned.clone(),
+        os_policy.clone(),
+    );
+    let resolver = Arc::new(resolver::ConfiguredResolver::new(
+        store.clone(),
+        secrets.clone(),
+        gateway,
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
+        provisioned.clone(),
+        os_policy.clone(),
+    ));
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        resolver,
+        secrets,
+        Arc::new(ToolRegistry::new()),
+        AgentConfig::default(),
+    );
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".into(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "gateway-opus".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            }],
+            model_protocols: Default::default(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
+    let router = app(state.clone());
+    let bearer = format!("Bearer {}", state.token);
+    let chat = make_chat(&router, &bearer).await;
+    store
+        .set_chat_model(chat.id, Some("model_gateway::gateway-opus".into()))
+        .await
+        .unwrap();
+    let chat = store.get_chat(chat.id).await.unwrap().unwrap();
+
+    let error = crate::routes::resolve_executable_chat_model(&state, &chat)
+        .await
+        .expect_err("a transiently unavailable managed route must not fall back to its plain key");
+    assert_eq!(error.kind(), "model_provider_unavailable");
 }
 
 /// A router whose state carries a code-execution provider loaded from the
