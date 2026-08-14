@@ -1,6 +1,6 @@
 ---
 title: How the agent works
-description: What happens during a turn, how plans and questions pause it, and how to redirect work in progress.
+description: What happens during a turn, how plans and questions pause it, and how to steer or queue work in progress.
 ---
 
 A Tidebreak turn is a durable loop: the selected model proposes the next step,
@@ -44,16 +44,18 @@ questions and pause. The question remains in the transcript and the **Inbox**
 until you answer it. Approval cards work the same way: the turn waits on a
 durable decision rather than treating a closed window as consent or refusal.
 
-## Redirecting a running turn
+## Steering or queueing a running turn
 
 If you send another message while a turn is active, Tidebreak can either queue
-it as the next turn or use it to steer the current one, depending on the send
-mode you selected. Steering is applied at a safe model boundary; it does not
-interrupt a tool halfway through and pretend the tool never ran.
+it as the next turn or use it to steer the current one. Choose the default
+under **Settings → Agents → While an agent is responding**. Steering is
+applied at a safe model boundary; it does not interrupt a tool halfway through
+and pretend the tool never ran.
 
 Use steering for corrections that matter to the current result. Queue a
 message when it is a separate follow-up you want handled after the current
-turn settles.
+turn settles. The queue is durable and can be paused, reordered, edited, or
+advanced with **Send now**.
 
 ## Background work
 

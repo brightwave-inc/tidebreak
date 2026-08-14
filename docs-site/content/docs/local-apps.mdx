@@ -1,0 +1,67 @@
+---
+title: Local apps
+description: Reopen agent-built mini-apps, review their exact capabilities, and control what they can call.
+---
+
+A local app is a small tool the agent builds once and Tidebreak keeps in the
+**Apps** library. Ask for a triage view, review console, or other focused
+interface in a chat; when the agent publishes it, the app outlives that chat
+and can be reopened from the sidebar.
+
+Apps are versioned. Publishing another revision appends to the app's history
+instead of replacing the old record in place.
+
+## What an app contains
+
+Each revision has two parts:
+
+- An HTML, CSS, and JavaScript bundle authored by the model.
+- A manifest naming the exact capabilities the app needs: selected operations
+  from REST [connected apps](/connected-apps), connected folders, or apps
+  granted through an organization's model gateway.
+
+The bundle is untrusted. The manifest is the part you review and consent to.
+Tidebreak enforces it on every call, regardless of what the app's interface
+claims it can do.
+
+## Opening and granting one
+
+Open **Apps** in the sidebar and choose an app. The first open—and any open
+after its capability set changes—shows a consent sheet before the app runs.
+Review the named folders, connected apps, and exact operations, then grant or
+decline access.
+
+Consent belongs to that app, not to a chat permission mode. You can revoke it
+from the app's detail view. If a bound connected app is reconfigured, or a new
+revision asks for more access, the existing grant stops matching and Tidebreak
+asks again.
+
+## Containment
+
+The app runs in a sandboxed, opaque-origin frame with a strict content security
+policy. It has no direct network access, cannot read Tidebreak's DOM or local
+storage, and never receives provider or connected-app credentials.
+
+When the app invokes a granted operation, it sends a message to the trusted
+host. The host checks the current manifest and consent, injects credentials at
+request time, executes the operation, bounds the result, and returns only the
+result to the frame.
+
+An app can still render misleading text—the bundle is model-authored—so treat
+its interface as presentation, not authority. The server-side manifest and
+grant are the actual boundary.
+
+## Managing apps
+
+The Apps library shows every live app, its revision count, last update, and
+whether access is granted. Open an app to run it, inspect or revoke access,
+review its revision history, or delete it.
+
+<Cards>
+  <Card title="Connected apps" href="/connected-apps">
+    Add the REST operations a local app can bind to.
+  </Card>
+  <Card title="Connected folders" href="/connected-folders">
+    Understand folder capabilities and replacement rules.
+  </Card>
+</Cards>

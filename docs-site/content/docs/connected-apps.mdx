@@ -1,0 +1,66 @@
+---
+title: Connected apps
+description: Add MCP servers and REST APIs, understand what each surface can do, and keep credentials out of app code.
+---
+
+**Settings → Connected apps** lists the outside systems this Tidebreak profile
+can reach. There are two local kinds:
+
+- **MCP servers** expose tools directly to chats. Every call stays behind the
+  chat approval boundary.
+- **REST APIs** expose selected OpenAPI operations to [local apps](/local-apps).
+  They are not automatically added to a chat's tool list.
+
+Managed profiles can also show applications granted through their
+organization's model gateway. Those are configured by the organization rather
+than with local credentials.
+
+## Add a REST API
+
+Press **Add REST API**, then provide:
+
+| Field | What it means |
+| --- | --- |
+| **Name** | The label people see in Settings and consent sheets. |
+| **Base URL** | The HTTPS origin and path operations run against. |
+| **OpenAPI document** | A JSON OpenAPI 3.x document, fetched from an HTTPS URL or pasted directly. |
+| **Operations** | The exact `operationId` entries Tidebreak keeps from the document. |
+| **Credential** | None, a bearer token, or a custom header such as `X-Api-Key`. |
+
+Tidebreak ingests the operation catalog and keeps only the selected operation
+definitions, not the raw OpenAPI document. If you edit the connection later,
+provide the document again so the operation set can be validated against the
+new definition.
+
+Credentials go into the profile's secret store and are never displayed again.
+They are injected only by the host-side executor when a granted app invokes an
+operation; the app's HTML, the model, and the renderer never receive the value.
+
+## The REST boundary
+
+The executor refuses anything outside the stored catalog. It validates the
+HTTP method, path template, and parameters before sending a request. Requests
+must use HTTPS; loopback and private-network destinations are refused,
+redirects are not followed, and request, response, and timeout bounds are
+enforced by the host.
+
+A local app's consent sheet names the connected app and the exact operations it
+wants. If you change the base URL, operation catalog, credential reference, or
+credential placement, the old consent no longer matches and the app asks
+again.
+
+## MCP servers
+
+MCP definitions live on the same Settings page, but their behavior is
+different: their tools are advertised to the chat model and each call is
+sensitive. See [MCP servers](/mcp-servers) for transports, health, and the
+approval boundary.
+
+<Cards>
+  <Card title="Local apps" href="/local-apps">
+    See how reusable apps bind to connected operations and folders.
+  </Card>
+  <Card title="MCP servers" href="/mcp-servers">
+    Connect stdio or HTTP tool servers to chats.
+  </Card>
+</Cards>

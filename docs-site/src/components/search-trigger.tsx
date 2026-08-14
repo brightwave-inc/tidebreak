@@ -17,7 +17,9 @@ export function SearchTrigger({ onClick }: { onClick: () => void }) {
 
   return (
     <button
+      type="button"
       onClick={onClick}
+      aria-label="Search documentation"
       className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-muted/50 px-3 text-sm text-muted-foreground transition-colors hover:text-foreground"
     >
       <Search className="h-3.5 w-3.5" />

@@ -24,10 +24,6 @@ pick them up now:
   self-hosted profile.
 - Enforce the strict `network off` setting in Docker code execution, then use
   the existing egress topology to make the other network policies enforceable.
-- Give the project model its share of the desktop: optional chat organization
-  has landed, and project-scoped context is specified by
-  [decision record 1](decisions/0001-project-files-and-attachment-vocabulary.md)
-  but not yet built.
 - Make deletion of a terminal chat erase its background-run workspaces without
   waiting for the periodic reaper.
 

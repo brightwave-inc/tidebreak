@@ -5,8 +5,6 @@ import type { ReactNode } from 'react';
 import { Header } from './header';
 import { Sidebar, MobileSidebar } from './sidebar';
 import type { SidebarSection } from '@/lib/content';
-import { Button } from '@/components/ui/button';
-import { PanelLeft } from 'lucide-react';
 
 export function DocsShell({
   sections,
@@ -23,18 +21,18 @@ export function DocsShell({
 
   return (
     <>
-      <Header onOpenSearch={openSearch} />
+      <a
+        href="#main-content"
+        className="fixed left-4 top-3 z-[60] -translate-y-20 rounded-md bg-foreground px-3 py-2 text-sm font-medium text-background transition-transform focus:translate-y-0"
+      >
+        Skip to content
+      </a>
+      <Header
+        onOpenSearch={openSearch}
+        onOpenSidebar={() => setSidebarOpen(true)}
+      />
       <div className="mx-auto flex w-full max-w-screen-2xl flex-1 gap-0 px-2 py-2 lg:px-3">
         <Sidebar sections={sections} />
-        <Button
-          variant="outline"
-          size="icon-sm"
-          className="fixed bottom-4 left-4 z-30 rounded-full shadow-md lg:hidden"
-          onClick={() => setSidebarOpen(true)}
-          aria-label="Open sidebar"
-        >
-          <PanelLeft className="h-4 w-4" />
-        </Button>
         <MobileSidebar
           sections={sections}
           open={sidebarOpen}

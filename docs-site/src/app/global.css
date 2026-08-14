@@ -137,7 +137,7 @@
   }
 
   body {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-geist-sans), system-ui, sans-serif;
     @apply bg-page-background text-foreground;
   }
 }
@@ -173,13 +173,17 @@
 }
 
 .prose code:not(pre code) {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 0.8em;
   font-weight: 450;
   background-color: color-mix(in srgb, var(--muted) 75%, transparent);
   padding: 0.2em 0.4em;
   border-radius: 0.25rem;
   border: 0.5px solid var(--border);
+}
+
+.prose :where(p, li) {
+  text-wrap: pretty;
 }
 
 .prose code:not(pre code)::before,

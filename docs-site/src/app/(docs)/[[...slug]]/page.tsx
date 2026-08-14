@@ -43,13 +43,13 @@ export default async function Page(props: PageProps<'/[[...slug]]'>) {
 
   return (
     <>
-      <main className="min-w-0 flex-1 py-8 lg:py-10">
-        <div className="mx-auto max-w-3xl px-6">
-          <h1 className="text-3xl font-bold tracking-tight text-foreground">
+      <main id="main-content" className="min-w-0 flex-1 py-8 lg:py-12">
+        <div className="mx-auto max-w-3xl px-5 sm:px-7">
+          <h1 className="text-balance text-3xl font-semibold tracking-[-0.03em] text-foreground sm:text-4xl">
             {page.title}
           </h1>
           {page.description && (
-            <p className="mt-2 text-lg text-muted-foreground">
+            <p className="mt-3 text-pretty text-base leading-7 text-muted-foreground sm:text-lg">
               {page.description}
             </p>
           )}
