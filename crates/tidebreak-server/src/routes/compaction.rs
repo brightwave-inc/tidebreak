@@ -19,7 +19,7 @@ use crate::extract::{Json, Path};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
-use super::providers_models::resolve_chat_model;
+use super::providers_models::resolve_executable_chat_model;
 
 /// How much focus text one request may carry.
 ///
@@ -83,7 +83,7 @@ pub async fn post_compact(
     }
 
     let mut config = state.agent_config.clone();
-    let model = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
+    let model = resolve_executable_chat_model(&state, &chat).await?;
     match crate::providers::resolve_model_policy(&*state.store, &model, true).await? {
         Some(policy) => {
             crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;

@@ -12,14 +12,13 @@ use tidebreak_core::{
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::model_roles::{self};
 use crate::providers::{self};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 use super::agent_runs::signal_origin_sandbox_runs_after_commit;
 use super::image_attachment;
-use super::providers_models::{resolve_chat_model, validate_model_selection};
+use super::providers_models::resolve_executable_chat_model;
 
 /// Body of `POST /chats/{id}/messages`.
 #[derive(Debug, Deserialize)]
@@ -313,31 +312,7 @@ pub async fn post_message(
         }
         existing.model
     } else {
-        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        let explicit = chat.model.is_some()
-            || model_roles::read_selection(&*state.store, model_roles::ModelRole::Chat)
-                .await?
-                .is_some();
-        // Managed turns route portable direct selections through their unique
-        // current gateway equivalent without changing the chat or global
-        // setting. Ambiguous and unmatched explicit choices keep their raw
-        // value and fail validation honestly below.
-        let managed =
-            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed {
-            model_roles::effective_chat_policy(
-                &*state.store,
-                &*state.secrets,
-                &managed,
-                &selected,
-                explicit,
-            )
-            .await?
-            .map_or(selected, |policy| policy.key)
-        } else {
-            selected
-        };
-        validate_model_selection(&state, &selected, true).await?
+        resolve_executable_chat_model(&state, &chat).await?
     };
     require_invocable_skills(&state, &body.invoked_skills).await?;
     let images = resolve_message_attachments(&state, &body.attachments).await?;
@@ -740,39 +715,31 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
         else {
             continue;
         };
-        let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        let explicit = chat.model.is_some()
-            || model_roles::read_selection(&*state.store, model_roles::ModelRole::Chat)
-                .await?
-                .is_some();
-        let managed =
-            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed {
-            model_roles::effective_chat_policy(
-                &*state.store,
-                &*state.secrets,
-                &managed,
-                &selected,
-                explicit,
-            )
-            .await?
-            .map_or(selected, |policy| policy.key)
-        } else {
-            selected
-        };
         let dropped = |reason: &str| {
             eprintln!(
                 "tidebreak: dropping queued message {} for chat {chat_id}: {reason}",
                 next.id
             );
         };
-        let model = match validate_model_selection(state, &selected, true).await {
-            Ok(model) => model,
-            Err(_) => {
-                // The chat's model became unusable; leave the row so fixing
-                // the model releases the queue rather than losing messages.
+        // A crash after acceptance but before deleting the queued row must
+        // replay against the accepted turn's immutable execution selector.
+        // Re-resolving here could turn a catalog change into an identity
+        // conflict and strand or drop input that already committed.
+        let model = match state.store.get_turn_run(next.id).await? {
+            Some(existing) if existing.chat_id == chat_id => existing.model,
+            Some(_) => {
+                dropped("its turn id was already accepted by another chat");
+                state.store.delete_queued_turn(chat_id, next.id).await?;
                 continue;
             }
+            None => match resolve_executable_chat_model(state, &chat).await {
+                Ok(model) => model,
+                Err(_) => {
+                    // The chat's model became unusable; leave the row so fixing
+                    // the model releases the queue rather than losing messages.
+                    continue;
+                }
+            },
         };
         if require_invocable_skills(state, &next.invoked_skills)
             .await

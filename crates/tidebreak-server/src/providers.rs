@@ -10,8 +10,10 @@
 //! `PUT /settings/api-key` shim still work — they read/write the anthropic
 //! credential in the new blob shape.
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, HashMap};
 
 use tidebreak_core::{AgentConfig, ProviderId, ReasoningEffort, Result, SecretProvider, Store};
 
@@ -50,6 +52,14 @@ pub(crate) static GATEWAY_STATE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mu
 /// other stored state describes the gateway.
 const GATEWAY_MODELS_KEY: &str = "gateway.models_v1";
 
+/// Internal model selector prefix for one admitted gateway route.
+///
+/// The suffix binds a deployment-local id to the exact deployment and catalog
+/// row that admitted it. The router recognizes the selector only while the
+/// current policy-matched snapshot produces the same value, then rewrites it
+/// to the local id before egress.
+const FROZEN_GATEWAY_MODEL_PREFIX: &str = "__tidebreak_gateway_v1.";
+
 /// The persisted snapshot of the managed gateway's entitled models, stamped
 /// with the deployment it was synced from. The stamp is what keeps the cache
 /// honest without coordinated clears: a snapshot synced from one gateway is
@@ -58,6 +68,10 @@ const GATEWAY_MODELS_KEY: &str = "gateway.models_v1";
 pub(crate) struct GatewayModelSnapshot {
     /// The normalized gateway base URL the models were fetched from.
     pub(crate) gateway_url: String,
+    /// Gateway installation that issued this catalog. URL alone is not enough:
+    /// an administrator may replace a deployment in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) installation_id: Option<String>,
     pub(crate) models: Vec<CustomModelConfig>,
     /// Per-model inference protocol. An absent map is a snapshot written by a
     /// gateway generation that served only Anthropic Messages, so lookup
@@ -235,6 +249,7 @@ pub(crate) async fn retire_legacy_gateway_row(
         store,
         &GatewayModelSnapshot {
             gateway_url,
+            installation_id: None,
             models: row.models,
             model_protocols: BTreeMap::new(),
             member_catalog: None,
@@ -597,6 +612,12 @@ pub struct ResolvedModelPolicy {
     pub key: String,
     /// Raw model id sent to the provider.
     pub id: String,
+    /// Host-side model selector placed on the request.
+    ///
+    /// Usually the same as `id`. A frozen gateway execution uses an internal
+    /// selector here so the router can prove the current catalog still names
+    /// the admitted route before rewriting it to `id` for the wire.
+    pub route_model: String,
     /// Human-readable label.
     pub display_name: String,
     /// Exact provider route.
@@ -639,10 +660,20 @@ pub struct ResolvedModelPolicy {
 }
 
 impl ResolvedModelPolicy {
+    /// Provider-qualified selector persisted for one accepted execution.
+    ///
+    /// Direct routes return the ordinary catalog key. Gateway routes return a
+    /// frozen host selector that the router rewrites to `id` only after the
+    /// current deployment proves it still owns the same route.
+    pub(crate) fn execution_key(&self) -> String {
+        model_registry::selection_key(self.provider, &self.route_model)
+    }
+
     pub(crate) fn curated(spec: &ModelSpec) -> Self {
         Self {
             key: model_registry::selection_key(spec.provider, spec.id),
             id: spec.id.to_owned(),
+            route_model: spec.id.to_owned(),
             display_name: spec.display_name.to_owned(),
             provider: spec.provider,
             vendor: spec.vendor(),
@@ -699,6 +730,7 @@ impl ResolvedModelPolicy {
         Self {
             key: model_registry::selection_key(provider, &model.id),
             id: model.id.clone(),
+            route_model: model.id.clone(),
             display_name: model
                 .display_name
                 .clone()
@@ -789,16 +821,140 @@ fn curated_id_candidate(upstream_id: &str) -> String {
 /// the same deliberately narrow normalization that attributes capabilities
 /// also identifies a safe route-equivalent migration target.
 fn gateway_curated_spec(model: &CustomModelConfig) -> Option<&'static ModelSpec> {
-    model_registry::find(&model.id).or_else(|| {
-        model
-            .upstream_id
-            .as_deref()
-            .into_iter()
-            .chain(model.aliases.iter().map(String::as_str))
-            .find_map(|candidate| {
-                model_registry::find(candidate)
-                    .or_else(|| model_registry::find(&curated_id_candidate(candidate)))
-            })
+    let stronger: Vec<&str> = model
+        .upstream_id
+        .as_deref()
+        .into_iter()
+        .chain(model.aliases.iter().map(String::as_str))
+        .collect();
+    let mut recognized = stronger.iter().filter_map(|candidate| {
+        model_registry::find(candidate)
+            .or_else(|| model_registry::find(&curated_id_candidate(candidate)))
+    });
+    let first = recognized.next();
+    if recognized.any(|candidate| Some(candidate) != first) {
+        return None;
+    }
+    if let Some(spec) = first {
+        if let Some(local) = model_registry::find(&model.id) {
+            if local != spec {
+                return None;
+            }
+        }
+        return Some(spec);
+    }
+    if stronger.is_empty() {
+        model_registry::find(&model.id)
+    } else {
+        None
+    }
+}
+
+#[derive(Serialize)]
+struct GatewayRouteFingerprint<'a> {
+    id: &'a str,
+    upstream_id: &'a Option<String>,
+    aliases: Vec<&'a str>,
+    context_window: u32,
+    max_output_tokens: u32,
+    input_modalities: &'a [InputModality],
+    supports_reasoning: bool,
+    reasoning_efforts: &'a [ReasoningEffort],
+    protocol: GatewayModelProtocol,
+    canonical_key: Option<String>,
+}
+
+fn gateway_digest(value: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(value))
+}
+
+fn gateway_route_digest(model: &CustomModelConfig, protocol: GatewayModelProtocol) -> String {
+    let mut aliases: Vec<_> = model.aliases.iter().map(String::as_str).collect();
+    aliases.sort_unstable();
+    let fingerprint = GatewayRouteFingerprint {
+        id: &model.id,
+        upstream_id: &model.upstream_id,
+        aliases,
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
+        input_modalities: &model.input_modalities,
+        supports_reasoning: model.supports_reasoning,
+        reasoning_efforts: &model.reasoning_efforts,
+        protocol,
+        canonical_key: gateway_curated_spec(model)
+            .map(|spec| model_registry::selection_key(spec.provider, spec.id)),
+    };
+    gateway_digest(&serde_json::to_vec(&fingerprint).expect("gateway fingerprint serializes"))
+}
+
+fn frozen_gateway_route_model(
+    snapshot: &GatewayModelSnapshot,
+    model: &CustomModelConfig,
+    protocol: GatewayModelProtocol,
+) -> String {
+    let deployment = gateway_digest(snapshot.gateway_url.as_bytes());
+    let installation = gateway_digest(snapshot.installation_id.as_deref().unwrap_or("").as_bytes());
+    let route = gateway_route_digest(model, protocol);
+    format!("{FROZEN_GATEWAY_MODEL_PREFIX}{deployment}.{installation}.{route}")
+}
+
+fn freeze_gateway_policy(
+    snapshot: &GatewayModelSnapshot,
+    model: &CustomModelConfig,
+) -> ResolvedModelPolicy {
+    let protocol = snapshot
+        .model_protocols
+        .get(&model.id)
+        .copied()
+        .unwrap_or_default();
+    let route_model = frozen_gateway_route_model(snapshot, model, protocol);
+    let mut policy = ResolvedModelPolicy::gateway_for(model);
+    policy.route_model = route_model;
+    policy
+}
+
+pub(crate) fn gateway_execution_policy(
+    snapshot: &GatewayModelSnapshot,
+    selection: &str,
+) -> Option<ResolvedModelPolicy> {
+    let (provider, id) = model_registry::parse_selection_key(selection)?;
+    if provider != ProviderKind::ModelGateway {
+        return None;
+    }
+    if id.starts_with(FROZEN_GATEWAY_MODEL_PREFIX) {
+        return resolve_frozen_gateway_policy(snapshot, id);
+    }
+    snapshot
+        .models
+        .iter()
+        .find(|model| model.id == id)
+        .map(|model| freeze_gateway_policy(snapshot, model))
+}
+
+fn resolve_frozen_gateway_policy(
+    snapshot: &GatewayModelSnapshot,
+    route_model: &str,
+) -> Option<ResolvedModelPolicy> {
+    let suffix = route_model.strip_prefix(FROZEN_GATEWAY_MODEL_PREFIX)?;
+    let mut parts = suffix.split('.');
+    let deployment = parts.next()?;
+    let installation = parts.next()?;
+    let route = parts.next()?;
+    if parts.next().is_some()
+        || deployment != gateway_digest(snapshot.gateway_url.as_bytes())
+        || installation
+            != gateway_digest(snapshot.installation_id.as_deref().unwrap_or("").as_bytes())
+    {
+        return None;
+    }
+    snapshot.models.iter().find_map(|model| {
+        let protocol = snapshot
+            .model_protocols
+            .get(&model.id)
+            .copied()
+            .unwrap_or_default();
+        (route == gateway_route_digest(model, protocol))
+            .then(|| freeze_gateway_policy(snapshot, model))
     })
 }
 
@@ -809,9 +965,9 @@ fn gateway_curated_spec(model: &CustomModelConfig) -> Option<&'static ModelSpec>
 /// reader chooses deliberately instead of Tidebreak guessing between routes.
 pub(crate) async fn unique_gateway_equivalent(
     store: &dyn Store,
-    policy: &crate::managed_policy::ManagedPolicy,
+    snapshot: &GatewayModelSnapshot,
     selection: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<ResolvedModelPolicy>> {
     let spec = if let Some((provider, id)) = model_registry::parse_selection_key(selection) {
         if provider == ProviderKind::ModelGateway {
             return Ok(None);
@@ -831,11 +987,11 @@ pub(crate) async fn unique_gateway_equivalent(
         model_registry::find_for(owner.provider, &owner.id)
     };
     let Some(spec) = spec else { return Ok(None) };
-    let mut matches = gateway_models(store, policy)
-        .await?
-        .into_iter()
+    let mut matches = snapshot
+        .models
+        .iter()
         .filter(|model| gateway_curated_spec(model).is_some_and(|candidate| candidate == spec))
-        .map(|model| model_registry::selection_key(ProviderKind::ModelGateway, &model.id));
+        .map(|model| freeze_gateway_policy(snapshot, model));
     let first = matches.next();
     Ok(match (first, matches.next()) {
         (Some(key), None) => Some(key),
@@ -908,7 +1064,7 @@ pub fn apply_model_policy(
     reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<()> {
     config.provider = Some(ProviderId::new(policy.provider.as_str()));
-    config.model = policy.id.clone();
+    config.model = policy.route_model.clone();
     config.reasoning_model = policy.supports_reasoning;
     config.image_input = policy.input_modalities.contains(&InputModality::Image);
     config.tools_supported = policy.supports_tools;
@@ -1578,23 +1734,34 @@ pub async fn collect_routes(
             if !(base.starts_with("https://") || base.starts_with("http://")) {
                 continue;
             }
-            let (models, model_protocols) = match gateway_snapshot_for_policy(store, policy)
+            let snapshot = gateway_snapshot_for_policy(store, policy)
                 .await
                 .unwrap_or_default()
-            {
-                Some(GatewayModelSnapshot {
-                    models,
-                    model_protocols,
-                    ..
-                }) => (models, model_protocols),
-                None => (Vec::new(), BTreeMap::new()),
-            };
+                .filter(|snapshot| snapshot.installation_id.as_deref() == source.binding_id());
             let mut anthropic_models = Vec::new();
             let mut openai_models = Vec::new();
-            for model in models {
-                match model_protocols.get(&model.id).copied().unwrap_or_default() {
-                    GatewayModelProtocol::AnthropicMessages => anthropic_models.push(model.id),
-                    GatewayModelProtocol::OpenaiResponses => openai_models.push(model.id),
+            let mut anthropic_rewrites = HashMap::new();
+            let mut openai_rewrites = HashMap::new();
+            if let Some(snapshot) = snapshot.as_ref() {
+                for model in &snapshot.models {
+                    let protocol = snapshot
+                        .model_protocols
+                        .get(&model.id)
+                        .copied()
+                        .unwrap_or_default();
+                    let frozen = frozen_gateway_route_model(snapshot, model, protocol);
+                    match protocol {
+                        GatewayModelProtocol::AnthropicMessages => {
+                            anthropic_models.push(model.id.clone());
+                            anthropic_models.push(frozen.clone());
+                            anthropic_rewrites.insert(frozen, model.id.clone());
+                        }
+                        GatewayModelProtocol::OpenaiResponses => {
+                            openai_models.push(model.id.clone());
+                            openai_models.push(frozen.clone());
+                            openai_rewrites.insert(frozen, model.id.clone());
+                        }
+                    }
                 }
             }
             let base = base.trim_end_matches('/');
@@ -1608,6 +1775,7 @@ pub async fn collect_routes(
                     api_key: String::new(),
                     base_url: Some(format!("{base}/compat/anthropic")),
                     curated_models: Vec::new(),
+                    model_rewrites: HashMap::new(),
                     token_source: Some(source),
                     chatgpt_account_id: None,
                 });
@@ -1618,6 +1786,7 @@ pub async fn collect_routes(
                         api_key: String::new(),
                         base_url: Some(format!("{base}/compat/anthropic")),
                         curated_models: anthropic_models,
+                        model_rewrites: anthropic_rewrites,
                         token_source: Some(source.clone()),
                         chatgpt_account_id: None,
                     });
@@ -1628,6 +1797,7 @@ pub async fn collect_routes(
                         api_key: String::new(),
                         base_url: Some(format!("{base}/compat/openai/v1")),
                         curated_models: openai_models,
+                        model_rewrites: openai_rewrites,
                         token_source: Some(source),
                         chatgpt_account_id: None,
                     });
@@ -1666,6 +1836,7 @@ pub async fn collect_routes(
                     .filter(|spec| spec.supports_chatgpt_auth())
                     .map(|spec| spec.id.to_string())
                     .collect(),
+                model_rewrites: HashMap::new(),
                 token_source: Some(source),
                 chatgpt_account_id: Some(account_id),
             });
@@ -1706,6 +1877,7 @@ pub async fn collect_routes(
                 .map(|spec| spec.id.to_string())
                 .chain(config.models.into_iter().map(|model| model.id))
                 .collect(),
+            model_rewrites: HashMap::new(),
             token_source: None,
             chatgpt_account_id: None,
         });
@@ -1760,6 +1932,12 @@ pub async fn resolve_model_policy(
         if let Some(spec) = model_registry::find_for(provider, id) {
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
+        if provider == ProviderKind::ModelGateway && id.starts_with(FROZEN_GATEWAY_MODEL_PREFIX) {
+            return Ok(read_gateway_snapshot(store)
+                .await?
+                .as_ref()
+                .and_then(|snapshot| resolve_frozen_gateway_policy(snapshot, id)));
+        }
         let models = match provider {
             kind if kind.accepts_configured_models() => read_config(store, provider).await?.models,
             // Resolution is not an offer: usability and routing gate the
@@ -1811,7 +1989,16 @@ pub async fn provider_is_usable(
         let Some(gateway_url) = policy.gateway_url.as_deref() else {
             return Ok(false);
         };
-        return Ok(crate::connectors::has_stored_credentials_for(secrets, gateway_url).await);
+        let Some(installation_id) =
+            crate::connectors::stored_installation_id_for(secrets, gateway_url).await
+        else {
+            return Ok(false);
+        };
+        return Ok(gateway_snapshot_for_policy(store, policy)
+            .await?
+            .is_some_and(|snapshot| {
+                snapshot.installation_id.as_deref() == Some(&installation_id)
+            }));
     }
     if kind == ProviderKind::ModelGateway {
         return Ok(false);
@@ -1845,6 +2032,23 @@ pub async fn model_is_usable(
 ) -> Result<bool> {
     if !provider_is_usable(store, secrets, model.provider, policy).await? {
         return Ok(false);
+    }
+    if model.provider == ProviderKind::ModelGateway {
+        let Some(snapshot) = gateway_snapshot_for_policy(store, policy).await? else {
+            return Ok(false);
+        };
+        let matches_snapshot = if model.route_model.starts_with(FROZEN_GATEWAY_MODEL_PREFIX) {
+            resolve_frozen_gateway_policy(&snapshot, &model.route_model)
+                .is_some_and(|current| current == *model)
+        } else {
+            snapshot
+                .models
+                .iter()
+                .any(|candidate| candidate.id == model.id)
+        };
+        if !matches_snapshot {
+            return Ok(false);
+        }
     }
     // ChatGPT / Codex auth rejects some API-only OpenAI ids. Keep the row in
     // the catalog (API-key installs still need it) but mark it unusable here.
@@ -1952,6 +2156,7 @@ mod tests {
             &store,
             &GatewayModelSnapshot {
                 gateway_url: policy.gateway_url.clone().unwrap(),
+                installation_id: Some("install-1".into()),
                 models: vec![CustomModelConfig {
                     id: "sample-claude".into(),
                     upstream_id: Some("claude-opus-5".into()),
@@ -1969,27 +2174,49 @@ mod tests {
         (store, directory, policy)
     }
 
+    fn gateway_test_snapshot(
+        installation_id: &str,
+        models: Vec<CustomModelConfig>,
+    ) -> GatewayModelSnapshot {
+        GatewayModelSnapshot {
+            gateway_url: "https://gateway.example/".into(),
+            installation_id: Some(installation_id.into()),
+            models,
+            model_protocols: BTreeMap::new(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        }
+    }
+
     #[tokio::test]
     async fn a_unique_bare_curated_id_migrates_to_its_gateway_equivalent() {
         let (store, _directory, policy) = gateway_migration_test_store().await;
+        let snapshot = gateway_snapshot_for_policy(&store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
 
         let resolved = resolve_model_policy(&store, "claude-opus-5", false)
             .await
             .unwrap()
             .expect("the unique bare id resolves to Anthropic");
         assert_eq!(resolved.provider, ProviderKind::Anthropic);
-        assert_eq!(
-            unique_gateway_equivalent(&store, &policy, "claude-opus-5")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("model_gateway::sample-claude")
-        );
+        let equivalent = unique_gateway_equivalent(&store, &snapshot, "claude-opus-5")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(equivalent.key, "model_gateway::sample-claude");
+        assert_eq!(equivalent.id, "sample-claude");
+        assert_ne!(equivalent.route_model, equivalent.id);
     }
 
     #[tokio::test]
     async fn a_bare_curated_id_shadowed_by_a_configured_model_does_not_migrate() {
         let (store, _directory, policy) = gateway_migration_test_store().await;
+        let snapshot = gateway_snapshot_for_policy(&store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
         write_config(
             &store,
             ProviderKind::OpenaiCompatible,
@@ -2012,11 +2239,153 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            unique_gateway_equivalent(&store, &policy, "claude-opus-5")
+            unique_gateway_equivalent(&store, &snapshot, "claude-opus-5")
                 .await
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_identity_conflicting_local_and_upstream_ids_are_not_equivalent_or_enriched() {
+        let (store, _directory, _policy) = gateway_migration_test_store().await;
+        let snapshot = gateway_test_snapshot(
+            "install-1",
+            vec![CustomModelConfig {
+                id: "claude-opus-5".into(),
+                upstream_id: Some("gpt-5.6-sol".into()),
+                input_modalities: vec![InputModality::Text, InputModality::Image],
+                supports_reasoning: true,
+                reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                ..Default::default()
+            }],
+        );
+
+        for selection in ["anthropic::claude-opus-5", "openai::gpt-5.6-sol"] {
+            assert_eq!(
+                unique_gateway_equivalent(&store, &snapshot, selection)
+                    .await
+                    .unwrap(),
+                None,
+                "a conflicting identity must not be equivalent to {selection}"
+            );
+        }
+
+        let policy = gateway_execution_policy(&snapshot, "model_gateway::claude-opus-5")
+            .expect("the deployment-local route remains selectable without canonical claims");
+        assert_eq!(policy.vendor, None);
+        assert_eq!(policy.verification, VerificationTier::Unverified);
+        assert_eq!(policy.input_modalities, vec![InputModality::Text]);
+        assert!(!policy.supports_structured_output);
+        assert!(!policy.supports_reasoning);
+        assert!(policy.reasoning_efforts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gateway_identity_conflicting_recognized_aliases_are_not_equivalent_or_enriched() {
+        let (store, _directory, _policy) = gateway_migration_test_store().await;
+        let snapshot = gateway_test_snapshot(
+            "install-1",
+            vec![CustomModelConfig {
+                id: "deployment-model".into(),
+                aliases: vec!["claude-opus-5".into(), "gpt-5.6-sol".into()],
+                input_modalities: vec![InputModality::Text, InputModality::Image],
+                supports_reasoning: true,
+                reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                ..Default::default()
+            }],
+        );
+
+        for selection in ["anthropic::claude-opus-5", "openai::gpt-5.6-sol"] {
+            assert_eq!(
+                unique_gateway_equivalent(&store, &snapshot, selection)
+                    .await
+                    .unwrap(),
+                None,
+                "conflicting aliases must not be equivalent to {selection}"
+            );
+        }
+
+        let policy = gateway_execution_policy(&snapshot, "model_gateway::deployment-model")
+            .expect("the deployment-local route remains selectable without canonical claims");
+        assert_eq!(policy.vendor, None);
+        assert_eq!(policy.verification, VerificationTier::Unverified);
+        assert_eq!(policy.input_modalities, vec![InputModality::Text]);
+        assert!(!policy.supports_structured_output);
+        assert!(!policy.supports_reasoning);
+        assert!(policy.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn frozen_gateway_key_stops_resolving_when_the_same_local_id_is_retargeted() {
+        let original = gateway_test_snapshot(
+            "install-1",
+            vec![CustomModelConfig {
+                id: "deployment-model".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                ..Default::default()
+            }],
+        );
+        let frozen = gateway_execution_policy(&original, "model_gateway::deployment-model")
+            .expect("the original route resolves")
+            .execution_key();
+        let retargeted = gateway_test_snapshot(
+            "install-1",
+            vec![CustomModelConfig {
+                id: "deployment-model".into(),
+                upstream_id: Some("gpt-5.6-sol".into()),
+                ..Default::default()
+            }],
+        );
+
+        assert_eq!(gateway_execution_policy(&retargeted, &frozen), None);
+    }
+
+    #[test]
+    fn frozen_gateway_key_survives_unrelated_catalog_row_changes() {
+        let selected = CustomModelConfig {
+            id: "deployment-model".into(),
+            upstream_id: Some("claude-opus-5".into()),
+            ..Default::default()
+        };
+        let original = gateway_test_snapshot("install-1", vec![selected.clone()]);
+        let frozen = gateway_execution_policy(&original, "model_gateway::deployment-model")
+            .expect("the original route resolves")
+            .execution_key();
+        let changed = gateway_test_snapshot(
+            "install-1",
+            vec![
+                CustomModelConfig {
+                    id: "unrelated-model".into(),
+                    upstream_id: Some("gpt-5.6-sol".into()),
+                    context_window: 64_000,
+                    max_output_tokens: 8_000,
+                    ..Default::default()
+                },
+                selected,
+            ],
+        );
+
+        let resolved = gateway_execution_policy(&changed, &frozen)
+            .expect("an unrelated row must not invalidate the selected route");
+        assert_eq!(resolved.id, "deployment-model");
+        assert_eq!(resolved.execution_key(), frozen);
+    }
+
+    #[test]
+    fn frozen_gateway_key_stops_resolving_when_the_installation_changes() {
+        let model = CustomModelConfig {
+            id: "deployment-model".into(),
+            upstream_id: Some("claude-opus-5".into()),
+            ..Default::default()
+        };
+        let original = gateway_test_snapshot("install-1", vec![model.clone()]);
+        let frozen = gateway_execution_policy(&original, "model_gateway::deployment-model")
+            .expect("the original route resolves")
+            .execution_key();
+        let replaced = gateway_test_snapshot("install-2", vec![model]);
+
+        assert_eq!(gateway_execution_policy(&replaced, &frozen), None);
     }
 
     #[test]

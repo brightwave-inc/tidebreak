@@ -1663,6 +1663,7 @@ mod tests {
             },
             base_url: Some(format!("http://{address}/v1")),
             curated_models: vec!["hosted-model".to_string()],
+            model_rewrites: std::collections::HashMap::new(),
             token_source: is_gateway.then(|| {
                 std::sync::Arc::new(StaticGatewayTokenSource)
                     as std::sync::Arc<dyn crate::BearerTokenSource>
@@ -1844,6 +1845,7 @@ mod tests {
             api_key: String::new(),
             base_url: Some(format!("http://{address}/compat/openai/v1")),
             curated_models: vec!["gpt-fable-5".to_string()],
+            model_rewrites: std::collections::HashMap::new(),
             token_source: Some(source.clone()),
             chatgpt_account_id: None,
         }]);

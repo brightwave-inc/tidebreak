@@ -480,6 +480,19 @@ pub async fn has_stored_credentials_for(secrets: &dyn SecretProvider, base_url: 
     )
 }
 
+/// Installation id of the session stored for `base_url`, without exposing any
+/// token material.
+pub async fn stored_installation_id_for(
+    secrets: &dyn SecretProvider,
+    base_url: &str,
+) -> Option<String> {
+    let raw = secrets.get_secret(SECRET_KEY).await.ok().flatten()?;
+    let credentials = serde_json::from_str::<GatewayCredentials>(&raw).ok()?;
+    credentials
+        .matches_base_url(base_url)
+        .then_some(credentials.installation_id)
+}
+
 /// Keychain-backed storage for [`GatewayCredentials`].
 #[derive(Clone)]
 pub struct CredentialVault {
@@ -1227,6 +1240,25 @@ impl GatewayConnection {
     /// A fresh access token for `resource`, from cache when possible and via
     /// rotating refresh otherwise.
     pub async fn access_token(&self, resource: &str) -> Result<String> {
+        self.access_token_bound(resource, None).await
+    }
+
+    /// A fresh token only while the stored session is still the installation
+    /// that constructed the caller's route.
+    pub async fn access_token_for_installation(
+        &self,
+        resource: &str,
+        expected_installation: &str,
+    ) -> Result<String> {
+        self.access_token_bound(resource, Some(expected_installation))
+            .await
+    }
+
+    async fn access_token_bound(
+        &self,
+        resource: &str,
+        expected_installation: Option<&str>,
+    ) -> Result<String> {
         let _guard = self.token_motion.lock().await;
         let Some(mut credentials) = self.vault.load().await? else {
             return Err(sign_in_required("no gateway session is stored"));
@@ -1236,6 +1268,11 @@ impl GatewayConnection {
         if !self.matches_deployment(&credentials) {
             return Err(sign_in_required(
                 "the stored gateway session belongs to a different gateway deployment",
+            ));
+        }
+        if expected_installation.is_some_and(|expected| credentials.installation_id != expected) {
+            return Err(sign_in_required(
+                "the model gateway session changed after this route was selected",
             ));
         }
         if let Some(cached) = credentials.access_tokens.get(resource) {
@@ -1286,6 +1323,28 @@ impl GatewayConnection {
     /// session is rejected by the gateway, and one remint under a fresh id
     /// self-heals that without a sign-out.
     pub async fn attested_access_token(&self, resource: &str, context_key: &str) -> Result<String> {
+        self.attested_access_token_bound(resource, context_key, None)
+            .await
+    }
+
+    /// An attested token pinned to the installation that constructed the
+    /// inference route.
+    pub async fn attested_access_token_for_installation(
+        &self,
+        resource: &str,
+        context_key: &str,
+        expected_installation: &str,
+    ) -> Result<String> {
+        self.attested_access_token_bound(resource, context_key, Some(expected_installation))
+            .await
+    }
+
+    async fn attested_access_token_bound(
+        &self,
+        resource: &str,
+        context_key: &str,
+        expected_installation: Option<&str>,
+    ) -> Result<String> {
         let _guard = self.token_motion.lock().await;
         let Some(mut credentials) = self.vault.load().await? else {
             return Err(sign_in_required("no gateway session is stored"));
@@ -1293,6 +1352,11 @@ impl GatewayConnection {
         if !self.matches_deployment(&credentials) {
             return Err(sign_in_required(
                 "the stored gateway session belongs to a different gateway deployment",
+            ));
+        }
+        if expected_installation.is_some_and(|expected| credentials.installation_id != expected) {
+            return Err(sign_in_required(
+                "the model gateway session changed after this route was selected",
             ));
         }
         let mut attested = self.attested.lock().await;

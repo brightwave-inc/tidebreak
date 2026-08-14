@@ -36,10 +36,10 @@ pub use chatgpt::{
 };
 pub use gateway::{
     has_stored_credentials, has_stored_credentials_for, is_sign_in_required,
-    validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault, GatewayApp, GatewayAuth,
-    GatewayAuthConfig, GatewayCatalog, GatewayCatalogApp, GatewayCatalogFetch, GatewayCatalogModel,
-    GatewayConnection, GatewayConsentOutcome, GatewayCredentials, GatewayIdentity,
-    GatewayInvokeOutcome, GatewayMeta, GatewayModel, GatewayOperationSummary,
-    GatewayRegistrationOutcome, GatewaySurfaces, PendingSignIn, TokenSet, MEMBER_CATALOG_V1,
-    RESOURCE_CONTROL, RESOURCE_LLM, SECRET_KEY as GATEWAY_SECRET_KEY,
+    stored_installation_id_for, validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault,
+    GatewayApp, GatewayAuth, GatewayAuthConfig, GatewayCatalog, GatewayCatalogApp,
+    GatewayCatalogFetch, GatewayCatalogModel, GatewayConnection, GatewayConsentOutcome,
+    GatewayCredentials, GatewayIdentity, GatewayInvokeOutcome, GatewayMeta, GatewayModel,
+    GatewayOperationSummary, GatewayRegistrationOutcome, GatewaySurfaces, PendingSignIn, TokenSet,
+    MEMBER_CATALOG_V1, RESOURCE_CONTROL, RESOURCE_LLM, SECRET_KEY as GATEWAY_SECRET_KEY,
 };

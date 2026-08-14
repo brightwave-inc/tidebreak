@@ -41,6 +41,12 @@ pub(crate) const GATEWAY_CONVERSATION_HEADER: &str = "x-model-gateway-conversati
 /// behind its own lock. Implementations must never log or echo the token.
 #[async_trait]
 pub trait BearerTokenSource: Send + Sync {
+    /// Stable non-secret identity this source is bound to, when its credential
+    /// must not follow a replacement session behind the same endpoint.
+    fn binding_id(&self) -> Option<&str> {
+        None
+    }
+
     /// A currently valid token, refreshing if the cached one is near expiry.
     async fn bearer_token(&self) -> Result<String>;
 
@@ -147,6 +153,14 @@ pub struct Route {
     /// Curated model ids this route claims. Used for preferential selection;
     /// `OpenaiCompatible` typically passes an empty list (free-form fallback).
     pub curated_models: Vec<String>,
+    /// Host-only model selectors rewritten to provider wire ids after this
+    /// exact route has claimed them.
+    ///
+    /// Managed gateway turns use this to bind an accepted turn to one catalog
+    /// identity without leaking Tidebreak's frozen selector onto the wire.
+    /// Every key must also appear in `curated_models`; unclaimed rewrites are
+    /// ignored.
+    pub model_rewrites: HashMap<String, String>,
     /// Per-request credential supplier for short-lived tokens. Takes
     /// precedence over `api_key` when present.
     pub token_source: Option<Arc<dyn BearerTokenSource>>,
@@ -162,6 +176,7 @@ impl std::fmt::Debug for Route {
             .field("api_key", &"***")
             .field("base_url", &self.base_url)
             .field("curated_models", &self.curated_models)
+            .field("model_rewrites", &self.model_rewrites)
             .field("token_source", &self.token_source.is_some())
             .field("chatgpt_account_id", &self.chatgpt_account_id)
             .finish()
@@ -180,6 +195,8 @@ pub struct Router {
     /// provider + model claims. The provider dimension is intentional: two
     /// endpoints may expose the same raw model id without becoming ambiguous.
     curated: HashMap<String, RouteKind>,
+    /// Provider-qualified host selector to provider wire model id.
+    model_rewrites: HashMap<String, String>,
     has_openai_compat: bool,
     /// Fingerprint of the routes this was built from, for cache invalidation.
     fingerprint: String,
@@ -192,6 +209,7 @@ impl Router {
         let fingerprint = fingerprint_routes(&routes);
         let mut adapters: HashMap<RouteKind, Arc<dyn ModelProvider>> = HashMap::new();
         let mut curated: HashMap<String, RouteKind> = HashMap::new();
+        let mut model_rewrites = HashMap::new();
         let mut has_openai_compat = false;
 
         for route in routes {
@@ -199,7 +217,11 @@ impl Router {
                 has_openai_compat = true;
             }
             for model in &route.curated_models {
-                curated.insert(format!("{}::{model}", route.kind.provider_id()), route.kind);
+                let qualified = format!("{}::{model}", route.kind.provider_id());
+                curated.insert(qualified.clone(), route.kind);
+                if let Some(wire_model) = route.model_rewrites.get(model) {
+                    model_rewrites.insert(qualified, wire_model.clone());
+                }
             }
             if let Some(adapter) = build_adapter(&route) {
                 adapters.insert(route.kind, adapter);
@@ -209,6 +231,7 @@ impl Router {
         Self {
             adapters,
             curated,
+            model_rewrites,
             has_openai_compat,
             fingerprint,
         }
@@ -283,7 +306,7 @@ impl ModelProvider for Router {
         ProviderId::new("router")
     }
 
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+    async fn stream(&self, mut req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let Some(kind) = self.select_for(req.provider.as_ref(), &req.model) else {
             return Err(AgentError::config(format!(
                 "provider `{}` is unavailable or cannot serve model `{}`",
@@ -299,6 +322,10 @@ impl ModelProvider for Router {
                 req.model
             )));
         };
+        let qualified = format!("{}::{}", kind.provider_id(), req.model);
+        if let Some(wire_model) = self.model_rewrites.get(&qualified) {
+            req.model = wire_model.clone();
+        }
         // The route hint is host policy, not provider wire data. Adapters keep
         // it only to gate provider-native reasoning/tool replay; their request
         // builders enumerate wire fields explicitly and never serialize it.
@@ -441,7 +468,7 @@ fn fingerprint_routes(routes: &[Route]) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}",
                 r.kind.as_str(),
                 // A rotating token must not thrash the cached router; the
                 // fingerprint tracks *whether* a live source exists, and the
@@ -456,6 +483,15 @@ fn fingerprint_routes(routes: &[Route]) -> String {
                     let mut models = r.curated_models.clone();
                     models.sort();
                     models.join(",")
+                },
+                {
+                    let mut rewrites: Vec<_> = r.model_rewrites.iter().collect();
+                    rewrites.sort();
+                    rewrites
+                        .into_iter()
+                        .map(|(selection, wire)| format!("{selection}>{wire}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 },
                 r.chatgpt_account_id.as_deref().unwrap_or("")
             )
@@ -491,6 +527,7 @@ mod tests {
             api_key: key.into(),
             base_url: base.map(str::to_owned),
             curated_models: models.iter().map(|m| (*m).to_string()).collect(),
+            model_rewrites: HashMap::new(),
             token_source: None,
             chatgpt_account_id: None,
         }
@@ -657,6 +694,23 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingProvider {
+        requests: std::sync::Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("recording")
+        }
+
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            self.requests.lock().unwrap().push(req);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
     #[test]
     fn a_model_gateway_route_requires_a_live_token_source() {
         // No source ⇒ no adapter, even with a base URL: a static key cannot
@@ -719,6 +773,67 @@ mod tests {
             Some(RouteKind::ModelGatewayOpenai)
         );
         assert_eq!(router.select_for(Some(&gateway), "unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn frozen_selector_is_rewritten_and_an_old_unclaimed_selector_fails_closed() {
+        let old_selector = "__tidebreak_gateway_v1.old-deployment.old-install.old-route";
+        let new_selector = "__tidebreak_gateway_v1.new-deployment.new-install.new-route";
+        let local_wire_model = "deployment-local-opus";
+        let gateway = ProviderId::new("model_gateway");
+        let recorder = Arc::new(RecordingProvider::default());
+
+        let mut old_route = route(RouteKind::ModelGateway, "", &[old_selector], None);
+        old_route
+            .model_rewrites
+            .insert(old_selector.into(), "retired-local-model".into());
+        let mut old_router = Router::build(vec![old_route]);
+        old_router
+            .adapters
+            .insert(RouteKind::ModelGateway, recorder.clone());
+        assert_eq!(
+            old_router.select_for(Some(&gateway), old_selector),
+            Some(RouteKind::ModelGateway)
+        );
+
+        let mut current_route = route(RouteKind::ModelGateway, "", &[new_selector], None);
+        current_route
+            .model_rewrites
+            .insert(new_selector.into(), local_wire_model.into());
+        let mut current_router = Router::build(vec![current_route]);
+        current_router
+            .adapters
+            .insert(RouteKind::ModelGateway, recorder.clone());
+
+        let _stream = current_router
+            .stream(ChatRequest {
+                provider: Some(gateway.clone()),
+                model: new_selector.into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        {
+            let requests = recorder.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].model, local_wire_model);
+            assert_eq!(requests[0].provider.as_ref(), Some(&gateway));
+        }
+
+        let error = match current_router
+            .stream(ChatRequest {
+                provider: Some(gateway),
+                model: old_selector.into(),
+                ..Default::default()
+            })
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an unclaimed frozen selector must fail closed"),
+        };
+        assert!(error.to_string().contains(old_selector));
+        assert_eq!(recorder.requests.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -832,6 +947,7 @@ mod tests {
         let router = Router {
             adapters,
             curated: HashMap::from([("xai::grok-test".into(), RouteKind::Xai)]),
+            model_rewrites: HashMap::new(),
             has_openai_compat: false,
             fingerprint: String::new(),
         };

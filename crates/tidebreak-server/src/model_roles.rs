@@ -175,6 +175,45 @@ pub async fn resolve(
     role: ModelRole,
 ) -> Result<Option<ResolvedModelPolicy>> {
     let managed = crate::managed_policy::resolve(provisioned_policy, os_policy)?;
+    if managed.managed {
+        if let Some(selection) = read_selection(store, role).await? {
+            if let Some(policy) =
+                effective_chat_policy(store, secrets, &managed, &selection, true).await?
+            {
+                if role.supports_model(&policy) {
+                    return Ok(Some(policy));
+                }
+            }
+        }
+        if role.defaults().is_empty()
+            || !providers::provider_is_usable(
+                store,
+                secrets,
+                providers::ProviderKind::ModelGateway,
+                &managed,
+            )
+            .await?
+        {
+            return Ok(None);
+        }
+        let Some(snapshot) = providers::gateway_snapshot_for_policy(store, &managed).await? else {
+            return Ok(None);
+        };
+        let mut models: Vec<_> = snapshot.models.iter().collect();
+        models.sort_by_key(|model| model.context_window);
+        for model in models {
+            let key = crate::model_registry::selection_key(
+                providers::ProviderKind::ModelGateway,
+                &model.id,
+            );
+            if let Some(policy) = providers::gateway_execution_policy(&snapshot, &key) {
+                if role.supports_model(&policy) {
+                    return Ok(Some(policy));
+                }
+            }
+        }
+        return Ok(None);
+    }
     if let Some(selection) = read_selection(store, role).await? {
         // A selection whose provider has since been disabled or lost its
         // credential, or whose capabilities no longer satisfy the role, falls
@@ -189,14 +228,11 @@ pub async fn resolve(
     // `chat` has no default list on purpose — its last resort is process
     // state, not a registry row — so the managed substitution applies only to
     // roles that walk one at all.
-    let defaults: Vec<String> = if managed.managed && !role.defaults().is_empty() {
-        gateway_defaults(store, &managed).await?
-    } else {
-        role.defaults()
-            .iter()
-            .map(|key| (*key).to_owned())
-            .collect()
-    };
+    let defaults: Vec<String> = role
+        .defaults()
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
     for key in defaults {
         if let Some(policy) = usable_policy(store, secrets, &managed, &key).await? {
             if role.supports_model(&policy) {
@@ -205,45 +241,6 @@ pub async fn resolve(
         }
     }
     Ok(None)
-}
-
-/// A managed profile's ordered role defaults: the models the gateway has
-/// synced as entitled, smallest context window first.
-///
-/// The curated lists these stand in for name each provider's *cheapest* row,
-/// because a role like `utility` runs work the user did not ask for and must
-/// not bill it to a flagship. The gateway describes entitlement, not price,
-/// so context window is the proxy available — it tracks model tier closely
-/// enough to keep that intent, and ties keep the gateway's own order.
-async fn gateway_defaults(
-    store: &dyn Store,
-    policy: &crate::managed_policy::ManagedPolicy,
-) -> Result<Vec<String>> {
-    let mut models = providers::gateway_models(store, policy).await?;
-    models.sort_by_key(|model| model.context_window);
-    Ok(selection_keys(&models))
-}
-
-/// The entitled models in the gateway's own listed order — the order the
-/// composer picker renders them, and therefore the chat role's fallback
-/// order. Contrast [`gateway_defaults`], which re-sorts the same list
-/// cheapest-first for background work.
-async fn gateway_listed(
-    store: &dyn Store,
-    policy: &crate::managed_policy::ManagedPolicy,
-) -> Result<Vec<String>> {
-    Ok(selection_keys(
-        &providers::gateway_models(store, policy).await?,
-    ))
-}
-
-fn selection_keys(models: &[providers::CustomModelConfig]) -> Vec<String> {
-    models
-        .iter()
-        .map(|model| {
-            crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, &model.id)
-        })
-        .collect()
 }
 
 /// The chat role's effective policy for `selection` under `managed`.
@@ -272,25 +269,55 @@ pub async fn effective_chat_policy(
     if !managed.managed {
         return Ok(resolved);
     }
+    let snapshot = providers::gateway_snapshot_for_policy(store, managed).await?;
+    let Some(snapshot) = snapshot.as_ref() else {
+        return Ok(None);
+    };
     if let Some(equivalent) =
-        providers::unique_gateway_equivalent(store, managed, selection).await?
+        providers::unique_gateway_equivalent(store, snapshot, selection).await?
     {
-        return usable_policy(store, secrets, managed, &equivalent).await;
+        return Ok(providers::provider_is_usable(
+            store,
+            secrets,
+            providers::ProviderKind::ModelGateway,
+            managed,
+        )
+        .await?
+        .then_some(equivalent));
     }
     if let Some(policy) = resolved {
-        if policy.provider == providers::ProviderKind::ModelGateway
-            && providers::model_is_usable(store, secrets, &policy, managed).await?
-        {
-            return Ok(Some(policy));
+        if policy.provider == providers::ProviderKind::ModelGateway {
+            let frozen = providers::gateway_execution_policy(snapshot, selection);
+            if frozen.is_some()
+                && providers::provider_is_usable(
+                    store,
+                    secrets,
+                    providers::ProviderKind::ModelGateway,
+                    managed,
+                )
+                .await?
+            {
+                return Ok(frozen);
+            }
         }
     }
     if explicit {
         return Ok(None);
     }
-    for key in gateway_listed(store, managed).await? {
-        if let Some(policy) = usable_policy(store, secrets, managed, &key).await? {
-            return Ok(Some(policy));
-        }
+    if !providers::provider_is_usable(
+        store,
+        secrets,
+        providers::ProviderKind::ModelGateway,
+        managed,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    if let Some(model) = snapshot.models.first() {
+        let key =
+            crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, &model.id);
+        return Ok(providers::gateway_execution_policy(snapshot, &key));
     }
     Ok(None)
 }
@@ -329,7 +356,7 @@ pub async fn resolve_utility_model(
     };
     Ok(Some(UtilityModel {
         provider: Some(ProviderId::new(policy.provider.as_str())),
-        model: policy.id.clone(),
+        model: policy.route_model.clone(),
         reasoning_model: policy.supports_reasoning,
         // Same reconciliation `apply_model_policy` performs for a foreground
         // turn: a level this model does not accept degrades to the nearest one
@@ -503,46 +530,46 @@ mod tests {
             .save(&credentials)
             .await
             .unwrap();
-        providers::write_gateway_snapshot(
-            &*store,
-            &providers::GatewayModelSnapshot {
-                gateway_url: "https://corp.gateway/".to_string(),
-                // Listed flagship-first, as a gateway well might: the walk
-                // must not bill background work to the biggest model it is
-                // entitled to.
-                models: vec![
-                    CustomModelConfig {
-                        id: "gateway-flagship".to_string(),
-                        upstream_id: Some("claude-opus-5".to_string()),
-                        display_name: Some("Gateway Flagship".to_string()),
-                        context_window: 1_000_000,
-                        max_output_tokens: 64_000,
-                        ..Default::default()
-                    },
-                    CustomModelConfig {
-                        id: "gateway-haiku".to_string(),
-                        upstream_id: Some("claude-haiku-4-5-20251001".to_string()),
-                        display_name: Some("Gateway Haiku".to_string()),
-                        context_window: 200_000,
-                        max_output_tokens: 8_192,
-                        ..Default::default()
-                    },
-                ],
-                model_protocols: Default::default(),
-                member_catalog: None,
-                catalog_etag: None,
-            },
-        )
-        .await
-        .unwrap();
+        let snapshot = providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".to_string(),
+            installation_id: Some("install-1".into()),
+            // Listed flagship-first, as a gateway well might: the walk
+            // must not bill background work to the biggest model it is
+            // entitled to.
+            models: vec![
+                CustomModelConfig {
+                    id: "gateway-flagship".to_string(),
+                    upstream_id: Some("claude-opus-5".to_string()),
+                    display_name: Some("Gateway Flagship".to_string()),
+                    context_window: 1_000_000,
+                    max_output_tokens: 64_000,
+                    ..Default::default()
+                },
+                CustomModelConfig {
+                    id: "gateway-haiku".to_string(),
+                    upstream_id: Some("claude-haiku-4-5-20251001".to_string()),
+                    display_name: Some("Gateway Haiku".to_string()),
+                    context_window: 200_000,
+                    max_output_tokens: 8_192,
+                    ..Default::default()
+                },
+            ],
+            model_protocols: Default::default(),
+            member_catalog: None,
+            catalog_etag: None,
+        };
+        providers::write_gateway_snapshot(&*store, &snapshot)
+            .await
+            .unwrap();
         let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
             .await
             .unwrap()
             .expect("a managed profile resolves the utility role to a gateway model");
-        assert_eq!(
-            utility.model, "gateway-haiku",
-            "the cheapest entitled model, not the first listed"
-        );
+        let expected =
+            providers::gateway_execution_policy(&snapshot, "model_gateway::gateway-haiku")
+                .expect("the entitled utility model has a frozen execution identity");
+        assert_eq!(utility.model, expected.route_model);
+        assert_eq!(expected.id, "gateway-haiku");
         assert_eq!(
             utility.provider,
             Some(ProviderId::new(ProviderKind::ModelGateway.as_str()))

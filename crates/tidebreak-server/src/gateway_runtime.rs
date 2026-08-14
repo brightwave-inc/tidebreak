@@ -683,6 +683,7 @@ impl GatewayRuntime {
                     &*self.store,
                     &providers::GatewayModelSnapshot {
                         gateway_url: base_url,
+                        installation_id: None,
                         models: Vec::new(),
                         model_protocols: Default::default(),
                         member_catalog: None,
@@ -776,8 +777,11 @@ impl GatewayRuntime {
     /// session belongs to a different gateway than the policy URL.
     pub(crate) async fn route_token_source(&self) -> Option<Arc<dyn BearerTokenSource>> {
         let connection = self.connection().await.ok().flatten()?;
-        connection.stored_credentials().await.ok().flatten()?;
-        Some(Arc::new(GatewayTokenSource(connection)))
+        let credentials = connection.stored_credentials().await.ok().flatten()?;
+        Some(Arc::new(GatewayTokenSource {
+            connection,
+            installation_id: credentials.installation_id,
+        }))
     }
 
     /// Fetch the entitled models and persist them as the stored snapshot,
@@ -814,6 +818,9 @@ impl GatewayRuntime {
         let held = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?;
         let held_etag = held
             .as_ref()
+            .filter(|snapshot| {
+                snapshot.installation_id.as_deref() == Some(&session.installation_id)
+            })
             .and_then(|snapshot| snapshot.catalog_etag.clone());
         // Fetch the full entitled set before the row lock is taken. The
         // member catalog is preferred: one envelope, merged protocols per
@@ -929,6 +936,7 @@ impl GatewayRuntime {
             &*self.store,
             &providers::GatewayModelSnapshot {
                 gateway_url: base_url.clone(),
+                installation_id: Some(session.installation_id.clone()),
                 models,
                 model_protocols,
                 member_catalog,
@@ -1437,12 +1445,21 @@ fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
 
 /// Router-facing supplier of the gateway's `llm`-resource token. Refresh and
 /// rotation live inside [`GatewayConnection`]; this is just the seam.
-struct GatewayTokenSource(Arc<GatewayConnection>);
+struct GatewayTokenSource {
+    connection: Arc<GatewayConnection>,
+    installation_id: String,
+}
 
 #[async_trait]
 impl BearerTokenSource for GatewayTokenSource {
+    fn binding_id(&self) -> Option<&str> {
+        Some(&self.installation_id)
+    }
+
     async fn bearer_token(&self) -> Result<String> {
-        self.0.access_token(RESOURCE_LLM).await
+        self.connection
+            .access_token_for_installation(RESOURCE_LLM, &self.installation_id)
+            .await
     }
 
     /// A chat's inference rides a token minted inside that chat's
@@ -1456,8 +1473,12 @@ impl BearerTokenSource for GatewayTokenSource {
     ) -> Result<String> {
         match conversation {
             Some(chat) => {
-                self.0
-                    .attested_access_token(RESOURCE_LLM, &chat.to_string())
+                self.connection
+                    .attested_access_token_for_installation(
+                        RESOURCE_LLM,
+                        &chat.to_string(),
+                        &self.installation_id,
+                    )
                     .await
             }
             None => self.bearer_token().await,
@@ -2377,6 +2398,7 @@ mod tests {
             &*store,
             &providers::GatewayModelSnapshot {
                 gateway_url: base.clone(),
+                installation_id: Some("install-1".into()),
                 models: vec![
                     CustomModelConfig {
                         id: "claude-opus-5".to_string(),
@@ -2592,6 +2614,16 @@ mod tests {
         assert!(!anthropic_route
             .curated_models
             .contains(&"sample-coder".to_string()));
+        let anthropic_frozen: Vec<_> = anthropic_route
+            .curated_models
+            .iter()
+            .filter(|model| model.starts_with("__tidebreak_gateway_v1."))
+            .collect();
+        assert_eq!(anthropic_frozen.len(), 1);
+        assert_eq!(
+            anthropic_route.model_rewrites.get(anthropic_frozen[0]),
+            Some(&"sample-claude".to_string())
+        );
         let openai_route = routes
             .iter()
             .find(|route| route.kind == tidebreak_router::RouteKind::ModelGatewayOpenai)
@@ -2601,7 +2633,19 @@ mod tests {
             Some(format!("{base}/compat/openai/v1").as_str())
         );
         assert!(openai_route.api_key.is_empty());
-        assert_eq!(openai_route.curated_models, ["sample-coder"]);
+        assert!(openai_route
+            .curated_models
+            .contains(&"sample-coder".to_string()));
+        let openai_frozen: Vec<_> = openai_route
+            .curated_models
+            .iter()
+            .filter(|model| model.starts_with("__tidebreak_gateway_v1."))
+            .collect();
+        assert_eq!(openai_frozen.len(), 1);
+        assert_eq!(
+            openai_route.model_rewrites.get(openai_frozen[0]),
+            Some(&"sample-coder".to_string())
+        );
         assert!(providers::provider_is_usable(
             &*store,
             &*runtime.secrets,

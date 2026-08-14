@@ -50,6 +50,66 @@ pub(crate) async fn resolve_chat_model(
     }
 }
 
+/// Resolve one chat's durable selection into the immutable selector a new
+/// execution persists or runs with.
+///
+/// This is the shared admission seam for foreground turns, queued promotion,
+/// and on-demand chat work. Managed canonical selections are resolved from one
+/// gateway snapshot into a frozen route selector; explicit unresolved choices
+/// fail instead of falling back to another entitled model.
+pub(crate) async fn resolve_executable_chat_model(
+    state: &AppState,
+    chat: &tidebreak_core::Chat,
+) -> Result<String, ServerError> {
+    let (selected, explicit) = match chat.model.clone() {
+        Some(model) => (model, true),
+        None => match model_roles::read_selection(&*state.store, ModelRole::Chat).await? {
+            Some(model) => (model, true),
+            None => (state.agent_config.model.clone(), false),
+        },
+    };
+    if !state.resolver.enforces_model_registry() {
+        return Ok(selected);
+    }
+    let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    let executable = model_roles::effective_chat_policy(
+        &*state.store,
+        &*state.secrets,
+        &managed,
+        &selected,
+        explicit,
+    )
+    .await?
+    .map_or(selected, |policy| policy.execution_key());
+    validate_execution_selection(state, &executable, true).await
+}
+
+async fn validate_execution_selection(
+    state: &AppState,
+    value: &str,
+    allow_legacy_custom: bool,
+) -> Result<String, ServerError> {
+    let Some(policy) =
+        providers::resolve_model_policy(&*state.store, value, allow_legacy_custom).await?
+    else {
+        return Err(ServerError::bad_request_kind(
+            "unknown_model",
+            unknown_model_message(value),
+        ));
+    };
+    let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
+        return Err(ServerError::conflict_kind(
+            "model_provider_unavailable",
+            format!(
+                "provider `{}` cannot serve model `{}` with its current configuration or credential",
+                policy.provider, policy.id
+            ),
+        ));
+    }
+    Ok(policy.execution_key())
+}
+
 /// Resolve, canonicalize, and availability-check a model selection before it
 /// crosses a persistence boundary. Custom embedders with an injected provider
 /// retain their free-form model contract; the production configured resolver

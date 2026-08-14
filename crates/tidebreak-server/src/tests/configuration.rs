@@ -2257,6 +2257,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         &*store,
         &providers::GatewayModelSnapshot {
             gateway_url: "https://corp.gateway/".to_string(),
+            installation_id: Some("install-1".into()),
             // Flagship-first, as a gateway well might list them: an implicit
             // chat default takes the first pick, while utility must not.
             models: vec![
@@ -2309,14 +2310,20 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .await,
         StatusCode::ACCEPTED
     );
+    let gateway_override_model = store
+        .get_turn_run(gateway_override_turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(gateway_override_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        store
-            .get_turn_run(gateway_override_turn)
+        providers::resolve_model_policy(&*store, &gateway_override_model, false)
             .await
             .unwrap()
             .unwrap()
-            .model,
-        "model_gateway::gateway-flagship"
+            .id,
+        "gateway-flagship"
     );
     assert_eq!(
         store
@@ -2357,14 +2364,20 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         send_message_with_id(&router, &bearer, chat.id, sticky_turn, "hello").await,
         StatusCode::ACCEPTED
     );
+    let sticky_model = store
+        .get_turn_run(sticky_turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(sticky_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        store
-            .get_turn_run(sticky_turn)
+        providers::resolve_model_policy(&*store, &sticky_model, false)
             .await
             .unwrap()
             .unwrap()
-            .model,
-        "model_gateway::gateway-flagship"
+            .id,
+        "gateway-flagship"
     );
 
     // An unmatched sticky choice remains explicit and is refused honestly
@@ -2431,14 +2444,20 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .await,
         StatusCode::ACCEPTED
     );
+    let fallback_model = store
+        .get_turn_run(fallback_turn_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .model;
+    assert!(fallback_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        store
-            .get_turn_run(fallback_turn_id)
+        providers::resolve_model_policy(&*store, &fallback_model, false)
             .await
             .unwrap()
             .unwrap()
-            .model,
-        "model_gateway::gateway-flagship"
+            .id,
+        "gateway-flagship"
     );
 
     // An unmatched per-chat override remains explicit and is refused honestly.
@@ -3581,9 +3600,30 @@ async fn a_superseded_gateway_session_never_reads_usable() {
         .unwrap();
     assert!(!gateway.has_credential);
 
-    // A session for the policy's own deployment — trailing slash included,
-    // per the shared normalization — reads usable again.
+    // A session and catalog for the policy's own deployment — trailing slash
+    // included, per the shared normalization — read usable again. A matching
+    // session alone is intentionally insufficient because no executable model
+    // route can be admitted until its installation-bound catalog is present.
     seed(secrets.clone(), "https://corp.gateway/").await;
+    providers::write_gateway_snapshot(
+        &*store,
+        &providers::GatewayModelSnapshot {
+            gateway_url: "https://corp.gateway/".to_string(),
+            installation_id: Some("install-1".into()),
+            models: vec![providers::CustomModelConfig {
+                id: "sample-claude".into(),
+                upstream_id: Some("claude-opus-5".into()),
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            }],
+            model_protocols: std::collections::BTreeMap::new(),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(providers::provider_is_usable(
         &*store,
         &*secrets,

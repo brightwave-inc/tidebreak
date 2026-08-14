@@ -718,6 +718,7 @@ mod tests {
             &*store,
             &providers::GatewayModelSnapshot {
                 gateway_url: "https://old.gateway.test/".to_string(),
+                installation_id: Some("install-old".into()),
                 models: vec![providers::CustomModelConfig {
                     id: "stale-model".into(),
                     upstream_id: None,
