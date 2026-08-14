@@ -812,6 +812,8 @@ one member across the assembled router to keep that classification honest.
 Roles beyond the two, groups, per-capability grants, and per-user provider
 credentials are deliberately excluded — see
 [decision 6](decisions/0006-self-host-deployment-plane-authorization.md).
+Members reach that plane through the HTTP API and the CLI; the packaged
+desktop app is not a remote client for this profile.
 
 Configuration remains deployment-scoped rather than per-user: the settings
 table configures the deployment itself, shared credentials are the point of a
