@@ -161,7 +161,9 @@ automatic.
 8. A final job downloads every installer the immutable manifest lists back from
    the CDN, checks them against its digests, and attaches them to the GitHub
    Release with `.sha256` sidecars — today that is the notarized disk image as
-   `Tidebreak-macos-apple-silicon.dmg`, and it would again include
+   `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy
+   `Tidebreak-macos-apple-silicon.dmg` alias that keeps the existing README URL
+   live through the transition. It would again include
    `Tidebreak-windows-x86_64-setup.exe` if the Windows lane were unparked. It
    holds no signing or AWS credentials. The names omit the version so that
    `https://github.com/brightwave-inc/tidebreak/releases/latest/download/<name>`
@@ -176,27 +178,26 @@ not the shipping signal.
 
 ## Public desktop delivery
 
-### Apple Silicon only, for now
+### One universal macOS application
 
-A release ships one `aarch64` build. Intel is paused while the product is in
-active development. Cross-compiling `x86_64` on GitHub's arm64 macOS runners
-takes roughly two and a half times as long as the native build for the
-identical crate set — about 18 minutes against 7 on a recent release — so the
-Intel job, not the one anybody installs, set the length of every release and
-cache-warm run. No one on the team or in early testing uses an Intel Mac.
+A release ships one universal app, DMG, zip, and signed updater archive. Tauri
+builds the desktop for both `aarch64-apple-darwin` and
+`x86_64-apple-darwin` and combines the app executable. The before-build hook
+builds the host broker for both targets and combines those slices with `lipo`
+before bundling. Release verification rejects the bundle unless both the main
+executable and the host broker contain both slices.
 
 `RELEASE_PLATFORMS` in `scripts/create-release-manifests.mjs` is the single
 source of truth for what a release contains: it drives the manifest, the
-`latest.json` platform keys, and the immutable prefix below. Restoring Intel
-means adding `x86_64` to the macOS entry there and adding its row back to the
-two macOS `release.yml` build matrices and the `cache-macos.yml` warm matrix.
+`latest.json` platform keys, and the immutable prefix below. The immutable
+manifest contains one `macos/universal` artifact set; `latest.json` advertises
+that same signed updater archive under both `darwin-aarch64` and
+`darwin-x86_64`, so either native updater downloads identical universal bytes.
 
-Two consequences worth knowing. `latest.json` advertises only the platforms in
-that table, so an unsupported install finds no update rather than a broken
-one. And the preflight that resumes an already-hosted release validates it
-against the current platform set, so a release published before a platform
-change cannot be re-dispatched; it fails on the artifact count instead of
-silently republishing.
+The preflight that resumes an already-hosted release validates it against the
+current platform set. A release published before this platform change cannot
+be re-dispatched: it fails on the artifact paths and updater keys instead of
+silently republishing a different release shape.
 
 ### Windows: parked, unsigned x86_64 when it returns
 

@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Download for macOS, Apple Silicon"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
 </p>
 
 ---
@@ -83,10 +83,9 @@ PDFs under [`skills/`](skills) and [`plugins/`](plugins).
 
 ## Download
 
-Tidebreak ships as a signed and notarized macOS app for **Apple Silicon**. Intel
-is paused while the product is in active development, and the release pipeline
-publishes one `aarch64` build ([`docs/releases.md`](docs/releases.md)). The
-button above always resolves to the newest release; the
+Tidebreak ships as one signed and notarized **universal macOS app** for Apple
+Silicon and Intel ([`docs/releases.md`](docs/releases.md)). The button above
+always resolves to the newest release; the
 [releases page](https://github.com/brightwave-inc/tidebreak/releases) has the
 notes and earlier versions.
 
@@ -168,7 +167,7 @@ place.
 
 Worth knowing before you install:
 
-- **Packaged builds are macOS on Apple Silicon only.** See
+- **Packaged builds are macOS only, for Apple Silicon and Intel.** See
   [Download](#download).
 - **The native execution sandbox is macOS-only.** On Linux or Windows there is
   no native confinement primitive; the choices are the opt-in local Docker

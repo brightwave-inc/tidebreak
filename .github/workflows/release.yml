@@ -244,19 +244,11 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
   prepare_macos:
-    name: prepare unsigned macOS · ${{ matrix.arch }}
+    name: prepare unsigned macOS · universal
     needs: [validate, inspect_hosted]
     if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
     runs-on: macos-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        # Apple Silicon only while the product is in active development; see
-        # docs/releases.md.
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -271,7 +263,7 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add "${{ matrix.target }}"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Restore unsigned Rust build cache
         id: rust-build-cache
@@ -282,20 +274,29 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: macos-release-prepared-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+          key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
-            macos-release-prepared-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            macos-release-target-v4-${{ matrix.arch }}-
+            macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-target-v5-universal-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -337,7 +338,7 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/tidebreak-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
+          args: --target universal-apple-darwin --no-bundle --ci
 
       - name: Save release-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -348,14 +349,23 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -363,7 +373,7 @@ jobs:
         run: exit 1
 
   build_macos:
-    name: macOS · ${{ matrix.arch }}
+    name: macOS · universal
     needs: [validate, inspect_hosted, prepare_macos]
     if: >-
       ${{
@@ -377,14 +387,6 @@ jobs:
     environment:
       name: desktop-production
       url: https://downloads.brightwave.io/tidebreak/manifest.json
-    strategy:
-      fail-fast: false
-      matrix:
-        # Apple Silicon only while the product is in active development; see
-        # docs/releases.md.
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
     env:
       # Reuse compiler outputs across trusted release runs without caching the
       # signed bundles or any signing material.
@@ -424,19 +426,28 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: macos-release-prepared-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+          key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
-            macos-release-prepared-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       # A restore extracts the whole archive, including the linked products a
       # cache-warming run left in it. Those are the bytes that get signed, so
@@ -445,14 +456,13 @@ jobs:
       # stay. The sidecar matters most: Tauri copies it into the signed
       # product verbatim, with no Cargo fingerprint governing it.
       - name: Discard restored product binaries
-        env:
-          RELEASE_TARGET: ${{ matrix.target }}
         run: |
           rm -rf \
-            "target/$RELEASE_TARGET/release/tidebreak-desktop" \
-            "target/$RELEASE_TARGET/release/tidebreak-host-broker" \
-            "target/$RELEASE_TARGET/release/"libtidebreak_desktop_lib.* \
-            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+            target/{aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin}/release/tidebreak-desktop \
+            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-host-broker \
+            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/libtidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-{aarch64-apple-darwin,x86_64-apple-darwin} \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
 
       # sccache, rust-cache, and the UI install run before any Apple or Tauri
       # material is on disk. pnpm is pinned; lifecycle scripts stay off.
@@ -565,7 +575,7 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add "${{ matrix.target }}"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Write tag-derived Tauri configuration
         env:
@@ -595,13 +605,13 @@ jobs:
         with:
           projectPath: crates/tidebreak-desktop
           args: >-
-            --target ${{ matrix.target }}
+            --target universal-apple-darwin
             --config ${{ runner.temp }}/tidebreak-release.json
             --bundles app,dmg
 
       - name: Notarize and staple the DMG
         env:
-          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_TARGET: universal-apple-darwin
         run: |
           target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           dmg_paths=("$target_dir/$RELEASE_TARGET/release/bundle/dmg/"*.dmg)
@@ -636,8 +646,8 @@ jobs:
 
       - name: Verify and collect signed artifacts
         env:
-          RELEASE_ARCH: ${{ matrix.arch }}
-          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_ARCH: universal
+          RELEASE_TARGET: universal-apple-darwin
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -693,11 +703,21 @@ jobs:
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
           binary_arches="$(lipo -archs "$app_path/Contents/MacOS/$executable")"
           case "$RELEASE_ARCH" in
-            aarch64) [[ "$binary_arches" = *arm64* && "$binary_arches" != *x86_64* ]] ;;
-            x86_64) [[ "$binary_arches" = *x86_64* && "$binary_arches" != *arm64* ]] ;;
+            universal) [[ "$binary_arches" = *arm64* && "$binary_arches" = *x86_64* ]] ;;
             *) echo "Unsupported release architecture: $RELEASE_ARCH" >&2; exit 1 ;;
           esac || {
             echo "Expected $RELEASE_ARCH app, found Mach-O architectures: $binary_arches" >&2
+            exit 1
+          }
+
+          sidecar="$app_path/Contents/MacOS/tidebreak-host-broker"
+          [[ -x "$sidecar" ]] || {
+            echo "Universal app is missing its executable host broker: $sidecar" >&2
+            exit 1
+          }
+          sidecar_arches="$(lipo -archs "$sidecar")"
+          [[ "$sidecar_arches" = *arm64* && "$sidecar_arches" = *x86_64* ]] || {
+            echo "Expected universal host broker, found Mach-O architectures: $sidecar_arches" >&2
             exit 1
           }
 
@@ -725,8 +745,8 @@ jobs:
       - name: Upload verified macOS artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: tidebreak-macos-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
-          path: dist/macos/${{ matrix.arch }}/
+          name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
+          path: dist/macos/universal/
           if-no-files-found: error
           retention-days: 7
 
@@ -1146,12 +1166,12 @@ jobs:
           role-session-name: tidebreak-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Download Apple Silicon artifacts
+      - name: Download universal macOS artifacts
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: tidebreak-macos-aarch64-${{ needs.validate.outputs.version }}
-          path: dist/macos/aarch64
+          name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
+          path: dist/macos/universal
 
       # Parked with the Windows build; see docs/deferred.md.
       - name: Download Windows artifacts
@@ -1334,7 +1354,7 @@ jobs:
 
           while IFS=$'\t' read -r platform arch url digest; do
             case "$platform/$arch" in
-              macos/aarch64) name="Tidebreak-macos-apple-silicon.dmg" ;;
+              macos/universal) name="Tidebreak-macos-universal.dmg" ;;
               windows/x86_64) name="Tidebreak-windows-x86_64-setup.exe" ;;
               *) echo "Unsupported release platform: $platform/$arch" >&2; exit 1 ;;
             esac
@@ -1354,6 +1374,19 @@ jobs:
             echo "Expected one macOS disk image, found $dmg_count." >&2
             exit 1
           }
+
+          # Keep the existing permanent README URL live across the transition
+          # to universal packages. Both names carry the same CDN-verified bytes;
+          # the universal name is canonical for new links.
+          universal_dmg="downloads/Tidebreak-macos-universal.dmg"
+          compatibility_dmg="downloads/Tidebreak-macos-apple-silicon.dmg"
+          [[ -f "$universal_dmg" ]] || {
+            echo "The universal macOS disk image was not downloaded." >&2
+            exit 1
+          }
+          cp "$universal_dmg" "$compatibility_dmg"
+          (cd downloads && sha256sum "$(basename "$compatibility_dmg")" \
+            > "$(basename "$compatibility_dmg").sha256")
 
       # Version-free asset names give the README permanent one-click download
       # links through GitHub's /releases/latest/download/ redirect.
