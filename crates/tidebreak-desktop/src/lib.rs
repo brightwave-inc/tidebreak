@@ -205,7 +205,13 @@ fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or("unnamed");
-        let mut argv = vec![native_command_token(command)?];
+        let command = native_command_token(command)?;
+        if !std::path::Path::new(&command).is_absolute() {
+            return Err(
+                "enabled MCP local commands must use an absolute executable path".to_owned(),
+            );
+        }
+        let mut argv = vec![command];
         if let Some(args) = server.get("args") {
             let args = args
                 .as_array()
@@ -915,7 +921,7 @@ mod server_info_tests {
     fn only_enabled_local_commands_require_a_native_preview() {
         let config = serde_json::json!({
             "servers": [
-                {"name": "draft", "command": "/bin/echo", "enabled": false},
+                {"name": "draft", "command": "editable-bare-command", "enabled": false},
                 {"name": "remote", "url": "https://example.test/mcp", "enabled": true},
                 {"name": "live", "command": "/bin/sh", "args": ["-c", "echo safe"], "enabled": true}
             ]
@@ -931,6 +937,36 @@ mod server_info_tests {
             "desktop_process_current_directory"
         );
         assert_eq!(approval["environment"]["ambient_environment"], "cleared");
+    }
+
+    #[test]
+    fn enabled_native_commands_require_an_absolute_executable_path() {
+        for command in ["node", "./node", "tools/node"] {
+            let config = serde_json::json!({
+                "servers": [{"name": "ambiguous", "command": command, "enabled": true}]
+            });
+            assert_eq!(
+                native_command_previews(&config).unwrap_err(),
+                "enabled MCP local commands must use an absolute executable path"
+            );
+        }
+    }
+
+    #[test]
+    fn native_approval_displays_the_exact_absolute_executable_path() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "pinned executable",
+                "command": "/opt/tidebreak/bin/docs-mcp",
+                "args": ["serve"],
+                "enabled": true
+            }]
+        });
+        let approval = single_native_approval(config);
+        assert_eq!(
+            approval["argv"],
+            serde_json::json!(["/opt/tidebreak/bin/docs-mcp", "serve"])
+        );
     }
 
     #[test]
@@ -973,7 +1009,7 @@ mod server_info_tests {
         let base = serde_json::json!({
             "servers": [{
                 "name": "workspace",
-                "command": "node",
+                "command": "/usr/bin/node",
                 "args": ["server.mjs"],
                 "cwd": "/srv/first",
                 "env_from": ["HOME"]
@@ -982,7 +1018,7 @@ mod server_info_tests {
         let changed = serde_json::json!({
             "servers": [{
                 "name": "workspace",
-                "command": "node",
+                "command": "/usr/bin/node",
                 "args": ["server.mjs"],
                 "cwd": "/srv/second",
                 "env_from": ["HOME", "PATH"]
