@@ -1080,6 +1080,9 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(publish, /--skip-domain/);
   assert.match(publish, /--meta "releaseTag=\$RELEASE_TAG"/);
   assert.match(publish, /--meta "releaseSha=\$RELEASE_SHA"/);
+  assert.match(publish, /jq -ce '\.deployment \/\/ \.'/);
+  assert.match(publish, /deployment_url=.*jq -er \.url/);
+  assert.match(publish, /deployment_id=.*jq -er \.id/);
   assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
   assert.match(publish, /\/docs\/quickstart\//);
   assert.match(publish, /\/docs\/search-index\.json/);

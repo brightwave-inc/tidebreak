@@ -242,8 +242,9 @@ jobs:
             --scope "$VERCEL_SCOPE" \
             --token "$VERCEL_TOKEN" \
             --json)"
-          deployment_url="$(jq -er .url <<<"$deployment_json")"
-          deployment_id="$(jq -er .deployment.id <<<"$deployment_json")"
+          deployment="$(jq -ce '.deployment // .' <<<"$deployment_json")"
+          deployment_url="$(jq -er .url <<<"$deployment")"
+          deployment_id="$(jq -er .id <<<"$deployment")"
           echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Smoke-test the staged deployment
