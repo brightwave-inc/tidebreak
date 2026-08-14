@@ -1608,15 +1608,18 @@ body {
 }
 
 
-/* Desktop titlebar: a quiet drag region with back/forward controls. Product
-   identity stays in the sidebar below; macOS reserves room for traffic lights. */
-.app-shell.with-titlebar {
-  flex-direction: column;
-}
-
+/* Desktop window chrome lives over the top of the sidebar instead of taking a
+   full-width row. The routed surface can therefore start at the top edge while
+   the rail still reserves a safe home for dragging, history, and macOS traffic
+   lights. */
 .titlebar {
-  flex: 0 0 40px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 40;
   display: flex;
+  width: var(--sidebar-expanded-min);
+  height: 40px;
   align-items: center;
   gap: 0.5rem;
   padding-left: 1rem;
@@ -1634,10 +1637,29 @@ body {
   gap: 0.1rem;
 }
 
-/* The strip is window chrome rather than a second product header. Keep the
-   sidebar identity close enough that both rows read as one integrated rail. */
-.app-shell.with-titlebar .sidebar {
-  padding-top: 0;
+/* Only the rail yields vertical space to the overlaid window chrome. This is
+   the key distinction from a normal titlebar row: the conversation and its
+   panels no longer get pushed down by 40px. */
+.app-shell.with-titlebar [data-sidebar] {
+  padding-top: 40px;
+}
+
+/* A compact rail is narrower than the macOS traffic-light cluster. It remains
+   the drag target, but the optional history buttons disappear until the rail
+   is expanded rather than spilling over the routed header. */
+.app-shell:has([data-sidebar="compact"]) .titlebar {
+  width: calc(var(--spacing) * 14);
+  padding-inline: 0.25rem;
+}
+
+.app-shell:has([data-sidebar="compact"]) .titlebar.is-mac-overlay {
+  padding-left: 0;
+}
+
+.app-shell:has([data-sidebar="compact"])
+  .titlebar.is-mac-overlay
+  .titlebar-nav {
+  display: none;
 }
 
 /* Full-window surfaces that replace the shell (boot and error screens, the
