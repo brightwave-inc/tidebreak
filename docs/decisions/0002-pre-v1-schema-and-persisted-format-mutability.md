@@ -70,7 +70,8 @@ part that has to survive to v1.
 **At `1.0.0` this inverts, in one identified place.** The fixture's failure
 message flips back from "bump the epoch" to "add an alias or write a
 migration", the baseline becomes the first entry in a real migration chain, and
-`reset_pre_v1_state` stops being reachable. The reminder lives on #1462.
+`reset_pre_v1_state` stops being reachable. The reminder lives on the
+[1.0.0 checklist](../releases.md#preparing-and-shipping-100).
 
 Deliberately excluded: this record says nothing about *wire* compatibility
 between the desktop client and server, which is a separate contract with its own

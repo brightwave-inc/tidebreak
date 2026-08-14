@@ -17,9 +17,6 @@ Several pieces are ordinary implementation work, not deferred product bets.
 They stay as open issues without a `deferred` label because a contributor can
 pick them up now:
 
-- Finish the disposable pre-v1 database baseline: consolidate the migration
-  history and remove obsolete schema paths before compatibility commitments
-  begin at 1.0.
 - Close the remaining multi-principal prompt-inbox ownership gap in the
   self-hosted profile.
 - Enforce the strict `network off` setting in Docker code execution, then use

@@ -1,10 +1,12 @@
 //! The database schema.
 //!
-//! Fresh pre-v1 databases are still described by [`Baseline`], and desktop
+//! Fresh pre-v1 databases are described by a single [`Baseline`]. Desktop
 //! SQLite changes bump `DESKTOP_SCHEMA_EPOCH` so disposable local data is
-//! rebuilt. Self-host databases are durable, however, so any schema change
-//! that must reach an already-recorded baseline also gets an ordered upgrade
-//! migration in this module.
+//! rebuilt. Self-host databases are durable: a renamed baseline must not
+//! recreate tables that already exist, and any later in-place baseline edit
+//! that must reach an already-recorded schema also gets an ordered upgrade
+//! migration in this module. Squash again before `1.0.0` so that release's
+//! first migration is a clean snapshot, not this public-opening chain.
 
 mod baseline;
 mod idens;
@@ -17,74 +19,7 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Baseline), Box::new(AddAppOwner)]
-    }
-}
-
-/// Upgrade databases that recorded the original pre-launch baseline before
-/// apps became principal-owned. Fresh databases already receive this shape
-/// from [`Baseline`], so the migration is deliberately idempotent.
-struct AddAppOwner;
-
-impl MigrationName for AddAppOwner {
-    fn name(&self) -> &str {
-        "m20260814_000002_add_app_owner"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for AddAppOwner {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if !manager.has_column("app", "owner").await? {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(idens::App::Table)
-                        .add_column(
-                            ColumnDef::new(idens::App::Owner)
-                                .text()
-                                .not_null()
-                                .default("local"),
-                        )
-                        .to_owned(),
-                )
-                .await?;
-        }
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_app_owner_updated")
-                    .table(idens::App::Table)
-                    .col(idens::App::Owner)
-                    .col(idens::App::UpdatedAt)
-                    .col(idens::App::Id)
-                    .to_owned(),
-            )
-            .await
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if manager.has_column("app", "owner").await? {
-            manager
-                .drop_index(
-                    Index::drop()
-                        .if_exists()
-                        .name("idx_app_owner_updated")
-                        .table(idens::App::Table)
-                        .to_owned(),
-                )
-                .await?;
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(idens::App::Table)
-                        .drop_column(idens::App::Owner)
-                        .to_owned(),
-                )
-                .await?;
-        }
-        Ok(())
+        vec![Box::new(Baseline)]
     }
 }
 
@@ -92,13 +27,19 @@ struct Baseline;
 
 impl MigrationName for Baseline {
     fn name(&self) -> &str {
-        "m20260804_000001_baseline"
+        "m20260814_000001_baseline"
     }
 }
 
 #[async_trait::async_trait]
 impl MigrationTrait for Baseline {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // An existing self-host database already recorded an older baseline
+        // name. Re-running CREATE TABLE would fail; fold leftover upgrades
+        // into this snapshot instead and leave the rows alone.
+        if manager.has_table("app").await? {
+            return ensure_app_owner(manager).await;
+        }
         for entry in baseline::tables() {
             manager.create_table(entry.table).await?;
             for index in entry.indexes {
@@ -128,6 +69,38 @@ impl MigrationTrait for Baseline {
     }
 }
 
+/// Folded from the pre-public `add_app_owner` upgrade. Existing self-host
+/// databases that recorded the August 4 baseline may still lack the column.
+async fn ensure_app_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    if !manager.has_column("app", "owner").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::App::Table)
+                    .add_column(
+                        ColumnDef::new(idens::App::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+    }
+    manager
+        .create_index(
+            Index::create()
+                .if_not_exists()
+                .name("idx_app_owner_updated")
+                .table(idens::App::Table)
+                .col(idens::App::Owner)
+                .col(idens::App::UpdatedAt)
+                .col(idens::App::Id)
+                .to_owned(),
+        )
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -136,15 +109,48 @@ mod tests {
     use super::Migrator;
 
     #[tokio::test]
-    async fn an_existing_baseline_app_is_backfilled_to_the_local_owner() {
+    async fn a_fresh_database_is_described_by_one_baseline() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, Some(1)).await.unwrap();
-        db.execute_unprepared("DROP INDEX idx_app_owner_updated")
+        Migrator::up(&db, None).await.unwrap();
+
+        let versions = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT version FROM seaql_migrations ORDER BY version".to_owned(),
+            ))
             .await
             .unwrap();
-        db.execute_unprepared("ALTER TABLE app DROP COLUMN owner")
+        let versions: Vec<String> = versions
+            .iter()
+            .map(|row| row.try_get::<String>("", "version").unwrap())
+            .collect();
+        assert_eq!(versions, ["m20260814_000001_baseline"]);
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT owner FROM app LIMIT 1".to_owned(),
+            ))
             .await
-            .unwrap();
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_existing_pre_owner_app_is_backfilled_and_not_recreated() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE app (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                current_revision_id TEXT NOT NULL,
+                revision_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            )",
+        )
+        .await
+        .unwrap();
         db.execute_unprepared(
             concat!(
                 "INSERT INTO app (id, name, current_revision_id, revision_count, created_at, updated_at, deleted_at) ",
