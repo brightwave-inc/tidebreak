@@ -1430,13 +1430,6 @@ jobs:
             exit 1
           fi
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
-        with:
-          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
-          role-session-name: tidebreak-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Download universal macOS artifacts
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
