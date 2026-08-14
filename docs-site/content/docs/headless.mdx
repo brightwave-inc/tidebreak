@@ -430,10 +430,15 @@ query is scoped to the authenticated principal.
 
 One thing to know before using it: **settings are deployment-scoped, not
 per-user.** Enabled providers, credentials, model roles, and web-search and
-code-execution configuration are shared by everyone on the deployment, and
-anyone who can call the API can change them. The profile is for mutually
-trusting users of one operator's deployment — a household or a small team. It
-is not multi-tenant isolation.
+code-execution configuration are shared by the deployment. Only an `admin`
+token can change them; a member token receives `403` on that plane and keeps
+its own chats, projects, documents, and event stream.
+
+What a member runs is this API and the CLI with `--server` and a token from
+the operator file. The desktop app is the local Desktop profile and does not
+connect to a remote self-host deployment. The profile is for mutually trusting
+users of one operator's deployment — a household or a small team. It is not
+multi-tenant isolation.
 
 Document and blob storage on PostgreSQL, remote secret custody, object storage,
 and multi-process ownership are not finished. Treat self-hosting as

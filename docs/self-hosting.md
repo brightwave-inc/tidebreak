@@ -96,6 +96,28 @@ a configuration route cannot quietly land outside the gate. The reasoning, the
 rejected alternatives, and what would make us revisit it are in
 [decision record 6](decisions/0006-self-host-deployment-plane-authorization.md).
 
+### What a member runs
+
+The member surface is the HTTP API and the `tidebreak` CLI pointed at the
+deployment. Give each teammate a token from the file above and a base URL:
+
+```sh
+export TIDEBREAK_SERVER_URL=https://tidebreak.example
+export TIDEBREAK_SERVER_TOKEN=<the member token>
+cargo run -p tidebreak-cli -- --server "$TIDEBREAK_SERVER_URL" chat list
+cargo run -p tidebreak-cli -- --server "$TIDEBREAK_SERVER_URL" -p "summarize yesterday"
+```
+
+`--server` / `TIDEBREAK_SERVER_TOKEN` are the same attach path the headless
+docs describe. A member token receives `403` on deployment-plane routes, which
+is the intended degradation — not a desktop Settings panel.
+
+The packaged desktop app is the local Desktop profile. It embeds its own
+server, uses a per-launch loopback token, and does not connect to a remote
+self-host deployment. A remote-server connection mode, or a hosted web UI
+served by the deployment, is parked — see
+[What comes after v1](deferred.md#a-client-for-self-host-teammates).
+
 Give `admin` only to the people who actually administer the deployment: MCP
 server definitions spawn processes on the host, and the provider credentials
 are shared.

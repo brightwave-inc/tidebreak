@@ -28,6 +28,20 @@ These are important finishing work, but they do not change the product's basic
 shape. They should be delivered as normal, reviewable slices rather than held
 in a parking label.
 
+## A client for self-host teammates
+
+The self-host profile already has named users and an admin/member split on the
+API. What a teammate runs today is that API and the `tidebreak` CLI with a
+static bearer token from the operator file. The packaged desktop app stays a
+local Desktop-profile product: it embeds its own server and does not point at
+a remote deployment.
+
+A later member client can be a desktop connection mode (URL, token, TLS
+expectations, Settings panels that degrade on a member `403`) or a hosted web
+UI the deployment serves. Either one is a second product surface, not an
+omission in the current server. Auth beyond the static token file waits on
+gateway-derived identity.
+
 ## A coworker that can work later
 
 Background agent runs make work durable, but Tidebreak does not yet schedule
