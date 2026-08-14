@@ -209,19 +209,14 @@ pub async fn create_chat(
         crate::code_execution::normalize_network_policy(policy)?;
     }
     let title = normalize_chat_title(body.title)?;
-    // Catalog sync can migrate both the sticky model and existing chat rows.
-    // Hold the same lock from the sticky read through the transactional chat
-    // insert, so a create cannot copy a stale value while migration is
-    // changing it, and a concurrent explicit create wins as one operation.
-    let _model_write = crate::providers::GATEWAY_STATE_WRITES.lock().await;
     let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     let model = match body.model.as_ref() {
         Some(model) => Some(model.clone()),
         // On an unmanaged profile, preserve the historical recovery behavior
         // for a stale deregistered sticky value. Under managed routing the
-        // sticky value is explicit user intent: if migration found no unique
-        // gateway equivalent, keep it on the chat so turn admission refuses
-        // honestly instead of silently choosing the catalog's first model.
+        // sticky value is durable user intent: copy it unchanged so turn
+        // admission can resolve a unique gateway equivalent or refuse an
+        // ambiguous/unmatched selection honestly.
         None => match read_sticky_default::<String>(&*state.store, STICKY_MODEL_KEY).await? {
             Some(sticky) => match validate_model_selection(&state, &sticky, false).await {
                 Ok(model) => Some(model),
@@ -361,8 +356,6 @@ pub async fn patch_chat(
     // default resolves to.
     refuse_permission_mode_over_ceiling(&state, body.permission_mode.flatten()).await?;
     let title = body.title.map(normalize_chat_title).transpose()?;
-    let updates_model = body.model.is_some();
-
     // The move lands first, because it is the one field that can be refused on
     // durable state rather than on its own value, and because the chat read
     // below must see where the conversation ended up.
@@ -394,16 +387,6 @@ pub async fn patch_chat(
     }
 
     let mut chat = store.require_chat(id).await?;
-
-    // Gateway catalog sync may migrate this row's model to a unique
-    // route-equivalent gateway key. Serialize that migration with explicit
-    // user model changes so whichever operation acquires the lock last wins
-    // from a current value rather than overwriting an in-flight choice.
-    let _model_write = if updates_model {
-        Some(crate::providers::GATEWAY_STATE_WRITES.lock().await)
-    } else {
-        None
-    };
 
     if !store
         .update_chat_metadata(

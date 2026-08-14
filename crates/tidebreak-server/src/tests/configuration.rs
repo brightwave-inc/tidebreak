@@ -2180,10 +2180,18 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "openai::gpt-5.6-sol"
     );
 
-    // A managed flip with a BYOK chat pin carried in from before it. Catalog
-    // sync normally migrates a unique canonical match; this direct snapshot
-    // setup represents an ambiguous or unmatched pin left unresolved.
+    // A managed flip with BYOK chat choices carried in from before it. Direct
+    // selections remain durable; managed reads and turns resolve a unique
+    // current gateway equivalent without rewriting them.
     configure_provider("openai", serde_json::json!({"enabled": true})).await;
+    configure_provider(
+        "anthropic",
+        serde_json::json!({
+            "enabled": true,
+            "credential": {"type": "api_key", "key": "sk-anthropic"}
+        }),
+    )
+    .await;
     let pinned = put_role(
         "chat",
         serde_json::json!({"selection": "openai::gpt-5.6-sol"}),
@@ -2209,6 +2217,23 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(overridden_response.status(), StatusCode::CREATED);
     let overridden: Chat = json_body(overridden_response).await;
+    let gateway_overridden_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"model": "anthropic::claude-opus-5"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_overridden_response.status(), StatusCode::CREATED);
+    let gateway_overridden: Chat = json_body(gateway_overridden_response).await;
 
     crate::managed_policy::provision(
         &crate::managed_policy::ProvisionedPolicyFile::in_data_dir(dir.path()),
@@ -2269,10 +2294,44 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "model_gateway::gateway-haiku"
     );
 
-    // Clear the global pin: the explicit sticky choice made by the prior chat
-    // must still survive independently. An unmatched sticky value is copied
-    // onto the new chat and refused honestly rather than becoming an implicit
-    // first-model fallback.
+    // The explicit per-chat canonical selection is portable. The durable row
+    // remains canonical while this turn freezes the unique current gateway
+    // route that represents it.
+    let gateway_override_turn = TurnId::new();
+    assert_eq!(
+        send_message_with_id(
+            &router,
+            &bearer,
+            gateway_overridden.id,
+            gateway_override_turn,
+            "hello"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store
+            .get_turn_run(gateway_override_turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .model,
+        "model_gateway::gateway-flagship"
+    );
+    assert_eq!(
+        store
+            .get_chat(gateway_overridden.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("anthropic::claude-opus-5")
+    );
+
+    // Clear the global pin: the explicit canonical sticky choice made by the
+    // prior chat survives independently and resolves through the same unique
+    // gateway route without being rewritten.
     let cleared = put_role("chat", serde_json::json!({"selection": null})).await;
     assert_eq!(cleared.status(), StatusCode::OK);
     let cleared: serde_json::Value = json_body(cleared).await;
@@ -2292,9 +2351,49 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(chat_response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(chat_response).await;
-    assert_eq!(chat.model.as_deref(), Some("openai::gpt-5.6-sol"));
+    assert_eq!(chat.model.as_deref(), Some("anthropic::claude-opus-5"));
+    let sticky_turn = TurnId::new();
     assert_eq!(
-        send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "hello").await,
+        send_message_with_id(&router, &bearer, chat.id, sticky_turn, "hello").await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store
+            .get_turn_run(sticky_turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .model,
+        "model_gateway::gateway-flagship"
+    );
+
+    // An unmatched sticky choice remains explicit and is refused honestly
+    // instead of degrading to the first gateway model.
+    store
+        .set_setting(
+            "chat_default.model",
+            &serde_json::Value::String("openai::gpt-5.6-sol".into()),
+        )
+        .await
+        .unwrap();
+    let unmatched_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/chats")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unmatched_response.status(), StatusCode::CREATED);
+    let unmatched: Chat = json_body(unmatched_response).await;
+    assert_eq!(unmatched.model.as_deref(), Some("openai::gpt-5.6-sol"));
+    assert_eq!(
+        send_message_with_id(&router, &bearer, unmatched.id, TurnId::new(), "hello").await,
         StatusCode::CONFLICT
     );
 
@@ -2342,10 +2441,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "model_gateway::gateway-flagship"
     );
 
-    // The re-route covers exactly what the roles read labels: the default. A
-    // per-chat override is the user's explicit pick, and its pill still names
-    // it — a dead one is refused honestly rather than silently swapped, and
-    // the picker offers only gateway models to fix it.
+    // An unmatched per-chat override remains explicit and is refused honestly.
     assert_eq!(
         send_message_with_id(&router, &bearer, overridden.id, TurnId::new(), "hello").await,
         StatusCode::CONFLICT

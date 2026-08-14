@@ -314,20 +314,26 @@ pub async fn post_message(
         existing.model
     } else {
         let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
-        // The managed re-route the roles read applies, on exactly the domain
-        // that read labels: the role default, and only for a managed profile.
-        // Unmanaged sends pass through untouched — free-form ids included —
-        // and a per-chat override is the user's explicit pick, so a dead one
-        // gets the honest validation refusal below rather than a silent swap
-        // out from under the label the pill still shows; the picker offers
-        // only gateway models to fix it. A managed profile with nothing
-        // entitled also keeps the raw selection, refused with the real reason.
+        let explicit = chat.model.is_some()
+            || model_roles::read_selection(&*state.store, model_roles::ModelRole::Chat)
+                .await?
+                .is_some();
+        // Managed turns route portable direct selections through their unique
+        // current gateway equivalent without changing the chat or global
+        // setting. Ambiguous and unmatched explicit choices keep their raw
+        // value and fail validation honestly below.
         let managed =
             crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed && chat.model.is_none() {
-            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
-                .await?
-                .map_or(selected, |policy| policy.key)
+        let selected = if managed.managed {
+            model_roles::effective_chat_policy(
+                &*state.store,
+                &*state.secrets,
+                &managed,
+                &selected,
+                explicit,
+            )
+            .await?
+            .map_or(selected, |policy| policy.key)
         } else {
             selected
         };
@@ -735,12 +741,22 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
             continue;
         };
         let selected = resolve_chat_model(&*state.store, &chat, &state.agent_config.model).await?;
+        let explicit = chat.model.is_some()
+            || model_roles::read_selection(&*state.store, model_roles::ModelRole::Chat)
+                .await?
+                .is_some();
         let managed =
             crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
-        let selected = if managed.managed && chat.model.is_none() {
-            model_roles::effective_chat_policy(&*state.store, &*state.secrets, &managed, &selected)
-                .await?
-                .map_or(selected, |policy| policy.key)
+        let selected = if managed.managed {
+            model_roles::effective_chat_policy(
+                &*state.store,
+                &*state.secrets,
+                &managed,
+                &selected,
+                explicit,
+            )
+            .await?
+            .map_or(selected, |policy| policy.key)
         } else {
             selected
         };

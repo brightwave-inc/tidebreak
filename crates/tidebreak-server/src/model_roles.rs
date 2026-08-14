@@ -246,10 +246,14 @@ fn selection_keys(models: &[providers::CustomModelConfig]) -> Vec<String> {
         .collect()
 }
 
-/// The chat role's effective policy for `selection` under `managed`: the
-/// selection itself while its provider can serve it. When there is no stored
-/// chat selection, an unusable boot default falls back to the first entitled
-/// gateway model; an explicit stored selection never does.
+/// The chat role's effective policy for `selection` under `managed`.
+///
+/// Durable direct-provider selections stay portable: while managed, a curated
+/// key (or uniquely owned legacy bare id) resolves through its one entitled
+/// gateway equivalent without rewriting the saved value. Deployment-local
+/// gateway keys resolve only against the current snapshot. An ambiguous or
+/// unmatched explicit selection stays unresolved; only a genuinely automatic
+/// boot default may fall back to the first entitled gateway model.
 ///
 /// This is one function on purpose. The roles read labels the default with it
 /// and the turn-accept seam freezes a model from it, so the model a client
@@ -262,25 +266,25 @@ pub async fn effective_chat_policy(
     secrets: &dyn SecretProvider,
     managed: &crate::managed_policy::ManagedPolicy,
     selection: &str,
+    explicit: bool,
 ) -> Result<Option<ResolvedModelPolicy>> {
     let resolved = providers::resolve_model_policy(store, selection, true).await?;
     if !managed.managed {
         return Ok(resolved);
     }
+    if let Some(equivalent) =
+        providers::unique_gateway_equivalent(store, managed, selection).await?
+    {
+        return usable_policy(store, secrets, managed, &equivalent).await;
+    }
     if let Some(policy) = resolved {
-        if providers::provider_is_usable(store, secrets, policy.provider, managed).await? {
+        if policy.provider == providers::ProviderKind::ModelGateway
+            && providers::model_is_usable(store, secrets, &policy, managed).await?
+        {
             return Ok(Some(policy));
         }
     }
-    // Catalog sync migrates an explicit direct-provider selection only when
-    // exactly one canonically equivalent gateway route exists. If that
-    // migration left the pin alone, it was ambiguous or unmatched: choosing
-    // the gateway's first unrelated row here would erase the distinction and
-    // run a foreground turn on a model the user did not select. Preserve the
-    // unresolved result so the role label is empty and turn validation asks
-    // the user to make a deliberate choice. Only an implicit process boot
-    // default retains the automatic managed fallback below.
-    if read_selection(store, ModelRole::Chat).await?.is_some() {
+    if explicit {
         return Ok(None);
     }
     for key in gateway_listed(store, managed).await? {
