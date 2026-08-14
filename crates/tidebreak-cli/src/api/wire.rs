@@ -32,8 +32,8 @@ pub struct SequencedFrame {
 pub enum MetadataFrame {
     /// The chat was named — by titling, for a chat that had no name.
     Titled { title: String },
-    /// A post-turn file-change summary is ready; the TUI has no surface for
-    /// the undo flow, but recognizing the frame keeps the tag decode closed.
+    /// A post-turn file-change summary is ready; recognizing the frame keeps
+    /// the tag decode closed.
     FileChangesRecorded,
     /// Code execution is preparing its sandbox image, or has stopped.
     SandboxPreparing { preparing: bool },
@@ -54,16 +54,6 @@ pub struct TurnUsage {
     pub cache_read_input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
-}
-
-impl TurnUsage {
-    /// Everything that occupied the model's context across the turn.
-    pub fn context_tokens(self) -> u64 {
-        u64::from(self.input_tokens)
-            + u64::from(self.output_tokens)
-            + u64::from(self.cache_read_input_tokens)
-            + u64::from(self.cache_creation_input_tokens)
-    }
 }
 
 /// The events the CLI renders. Only fields a CLI surface uses are declared;
@@ -197,121 +187,10 @@ pub struct Refusal {
     pub partial_output: bool,
 }
 
-/// One entry of the durable transcript, from `GET /chats/{id}/messages`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MessageSnapshot {
-    pub role: TranscriptRole,
-    pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Images submitted with a user message (identity and geometry only).
-    #[serde(default)]
-    pub image_attachments: Option<Vec<ImageAttachment>>,
-    /// Files submitted with a user message.
-    #[serde(default)]
-    pub file_attachments: Option<Vec<FileAttachment>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TranscriptRole {
-    User,
-    Assistant,
-    /// A durable host-authored note between turns; shown as a subtle notice.
-    System,
-    /// The transcript never emits these, but decode defensively anyway.
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ImageAttachment {
-    pub media_type: String,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct FileAttachment {
-    pub name: String,
-    /// The document's media type; decoded for forward compatibility, not yet
-    /// shown on the TUI's attachment chips.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub media_type: String,
-}
-
-/// One finished tool call in history, projected through the renderer-safe
-/// allowlist. Only the fields the TUI renders are declared.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ToolActivitySnapshot {
-    /// The call's durable identity; the TUI doesn't key history by it yet,
-    /// but it is part of the wire contract.
-    #[allow(dead_code)]
-    pub call_id: CallId,
-    pub tool: String,
-    #[serde(default)]
-    pub action: Option<serde_json::Value>,
-    #[serde(default)]
-    pub result: Option<serde_json::Value>,
-    #[serde(default)]
-    pub status: Option<ToolCallStatus>,
-}
-
-/// One terminal turn's status and visible content.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TerminalTurnSnapshot {
-    /// The turn's identity and its partial/reasoning text are part of the
-    /// wire contract; the TUI reads the status, usage, and failure fields and
-    /// doesn't reprint settled partial text.
-    #[allow(dead_code)]
-    pub turn_id: TurnId,
-    pub status: TerminalTurnStatus,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub partial_content: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub reasoning: Option<String>,
-    #[serde(default)]
-    pub refusal: Option<Refusal>,
-    #[serde(default)]
-    pub failure_category: Option<String>,
-    #[serde(default)]
-    pub usage: TurnUsage,
-    #[allow(dead_code)]
-    pub finished_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalTurnStatus {
-    Completed,
-    Failed,
-    Cancelled,
-    #[serde(other)]
-    Unknown,
-}
-
-/// The visible transcript plus the journal watermark that produced it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Transcript {
-    #[serde(default)]
-    pub messages: Vec<MessageSnapshot>,
-    #[serde(default)]
-    pub tool_activity: Vec<ToolActivitySnapshot>,
-    #[serde(default)]
-    pub terminal_turns: Vec<TerminalTurnSnapshot>,
-    #[serde(default)]
-    pub last_event_seq: i64,
-}
-
 /// The chat record, as `GET /chats` and `GET /chats/{id}` return it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatSummary {
     pub id: tidebreak_core::ChatId,
-    /// The project this chat belongs to; decoded so the move picker can show
-    /// the current home, not yet rendered.
-    #[allow(dead_code)]
     #[serde(default)]
     pub project_id: Option<tidebreak_core::ProjectId>,
     #[serde(default)]
@@ -319,43 +198,9 @@ pub struct ChatSummary {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub reasoning_effort: Option<String>,
-    #[serde(default)]
     pub permission_mode: Option<String>,
-    /// When the chat was created; the TUI doesn't sort or label by it yet.
-    #[allow(dead_code)]
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// One project (workspace), as `GET /projects` returns it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProjectSummary {
-    pub id: tidebreak_core::ProjectId,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// When the project was created; not shown in the picker.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// One item waiting on the user, from `GET /inbox`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct InboxItem {
-    pub chat_id: tidebreak_core::ChatId,
-    /// The detail fields are part of the wire contract; the TUI's inbox use
-    /// is the attention marker, so only the chat identity is read today.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub chat_title: Option<String>,
-    #[allow(dead_code)]
-    pub kind: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub action: Option<String>,
-    #[allow(dead_code)]
-    pub requested_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// One background agent run, from `GET /chats/{id}/agent-runs`.
@@ -383,16 +228,11 @@ pub struct AgentRunSnapshot {
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub last_error_code: Option<String>,
-    #[serde(default)]
-    pub activity: Option<AgentActivity>,
     /// Files the run named in its terminal `done` submission.
     #[serde(default)]
     pub submitted_outputs: Vec<SubmittedOutput>,
     #[serde(default)]
     pub terminal_text: Option<String>,
-    /// The call that spawned this run; lets a transcript attach the run to
-    /// its spawning step. The TUI doesn't join the two yet.
-    #[allow(dead_code)]
     #[serde(default)]
     pub spawn_call_id: Option<CallId>,
     #[serde(default)]
@@ -404,13 +244,6 @@ pub struct AgentRunSnapshot {
 pub struct SubmittedOutput {
     pub output_id: tidebreak_core::OutputId,
     pub filename: String,
-}
-
-/// The live checkpoint of a background run.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AgentActivity {
-    pub kind: AgentActivityKind,
-    pub status: String,
 }
 
 /// The renderer-safe activity vocabulary, closed like the server's.
@@ -429,19 +262,6 @@ pub enum AgentActivityKind {
 }
 
 impl AgentActivityKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Exec => "a command",
-            Self::WebSearch => "a web search",
-            Self::ReadDelegatedFile => "a delegated file",
-            Self::ListConnectedFolders => "connected folders",
-            Self::ListFolder => "a folder",
-            Self::ReadConnectedFile => "a file",
-            Self::ImportConnectedFile => "an import",
-            Self::Other => "a step",
-        }
-    }
-
     /// Stable snake_case name for JSON drivers and text listings.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -466,25 +286,6 @@ pub struct AgentActivityItem {
     /// Renderer-safe command/query detail when the server supplies it.
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
-}
-
-/// One pending approval, from `GET /chats/{id}/approvals`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PendingApprovalSnapshot {
-    pub call_id: CallId,
-    pub action: String,
-    pub approval: String,
-    #[serde(default)]
-    pub auto_judge_status: Option<String>,
-    #[serde(default)]
-    pub preview: Option<serde_json::Value>,
-    /// Whether the kind is approvable at all; a `false` card is decline-only.
-    /// The TUI shows the same card either way today.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub can_approve: bool,
-    #[serde(default)]
-    pub grant_rungs: Vec<GrantRung>,
 }
 
 /// One proposed plan awaiting review, from `GET /chats/{id}/plans/pending`.

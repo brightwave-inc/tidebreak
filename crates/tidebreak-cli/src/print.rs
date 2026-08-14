@@ -676,7 +676,7 @@ impl FolderDeclines {
     ) {
         // Attach mode has no client-executor credential and is not the trusted
         // surface for this server — the process that owns it is. Headless
-        // owners (`tidebreak serve`, an embedded `-p`/`tui`) settle the call
+        // owners (`tidebreak serve` or an embedded `-p`) settle the call
         // declined without granting; a desktop owner may show a picker. Say so
         // and leave the call alone rather than pretending to be that surface.
         let Some(executor_token) = executor_token else {

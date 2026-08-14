@@ -19,12 +19,6 @@
 //! keychain items belong to the running binary's code signature, which is what
 //! stops macOS asking for credentials an earlier build created.
 //!
-//! `tidebreak tui [--chat <id> | --new]` runs an interactive terminal chat: it
-//! boots the same in-process server as `serve` and drives it over the loopback
-//! HTTP+WS API. With neither flag it opens a picker over the existing chats, so
-//! a session can be resumed without knowing its id; `--new` skips straight to a
-//! fresh chat, and `--chat` resumes one by id.
-//!
 //! `tidebreak output list|show|revisions|export <chat> …` reads a conversation's
 //! outputs and writes one to a path, and `tidebreak attach <chat> <file>` puts a
 //! local file into a conversation. Both drive the same server routes the desktop
@@ -81,7 +75,6 @@ mod folder_executor;
 mod outputs;
 mod print;
 mod setup;
-mod tui;
 
 use print::OutputFormat;
 use setup::{Command as SetupCommand, SecretSource};
@@ -90,7 +83,6 @@ const USAGE: &str = "\
 usage: tidebreak serve
        tidebreak mcp <workspace>
        tidebreak rehome-secrets
-       tidebreak tui [--chat <id> | --new]
        tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
                   [--permission-mode ask|auto|allow|plan]
                   [--model <key>]
@@ -136,7 +128,7 @@ The setup commands, the output family, and the folder commands take
 variable named by --from-env — never from an argument, which every process on
 the machine can read.
 
-tui, -p, output, attach, and the setup commands also take --server <url>
+-p, output, attach, and the setup commands also take --server <url>
 [--server-token-env <var>] or --attach, which talks to a server that is already
 running instead of embedding one. --attach reads {TIDEBREAK_DATA_DIR}/listen.json
 (written by serve and the desktop). With --server the token comes from
@@ -194,33 +186,6 @@ async fn run() -> Result<i32> {
                 usage_error("rehome-secrets does not accept arguments");
             }
             rehome_secrets().await.map(|()| 0)
-        }
-        Some(command) if command == OsStr::new("tui") => {
-            let mut open = None;
-            while let Some(flag) = args.next() {
-                if flag == OsStr::new("--chat") {
-                    let Some(id) = args.next() else {
-                        usage_error("tui --chat requires a chat id");
-                    };
-                    let Ok(chat) = ChatId::from_str(&id.to_string_lossy()) else {
-                        usage_error("tui --chat expects a chat UUID");
-                    };
-                    if open.is_some() {
-                        usage_error("tui takes either --chat <id> or --new, not both");
-                    }
-                    open = Some(tui::Open::Chat(chat));
-                } else if flag == OsStr::new("--new") {
-                    if open.is_some() {
-                        usage_error("tui takes either --chat <id> or --new, not both");
-                    }
-                    open = Some(tui::Open::New);
-                } else {
-                    usage_error("tui accepts only --chat <id> or --new");
-                }
-            }
-            tui::run(open.unwrap_or(tui::Open::Pick), server_flags.resolve()?)
-                .await
-                .map(|()| 0)
         }
         Some(command) if command == OsStr::new("output") => {
             output_command(&mut args, server_flags.resolve()?)

@@ -1,7 +1,7 @@
 //! Scriptable setup: `tidebreak provider|model|settings|mcp-server|chat|agent-run`.
 //!
-//! `chat steer` posts more user text into an active turn (same route the TUI
-//! uses); `turn` is the durable turn identity from the chat event stream.
+//! `chat steer` posts more user text into an active turn; `turn` is the durable
+//! turn identity from the chat event stream.
 //!
 //! Every command here is a thin client of a route the server already serves —
 //! the same ones the desktop settings pages call — so configuring Tidebreak
@@ -433,8 +433,8 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             turn,
             content,
         } => {
-            // Same client path the TUI uses: mint a steer id, interrupt the
-            // active turn with the new user text.
+            // Mint a steer id, then interrupt the active turn with the new
+            // user text.
             let steer_id = TurnId::new();
             client.steer(chat, turn, steer_id, &content).await?;
             if format == OutputFormat::Json {

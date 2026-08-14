@@ -241,8 +241,7 @@ ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 #       curl -H "Authorization: Bearer TOKEN" http://127.0.0.1:PORT/chats
 ```
 
-The CLI also has an interactive terminal chat (`tidebreak tui`), a
-non-interactive single turn (`tidebreak -p "<prompt>"`, with
+The CLI has a non-interactive single turn (`tidebreak -p "<prompt>"`, with
 `--output-format json` for the turn's NDJSON event stream), and an MCP stdio
 server confined to one explicit workspace:
 
@@ -310,7 +309,7 @@ end-to-end, less technical tour of the runtime and its state machines, see
 | [`tidebreak-server`](crates/tidebreak-server) | authenticated local HTTP/WebSocket API + durable workers |
 | [`tidebreak-mcp`](crates/tidebreak-mcp) | MCP server face plus external stdio client tool mounting |
 | [`tidebreak-desktop`](crates/tidebreak-desktop) | desktop app (Tauri) |
-| [`tidebreak-cli`](crates/tidebreak-cli) | headless `tidebreak serve`, `tui`, print mode, and `mcp` |
+| [`tidebreak-cli`](crates/tidebreak-cli) | headless `tidebreak serve`, print mode, and `mcp` |
 
 ## Contributing
 

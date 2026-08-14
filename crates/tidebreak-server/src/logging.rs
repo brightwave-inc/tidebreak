@@ -89,11 +89,10 @@ pub fn init_logging(data_dir: &Path) {
     }
 }
 
-/// Install the file-only subscriber used by `tidebreak tui`.
+/// Install the file-only subscriber used by commands whose stdout is data.
 ///
-/// The TUI owns the terminal, so unlike [`init_logging`] there is no stderr
-/// mirror — and an unusable log file degrades to no subscriber at all rather
-/// than stderr, which would corrupt the display.
+/// Unlike [`init_logging`] there is no stderr mirror — an unusable log file
+/// degrades to no subscriber at all rather than corrupting command output.
 pub fn init_logging_file_only(data_dir: &Path) {
     if let Ok(writer) = open_log_writer(data_dir) {
         let subscriber = tracing_subscriber::registry().with(env_filter()).with(
