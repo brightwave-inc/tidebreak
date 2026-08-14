@@ -1631,8 +1631,12 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
     // spend most of the ordinary 30-second guard waiting for scheduler time even
     // though the same flow completes immediately in isolation. Keep a hard
     // bound while leaving enough headroom for the integration-heavy suite.
+    // Serialize this test's writes through one SQLite connection: a wide pool
+    // only makes the operation-log and run-accounting writes compete for
+    // SQLite's single writer lock, which can exhaust the driver's busy timeout
+    // on a loaded CI runner without exercising behavior this test cares about.
     tokio::time::timeout(Duration::from_secs(60), async {
-        let (_dir, store, chat) = store_with_pool(Some(32)).await;
+        let (_dir, store, chat) = store_with_pool(Some(1)).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
 
         let backend = MockBackend::spawning();
