@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      update-draft:
+        description: Regenerate the release draft from merged pull requests
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -61,7 +66,11 @@ jobs:
 
   draft:
     name: update native GitHub release draft
-    if: ${{ github.event_name == 'push' }}
+    if: >-
+      ${{
+        github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && inputs.update-draft)
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

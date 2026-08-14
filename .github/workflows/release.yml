@@ -80,10 +80,12 @@ jobs:
             echo "GitHub returned metadata for a different release tag." >&2
             exit 1
           }
-          [[ "$(jq -r .prerelease <<<"$release_json")" = false ]] || {
-            echo "Production desktop builds cannot be published from a GitHub prerelease." >&2
-            exit 1
-          }
+          # A prerelease is an in-flight production build that was previously
+          # dispatched and then failed or was re-triggered. Resume it.
+          prerelease="$(jq -r .prerelease <<<"$release_json")"
+          if [[ "$prerelease" = true ]]; then
+            echo "Resuming an in-flight prerelease $RELEASE_TAG."
+          fi
 
           draft="$(jq -r .draft <<<"$release_json")"
           release_id="$(jq -er .id <<<"$release_json")"
@@ -104,7 +106,7 @@ jobs:
           fi
 
           published_at="$(jq -r '.published_at // empty' <<<"$release_json")"
-          if [[ "$draft" = false && -z "$published_at" ]]; then
+          if [[ "$draft" = false && "$prerelease" = false && -z "$published_at" ]]; then
             echo "Published release $RELEASE_TAG has no publication timestamp." >&2
             exit 1
           fi
@@ -112,13 +114,31 @@ jobs:
           jq '{name, body, tag_name, target_commitish, prerelease}' \
             <<<"$release_json" > "$RUNNER_TEMP/release-snapshot.json"
           {
-            echo "draft=$draft"
+            # The release is finalized if it was mutable when validation ran.
+            # Drafts and in-flight prereleases are both published by finalize.
+            echo "draft=$([[ "$draft" = true || "$prerelease" = true ]] && echo true || echo false)"
             echo "published_at=$published_at"
             echo "release_id=$release_id"
             echo "sha=$release_sha"
             echo "tag=$RELEASE_TAG"
             echo "version=${RELEASE_TAG#v}"
           } >> "$GITHUB_OUTPUT"
+      - name: Convert the draft to a prerelease while it builds
+        if: ${{ steps.release.outputs.draft == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          # A draft keeps collecting release notes from new merges while the
+          # build runs, making the live draft drift away from the frozen notes.
+          # Mark the in-flight release as a prerelease so Release Drafter treats
+          # it as already-published and starts the next draft for any PRs that
+          # merge during this build.
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f draft=false \
+            -f prerelease=true \
+            >/dev/null
       - name: Require a commit from main
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
@@ -1897,6 +1917,7 @@ jobs:
       }}
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     outputs:
       published_at: ${{ steps.release.outputs.published_at }}
@@ -1927,7 +1948,7 @@ jobs:
 
           if [[ "$RELEASE_DRAFT" = true ]]; then
             snapshot="$RUNNER_TEMP/release-snapshot/release-snapshot.json"
-            jq '. + {draft: false, make_latest: "true"}' "$snapshot" | gh api \
+            jq '. + {draft: false, prerelease: false, make_latest: "true"}' "$snapshot" | gh api \
               --method PATCH \
               "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --input - >/dev/null
@@ -1952,3 +1973,13 @@ jobs:
             '.published_at | select(type == "string" and length > 0)' \
             <<<"$release_json")"
           echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
+      - name: Refresh the next release draft
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Start a new draft immediately after publishing. If any PRs merged
+          # during the build, Release Drafter already created one while the
+          # release was a prerelease; this call is idempotent and just ensures
+          # a draft exists even when the build was quiet.
+          gh workflow run release-draft.yml --ref main --field update-draft=true
