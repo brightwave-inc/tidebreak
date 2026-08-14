@@ -1,7 +1,7 @@
 /**
- * `components/document/` is the reading side of a source: the extracted text,
- * the panel's view switcher below, and the viewers that need nothing more than
- * the file's characters — image, text/markdown, JSON, XML.
+ * `components/document/` is the reading side of a source: the extracted-text
+ * fallback, and the viewers that need nothing more than the file's characters
+ * — image, text/markdown, JSON, XML.
  *
  * `document/` next to it is the heavy side: the media-type dispatcher and the
  * viewers built on a document engine of their own (pdf.js, Univer), each of
@@ -34,9 +34,6 @@ import { MarkdownViewer } from "./markdown-viewer";
 const JsonViewer = lazy(() => import("./json-viewer"));
 const XmlViewer = lazy(() => import("./xml-viewer"));
 
-/** Which of a document's two views is on screen. */
-export type DocumentView = "extracted_text" | "original_doc";
-
 /**
  * A media type reduced to `type/subtype`: lowercased, parameters dropped.
  * Sources are typed by sniffing their bytes, so the stored value can carry a
@@ -49,10 +46,10 @@ export function baseMediaType(mediaType: string): string {
 /**
  * Whether any viewer can draw this format's original bytes.
  *
- * A format with no viewer is not refused: its panel drops the original view
- * and opens on the extracted text alone, which is a better floor than
- * declining to open the document at all. Keep this in step with the dispatch
- * below — a type listed here must reach a viewer there.
+ * A format with no viewer is not refused: the panel draws the extracted text
+ * instead, which is a better floor than declining to open the document at all.
+ * Keep this in step with the dispatch below — a type listed here must reach a
+ * viewer there.
  */
 export function isDocumentRenderable(mediaType: string): boolean {
   const type = baseMediaType(mediaType);
@@ -82,8 +79,7 @@ export function structuredKind(type: string): "json" | "xml" | null {
 type DocumentDetailsProps = {
   chatId: string;
   info: DocumentDetail;
-  view: DocumentView;
-  hasOriginalDocumentTab?: boolean;
+  hasOriginalDocument?: boolean;
   /** Model-authored line range to reveal in a text view. */
   targetLines?: Readonly<{ start: number; end: number }>;
   /** Page of a paginated original to open on, when opened from a citation. */
@@ -97,20 +93,19 @@ type DocumentDetailsProps = {
 };
 
 /**
- * The two ways a source is shown, and which viewer draws each format.
+ * The original file when a viewer can draw it, otherwise the extracted text.
  *
  * The original is whatever the reader imported, dispatched on media type. The
  * extracted text is what Tidebreak actually read out of it — the text of record
- * that searches and citations index into — and every source has one, which is
- * why it is the view a format with no viewer falls back to.
+ * that searches and citations index into — and is the floor for a format with
+ * no viewer.
  *
  * Adding a format is a branch here plus a case in {@link isDocumentRenderable}.
  */
 export function DocumentDetails({
   chatId,
   info,
-  view,
-  hasOriginalDocumentTab,
+  hasOriginalDocument,
   targetLines,
   targetPage,
   citationCellRange,
@@ -122,7 +117,7 @@ export function DocumentDetails({
 
   return (
     <div className="flex min-h-0 grow flex-col overflow-hidden">
-      {hasOriginalDocumentTab && view === "original_doc" && (
+      {hasOriginalDocument ? (
         <>
           {hasOriginalViewer(type) ? (
             <DocumentViewer
@@ -163,11 +158,9 @@ export function DocumentDetails({
             />
           )}
         </>
-      )}
-      {view === "extracted_text" && (
+      ) : (
         <ExtractedText info={info} targetLines={targetLines} />
       )}
-
     </div>
   );
 }

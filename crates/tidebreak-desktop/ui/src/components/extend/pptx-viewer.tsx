@@ -1234,7 +1234,7 @@ export function PptxViewerPreview({
           ) : null}
         </DocumentViewerThumbnailSidebar>
         <ScrollArea
-          className="min-h-0 flex-1 bg-background"
+          className="min-h-0 min-w-0 flex-1 bg-background"
           viewportClassName="p-0"
           viewportProps={{
             "aria-label": "PowerPoint presentation",

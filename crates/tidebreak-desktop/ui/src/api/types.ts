@@ -156,8 +156,8 @@ export type DocumentDetail = {
   /**
    * Whether the source kept the bytes it was made from. A source with none —
    * a fetched web page, whose markup is not retained — has no original to draw,
-   * so the panel offers only the extracted text rather than a tab that can
-   * only fail.
+   * so the panel shows the extracted text rather than a viewer that can only
+   * fail.
    */
   has_original_bytes: boolean;
   updated_at: string;

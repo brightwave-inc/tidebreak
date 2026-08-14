@@ -4,10 +4,10 @@
  * Extend's OOXML renderers, Univer) with the parsing and control surfaces those need, and
  * the download every viewer shares (`useFileDownload`).
  *
- * `components/document/` next to it is the reading side: the extracted text,
- * the panel's view switcher, and the viewers that need nothing beyond the
- * file's characters — image, text/markdown, JSON, XML. A new format goes
- * wherever its viewer's weight puts it; both sides download the same way.
+ * `components/document/` next to it is the reading side: the extracted-text
+ * fallback, and the viewers that need nothing beyond the file's characters —
+ * image, text/markdown, JSON, XML. A new format goes wherever its viewer's
+ * weight puts it; both sides download the same way.
  */
 import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";

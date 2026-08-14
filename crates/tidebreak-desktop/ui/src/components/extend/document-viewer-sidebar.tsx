@@ -4,7 +4,7 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-const INLINE_THUMBNAIL_SIDEBAR_MIN_WIDTH = 768
+const INLINE_THUMBNAIL_SIDEBAR_MIN_WIDTH = 600
 
 export function useElementWidth<TElement extends HTMLElement>() {
   const ref = React.useRef<TElement | null>(null)

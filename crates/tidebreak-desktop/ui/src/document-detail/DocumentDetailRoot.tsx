@@ -9,7 +9,6 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import {
   DocumentDetails,
   isDocumentRenderable,
-  type DocumentView,
 } from "@/components/document/document-details";
 import { DocumentError } from "@/components/document/error";
 import { Button } from "@/components/ui/button";
@@ -79,12 +78,10 @@ export function DocumentDetailRoot({
     };
   }, [client, chatId, documentID, reloads]);
 
-  const hasOriginalDocumentTab =
+  const hasOriginalDocument =
     info != null &&
     info.has_original_bytes &&
     isDocumentRenderable(info.media_type);
-
-  const [view, setView] = useState<DocumentView>("original_doc");
 
   const placement = useCitationPlacement(documentID, citationId);
   const paginated = info != null && isPaginatedOriginalViewer(info.media_type);
@@ -105,7 +102,7 @@ export function DocumentDetailRoot({
   // highlighted instead.
   const citationCellRange =
     placement?.kind === "sheet" &&
-    hasOriginalDocumentTab &&
+    hasOriginalDocument &&
     info != null &&
     isGridOriginalViewer(info.media_type)
       ? {
@@ -114,36 +111,6 @@ export function DocumentDetailRoot({
           ...splitCells(placement.cells),
         }
       : undefined;
-
-  // Arriving from a citation, land on whichever view can show where it points:
-  // the recorded page of a paginated original, the range of a grid one, or else
-  // the extracted text, where the passage itself is highlighted. A citation the
-  // transcript cannot resolve opens the document the same way the source list
-  // does.
-  //
-  // The original view is only worth landing on where there is one.
-  const citationView: DocumentView | null = !placement
-    ? null
-    : (citationPage != null || citationCellRange != null) &&
-        hasOriginalDocumentTab
-      ? "original_doc"
-      : citationLines
-        ? "extracted_text"
-        : null;
-
-  // Reset the view when the document changes. A format with no viewer has only
-  // the extracted text to land on.
-  //
-  // Landing is per citation rather than per resolution. Two citations into one
-  // source often want the same view, so the view alone cannot tell the second
-  // click from the first: without the citation in the dependencies, a reader who
-  // had since switched views stayed on the view they were on and the second
-  // citation landed nowhere. The citation only changes when the reader clicks
-  // one, so the transcript re-resolving the citation the panel is already open
-  // at still leaves a deliberate view switch alone.
-  useEffect(() => {
-    setView(citationView ?? (hasOriginalDocumentTab ? "original_doc" : "extracted_text"));
-  }, [documentID, hasOriginalDocumentTab, citationView, citationId]);
 
   const documentName = info ? documentTitle(info) : undefined;
 
@@ -193,9 +160,6 @@ export function DocumentDetailRoot({
       }
       headerRightSlot={
         <DocumentDetailActions
-          view={view}
-          onViewChange={setView}
-          showOriginalView={hasOriginalDocumentTab}
           canDownload={canDownload && info != null}
           downloading={downloading}
           onDownload={() => void onDownload()}
@@ -226,8 +190,7 @@ export function DocumentDetailRoot({
         <DocumentDetails
           chatId={chatId}
           info={info}
-          view={view}
-          hasOriginalDocumentTab={hasOriginalDocumentTab}
+          hasOriginalDocument={hasOriginalDocument}
           targetLines={citationLines}
           targetPage={citationPage}
           citationCellRange={citationCellRange}
