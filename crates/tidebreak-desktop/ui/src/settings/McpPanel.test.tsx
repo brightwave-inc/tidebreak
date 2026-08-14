@@ -392,8 +392,11 @@ describe("McpPanel", () => {
     await screen.findByRole("switch", { name: "Mount example-security-tools" });
     const row = mountRow("example-security-tools");
     expect(within(row).getByText("Healthy")).toBeInTheDocument();
+    // Apps load after the session check, so the switch can appear before
+    // this label. Wait for it instead of assuming the two fetches finish
+    // in lockstep.
     expect(
-      within(row).getByText(/serves: Incident API/),
+      await within(row).findByText(/serves: Incident API/),
     ).toBeInTheDocument();
     expect(
       within(row).getByRole("button", { name: /Reconnect/ }),
