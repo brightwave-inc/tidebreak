@@ -281,7 +281,7 @@ jobs:
           request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
 
-          grep -Fq 'https://tidebreak.sh/docs/' "$RUNNER_TEMP/docs-index.html"
+          grep -Fq 'https://www.tidebreak.sh/docs/' "$RUNNER_TEMP/docs-index.html"
           grep -Fq '/docs/_next/' "$RUNNER_TEMP/docs-index.html"
           asset_path="$(grep -oE '/docs/_next/[^" ]+' \
             "$RUNNER_TEMP/docs-index.html" | head -n 1)"
@@ -328,7 +328,7 @@ jobs:
               https://tidebreak-docs.vercel.app/docs/ \
               --dump-header "$RUNNER_TEMP/docs-production-headers" \
               --output "$RUNNER_TEMP/docs-production.html" \
-              && grep -Fq 'https://tidebreak.sh/docs/' \
+              && grep -Fq 'https://www.tidebreak.sh/docs/' \
                 "$RUNNER_TEMP/docs-production.html" \
               && grep -Fqi 'content-security-policy:' \
                 "$RUNNER_TEMP/docs-production-headers" \
@@ -1343,6 +1343,9 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
           path: release-source
           persist-credentials: false
+
+      - name: Create the source SBOM output directory
+        run: mkdir -p source-sbom
 
       - name: Generate the source-scoped release SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0

@@ -96,7 +96,7 @@ export async function generateMetadata(
     return {
       title: { absolute: 'Tidebreak Docs' },
       description: 'Documentation for Tidebreak.',
-      alternates: { canonical: 'https://tidebreak.sh/docs/' },
+      alternates: { canonical: 'https://www.tidebreak.sh/docs/' },
     };
   }
 
@@ -108,7 +108,7 @@ export async function generateMetadata(
     title: page.title,
     description: page.description,
     alternates: {
-      canonical: `https://tidebreak.sh/docs/${publicPath}`,
+      canonical: `https://www.tidebreak.sh/docs/${publicPath}`,
     },
     openGraph: {
       images: getPageImage(page).url,

@@ -15,7 +15,9 @@ import { useFileDownload, type FileBytesSource } from "./useFileDownload";
  */
 export const DOCX_RENDER_OPTIONS = {
   breakPages: true,
-  experimental: true,
+  // The experimental tab-stop pass runs on a fixed delayed timer after
+  // renderAsync resolves. Keep it off so serialization never races it.
+  experimental: false,
   ignoreLastRenderedPageBreak: false,
   renderAltChunks: false,
   renderComments: false,
@@ -86,16 +88,23 @@ export default function DocxViewer({
     if (!fileDownload.data) return;
 
     let cancelled = false;
+    const stagingHost = document.createElement("div");
     const staging = document.createElement("div");
+    stagingHost.style.cssText =
+      "position:fixed;left:-100000px;top:0;width:1200px;opacity:0;pointer-events:none;";
+    stagingHost.attachShadow({ mode: "closed" }).append(staging);
+    document.body.append(stagingHost);
     setFrameDocument(null);
     setIsReady(false);
     setErrorType(null);
 
-    // docx-preview cannot cancel a parse. Render into a detached node so its
-    // generated styles never enter Tidebreak's main document. The sanitized
-    // serialization is then loaded into a scriptless sandboxed frame.
+    // docx-preview cannot cancel a parse. Render inside an offscreen closed
+    // shadow root so layout-dependent SVG sizing can finish without generated
+    // styles entering Tidebreak's main document. The sanitized serialization
+    // is then loaded into a scriptless sandboxed frame.
     void renderAsync(fileDownload.data, staging, staging, DOCX_RENDER_OPTIONS)
-      .then(() => {
+      .then(async () => {
+        await nextAnimationFrame();
         if (cancelled) return;
         sanitizeRenderedDocument(staging);
         setFrameDocument(
@@ -104,10 +113,14 @@ export default function DocxViewer({
       })
       .catch(() => {
         if (!cancelled) setErrorType("parse");
+      })
+      .finally(() => {
+        stagingHost.remove();
       });
 
     return () => {
       cancelled = true;
+      stagingHost.remove();
     };
   }, [fileDownload.data]);
 
@@ -155,7 +168,7 @@ export default function DocxViewer({
       {frameDocument && (
         <iframe
           title="Document preview"
-          sandbox="allow-popups"
+          sandbox=""
           referrerPolicy="no-referrer"
           srcDoc={frameDocument}
           className="h-full min-h-64 w-full border-0"
@@ -205,23 +218,28 @@ function sanitizeRenderedDocument(container: HTMLElement): void {
       const href = element.getAttribute(name) ?? "";
       if (href.startsWith("#")) continue;
       const safeHref = safeExternalHref(href);
-      if (safeHref) {
-        element.setAttribute(name, safeHref);
-      } else {
-        element.removeAttribute(name);
+      if (
+        safeHref &&
+        name === "href" &&
+        element.tagName.toLowerCase() === "a"
+      ) {
+        element.setAttribute("data-tidebreak-external-href", safeHref);
       }
+      element.removeAttribute(name);
     }
   }
 
   for (const anchor of container.querySelectorAll<HTMLAnchorElement>("a")) {
-    const href = anchor.getAttribute("href");
-    if (!href || href.startsWith("#")) {
-      anchor.removeAttribute("target");
-      anchor.removeAttribute("rel");
-      continue;
+    const externalHref = anchor.getAttribute("data-tidebreak-external-href");
+    anchor.removeAttribute("data-tidebreak-external-href");
+    anchor.removeAttribute("target");
+    anchor.removeAttribute("rel");
+    if (externalHref) {
+      anchor.title = `External link (copy this address): ${externalHref}`;
+      if (!anchor.textContent?.includes(externalHref)) {
+        anchor.append(document.createTextNode(` (${externalHref})`));
+      }
     }
-    anchor.target = "_blank";
-    anchor.rel = "noopener noreferrer";
   }
 
   for (const page of container.querySelectorAll<HTMLElement>("section.docx")) {
@@ -235,6 +253,12 @@ function sanitizeRenderedDocument(container: HTMLElement): void {
   for (const style of container.querySelectorAll<HTMLStyleElement>("style")) {
     style.textContent = style.textContent?.replace(/<\/style/giu, "<\\/style") ?? "";
   }
+}
+
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
 }
 
 function safeExternalHref(href: string): string | null {

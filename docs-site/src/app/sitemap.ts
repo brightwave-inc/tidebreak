@@ -1,7 +1,7 @@
 import type { MetadataRoute } from 'next';
 import { getAllPages } from '@/lib/content';
 
-const PUBLIC_DOCS_URL = 'https://tidebreak.sh/docs/';
+const PUBLIC_DOCS_URL = 'https://www.tidebreak.sh/docs/';
 
 export const dynamic = 'force-static';
 

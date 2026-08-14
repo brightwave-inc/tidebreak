@@ -274,10 +274,12 @@ impl ComputerUseState {
     }
 
     async fn halt(&self) {
-        let _dispatch = self.acting_dispatch.lock().await;
         // send_replace, not send: the latch must hold even when no prompt is
         // currently parked on it (send drops the value with zero receivers).
         self.halt.send_replace(true);
+        // Make Stop visible immediately, then wait for any action that was
+        // already in flight to drain before reporting the stop complete.
+        let _dispatch = self.acting_dispatch.lock().await;
     }
 
     async fn dispatch_acting<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
@@ -1203,6 +1205,11 @@ async fn dispatch_consent(
         return map_control_error(&error);
     }
 
+    if cu.is_halted() {
+        revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
+        return stopped_resolution();
+    }
+
     // Re-issued exactly once, now authorized. A second Denied means the grant
     // did not cover the op (a broker-side surprise, not another ask). A held
     // consequential action re-authorizes at confirm time, so the one-time
@@ -1742,6 +1749,50 @@ mod tests {
 
         cu.resume();
         assert!(!cu.is_halted());
+    }
+
+    #[tokio::test]
+    async fn stop_sets_the_latch_before_waiting_for_an_in_flight_action() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (dispatch_started_tx, dispatch_started_rx) = oneshot::channel::<()>();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel::<()>();
+
+        let dispatch_cu = std::sync::Arc::clone(&cu);
+        let dispatch = tokio::spawn(async move {
+            dispatch_cu
+                .dispatch_acting(|| async move {
+                    dispatch_started_tx
+                        .send(())
+                        .expect("the test observes the in-flight action");
+                    release_dispatch_rx
+                        .await
+                        .expect("the test releases the in-flight action");
+                })
+                .await
+        });
+        dispatch_started_rx
+            .await
+            .expect("the acting request holds the dispatch gate");
+
+        let halt_cu = std::sync::Arc::clone(&cu);
+        let halt = tokio::spawn(async move { halt_cu.halt().await });
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while !cu.is_halted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Stop must publish its latch without waiting for the broker");
+        assert!(
+            !halt.is_finished(),
+            "Stop still drains the in-flight action"
+        );
+
+        release_dispatch_tx
+            .send(())
+            .expect("release the in-flight action");
+        dispatch.await.expect("the acting task completes").unwrap();
+        halt.await.expect("the Stop task completes after the drain");
     }
 
     #[tokio::test]

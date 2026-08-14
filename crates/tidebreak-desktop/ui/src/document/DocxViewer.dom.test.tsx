@@ -97,7 +97,7 @@ it("confines generated document styles to an opaque-origin sandbox", async () =>
     expect(candidate).not.toBeNull();
     return candidate as HTMLIFrameElement;
   });
-  expect(frame).toHaveAttribute("sandbox", "allow-popups");
+  expect(frame).toHaveAttribute("sandbox", "");
   expect(frame).not.toHaveAttribute(
     "sandbox",
     expect.stringContaining("allow-scripts"),
@@ -120,8 +120,14 @@ it("confines generated document styles to an opaque-origin sandbox", async () =>
   );
   expect(frame.srcdoc).toContain("body { display: none !important; }");
   expect(frame.srcdoc).not.toContain("</style><script>alert(1)</script>");
-  expect(frame.srcdoc).toContain('href="https://example.com/report"');
-  expect(frame.srcdoc).toContain('target="_blank"');
+  expect(frame.srcdoc).not.toContain('href="https://example.com/report"');
+  expect(frame.srcdoc).not.toContain('target="_blank"');
+  expect(frame.srcdoc).toContain(
+    "safe (https://example.com/report)",
+  );
+  expect(frame.srcdoc).toContain(
+    "External link (copy this address): https://example.com/report",
+  );
   expect(frame.srcdoc).not.toContain("http://example.com/plain");
 
   rerender(<DocxViewer source={source()} />);

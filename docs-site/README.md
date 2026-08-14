@@ -56,11 +56,11 @@ BASE_PATH=/docs pnpm build
 rewrites asset URLs, `next/link` hrefs, and the search-index fetch. Leave it
 unset for local development. See `.env.example`.
 
-Nothing here is wired to a host yet. `metadataBase` in `src/app/layout.tsx` is
-set to the intended public URL, but the indexing decision is still open —
-either a canonical URL pointing at the public path, or `noindex` on the raw
-deployment origin, so the deployment origin and the public URL are not indexed
-as separate sites.
+The release workflow deploys this export to the dedicated documentation
+project, then the marketing project serves it under
+`https://www.tidebreak.sh/docs/`. Canonical metadata and the sitemap point at
+that public path so the raw deployment origin is not indexed as a separate
+site.
 
 ## Design tokens
 

@@ -1496,6 +1496,15 @@ test("source SBOM generation is isolated from production credentials", () => {
   assert.doesNotMatch(sbomJob, /\n    environment:/);
   assert.doesNotMatch(sbomJob, /AWS_|DOWNLOADS_|RELEASE_BASE_URL|vars\.|secrets\./);
   assert.match(sbomJob, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  const outputDirectoryIndex = sbomJob.indexOf(
+    "- name: Create the source SBOM output directory",
+  );
+  const generatorIndex = sbomJob.indexOf(
+    "- name: Generate the source-scoped release SBOM",
+  );
+  assert.ok(outputDirectoryIndex !== -1 && generatorIndex !== -1);
+  assert.ok(outputDirectoryIndex < generatorIndex);
+  assert.match(sbomJob, /run: mkdir -p source-sbom/);
   assert.match(
     sbomJob,
     /uses: anchore\/sbom-action@[0-9a-f]{40} # v0\.24\.0/,
