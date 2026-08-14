@@ -55,9 +55,19 @@ const dockerIgnore = readFileSync(
   repositoryFile("deploy", "self-host", "Dockerfile.dockerignore"),
   "utf8",
 );
+const selfHostDockerfile = readFileSync(
+  repositoryFile("deploy", "self-host", "Dockerfile"),
+  "utf8",
+);
 const denyConfig = readFileSync(repositoryFile("deny.toml"), "utf8");
 const e2bPackage = JSON.parse(
   readFileSync(repositoryFile(".github", "e2b-cli", "package.json"), "utf8"),
+);
+const docsPackage = JSON.parse(
+  readFileSync(repositoryFile("docs-site", "package.json"), "utf8"),
+);
+const vercelCliPackage = JSON.parse(
+  readFileSync(repositoryFile(".github", "vercel-cli", "package.json"), "utf8"),
 );
 
 function workflowJob(source, name) {
@@ -671,6 +681,23 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
   );
 });
 
+test("the self-host runtime installs packages from an immutable Debian snapshot", () => {
+  assert.match(
+    selfHostDockerfile,
+    /snapshot\.debian\.org\/archive\/debian\/[0-9]{8}T[0-9]{6}Z/,
+  );
+  assert.match(
+    selfHostDockerfile,
+    /snapshot\.debian\.org\/archive\/debian-security\/[0-9]{8}T[0-9]{6}Z/,
+  );
+  assert.match(selfHostDockerfile, /ca-certificates=[^\s\\]+/);
+  assert.match(selfHostDockerfile, /curl=[^\s\\]+/);
+  assert.doesNotMatch(
+    selfHostDockerfile,
+    /apt-get install -y --no-install-recommends ca-certificates curl/,
+  );
+});
+
 test(
   "BuildKit admits only exact source inputs from allowed source paths",
   { skip: process.env.TIDEBREAK_SKIP_DOCKER_CONTEXT_PROBE === "1" },
@@ -1006,6 +1033,101 @@ test("release builds use the trusted shared main cache scope", () => {
     /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
   );
   assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+});
+
+test("release documentation is built from the validated tag and promoted only after staged checks", () => {
+  const build = workflowJob(workflows["release.yml"], "build_docs");
+  const publish = workflowJob(workflows["release.yml"], "publish_docs");
+
+  assert.match(build, /^    needs: validate$/m);
+  assert.doesNotMatch(build, /^    environment:/m);
+  assert.match(publish, /^    needs: \[validate, build_docs\]$/m);
+  assert.match(publish, /^    environment:\n      name: docs-production$/m);
+  assert.match(build, /^    permissions:\n      contents: read$/m);
+  assert.match(publish, /^    permissions:\n      contents: read$/m);
+  assert.doesNotMatch(`${build}\n${publish}`, /id-token: write|contents: write/);
+  assert.match(build, /BASE_PATH: \/docs/);
+  assert.match(build, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.doesNotMatch(build, /VERCEL_TOKEN|docs-production/);
+  assert.match(publish, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
+  assert.equal(
+    Object.values(docsPackage.dependencies ?? {}).includes("vercel"),
+    false,
+  );
+  assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
+  assert.match(build, /pnpm --dir docs-site install --frozen-lockfile/);
+  assert.match(build, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(build, /persist-credentials: false/);
+  assert.match(build, /test "\$\(git rev-parse HEAD\)" = "\$RELEASE_SHA"/);
+  assert.match(build, /pnpm --dir docs-site build/);
+  assert.match(build, /pnpm --dir docs-site test:vercel-output/);
+  assert.match(build, /pnpm --dir docs-site package:vercel/);
+  assert.match(build, /\.vercel\/output\/static\/docs\/index\.html/);
+  assert.match(build, /cd \.vercel\/output/);
+  assert.match(build, /find \. -type f -print0/);
+  assert.match(build, /tidebreak-docs-\$RELEASE_TAG\.sha256/);
+  assert.match(build, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-prebuilt/);
+  assert.doesNotMatch(publish, /docs-site install|docs-site build/);
+  assert.equal(vercelCliPackage.dependencies.vercel, "59.0.0");
+  assert.match(publish, /sparse-checkout: \.github\/vercel-cli/);
+  assert.match(publish, /persist-credentials: false/);
+  assert.match(
+    publish,
+    /pnpm --dir \.github\/vercel-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.doesNotMatch(publish, /pnpm (?:add --global|dlx)|npx/);
+  assert.match(publish, /actions\/download-artifact@[0-9a-f]{40} # v8/);
+  assert.match(publish, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-manifest/);
+  assert.match(publish, /sha256sum --check --strict/);
+  assert.match(publish, /asset_path=.*\/docs\/_next\//);
+  for (const directive of [
+    "default-src 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+  ]) {
+    assert.equal(
+      publish.split(`content-security-policy:.*${directive}`).length - 1,
+      2,
+      `staged and promoted docs must both verify ${directive}`,
+    );
+  }
+  assert.match(publish, /x-frame-options: DENY/);
+  assert.match(publish, /\.id == \$id and \.readyState == "READY"/);
+  assert.match(publish, /--prebuilt/);
+  assert.match(publish, /--prod/);
+  assert.match(publish, /--skip-domain/);
+  assert.match(publish, /--meta "releaseTag=\$RELEASE_TAG"/);
+  assert.match(publish, /--meta "releaseSha=\$RELEASE_SHA"/);
+  assert.match(publish, /jq -ce '\.deployment \/\/ \.'/);
+  assert.match(publish, /deployment_url=.*jq -er \.url/);
+  assert.match(publish, /deployment_id=.*jq -er \.id/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
+  assert.doesNotMatch(publish, /--token/);
+  assert.match(publish, /\/docs\/quickstart\//);
+  assert.match(publish, /\/docs\/search-index\.json/);
+  assert.match(publish, /\/docs\/sitemap\.xml/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel promote/);
+
+  const deploy = publish.indexOf("Create an unaliased production deployment");
+  const verify = publish.indexOf("Verify the transferred documentation");
+  const smoke = publish.indexOf("Smoke-test the staged deployment");
+  const promote = publish.indexOf("Promote the verified deployment");
+  const production = publish.indexOf("Verify the production alias");
+  assert.ok(
+    verify !== -1 &&
+      verify < deploy &&
+      deploy < smoke &&
+      smoke < promote &&
+      promote < production,
+    "docs must be verified, staged, checked, promoted, and then verified in that order",
+  );
+
+  const packageOutput = build.indexOf("pnpm --dir docs-site package:vercel");
+  const digestOutput = build.indexOf("find . -type f -print0");
+  assert.ok(
+    packageOutput !== -1 && packageOutput < digestOutput,
+    "the digest must cover the packaged Vercel output, including config.json",
+  );
 });
 
 test("cache warming cannot access production credentials or publish", () => {
@@ -1392,6 +1514,74 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
   );
 });
 
+test("source SBOM generation is isolated from production credentials", () => {
+  const release = workflows["release.yml"];
+  const sbomJob = workflowJob(release, "source_sbom");
+  const publishJob = workflowJob(workflows["release.yml"], "publish");
+
+  assert.match(sbomJob, /needs: \[validate, inspect_hosted\]/);
+  assert.match(sbomJob, /permissions:\n      contents: read/);
+  assert.doesNotMatch(sbomJob, /id-token:/);
+  assert.doesNotMatch(sbomJob, /attestations:/);
+  assert.doesNotMatch(sbomJob, /artifact-metadata:/);
+  assert.doesNotMatch(sbomJob, /\n    environment:/);
+  assert.doesNotMatch(sbomJob, /AWS_|DOWNLOADS_|RELEASE_BASE_URL|vars\.|secrets\./);
+  assert.match(sbomJob, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  const outputDirectoryIndex = sbomJob.indexOf(
+    "- name: Create the source SBOM output directory",
+  );
+  const generatorIndex = sbomJob.indexOf(
+    "- name: Generate the source-scoped release SBOM",
+  );
+  assert.ok(outputDirectoryIndex !== -1 && generatorIndex !== -1);
+  assert.ok(outputDirectoryIndex < generatorIndex);
+  assert.match(sbomJob, /run: mkdir -p source-sbom/);
+  assert.match(
+    sbomJob,
+    /uses: anchore\/sbom-action@[0-9a-f]{40} # v0\.24\.0/,
+  );
+  assert.match(sbomJob, /syft-version: v1\.51\.0/);
+  assert.match(sbomJob, /format: spdx-json/);
+  assert.match(sbomJob, /upload-artifact: false/);
+  assert.match(sbomJob, /upload-release-assets: false/);
+  assert.match(
+    sbomJob,
+    /uses: actions\/upload-artifact@[0-9a-f]{40} # v7/,
+  );
+  assert.match(sbomJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
+  assert.doesNotMatch(publishJob, /anchore\/sbom-action/);
+
+  assert.match(publishJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom\]/);
+  assert.match(publishJob, /needs\.source_sbom\.result == 'success'/);
+  assert.match(
+    publishJob,
+    /uses: actions\/download-artifact@[0-9a-f]{40} # v8/,
+  );
+  assert.match(publishJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
+  assert.match(publishJob, /sha256sum --check --strict/);
+});
+
+test("public releases attest provenance without treating the source SBOM as an installer SBOM", () => {
+  const publishJob = workflowJob(workflows["release.yml"], "publish");
+
+  assert.match(publishJob, /attestations: write/);
+  assert.match(publishJob, /id-token: write/);
+  assert.match(publishJob, /github\.event\.repository\.visibility == 'public'/);
+
+  const attestations = publishJob.match(
+    /uses: actions\/attest@[0-9a-f]{40} # v4\.2\.2/g,
+  );
+  assert.equal(attestations?.length, 1);
+  assert.match(publishJob, /subject-checksums: \$\{\{ runner\.temp \}\}\/immutable-release-files\.sha256/);
+  assert.doesNotMatch(publishJob, /sbom-path:/);
+  assert.doesNotMatch(publishJob, /release-artifacts\.sha256/);
+
+  const provenanceIndex = publishJob.indexOf("- name: Attest immutable release provenance");
+  const awsIndex = publishJob.indexOf("- name: Configure AWS credentials");
+  assert.ok(provenanceIndex !== -1 && awsIndex !== -1);
+  assert.ok(provenanceIndex < awsIndex);
+});
+
 test("GitHub release downloads are copied from the hosted release", () => {
   const release = workflows["release.yml"];
   const attachJob = workflowJob(release, "attach_downloads");
@@ -1406,17 +1596,19 @@ test("GitHub release downloads are copied from the hosted release", () => {
   // manifest, rather than a second copy built alongside the hosted release.
   assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
-  if (/Tidebreak-macos-universal\.dmg/.test(attachJob)) {
-    assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
-  }
+  assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
   assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
   assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
-  assert.match(
-    readFileSync(repositoryFile("README.md"), "utf8"),
-    /releases\/latest\/download\/Tidebreak-macos-universal\.dmg/,
-    "the README download link must match the published asset name",
+  const macDownloadLink = readFileSync(repositoryFile("README.md"), "utf8")
+    .match(
+      /releases\/latest\/download\/(Tidebreak-macos-[\w-]+\.dmg)/,
+    )?.[1];
+  assert.ok(macDownloadLink, "the README must publish a macOS download link");
+  assert.ok(
+    attachJob.includes(`downloads/${macDownloadLink}`),
+    `attach_downloads must upload ${macDownloadLink}`,
   );
 });
 

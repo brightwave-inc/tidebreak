@@ -1,3 +1,5 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+
 import {
   APP_INVOKE_REFUSAL_KINDS,
   AppInvokeRefusalError,
@@ -471,6 +473,11 @@ export class ApiClient {
   }
 
   putMcpServers(servers: McpServerDefinition[]): Promise<McpServersInfo> {
+    if (isTauri()) {
+      return invoke<McpServersInfo>("put_native_mcp_servers", {
+        config: { servers },
+      });
+    }
     return this.json("/mcp/servers", {
       method: "PUT",
       headers: this.headers(true),

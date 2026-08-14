@@ -1465,6 +1465,7 @@ pub mod app {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub name: String,
         pub current_revision_id: Uuid,
         pub revision_count: i32,

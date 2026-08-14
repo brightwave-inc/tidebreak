@@ -31,6 +31,7 @@ impl ScriptedDrafts {
 impl GatewayDraftSource for ScriptedDrafts {
     async fn ensure_registered(
         &self,
+        _owner: &tidebreak_core::OwnerId,
         _app: AppId,
         _gateway_base_url: &str,
     ) -> tidebreak_core::Result<GatewayRegistration> {
@@ -40,6 +41,7 @@ impl GatewayDraftSource for ScriptedDrafts {
 
     async fn relay_consent(
         &self,
+        _owner: &tidebreak_core::OwnerId,
         _app: AppId,
         _gateway_base_url: &str,
     ) -> tidebreak_core::Result<GatewayConsentRelay> {

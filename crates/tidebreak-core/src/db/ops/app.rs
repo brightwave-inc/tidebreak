@@ -14,24 +14,32 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{AppId, AppRevisionId};
+use crate::id::{AppId, AppRevisionId, ChatId};
 use crate::local_app::{
     validate_app_gateway_draft, validate_app_grant, validate_app_manifest, AppGatewayDraft,
     AppGrant, AppGrantBinding, AppManifest, AppRecord, AppRevision, CreateApp, NewAppRevision,
     MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
 };
+use crate::OwnerId;
 
 use super::super::{entities, store_err, DbStore};
 use super::turn::canonical_db_timestamp;
 
-pub(in crate::db) async fn create_app(store: &DbStore, request: &CreateApp) -> Result<AppRecord> {
+pub(in crate::db) async fn create_app(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    chat_id: Option<ChatId>,
+    request: &CreateApp,
+) -> Result<AppRecord> {
     let manifest_json = validate_revision(&request.revision)?;
     let created_at = canonical_db_timestamp(request.revision.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    let owner = resolve_owner_on(&transaction, owner, chat_id).await?;
     if let Some(existing) = find_app_on(&transaction, request.id).await? {
         // An exact retry must return the original record rather than fail. A
         // reused id that describes different content is a caller bug.
-        let exact = exact_app_on(&transaction, &existing, request, created_at).await?;
+        let exact = existing.owner == owner
+            && exact_app_on(&transaction, &existing, request, created_at).await?;
         transaction.rollback().await.map_err(store_err)?;
         return if exact {
             Ok(existing)
@@ -44,6 +52,7 @@ pub(in crate::db) async fn create_app(store: &DbStore, request: &CreateApp) -> R
     }
     entities::app::ActiveModel {
         id: Set(request.id.0),
+        owner: Set(owner.as_str().to_owned()),
         name: Set(request.revision.manifest.name.clone()),
         current_revision_id: Set(request.revision.id.0),
         revision_count: Set(1),
@@ -70,20 +79,23 @@ pub(in crate::db) async fn create_app(store: &DbStore, request: &CreateApp) -> R
 
 pub(in crate::db) async fn append_app_revision(
     store: &DbStore,
+    owner: Option<&OwnerId>,
+    chat_id: Option<ChatId>,
     app_id: AppId,
     revision: &NewAppRevision,
 ) -> Result<AppRecord> {
     let manifest_json = validate_revision(revision)?;
     let created_at = canonical_db_timestamp(revision.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    let owner = resolve_owner_on(&transaction, owner, chat_id).await?;
     // Take the app row's write lock so two concurrent revisions cannot both
     // read the same ordinal and race to publish a current revision. There is
     // no owning chat to lock: the app row itself is the serialization point.
-    if !acquire_app_write_lock(&transaction, app_id).await? {
+    if !acquire_app_write_lock(&transaction, &owner, app_id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!("app {app_id} not found")));
     }
-    let existing = require_app_on(&transaction, app_id).await?;
+    let existing = require_app_scoped_on(&transaction, &owner, app_id).await?;
     if existing.deleted_at.is_some() {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!("app {app_id} is deleted")));
@@ -136,12 +148,30 @@ pub(in crate::db) async fn append_app_revision(
     Ok(record)
 }
 
-pub(in crate::db) async fn get_app(store: &DbStore, id: AppId) -> Result<Option<AppRecord>> {
-    find_app_on(&store.conn, id).await
+pub(in crate::db) async fn get_app(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    id: AppId,
+) -> Result<Option<AppRecord>> {
+    find_app_scoped_on(&store.conn, effective_owner(owner), id).await
 }
 
-pub(in crate::db) async fn list_apps(store: &DbStore, limit: u64) -> Result<Vec<AppRecord>> {
+pub(in crate::db) async fn get_app_for_chat(
+    store: &DbStore,
+    chat_id: ChatId,
+    id: AppId,
+) -> Result<Option<AppRecord>> {
+    let owner = resolve_owner_on(&store.conn, None, Some(chat_id)).await?;
+    find_app_scoped_on(&store.conn, &owner, id).await
+}
+
+pub(in crate::db) async fn list_apps(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    limit: u64,
+) -> Result<Vec<AppRecord>> {
     entities::app::Entity::find()
+        .filter(entities::app::Column::Owner.eq(effective_owner(owner).as_str()))
         .filter(entities::app::Column::DeletedAt.is_null())
         .order_by_desc(entities::app::Column::UpdatedAt)
         .order_by_desc(entities::app::Column::Id)
@@ -156,8 +186,15 @@ pub(in crate::db) async fn list_apps(store: &DbStore, limit: u64) -> Result<Vec<
 
 pub(in crate::db) async fn list_app_revisions(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     app_id: AppId,
 ) -> Result<Vec<AppRevision>> {
+    if find_app_scoped_on(&store.conn, effective_owner(owner), app_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
     entities::app_revision::Entity::find()
         .filter(entities::app_revision::Column::AppId.eq(app_id.0))
         .order_by_desc(entities::app_revision::Column::Ordinal)
@@ -171,19 +208,43 @@ pub(in crate::db) async fn list_app_revisions(
 
 pub(in crate::db) async fn get_app_revision(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     id: AppRevisionId,
 ) -> Result<Option<AppRevision>> {
-    find_revision_on(&store.conn, id).await
+    let Some(revision) = find_revision_on(&store.conn, id).await? else {
+        return Ok(None);
+    };
+    Ok(
+        find_app_scoped_on(&store.conn, effective_owner(owner), revision.app_id)
+            .await?
+            .map(|_| revision),
+    )
+}
+
+pub(in crate::db) async fn get_app_revision_for_chat(
+    store: &DbStore,
+    chat_id: ChatId,
+    id: AppRevisionId,
+) -> Result<Option<AppRevision>> {
+    let owner = resolve_owner_on(&store.conn, None, Some(chat_id)).await?;
+    let Some(revision) = find_revision_on(&store.conn, id).await? else {
+        return Ok(None);
+    };
+    Ok(find_app_scoped_on(&store.conn, &owner, revision.app_id)
+        .await?
+        .map(|_| revision))
 }
 
 pub(in crate::db) async fn delete_app(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     id: AppId,
     deleted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let deleted_at = canonical_db_timestamp(deleted_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let Some(existing) = find_app_on(&transaction, id).await? else {
+    let owner = effective_owner(owner);
+    let Some(existing) = find_app_scoped_on(&transaction, owner, id).await? else {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(false);
     };
@@ -206,12 +267,14 @@ pub(in crate::db) async fn delete_app(
 
 pub(in crate::db) async fn restore_app(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     id: AppId,
     restored_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let restored_at = canonical_db_timestamp(restored_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    let Some(existing) = find_app_on(&transaction, id).await? else {
+    let owner = effective_owner(owner);
+    let Some(existing) = find_app_scoped_on(&transaction, owner, id).await? else {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(false);
     };
@@ -236,18 +299,23 @@ pub(in crate::db) async fn restore_app(
     Ok(true)
 }
 
-pub(in crate::db) async fn put_app_grant(store: &DbStore, grant: &AppGrant) -> Result<()> {
+pub(in crate::db) async fn put_app_grant(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    grant: &AppGrant,
+) -> Result<()> {
     let bindings_json = validate_app_grant(grant)
         .map_err(|message| AgentError::Store(format!("invalid app grant: {message}")))?;
     let created_at = canonical_db_timestamp(grant.created_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    let owner = effective_owner(owner);
     // The app row's write lock serializes replacement of the single grant row
     // the same way it serializes revision appends.
-    if !acquire_app_write_lock(&transaction, grant.app_id).await? {
+    if !acquire_app_write_lock(&transaction, owner, grant.app_id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!("app {} not found", grant.app_id)));
     }
-    let existing = require_app_on(&transaction, grant.app_id).await?;
+    let existing = require_app_scoped_on(&transaction, owner, grant.app_id).await?;
     if existing.deleted_at.is_some() {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
@@ -275,9 +343,16 @@ pub(in crate::db) async fn put_app_grant(store: &DbStore, grant: &AppGrant) -> R
 
 pub(in crate::db) async fn get_app_grant(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     app_id: AppId,
 ) -> Result<Option<AppGrant>> {
-    entities::app_grant::Entity::find_by_id(app_id.0)
+    entities::app_grant::Entity::find()
+        .filter(entities::app_grant::Column::AppId.eq(app_id.0))
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            entities::app_grant::Relation::App.def(),
+        )
+        .filter(entities::app::Column::Owner.eq(effective_owner(owner).as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -285,21 +360,36 @@ pub(in crate::db) async fn get_app_grant(
         .transpose()
 }
 
-pub(in crate::db) async fn delete_app_grant(store: &DbStore, app_id: AppId) -> Result<bool> {
+pub(in crate::db) async fn delete_app_grant(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+    app_id: AppId,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let owner = effective_owner(owner);
+    if !acquire_app_write_lock(&transaction, owner, app_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
     let deleted = entities::app_grant::Entity::delete_many()
         .filter(entities::app_grant::Column::AppId.eq(app_id.0))
-        .exec(&store.conn)
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
     Ok(deleted.rows_affected > 0)
 }
 
-pub(in crate::db) async fn list_live_app_grants(store: &DbStore) -> Result<Vec<AppGrant>> {
+pub(in crate::db) async fn list_live_app_grants(
+    store: &DbStore,
+    owner: Option<&OwnerId>,
+) -> Result<Vec<AppGrant>> {
     entities::app_grant::Entity::find()
         .join(
             sea_orm::JoinType::InnerJoin,
             entities::app_grant::Relation::App.def(),
         )
+        .filter(entities::app::Column::Owner.eq(effective_owner(owner).as_str()))
         .filter(entities::app::Column::DeletedAt.is_null())
         .all(&store.conn)
         .await
@@ -311,20 +401,22 @@ pub(in crate::db) async fn list_live_app_grants(store: &DbStore) -> Result<Vec<A
 
 pub(in crate::db) async fn put_app_gateway_draft(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     draft: &AppGatewayDraft,
 ) -> Result<()> {
     validate_app_gateway_draft(draft)
         .map_err(|message| AgentError::Store(format!("invalid gateway registration: {message}")))?;
     let updated_at = canonical_db_timestamp(draft.updated_at)?;
     let transaction = store.conn.begin().await.map_err(store_err)?;
+    let owner = effective_owner(owner);
     // The app row's write lock serializes replacement of the registration the
     // same way it serializes revision appends: two invokes racing a first
     // registration must not both insert.
-    if !acquire_app_write_lock(&transaction, draft.app_id).await? {
+    if !acquire_app_write_lock(&transaction, owner, draft.app_id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!("app {} not found", draft.app_id)));
     }
-    let existing = require_app_on(&transaction, draft.app_id).await?;
+    let existing = require_app_scoped_on(&transaction, owner, draft.app_id).await?;
     if existing.deleted_at.is_some() {
         transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
@@ -357,9 +449,16 @@ pub(in crate::db) async fn put_app_gateway_draft(
 
 pub(in crate::db) async fn get_app_gateway_draft(
     store: &DbStore,
+    owner: Option<&OwnerId>,
     app_id: AppId,
     gateway_base_url: &str,
 ) -> Result<Option<AppGatewayDraft>> {
+    if find_app_scoped_on(&store.conn, effective_owner(owner), app_id)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
     Ok(
         entities::app_gateway_draft::Entity::find_by_id((app_id.0, gateway_base_url.to_owned()))
             .one(&store.conn)
@@ -391,7 +490,7 @@ fn grant_from_model(model: entities::app_grant::Model) -> Result<AppGrant> {
 /// Same shape as the chat/project locks: a self-assigning update serializes
 /// read-then-write decisions (ordinal allocation, current-revision publication)
 /// across server processes.
-async fn acquire_app_write_lock<C>(conn: &C, app_id: AppId) -> Result<bool>
+async fn acquire_app_write_lock<C>(conn: &C, owner: &OwnerId, app_id: AppId) -> Result<bool>
 where
     C: ConnectionTrait,
 {
@@ -401,6 +500,7 @@ where
             sea_orm::sea_query::Expr::col(entities::app::Column::Name),
         )
         .filter(entities::app::Column::Id.eq(app_id.0))
+        .filter(entities::app::Column::Owner.eq(owner.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -516,6 +616,19 @@ where
         .transpose()
 }
 
+async fn find_app_scoped_on<C>(conn: &C, owner: &OwnerId, id: AppId) -> Result<Option<AppRecord>>
+where
+    C: ConnectionTrait,
+{
+    entities::app::Entity::find_by_id(id.0)
+        .filter(entities::app::Column::Owner.eq(owner.as_str()))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map(app_from_model)
+        .transpose()
+}
+
 async fn require_app_on<C>(conn: &C, id: AppId) -> Result<AppRecord>
 where
     C: ConnectionTrait,
@@ -523,6 +636,45 @@ where
     find_app_on(conn, id)
         .await?
         .ok_or_else(|| AgentError::Store(format!("app {id} not found")))
+}
+
+async fn require_app_scoped_on<C>(conn: &C, owner: &OwnerId, id: AppId) -> Result<AppRecord>
+where
+    C: ConnectionTrait,
+{
+    find_app_scoped_on(conn, owner, id)
+        .await?
+        .ok_or_else(|| AgentError::Store(format!("app {id} not found")))
+}
+
+fn effective_owner(owner: Option<&OwnerId>) -> &OwnerId {
+    static LOCAL: std::sync::LazyLock<OwnerId> = std::sync::LazyLock::new(OwnerId::local);
+    owner.unwrap_or(&LOCAL)
+}
+
+async fn resolve_owner_on<C>(
+    conn: &C,
+    owner: Option<&OwnerId>,
+    chat_id: Option<ChatId>,
+) -> Result<OwnerId>
+where
+    C: ConnectionTrait,
+{
+    match (owner, chat_id) {
+        (Some(owner), None) => Ok(owner.clone()),
+        (None, Some(chat_id)) => {
+            let chat = entities::chat::Entity::find_by_id(chat_id.0)
+                .one(conn)
+                .await
+                .map_err(store_err)?
+                .ok_or_else(|| AgentError::Store(format!("chat {chat_id} not found")))?;
+            OwnerId::new(&chat.owner)
+        }
+        (None, None) => Ok(OwnerId::local()),
+        (Some(_), Some(_)) => Err(AgentError::Store(
+            "app ownership must come from either a principal or a chat, not both".into(),
+        )),
+    }
 }
 
 async fn find_revision_on<C>(conn: &C, id: AppRevisionId) -> Result<Option<AppRevision>>
@@ -540,6 +692,7 @@ where
 fn app_from_model(model: entities::app::Model) -> Result<AppRecord> {
     Ok(AppRecord {
         id: AppId(model.id),
+        owner: OwnerId::new(&model.owner)?,
         name: model.name,
         current_revision: AppRevisionId(model.current_revision_id),
         revision_count: u32::try_from(model.revision_count)

@@ -12,7 +12,7 @@ const homePage = getPage([]);
 const homeImage = homePage ? getPageImage(homePage).url : '/og/image.png';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://tidebreak.dev'),
+  metadataBase: new URL('https://www.tidebreak.sh'),
   title: {
     default: 'Tidebreak Docs',
     template: '%s — Tidebreak Docs',

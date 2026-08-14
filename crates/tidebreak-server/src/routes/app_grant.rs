@@ -27,6 +27,7 @@ use crate::connected_apps::{current_fingerprints, current_rest_definitions, Curr
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::host_folders::folder_fingerprint;
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// Renderer-safe grant state for one app: the consent sheet's whole input.
@@ -94,10 +95,11 @@ pub struct AppGrantBindingState {
 /// `GET /apps/{id}/grant` — the app's current grant state.
 pub async fn get_app_grant_state(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGrantState>, ServerError> {
-    let (app, revision) = current_live_app(&state, app_id).await?;
-    let grant = state.store.get_app_grant(app.id).await?;
+    let (app, revision) = current_live_app(&store, app_id).await?;
+    let grant = store.get_app_grant(app.id).await?;
     let current = current_fingerprints(
         &state,
         &crate::connected_apps::gateway_apps_bound_by(&revision.manifest.bindings),
@@ -118,9 +120,10 @@ pub async fn get_app_grant_state(
 /// folders, then replaces any previous grant wholesale.
 pub async fn post_app_grant(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGrantState>, ServerError> {
-    let (app, revision) = current_live_app(&state, app_id).await?;
+    let (app, revision) = current_live_app(&store, app_id).await?;
     let current = current_fingerprints(
         &state,
         &crate::connected_apps::gateway_apps_bound_by(&revision.manifest.bindings),
@@ -242,8 +245,8 @@ pub async fn post_app_grant(
         bindings,
         created_at: Utc::now(),
     };
-    state.store.put_app_grant(&grant).await?;
-    register_at_the_gateway(&state, app.id, &revision.manifest);
+    store.put_app_grant(&grant).await?;
+    register_at_the_gateway(&state, store.owner_id(), app.id, &revision.manifest);
     Ok(Json(grant_state(
         &revision.manifest,
         Some(&grant),
@@ -257,13 +260,13 @@ pub async fn post_app_grant(
 /// revocation is fail-safe and must never be blocked by library state. The
 /// next invoke refuses with `consent_required`.
 pub async fn delete_app_grant(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(app_id): Path<AppId>,
 ) -> Result<StatusCode, ServerError> {
-    if state.store.get_app(app_id).await?.is_none() {
+    if store.get_app(app_id).await?.is_none() {
         return Err(ServerError::not_found(format!("no app {app_id}")));
     }
-    state.store.delete_app_grant(app_id).await?;
+    store.delete_app_grant(app_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -282,7 +285,12 @@ pub async fn delete_app_grant(
 ///
 /// Nothing is attempted for a manifest that binds no gateway app: there is
 /// nothing at the gateway for it to be.
-fn register_at_the_gateway(state: &AppState, app_id: AppId, manifest: &AppManifest) {
+fn register_at_the_gateway(
+    state: &AppState,
+    owner: tidebreak_core::OwnerId,
+    app_id: AppId,
+    manifest: &AppManifest,
+) {
     if crate::connected_apps::gateway_apps_bound_by(&manifest.bindings).is_empty() {
         return;
     }
@@ -292,7 +300,11 @@ fn register_at_the_gateway(state: &AppState, app_id: AppId, manifest: &AppManife
         else {
             return;
         };
-        match state.gateway_drafts.relay_consent(app_id, &base_url).await {
+        match state
+            .gateway_drafts
+            .relay_consent(&owner, app_id, &base_url)
+            .await
+        {
             Ok(crate::connected_apps::GatewayConsentRelay::Consented) => {}
             Ok(outcome) => tracing::info!(
                 %app_id,
@@ -311,16 +323,15 @@ fn register_at_the_gateway(state: &AppState, app_id: AppId, manifest: &AppManife
 /// A soft-deleted app answers as missing on the consent surface, exactly as
 /// it does on invoke.
 pub(crate) async fn current_live_app(
-    state: &AppState,
+    store: &ScopedStore,
     app_id: AppId,
 ) -> Result<(AppRecord, AppRevision), ServerError> {
     let absent = || ServerError::not_found(format!("no app {app_id}"));
-    let app = state.store.get_app(app_id).await?.ok_or_else(absent)?;
+    let app = store.get_app(app_id).await?.ok_or_else(absent)?;
     if app.deleted_at.is_some() {
         return Err(absent());
     }
-    let revision = state
-        .store
+    let revision = store
         .get_app_revision(app.current_revision)
         .await?
         .ok_or_else(absent)?;

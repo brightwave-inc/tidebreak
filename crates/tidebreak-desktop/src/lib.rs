@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde_json::Value;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::Config;
 
@@ -77,6 +80,294 @@ struct AppState {
 #[tauri::command]
 async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInfo, String> {
     Ok(wait_server_info(state.inner()).await?.renderer_info())
+}
+
+/// Save MCP configuration through the native-only server surface. Command
+/// transports receive an OS-native confirmation before the host credential is
+/// attached; renderer JavaScript can request the prompt but cannot approve it.
+#[tauri::command]
+async fn put_native_mcp_servers(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    config: Value,
+) -> Result<Value, String> {
+    let commands = native_command_previews(&config)?;
+    if !commands.is_empty() {
+        let preview = commands.join("\n");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut dialog = app
+            .dialog()
+            .message(format!(
+                "Allow these MCP servers to run local programs as your macOS user?\n\n{preview}"
+            ))
+            .title("Allow local MCP commands?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Allow and save".to_owned(),
+                "Cancel".to_owned(),
+            ));
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.parent(&window);
+        }
+        dialog.show(move |approved| {
+            let _ = sender.send(approved);
+        });
+        if !receiver.await.unwrap_or(false) {
+            return Err("local MCP command configuration was not approved".to_owned());
+        }
+    }
+
+    let info = wait_server_info(state.inner()).await?;
+    let response = documents::native_auth(
+        documents::local_client()
+            .put(format!("{}/native/mcp/servers", info.base_url))
+            .json(&config),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("save MCP servers: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("read MCP server response: {error}"))?;
+    if !status.is_success() {
+        let message = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|body| {
+                body.get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("MCP server returned {status}"));
+        return Err(message);
+    }
+    serde_json::from_slice(&body).map_err(|error| format!("decode MCP server response: {error}"))
+}
+
+const MAX_NATIVE_APPROVAL_FIELD_CHARS: usize = 240;
+const MAX_NATIVE_APPROVAL_MANIFEST_CHARS: usize = 16_384;
+
+#[derive(Serialize)]
+struct NativeCommandApproval<'a> {
+    server: &'a str,
+    argv: Vec<String>,
+    cwd: NativeCommandCwd,
+    environment: NativeCommandEnvironment,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "path")]
+enum NativeCommandCwd {
+    DesktopProcessCurrentDirectory,
+    Configured(String),
+}
+
+#[derive(Serialize)]
+struct NativeCommandEnvironment {
+    ambient_environment: &'static str,
+    inherited_from_desktop_process: Vec<String>,
+    stored_secrets: Vec<NativeStoredSecret>,
+}
+
+#[derive(Serialize)]
+struct NativeStoredSecret {
+    name: String,
+    effect: NativeStoredSecretEffect,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeStoredSecretEffect {
+    SetFromThisSave,
+    PreserveExistingStoredValue,
+}
+
+fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
+    let servers = config
+        .get("servers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())?;
+    let mut previews = Vec::new();
+    for server in servers {
+        if !server
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(command) = server.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = server
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unnamed");
+        let command = native_command_token(command)?;
+        if !std::path::Path::new(&command).is_absolute() {
+            return Err(
+                "enabled MCP local commands must use an absolute executable path".to_owned(),
+            );
+        }
+        let mut argv = vec![command];
+        if let Some(args) = server.get("args") {
+            let args = args
+                .as_array()
+                .ok_or_else(|| "MCP command args must be an array".to_owned())?;
+            for argument in args {
+                let argument = argument
+                    .as_str()
+                    .ok_or_else(|| "every MCP command argument must be a string".to_owned())?;
+                argv.push(native_command_token(argument)?);
+            }
+        }
+
+        let cwd = match server.get("cwd") {
+            None | Some(Value::Null) => NativeCommandCwd::DesktopProcessCurrentDirectory,
+            Some(Value::String(path)) => NativeCommandCwd::Configured(native_command_token(path)?),
+            Some(_) => return Err("MCP command cwd must be a string or null".to_owned()),
+        };
+        let mut inherited_from_desktop_process =
+            native_string_array(server, "env_from", "MCP env_from must be an array")?;
+        inherited_from_desktop_process.sort_unstable();
+        reject_duplicates(
+            &inherited_from_desktop_process,
+            "MCP env_from contains a duplicate name",
+        )?;
+
+        let mut stored_names = native_string_array(server, "env", "MCP env must be an array")?;
+        stored_names.sort_unstable();
+        reject_duplicates(&stored_names, "MCP env contains a duplicate name")?;
+        if stored_names
+            .iter()
+            .any(|name| inherited_from_desktop_process.binary_search(name).is_ok())
+        {
+            return Err("an MCP environment name cannot be both stored and inherited".to_owned());
+        }
+
+        let env_values = match server.get("env_values") {
+            None => None,
+            Some(Value::Object(values)) => Some(values),
+            Some(_) => return Err("MCP env_values must be an object".to_owned()),
+        };
+        if let Some(values) = env_values {
+            for (name, value) in values {
+                native_command_token(name)?;
+                if !value.is_string() {
+                    return Err("every MCP environment value must be a string".to_owned());
+                }
+                if stored_names.binary_search(name).is_err() {
+                    return Err(
+                        "every MCP env_values entry must name a stored environment variable"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        let stored_secrets = stored_names
+            .into_iter()
+            .map(|name| NativeStoredSecret {
+                effect: if env_values.is_some_and(|values| values.contains_key(&name)) {
+                    NativeStoredSecretEffect::SetFromThisSave
+                } else {
+                    NativeStoredSecretEffect::PreserveExistingStoredValue
+                },
+                name,
+            })
+            .collect();
+        let safe_name = native_command_token(name)?;
+        let manifest = serde_json::to_string_pretty(&NativeCommandApproval {
+            server: &safe_name,
+            argv,
+            cwd,
+            environment: NativeCommandEnvironment {
+                ambient_environment: "cleared",
+                inherited_from_desktop_process,
+                stored_secrets,
+            },
+        })
+        .expect("native command approval manifests serialize infallibly");
+        if manifest.chars().count() > MAX_NATIVE_APPROVAL_MANIFEST_CHARS {
+            return Err("MCP command approval manifest is too long to display safely".to_owned());
+        }
+        previews.push(manifest);
+    }
+    let manifest_chars = previews
+        .iter()
+        .map(|preview| preview.chars().count())
+        .sum::<usize>()
+        .saturating_add(previews.len().saturating_sub(1));
+    if manifest_chars > MAX_NATIVE_APPROVAL_MANIFEST_CHARS {
+        return Err("MCP command approval manifest is too long to display safely".to_owned());
+    }
+    Ok(previews)
+}
+
+fn native_string_array(
+    server: &Value,
+    field: &str,
+    type_error: &str,
+) -> Result<Vec<String>, String> {
+    let Some(value) = server.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| type_error.to_owned())?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("every MCP {field} entry must be a string"))
+                .and_then(native_command_token)
+        })
+        .collect()
+}
+
+fn reject_duplicates(values: &[String], error: &str) -> Result<(), String> {
+    if values.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error.to_owned());
+    }
+    Ok(())
+}
+
+fn native_command_token(value: &str) -> Result<String, String> {
+    if value.chars().count() > MAX_NATIVE_APPROVAL_FIELD_CHARS {
+        return Err("MCP command approval field is too long to display safely".to_owned());
+    }
+    if value.chars().any(|character| {
+        matches!(
+            get_general_category(character),
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        )
+    }) {
+        return Err("MCP command approval field contains unsafe formatting characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+pub(crate) fn native_security_label(value: &str) -> String {
+    value
+        .chars()
+        .take(160)
+        .map(|character| {
+            if matches!(
+                get_general_category(character),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            ) {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// Best-effort attention hint for a newly parked user question.
@@ -300,6 +591,7 @@ pub fn run() {
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
+            put_native_mcp_servers,
             request_user_attention,
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
@@ -318,8 +610,6 @@ pub fn run() {
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,
-            client_execution::computer_use::resolve_computer_use_consent,
-            client_execution::computer_use::resolve_computer_use_confirmation,
             host_access::connect_folder,
             host_access::connect_approved_folder,
             host_access::list_approved_folders,
@@ -586,6 +876,12 @@ mod bundle_tests {
 mod server_info_tests {
     use super::*;
 
+    fn single_native_approval(config: Value) -> Value {
+        let previews = native_command_previews(&config).expect("valid native command preview");
+        assert_eq!(previews.len(), 1);
+        serde_json::from_str(&previews[0]).expect("approval is a canonical JSON manifest")
+    }
+
     #[tokio::test]
     async fn wait_server_info_returns_the_published_boot_error() {
         let (tx, rx) = watch::channel(None);
@@ -610,5 +906,210 @@ mod server_info_tests {
         assert!(serialized.contains("renderer-bearer"));
         assert!(!serialized.contains("native-credential-sentinel"));
         assert!(!serialized.contains("executor"));
+    }
+
+    #[test]
+    fn native_security_labels_strip_format_controls_and_are_bounded() {
+        let label = native_security_label(&format!("trusted\u{202e}\u{200b}{}", "x".repeat(200)));
+        assert!(!label.contains('\u{202e}'));
+        assert!(!label.contains('\u{200b}'));
+        assert_eq!(label.chars().count(), 160);
+        assert!(label.starts_with("trusted\u{fffd}\u{fffd}"));
+    }
+
+    #[test]
+    fn only_enabled_local_commands_require_a_native_preview() {
+        let config = serde_json::json!({
+            "servers": [
+                {"name": "draft", "command": "editable-bare-command", "enabled": false},
+                {"name": "remote", "url": "https://example.test/mcp", "enabled": true},
+                {"name": "live", "command": "/bin/sh", "args": ["-c", "echo safe"], "enabled": true}
+            ]
+        });
+        let approval = single_native_approval(config);
+        assert_eq!(approval["server"], "live");
+        assert_eq!(
+            approval["argv"],
+            serde_json::json!(["/bin/sh", "-c", "echo safe"])
+        );
+        assert_eq!(
+            approval["cwd"]["source"],
+            "desktop_process_current_directory"
+        );
+        assert_eq!(approval["environment"]["ambient_environment"], "cleared");
+    }
+
+    #[test]
+    fn enabled_native_commands_require_an_absolute_executable_path() {
+        for command in ["node", "./node", "tools/node"] {
+            let config = serde_json::json!({
+                "servers": [{"name": "ambiguous", "command": command, "enabled": true}]
+            });
+            assert_eq!(
+                native_command_previews(&config).unwrap_err(),
+                "enabled MCP local commands must use an absolute executable path"
+            );
+        }
+    }
+
+    #[test]
+    fn native_approval_displays_the_exact_absolute_executable_path() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "pinned executable",
+                "command": "/opt/tidebreak/bin/docs-mcp",
+                "args": ["serve"],
+                "enabled": true
+            }]
+        });
+        let approval = single_native_approval(config);
+        assert_eq!(
+            approval["argv"],
+            serde_json::json!(["/opt/tidebreak/bin/docs-mcp", "serve"])
+        );
+    }
+
+    #[test]
+    fn native_command_preview_refuses_arguments_it_cannot_show_completely() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "hidden suffix",
+                "command": "/bin/sh",
+                "args": ["-c", "x".repeat(241)],
+                "enabled": true
+            }]
+        });
+        assert!(native_command_previews(&config).is_err());
+    }
+
+    #[test]
+    fn omitted_enabled_defaults_to_an_approved_command_and_every_command_is_shown() {
+        let servers = (0..9)
+            .map(|index| serde_json::json!({"name": format!("server-{index}"), "command": "/bin/true"}))
+            .collect::<Vec<_>>();
+        let previews = native_command_previews(&serde_json::json!({"servers": servers})).unwrap();
+        assert_eq!(previews.len(), 9);
+        let ninth: Value = serde_json::from_str(&previews[8]).unwrap();
+        assert_eq!(ninth["server"], "server-8");
+    }
+
+    #[test]
+    fn command_arguments_are_not_truncated_inside_the_displayable_bound() {
+        let suffix = "DANGEROUS_SUFFIX";
+        let argument = format!("{}{}", "x".repeat(180), suffix);
+        let config = serde_json::json!({
+            "servers": [{"name": "long", "command": "/bin/sh", "args": ["-c", argument]}]
+        });
+        let previews = native_command_previews(&config).unwrap();
+        assert!(previews[0].contains(suffix));
+    }
+
+    #[test]
+    fn cwd_and_inherited_path_changes_are_explicit_in_native_approval() {
+        let base = serde_json::json!({
+            "servers": [{
+                "name": "workspace",
+                "command": "/usr/bin/node",
+                "args": ["server.mjs"],
+                "cwd": "/srv/first",
+                "env_from": ["HOME"]
+            }]
+        });
+        let changed = serde_json::json!({
+            "servers": [{
+                "name": "workspace",
+                "command": "/usr/bin/node",
+                "args": ["server.mjs"],
+                "cwd": "/srv/second",
+                "env_from": ["HOME", "PATH"]
+            }]
+        });
+        let first = single_native_approval(base);
+        let second = single_native_approval(changed);
+        assert_ne!(first, second);
+        assert_eq!(first["cwd"]["path"], "/srv/first");
+        assert_eq!(second["cwd"]["path"], "/srv/second");
+        assert_eq!(
+            second["environment"]["inherited_from_desktop_process"],
+            serde_json::json!(["HOME", "PATH"])
+        );
+    }
+
+    #[test]
+    fn stored_secret_sources_and_preservation_are_visible_without_values() {
+        let preserved = serde_json::json!({
+            "servers": [{
+                "name": "private docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["DOCS_TOKEN", "LOG_LEVEL"]
+            }]
+        });
+        let replaced = serde_json::json!({
+            "servers": [{
+                "name": "private docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["DOCS_TOKEN", "LOG_LEVEL"],
+                "env_values": {"DOCS_TOKEN": "secret-sentinel-value"}
+            }]
+        });
+        let preserved = single_native_approval(preserved);
+        let replaced = single_native_approval(replaced);
+        assert_ne!(preserved, replaced);
+        assert_eq!(
+            replaced["environment"]["stored_secrets"],
+            serde_json::json!([
+                {"name": "DOCS_TOKEN", "effect": "set_from_this_save"},
+                {"name": "LOG_LEVEL", "effect": "preserve_existing_stored_value"}
+            ])
+        );
+        let encoded = replaced.to_string();
+        assert!(!encoded.contains("secret-sentinel-value"));
+    }
+
+    #[test]
+    fn environment_source_changes_alter_approval_and_never_show_parent_values() {
+        let inherited = serde_json::json!({
+            "servers": [{
+                "name": "docs",
+                "command": "/usr/bin/docs-mcp",
+                "env_from": ["PRIVATE_DOCS_TOKEN"]
+            }]
+        });
+        let stored = serde_json::json!({
+            "servers": [{
+                "name": "docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["PRIVATE_DOCS_TOKEN"]
+            }]
+        });
+        let inherited = single_native_approval(inherited);
+        let stored = single_native_approval(stored);
+        assert_ne!(inherited, stored);
+        assert_eq!(
+            inherited["environment"]["inherited_from_desktop_process"],
+            serde_json::json!(["PRIVATE_DOCS_TOKEN"])
+        );
+        assert_eq!(
+            stored["environment"]["stored_secrets"],
+            serde_json::json!([{
+                "name": "PRIVATE_DOCS_TOKEN",
+                "effect": "preserve_existing_stored_value"
+            }])
+        );
+        if let Ok(parent_value) = std::env::var("PRIVATE_DOCS_TOKEN") {
+            assert!(!inherited.to_string().contains(&parent_value));
+        }
+    }
+
+    #[test]
+    fn native_approval_refuses_unrepresentable_environment_manifest() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "oversized",
+                "command": "/bin/true",
+                "env_from": ["X".repeat(MAX_NATIVE_APPROVAL_FIELD_CHARS + 1)]
+            }]
+        });
+        assert!(native_command_previews(&config).is_err());
     }
 }

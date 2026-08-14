@@ -42,11 +42,10 @@ grant_folder_capability: widens a folder's capability only after the native perm
 # Host-side execution of client-executed tool calls
 resolve_folder_access_request: carries the user's in-turn folder decision into the native picker and the host broker that owns the grant.
 resolve_output_writeback_request: executes the approved write into a connected host folder, which only the desktop-side broker can reach.
-resolve_computer_use_consent: carries the user's per-app control/capture consent into the host broker's grant store, which only the desktop-side broker client can reach.
-resolve_computer_use_confirmation: confirms one broker-held consequential control action; the confirmation identity is broker-side and single-use, reachable only from the desktop.
+put_native_mcp_servers: shows the OS-native local-command warning and uses the host-only executor credential to save an approved configuration.
 
 # Computer-use control indicator and Stop
-computer_use_state: reads the native control/consent state (active app, halt latch, parked prompts) that lives only in this process.
+computer_use_state: reads the native control state (active app and halt latch) that lives only in this process.
 stop_computer_use_control: sets the native halt latch that short-circuits control ops before their next broker round-trip.
 resume_computer_use_control: clears that latch on an explicit user gesture.
 

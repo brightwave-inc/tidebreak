@@ -25,6 +25,9 @@ use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tidebreak_core::{
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
     validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
@@ -103,7 +106,8 @@ enum ConsentDecision {
     Decline,
 }
 
-/// One parked consent ask, as the renderer needs it.
+/// One native consent ask. This stays host-side: the renderer never receives
+/// the call id or an authority that can resolve the decision.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentPromptView {
@@ -123,7 +127,7 @@ pub(crate) enum ConsentGrantScope {
     Project,
 }
 
-/// One parked consequential-action confirmation, as the renderer needs it.
+/// One native consequential-action confirmation.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfirmationPromptView {
@@ -153,20 +157,6 @@ pub(crate) struct ActiveControlView {
 pub(crate) struct ComputerUseSnapshot {
     pub(crate) active: Option<ActiveControlView>,
     pub(crate) halted: bool,
-    pub(crate) pending_consents: Vec<ConsentPromptView>,
-    pub(crate) pending_confirmations: Vec<ConfirmationPromptView>,
-}
-
-/// What a parked prompt is waiting on, with the channel that resolves it.
-enum PendingPrompt {
-    Consent {
-        view: ConsentPromptView,
-        decision: oneshot::Sender<ConsentDecision>,
-    },
-    Confirmation {
-        view: ConfirmationPromptView,
-        decision: oneshot::Sender<bool>,
-    },
 }
 
 /// Indicator bookkeeping, kept separate so the lock is never held across an
@@ -200,7 +190,11 @@ pub(crate) struct ComputerUseState {
     /// cleared only by the user (resume, or a fresh consent approval — both
     /// are explicit opt-ins).
     halt: tokio::sync::watch::Sender<bool>,
-    prompts: StdMutex<HashMap<CallId, PendingPrompt>>,
+    /// Linearizes Stop with every broker dispatch that can act on the host.
+    /// The gate stays held through the broker round-trip so Stop either lands
+    /// before dispatch (and prevents it) or after that dispatch has already
+    /// completed. Read-only operations do not take this gate.
+    acting_dispatch: tokio::sync::Mutex<()>,
 }
 
 impl Default for ComputerUseState {
@@ -210,7 +204,7 @@ impl Default for ComputerUseState {
             app_names: StdMutex::new(HashMap::new()),
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
-            prompts: StdMutex::new(HashMap::new()),
+            acting_dispatch: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -279,10 +273,25 @@ impl ComputerUseState {
         }
     }
 
-    fn halt(&self) {
+    async fn halt(&self) {
         // send_replace, not send: the latch must hold even when no prompt is
         // currently parked on it (send drops the value with zero receivers).
         self.halt.send_replace(true);
+        // Make Stop visible immediately, then wait for any action that was
+        // already in flight to drain before reporting the stop complete.
+        let _dispatch = self.acting_dispatch.lock().await;
+    }
+
+    async fn dispatch_acting<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _dispatch = self.acting_dispatch.lock().await;
+        if self.is_halted() {
+            return Err(stopped_resolution());
+        }
+        Ok(dispatch().await)
     }
 
     fn resume(&self) {
@@ -290,24 +299,9 @@ impl ComputerUseState {
     }
 
     fn snapshot(&self) -> ComputerUseSnapshot {
-        let prompts = lock(&self.prompts);
         ComputerUseSnapshot {
             active: lock(&self.indicator).active.clone(),
             halted: self.is_halted(),
-            pending_consents: prompts
-                .values()
-                .filter_map(|prompt| match prompt {
-                    PendingPrompt::Consent { view, .. } => Some(view.clone()),
-                    PendingPrompt::Confirmation { .. } => None,
-                })
-                .collect(),
-            pending_confirmations: prompts
-                .values()
-                .filter_map(|prompt| match prompt {
-                    PendingPrompt::Confirmation { view, .. } => Some(view.clone()),
-                    PendingPrompt::Consent { .. } => None,
-                })
-                .collect(),
         }
     }
 }
@@ -316,6 +310,160 @@ fn emit_state(app: &AppHandle, cu: &ComputerUseState) {
     if let Err(error) = app.emit(STATE_EVENT, cu.snapshot()) {
         eprintln!("tidebreak-desktop: could not emit computer-use state: {error}");
     }
+}
+
+async fn native_binary_choice(
+    app: &AppHandle,
+    title: &str,
+    message: &str,
+    allow_label: &str,
+) -> Result<bool, String> {
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            allow_label.to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native computer-use prompt closed unexpectedly".to_owned())
+}
+
+async fn native_three_way_choice(
+    app: &AppHandle,
+    title: &str,
+    message: &str,
+    first: &str,
+    second: &str,
+    cancel: &str,
+) -> Result<MessageDialogResult, String> {
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            first.to_owned(),
+            second.to_owned(),
+            cancel.to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show_with_result(move |answer| {
+        let _ = sender.send(answer);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native computer-use prompt closed unexpectedly".to_owned())
+}
+
+async fn native_consent_choice(
+    app: &AppHandle,
+    view: &ConsentPromptView,
+) -> Result<ConsentDecision, String> {
+    let app_label = if view.bundle_id.is_empty() {
+        "your entire screen".to_owned()
+    } else {
+        crate::native_security_label(view.app_name.as_deref().unwrap_or(&view.bundle_id))
+    };
+    let action = match view.capability {
+        ConsentCapability::CaptureScreen => "capture",
+        ConsentCapability::ReadAppContent => "read on-screen content from",
+        ConsentCapability::ControlApp => "control",
+    };
+    let first = native_three_way_choice(
+        app,
+        "Allow computer use?",
+        &format!(
+            "Allow Tidebreak to {action} {app_label}? This permission is enforced by the native host, outside the conversation renderer."
+        ),
+        "Allow once",
+        "Remember permission…",
+        "Don't allow",
+    )
+    .await?;
+    match first {
+        MessageDialogResult::Yes => Ok(ConsentDecision::Once),
+        MessageDialogResult::Custom(ref value) if value == "Allow once" => {
+            Ok(ConsentDecision::Once)
+        }
+        MessageDialogResult::No => {
+            if view.grant_scope == ConsentGrantScope::Chat {
+                return Ok(ConsentDecision::Chat);
+            }
+            let scope = native_three_way_choice(
+                app,
+                "Remember computer-use permission?",
+                "Choose how widely Tidebreak may remember this native permission.",
+                "This chat",
+                "This project",
+                "Cancel",
+            )
+            .await?;
+            remembered_scope(scope)
+        }
+        MessageDialogResult::Custom(ref value) if value == "Remember permission…" => {
+            if view.grant_scope == ConsentGrantScope::Chat {
+                return Ok(ConsentDecision::Chat);
+            }
+            let scope = native_three_way_choice(
+                app,
+                "Remember computer-use permission?",
+                "Choose how widely Tidebreak may remember this native permission.",
+                "This chat",
+                "This project",
+                "Cancel",
+            )
+            .await?;
+            remembered_scope(scope)
+        }
+        _ => Ok(ConsentDecision::Decline),
+    }
+}
+
+fn remembered_scope(answer: MessageDialogResult) -> Result<ConsentDecision, String> {
+    match answer {
+        MessageDialogResult::Yes => Ok(ConsentDecision::Chat),
+        MessageDialogResult::No => Ok(ConsentDecision::Always),
+        MessageDialogResult::Custom(value) if value == "This chat" => Ok(ConsentDecision::Chat),
+        MessageDialogResult::Custom(value) if value == "This project" => {
+            Ok(ConsentDecision::Always)
+        }
+        _ => Ok(ConsentDecision::Decline),
+    }
+}
+
+async fn native_confirmation_choice(
+    app: &AppHandle,
+    view: &ConfirmationPromptView,
+) -> Result<bool, String> {
+    let app_label =
+        crate::native_security_label(view.app_name.as_deref().unwrap_or(&view.bundle_id));
+    let target = view
+        .target_label
+        .as_deref()
+        .map(crate::native_security_label)
+        .unwrap_or_else(|| "an unlabeled control".to_owned());
+    let reason = crate::native_security_label(&view.reason);
+    native_binary_choice(
+        app,
+        "Confirm consequential action",
+        &format!("Allow Tidebreak to {reason}?\n\nTarget: {target}\nApplication: {app_label}"),
+        "Allow action",
+    )
+    .await
 }
 
 // MARK: - Tauri surface
@@ -332,66 +480,33 @@ pub(crate) fn computer_use_state(state: State<'_, HostAccess>) -> ComputerUseSna
 /// wanted. In-memory only — a restart re-arms, and every agent whose op was
 /// short-circuited was already told not to retry.
 #[tauri::command]
-pub(crate) fn stop_computer_use_control(app: AppHandle, state: State<'_, HostAccess>) {
-    state.computer_use.halt();
-    emit_state(&app, &state.computer_use);
-}
-
-/// Re-arm control after a Stop. Explicit and user-driven only.
-#[tauri::command]
-pub(crate) fn resume_computer_use_control(app: AppHandle, state: State<'_, HostAccess>) {
-    state.computer_use.resume();
-    emit_state(&app, &state.computer_use);
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResolveConsentRequest {
-    call_id: Uuid,
-    decision: ConsentDecision,
-}
-
-/// Commit the user's per-app consent decision for a parked computer-use call.
-#[tauri::command]
-pub(crate) fn resolve_computer_use_consent(
+pub(crate) async fn stop_computer_use_control(
     app: AppHandle,
     state: State<'_, HostAccess>,
-    request: ResolveConsentRequest,
 ) -> Result<(), String> {
-    let prompt = lock(&state.computer_use.prompts).remove(&CallId::from(request.call_id));
-    let Some(PendingPrompt::Consent { decision, .. }) = prompt else {
-        return Err("that computer-use consent request is no longer pending".to_owned());
-    };
-    // A grant the user just approved is an explicit opt-in, which is also what
-    // re-arms control after a Stop.
-    if request.decision != ConsentDecision::Decline {
-        state.computer_use.resume();
-    }
-    let _ = decision.send(request.decision);
+    state.computer_use.halt().await;
     emit_state(&app, &state.computer_use);
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResolveConfirmationRequest {
-    call_id: Uuid,
-    confirmed: bool,
-}
-
-/// Commit the user's decision on one consequential action the broker held.
+/// Re-arm control after a Stop. A renderer request may open the native prompt,
+/// but cannot silently authorize the state transition.
 #[tauri::command]
-pub(crate) fn resolve_computer_use_confirmation(
+pub(crate) async fn resume_computer_use_control(
     app: AppHandle,
     state: State<'_, HostAccess>,
-    request: ResolveConfirmationRequest,
 ) -> Result<(), String> {
-    let prompt = lock(&state.computer_use.prompts).remove(&CallId::from(request.call_id));
-    let Some(PendingPrompt::Confirmation { decision, .. }) = prompt else {
-        return Err("that computer-use confirmation is no longer pending".to_owned());
-    };
-    let _ = decision.send(request.confirmed);
-    emit_state(&app, &state.computer_use);
+    if native_binary_choice(
+        &app,
+        "Resume computer control?",
+        "Resume only if you want Tidebreak to continue controlling applications on this Mac.",
+        "Resume control",
+    )
+    .await?
+    {
+        state.computer_use.resume();
+        emit_state(&app, &state.computer_use);
+    }
     Ok(())
 }
 
@@ -906,9 +1021,9 @@ async fn dispatch_broker(
     let acting = acts_on_host(&call.name);
     let bundle_id = request_bundle_id(&request).map(str::to_owned);
 
-    // The halt latch is checked immediately before the round-trip so Stop
-    // always lands first; the broker's blocklist is mirrored here so a blocked
-    // app fails closed without surfacing a consent card for it.
+    // The broker's blocklist is mirrored here so a blocked app fails closed
+    // without surfacing a consent card for it. Acting dispatches take the Stop
+    // gate below; that gate owns the authoritative final halt check.
     if acting && cu.is_halted() {
         return stopped_resolution();
     }
@@ -927,15 +1042,23 @@ async fn dispatch_broker(
         }
     }
 
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: tidebreak_host_broker::RequestId::new(),
-            context: context.execution,
-            request: request.clone(),
-        })
-        .await;
+    let envelope = OperationEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: tidebreak_host_broker::RequestId::new(),
+        context: context.execution,
+        request: request.clone(),
+    };
+    let result = if acting {
+        match cu
+            .dispatch_acting(|| state.broker.operation(envelope))
+            .await
+        {
+            Ok(result) => result,
+            Err(resolution) => return resolution,
+        }
+    } else {
+        state.broker.operation(envelope).await
+    };
     match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
             if cu.is_halted() {
@@ -1012,8 +1135,8 @@ fn stopped_resolution() -> StoredResolution {
     )
 }
 
-/// The per-app consent park: surface the card, wait for the decision, write
-/// the grant the decision implies, then re-issue the operation once.
+/// The per-app consent park: surface a native prompt, wait for the decision,
+/// write the grant the decision implies, then re-issue the operation once.
 async fn dispatch_consent(
     app: &AppHandle,
     state: &HostAccess,
@@ -1037,24 +1160,10 @@ async fn dispatch_consent(
             SubjectKind::Conversation => ConsentGrantScope::Chat,
         },
     };
-    let (sender, receiver) = oneshot::channel();
-    {
-        let mut prompts = lock(&cu.prompts);
-        prompts.insert(
-            call.id,
-            PendingPrompt::Consent {
-                view,
-                decision: sender,
-            },
-        );
-    }
-    emit_state(app, cu);
     let decision = tokio::select! {
-        decision = receiver => decision.unwrap_or(ConsentDecision::Decline),
+        decision = native_consent_choice(app, &view) => decision.unwrap_or(ConsentDecision::Decline),
         () = cu.wait_for_halt() => ConsentDecision::Decline,
     };
-    lock(&cu.prompts).remove(&call.id);
-    emit_state(app, cu);
 
     if cu.is_halted() {
         return stopped_resolution();
@@ -1096,23 +1205,36 @@ async fn dispatch_consent(
         return map_control_error(&error);
     }
 
-    // Re-issued exactly once, now authorized. A second Denied means the grant
-    // did not cover the op (a broker-side surprise, not another ask). A held
-    // consequential action re-authorizes at confirm time, so the one-time
-    // grant must outlive the whole continuation — revoke happens after it.
     if cu.is_halted() {
         revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
         return stopped_resolution();
     }
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: tidebreak_host_broker::RequestId::new(),
-            context: context.execution,
-            request,
-        })
-        .await;
+
+    // Re-issued exactly once, now authorized. A second Denied means the grant
+    // did not cover the op (a broker-side surprise, not another ask). A held
+    // consequential action re-authorizes at confirm time, so the one-time
+    // grant must outlive the whole continuation — revoke happens after it.
+    let envelope = OperationEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: tidebreak_host_broker::RequestId::new(),
+        context: context.execution,
+        request,
+    };
+    let acting = acts_on_host(&call.name);
+    let result = if acting {
+        match cu
+            .dispatch_acting(|| state.broker.operation(envelope))
+            .await
+        {
+            Ok(result) => result,
+            Err(resolution) => {
+                revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
+                return resolution;
+            }
+        }
+    } else {
+        state.broker.operation(envelope).await
+    };
     let resolution = match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
             if cu.is_halted() {
@@ -1163,7 +1285,8 @@ async fn revoke_once_grant(
 }
 
 /// The act-time consequential confirmation: the broker is holding the action
-/// and honors the confirmation only while the target's label still matches.
+/// and honors the native confirmation only while the target's label still
+/// matches.
 async fn dispatch_confirmation(
     app: &AppHandle,
     state: &HostAccess,
@@ -1179,24 +1302,10 @@ async fn dispatch_confirmation(
         target_label: held.target_label.clone(),
         reason: held.reason.clone(),
     };
-    let (sender, receiver) = oneshot::channel();
-    {
-        let mut prompts = lock(&cu.prompts);
-        prompts.insert(
-            call.id,
-            PendingPrompt::Confirmation {
-                view,
-                decision: sender,
-            },
-        );
-    }
-    emit_state(app, cu);
     let confirmed = tokio::select! {
-        confirmed = receiver => confirmed.unwrap_or(false),
+        confirmed = native_confirmation_choice(app, &view) => confirmed.unwrap_or(false),
         () = cu.wait_for_halt() => false,
     };
-    lock(&cu.prompts).remove(&call.id);
-    emit_state(app, cu);
 
     if !confirmed {
         return unavailable(
@@ -1218,7 +1327,14 @@ async fn dispatch_confirmation(
         confirmation_id: held.confirmation_id,
     });
     let deadline = tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
-    match state.broker.control_without_retry(confirm, deadline).await {
+    let result = match cu
+        .dispatch_acting(|| state.broker.control_without_retry(confirm, deadline))
+        .await
+    {
+        Ok(result) => result,
+        Err(resolution) => return resolution,
+    };
+    match result {
         Ok(ControlResult::CuConfirmControlAction(meta)) => completed(control_meta_json(&meta)),
         Ok(_) => unavailable(
             "operation_failed",
@@ -1609,11 +1725,11 @@ mod tests {
         assert_eq!(wire.element_fingerprint.as_deref(), Some("abc"));
     }
 
-    #[test]
-    fn the_halt_latch_short_circuits_before_any_broker_round_trip() {
+    #[tokio::test]
+    async fn the_halt_latch_short_circuits_before_any_broker_round_trip() {
         let cu = ComputerUseState::default();
         assert!(!cu.is_halted());
-        cu.halt();
+        cu.halt().await;
         assert!(cu.is_halted());
         // The gate the dispatcher runs immediately before dispatch: halted
         // control ops get the non-retryable stop error without a broker call.
@@ -1633,6 +1749,179 @@ mod tests {
 
         cu.resume();
         assert!(!cu.is_halted());
+    }
+
+    #[tokio::test]
+    async fn stop_sets_the_latch_before_waiting_for_an_in_flight_action() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (dispatch_started_tx, dispatch_started_rx) = oneshot::channel::<()>();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel::<()>();
+
+        let dispatch_cu = std::sync::Arc::clone(&cu);
+        let dispatch = tokio::spawn(async move {
+            dispatch_cu
+                .dispatch_acting(|| async move {
+                    dispatch_started_tx
+                        .send(())
+                        .expect("the test observes the in-flight action");
+                    release_dispatch_rx
+                        .await
+                        .expect("the test releases the in-flight action");
+                })
+                .await
+        });
+        dispatch_started_rx
+            .await
+            .expect("the acting request holds the dispatch gate");
+
+        let halt_cu = std::sync::Arc::clone(&cu);
+        let halt = tokio::spawn(async move { halt_cu.halt().await });
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while !cu.is_halted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Stop must publish its latch without waiting for the broker");
+        assert!(
+            !halt.is_finished(),
+            "Stop still drains the in-flight action"
+        );
+
+        release_dispatch_tx
+            .send(())
+            .expect("release the in-flight action");
+        dispatch.await.expect("the acting task completes").unwrap();
+        halt.await.expect("the Stop task completes after the drain");
+    }
+
+    #[tokio::test]
+    async fn stop_prevents_an_ordinary_acting_request_from_starting_after_it_completes() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (ready_to_dispatch, dispatch_ready) = oneshot::channel::<()>();
+        let (continue_dispatch, dispatch_continues) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let dispatch_cu = std::sync::Arc::clone(&cu);
+        let dispatch = tokio::spawn(async move {
+            ready_to_dispatch
+                .send(())
+                .expect("the test observes the acting request before dispatch");
+            dispatch_continues
+                .await
+                .expect("the acting request may continue");
+            dispatch_cu
+                .dispatch_acting(|| async move {
+                    broker_request
+                        .send("ordinary_acting_request")
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        dispatch_ready
+            .await
+            .expect("the acting request reaches the pre-dispatch pause");
+        cu.halt().await;
+        continue_dispatch
+            .send(())
+            .expect("release the acting request after Stop completes");
+
+        let resolution = dispatch
+            .await
+            .expect("the acting dispatch task completes")
+            .expect_err("Stop must prevent the ordinary acting broker request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped acting request fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_prevents_a_post_consent_reissue_from_starting_after_it_completes() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (consent_committed, consent_is_committed) = oneshot::channel::<()>();
+        let (continue_reissue, reissue_continues) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let reissue_cu = std::sync::Arc::clone(&cu);
+        let reissue = tokio::spawn(async move {
+            consent_committed
+                .send(())
+                .expect("the test observes consent before the reissue");
+            reissue_continues
+                .await
+                .expect("the authorized reissue may continue");
+            reissue_cu
+                .dispatch_acting(|| async move {
+                    broker_request
+                        .send("post_consent_reissue")
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        consent_is_committed
+            .await
+            .expect("consent reaches the pre-reissue pause");
+        cu.halt().await;
+        continue_reissue
+            .send(())
+            .expect("release the authorized reissue after Stop completes");
+
+        let resolution = reissue
+            .await
+            .expect("the post-consent reissue task completes")
+            .expect_err("Stop must prevent the post-consent broker request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped post-consent reissue fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_after_native_approval_prevents_confirmation_redemption() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (approved, native_approval) = oneshot::channel::<()>();
+        let (continue_after_approval, continue_redemption) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let redemption_cu = std::sync::Arc::clone(&cu);
+        let redemption = tokio::spawn(async move {
+            native_approval.await.expect("native approval arrives");
+            continue_redemption
+                .await
+                .expect("the approved action may continue");
+            redemption_cu
+                .dispatch_acting(|| async move {
+                    broker_request
+                        .send(ControlRequest::CuConfirmControlAction(
+                            CuConfirmControlActionRequest {
+                                confirmation_id: Uuid::new_v4(),
+                            },
+                        ))
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        approved.send(()).expect("approve the native prompt");
+        cu.halt().await;
+        continue_after_approval
+            .send(())
+            .expect("release the approved action after Stop");
+
+        let resolution = redemption
+            .await
+            .expect("the redemption task completes")
+            .expect_err("Stop must prevent the confirmation request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped confirmation fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
     }
 
     #[test]

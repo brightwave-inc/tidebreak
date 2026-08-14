@@ -71,6 +71,7 @@ pub(crate) enum OutputRevision {
 pub(crate) enum App {
     Table,
     Id,
+    Owner,
     Name,
     CurrentRevisionId,
     RevisionCount,

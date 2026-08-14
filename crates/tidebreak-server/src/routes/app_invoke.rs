@@ -38,6 +38,7 @@ use crate::connectors::GatewayInvokeOutcome;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::rest_executor::{RestExecuteError, RestOperationRequest};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// Body bound for an invoke request: a capability name plus its opaque
@@ -349,16 +350,18 @@ fn requested_surface(request: AppInvokeRequest) -> Result<InvokeSurface, AppInvo
 /// widen what a call reaches.
 pub async fn post_app_invoke(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(app_id): Path<AppId>,
     Json(request): Json<AppInvokeRequest>,
 ) -> Result<Response, AppInvokeError> {
     let surface = requested_surface(request)?;
-    let (app, revision) = current_app_revision(&state, app_id).await?;
+    let (app, revision) = current_app_revision(&store, app_id).await?;
     match surface {
         InvokeSurface::Operation(request) => {
             require_pinned_operation(&revision, &request.operation_id)?;
             require_app_grant(
                 &state,
+                &store,
                 &app,
                 &revision,
                 &Pinned::Operation(&request.operation_id),
@@ -376,6 +379,7 @@ pub async fn post_app_invoke(
             )?;
             let current = require_app_grant(
                 &state,
+                &store,
                 &app,
                 &revision,
                 &Pinned::GatewayOperation {
@@ -392,7 +396,7 @@ pub async fn post_app_invoke(
                 .get(&request.gateway_app)
                 .map_or(request.gateway_app.as_str(), |app| app.name.as_str())
                 .to_owned();
-            dispatch_gateway_operation(&state, app_id, &request, &display_name)
+            dispatch_gateway_operation(&state, &store.owner_id(), app_id, &request, &display_name)
                 .await
                 .map(|result| Json(result).into_response())
         }
@@ -400,6 +404,7 @@ pub async fn post_app_invoke(
             require_pinned_folder(&revision, folder, op.writes())?;
             require_app_grant(
                 &state,
+                &store,
                 &app,
                 &revision,
                 &Pinned::Folder {
@@ -420,7 +425,7 @@ pub async fn post_app_invoke(
 /// A deleted app refuses identically to a missing one: soft-deletion removes
 /// the app from every renderer surface, so it must remove it from this one.
 async fn current_app_revision(
-    state: &AppState,
+    store: &ScopedStore,
     app_id: AppId,
 ) -> Result<(AppRecord, AppRevision), AppInvokeError> {
     let absent = || {
@@ -429,14 +434,13 @@ async fn current_app_revision(
             format!("no app {app_id}"),
         )
     };
-    let app = state.store.get_app(app_id).await?.ok_or_else(absent)?;
+    let app = store.get_app(app_id).await?.ok_or_else(absent)?;
     if app.deleted_at.is_some() {
         return Err(absent());
     }
     // A live app always points at a stored revision; if the record is ever
     // inconsistent, fail closed as absent rather than dispatch unpinned.
-    let revision = state
-        .store
+    let revision = store
         .get_app_revision(app.current_revision)
         .await?
         .ok_or_else(absent)?;
@@ -598,13 +602,14 @@ impl Pinned<'_> {
 /// gateway currently calls an app, without a second live read.
 async fn require_app_grant(
     state: &AppState,
+    store: &ScopedStore,
     app: &AppRecord,
     revision: &AppRevision,
     pinned: &Pinned<'_>,
 ) -> Result<crate::connected_apps::CurrentFingerprints, AppInvokeError> {
     let consent_required =
         |message: String| AppInvokeError::refused(AppInvokeRefusalKind::ConsentRequired, message);
-    let Some(grant) = state.store.get_app_grant(app.id).await? else {
+    let Some(grant) = store.get_app_grant(app.id).await? else {
         return Err(consent_required(format!(
             "no live app grant covers {}",
             pinned.description()
@@ -790,6 +795,7 @@ async fn dispatch_rest_operation(
 /// `gateway_unavailable`, whose message says which of the two reasons it was.
 async fn dispatch_gateway_operation(
     state: &AppState,
+    owner: &tidebreak_core::OwnerId,
     app_id: AppId,
     request: &GatewayOperationRequest,
     display_name: &str,
@@ -801,7 +807,11 @@ async fn dispatch_gateway_operation(
         is_error: true,
         error: Some(error),
     };
-    match state.gateway_dispatch.dispatch(app_id, request).await {
+    match state
+        .gateway_dispatch
+        .dispatch(owner, app_id, request)
+        .await
+    {
         Ok(GatewayInvokeOutcome::Executed {
             status,
             content_type,

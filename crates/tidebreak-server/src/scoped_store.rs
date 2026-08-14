@@ -26,6 +26,8 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use serde_json::Value;
 
+use tidebreak_core::id::{AppId, AppRevisionId};
+use tidebreak_core::local_app::{AppGrant, AppRecord, AppRevision};
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
@@ -62,6 +64,12 @@ impl ScopedStore {
             store: state.store.clone(),
             owner: auth.principal.owner_id(),
         }
+    }
+
+    /// Durable owner key carried into owner-aware background seams after the
+    /// request has authorized an app through this view.
+    pub(crate) fn owner_id(&self) -> OwnerId {
+        self.owner.clone()
     }
 
     // ------------------------------------------------------------------
@@ -212,6 +220,52 @@ impl ScopedStore {
     ) -> Result<DocumentRecord> {
         self.store
             .accept_document_source_scoped(&self.owner, document)
+            .await
+    }
+
+    /// Fetch the principal's app by id.
+    pub async fn get_app(&self, id: AppId) -> Result<Option<AppRecord>> {
+        self.store.get_app_scoped(&self.owner, id).await
+    }
+
+    /// List the principal's live apps.
+    pub async fn list_apps(&self, limit: u64) -> Result<Vec<AppRecord>> {
+        self.store.list_apps_scoped(&self.owner, limit).await
+    }
+
+    /// List revisions only when the parent app belongs to the principal.
+    pub async fn list_app_revisions(&self, app_id: AppId) -> Result<Vec<AppRevision>> {
+        self.store
+            .list_app_revisions_scoped(&self.owner, app_id)
+            .await
+    }
+
+    /// Fetch a revision only through an app the principal owns.
+    pub async fn get_app_revision(&self, id: AppRevisionId) -> Result<Option<AppRevision>> {
+        self.store.get_app_revision_scoped(&self.owner, id).await
+    }
+
+    pub async fn delete_app(
+        &self,
+        id: AppId,
+        deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.store
+            .delete_app_scoped(&self.owner, id, deleted_at)
+            .await
+    }
+
+    pub async fn get_app_grant(&self, app_id: AppId) -> Result<Option<AppGrant>> {
+        self.store.get_app_grant_scoped(&self.owner, app_id).await
+    }
+
+    pub async fn put_app_grant(&self, grant: &AppGrant) -> Result<()> {
+        self.store.put_app_grant_scoped(&self.owner, grant).await
+    }
+
+    pub async fn delete_app_grant(&self, app_id: AppId) -> Result<bool> {
+        self.store
+            .delete_app_grant_scoped(&self.owner, app_id)
             .await
     }
 

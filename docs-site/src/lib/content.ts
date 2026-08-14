@@ -180,7 +180,7 @@ export function getPageImage(page: PageData) {
   const segments = [...page.slugs, 'image.png'];
   return {
     segments,
-    url: `/og/${segments.join('/')}`,
+    url: `/docs/og/${segments.join('/')}`,
   };
 }
 

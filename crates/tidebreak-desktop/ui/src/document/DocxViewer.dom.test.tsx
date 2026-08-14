@@ -27,6 +27,11 @@ function source(id = "doc-1"): FileBytesSource {
 }
 
 function renderPage(bodyContainer: HTMLElement, label = "document") {
+  const hostileStyle = document.createElement("style");
+  hostileStyle.textContent =
+    "body { display: none !important; } </style><script>alert(1)</script><style>";
+  bodyContainer.append(hostileStyle);
+
   const page = document.createElement("section");
   page.className = "docx";
   page.dataset.label = label;
@@ -43,6 +48,14 @@ function renderPage(bodyContainer: HTMLElement, label = "document") {
   unsafe.href = "http://example.com/plain";
   unsafe.textContent = "unsafe";
   page.append(unsafe);
+
+  const spoofed = document.createElement("a");
+  spoofed.setAttribute(
+    "data-tidebreak-external-href",
+    "javascript:alert('spoofed')",
+  );
+  spoofed.textContent = "spoofed";
+  page.append(spoofed);
 
   const bookmark = document.createElement("a");
   bookmark.href = "#section-2";
@@ -76,7 +89,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("renders one secured read-only document without remounting on parent rerenders", async () => {
+it("confines generated document styles to an opaque-origin sandbox", async () => {
   const { container, rerender } = render(<DocxViewer source={source()} />);
 
   await waitFor(() => expect(docxMocks.renderAsync).toHaveBeenCalledTimes(1));
@@ -87,18 +100,65 @@ it("renders one secured read-only document without remounting on parent rerender
     DOCX_RENDER_OPTIONS,
   );
 
-  const links = Array.from(container.querySelectorAll("a"));
-  expect(links[0]).toHaveAttribute("href", "https://example.com/report");
-  expect(links[0]).toHaveAttribute("target", "_blank");
-  expect(links[0]).toHaveAttribute("rel", "noopener noreferrer");
-  expect(links[1]).not.toHaveAttribute("href");
-  expect(links[2]).toHaveAttribute("href", "#section-2");
+  const frame = await waitFor(() => {
+    const candidate = container.querySelector("iframe");
+    expect(candidate).not.toBeNull();
+    return candidate as HTMLIFrameElement;
+  });
+  expect(frame).toHaveAttribute("sandbox", "");
+  expect(frame).not.toHaveAttribute(
+    "sandbox",
+    expect.stringContaining("allow-scripts"),
+  );
+  expect(frame).not.toHaveAttribute(
+    "sandbox",
+    expect.stringContaining("allow-same-origin"),
+  );
+  expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+  expect(frame.srcdoc).toContain("default-src 'none'; img-src data: blob:");
+  expect(frame.srcdoc).toContain("script-src 'none'");
+  expect(frame.srcdoc).toContain("connect-src 'none'");
+  expect(frame.srcdoc).toContain("form-action 'none'");
 
-  const page = container.querySelector<HTMLElement>("section.docx");
-  expect(page).toHaveStyle({ height: "auto", minHeight: "1056px" });
+  // docx-preview generated a document-global rule, but neither it nor the
+  // rendered page ever entered Tidebreak's live document.
+  expect(container.querySelector("section.docx")).toBeNull();
+  expect(document.body.textContent).not.toContain(
+    "body { display: none !important; }",
+  );
+  expect(frame.srcdoc).toContain("body { display: none !important; }");
+  expect(frame.srcdoc).not.toContain("</style><script>alert(1)</script>");
+  expect(frame.srcdoc).not.toContain('href="https://example.com/report"');
+  expect(frame.srcdoc).not.toContain('target="_blank"');
+  expect(frame.srcdoc).toContain(
+    "safe (https://example.com/report)",
+  );
+  expect(frame.srcdoc).toContain(
+    "External link (copy this address): https://example.com/report",
+  );
+  expect(frame.srcdoc).not.toContain("http://example.com/plain");
+  expect(frame.srcdoc).not.toContain("data-tidebreak-external-href");
+  expect(frame.srcdoc).not.toContain("javascript:alert");
 
   rerender(<DocxViewer source={source()} />);
   expect(docxMocks.renderAsync).toHaveBeenCalledTimes(1);
+});
+
+it("finishes rendering when animation frames are suspended", async () => {
+  const requestAnimationFrame = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation(() => 1);
+
+  try {
+    const { container } = render(<DocxViewer source={source()} />);
+
+    await waitFor(
+      () => expect(container.querySelector("iframe")).not.toBeNull(),
+      { timeout: 500 },
+    );
+  } finally {
+    requestAnimationFrame.mockRestore();
+  }
 });
 
 it("does not let a superseded parse overwrite the current document", async () => {
@@ -130,16 +190,18 @@ it("does not let a superseded parse overwrite the current document", async () =>
   await waitFor(() => expect(docxMocks.renderAsync).toHaveBeenCalledTimes(1));
 
   rerender(<DocxViewer source={source("new")} />);
-  await waitFor(() =>
-    expect(container.querySelector("section.docx")).toHaveAttribute(
-      "data-label",
-      "new",
-    ),
-  );
+  await waitFor(() => expect(docxMocks.renderAsync).toHaveBeenCalledTimes(2));
+  await waitFor(() => {
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain(
+      'data-label="new"',
+    );
+  });
 
   await act(async () => firstRender.resolve());
-  expect(container.querySelector("section.docx")).toHaveAttribute(
-    "data-label",
-    "new",
+  expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain(
+    'data-label="new"',
   );
+  expect(
+    container.querySelector("iframe")?.getAttribute("srcdoc"),
+  ).not.toContain('data-label="old"');
 });

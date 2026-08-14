@@ -386,7 +386,7 @@ impl Tool for CreateAppTool {
         // Appending must address an app that exists before any bytes are
         // published under its id; the store re-checks inside the transaction.
         if args.app_id.is_some() {
-            match self.store.get_app(app_id).await {
+            match self.store.get_app_for_chat(ctx.chat_id, app_id).await {
                 Ok(Some(app)) if app.deleted_at.is_none() => {}
                 Ok(Some(_)) => {
                     return Ok(ToolOutput::error(
@@ -407,7 +407,11 @@ impl Tool for CreateAppTool {
         // Recognize an exact retry before writing anything: the same call
         // republishing the same content reports the record it already made,
         // while a call id reused for different content is refused.
-        match self.store.get_app_revision(revision_id).await {
+        match self
+            .store
+            .get_app_revision_for_chat(ctx.chat_id, revision_id)
+            .await
+        {
             Ok(Some(recorded)) => {
                 let exact = recorded.app_id == app_id
                     && recorded.byte_len == byte_len
@@ -418,12 +422,14 @@ impl Tool for CreateAppTool {
                         "this call already published a different app revision",
                     ));
                 }
-                return Ok(match self.store.get_app(app_id).await {
-                    Ok(Some(record)) => {
-                        Self::success(&record, recorded.ordinal, recorded.ordinal == 1)
-                    }
-                    _ => ToolOutput::error("could not read back the app record"),
-                });
+                return Ok(
+                    match self.store.get_app_for_chat(ctx.chat_id, app_id).await {
+                        Ok(Some(record)) => {
+                            Self::success(&record, recorded.ordinal, recorded.ordinal == 1)
+                        }
+                        _ => ToolOutput::error("could not read back the app record"),
+                    },
+                );
             }
             Ok(None) => {}
             Err(_) => return Ok(ToolOutput::error("could not check for an earlier attempt")),
@@ -460,13 +466,18 @@ impl Tool for CreateAppTool {
             created_at: Utc::now(),
         };
         let recorded = if args.app_id.is_some() {
-            self.store.append_app_revision(app_id, &revision).await
+            self.store
+                .append_app_revision_for_chat(ctx.chat_id, app_id, &revision)
+                .await
         } else {
             self.store
-                .create_app(&CreateApp {
-                    id: app_id,
-                    revision,
-                })
+                .create_app_for_chat(
+                    ctx.chat_id,
+                    &CreateApp {
+                        id: app_id,
+                        revision,
+                    },
+                )
                 .await
         };
         Ok(match recorded {

@@ -1,11 +1,11 @@
 //! The schema baseline: every table, index, and seed row a fresh database
 //! starts with.
 //!
-//! Pre-v1 databases are disposable — [`crate::db::migration::Migrator`] runs
-//! this one migration, and `tidebreak-server`'s schema-epoch guard discards any
-//! database written by an older baseline. So the baseline is edited in place
-//! rather than extended by an upgrade step: change the table definition here
-//! and bump the epoch.
+//! Pre-v1 desktop databases are disposable: `tidebreak-server`'s schema-epoch
+//! guard discards a database written by an older baseline. The self-host
+//! PostgreSQL store is durable, so a baseline edit that changes an existing
+//! table must also have an ordered upgrade migration in
+//! [`crate::db::migration`].
 
 use sea_orm_migration::prelude::*;
 

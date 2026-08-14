@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use tidebreak_core::{
-    AgentRun, ChatId, CompactionPolicy, PermissionMode, ReasoningEffort, Store, TurnId,
+    AgentRun, ChatId, CompactionPolicy, OwnerId, PermissionMode, ReasoningEffort, Store, TurnId,
     DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
     DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
@@ -24,6 +24,7 @@ use crate::exec_write_snapshot::{
 };
 use crate::extract::{Json, Path};
 use crate::model_roles::{self, ModelRole};
+use crate::principal::AuthContext;
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 use crate::web_search::{
@@ -218,14 +219,20 @@ where
 }
 
 /// `GET /settings` — the current runtime settings.
-pub async fn get_settings(State(state): State<AppState>) -> Result<Json<Settings>, ServerError> {
-    Ok(Json(read_settings(&state).await?))
+pub async fn get_settings(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<Settings>, ServerError> {
+    Ok(Json(
+        read_settings(&state, &auth.principal.owner_id()).await?,
+    ))
 }
 
 /// `PUT /settings` — update runtime settings, returning the new state. Only the
 /// fields present in the body are touched.
 pub async fn put_settings(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(mut body): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, ServerError> {
     if let Some(Some(model)) = body.model.as_mut() {
@@ -327,16 +334,18 @@ pub async fn put_settings(
             )
             .await?;
     }
-    Ok(Json(read_settings(&state).await?))
+    Ok(Json(
+        read_settings(&state, &auth.principal.owner_id()).await?,
+    ))
 }
 
 /// The settings both handlers return, read back from the store so a response
 /// always reflects what was persisted rather than what was requested.
-async fn read_settings(state: &AppState) -> Result<Settings, ServerError> {
+async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, ServerError> {
     Ok(Settings {
         model: read_model(&*state.store).await?,
         has_api_key: has_api_key(&*state.secrets).await,
-        chat_defaults: read_sticky_chat_defaults(state).await?,
+        chat_defaults: read_sticky_chat_defaults(state, owner).await?,
         max_active_background_agents: read_max_active_background_agents(&*state.store).await?,
         sandbox_agent_checkin_steps: read_sandbox_agent_checkin_steps(&*state.store).await?,
         sandbox_agent_error_checkin: read_sandbox_agent_error_checkin(&*state.store).await?,
@@ -849,8 +858,8 @@ pub async fn delete_web_search_credential(
 /// Settings keys holding the sticky new-chat defaults: the reader's last
 /// explicit per-chat choice at these routes, replayed into the next chat.
 ///
-/// Deployment-scoped like every other setting. `model` deliberately gets its
-/// own key rather than reusing the global `model` selection: seeding is a
+/// Owner-scoped within the deployment. `model` deliberately gets its own key
+/// rather than reusing the global `model` selection: seeding is a
 /// creation-time copy into the new chat, so picking a model in one chat never
 /// retargets existing chats that ride the configured default.
 pub(super) const STICKY_MODEL_KEY: &str = "chat_default.model";
@@ -858,14 +867,27 @@ pub(super) const STICKY_REASONING_EFFORT_KEY: &str = "chat_default.reasoning_eff
 pub(super) const STICKY_PERMISSION_MODE_KEY: &str = "chat_default.permission_mode";
 pub(super) const STICKY_NETWORK_POLICY_KEY: &str = "chat_default.network_policy";
 
+/// Resolve a sticky setting's durable key for one principal. The local profile
+/// keeps the historical key so existing desktop defaults survive upgrade;
+/// named self-host users receive disjoint keys.
+pub(super) fn sticky_default_key(owner: &OwnerId, key: &str) -> String {
+    if owner.is_local() {
+        key.to_owned()
+    } else {
+        format!("{key}.owner.{}", owner.as_str())
+    }
+}
+
 /// Read one sticky new-chat default. A stored value this build no longer
 /// recognizes reads as unset rather than failing the create.
 pub(super) async fn read_sticky_default<T: serde::de::DeserializeOwned>(
     store: &dyn Store,
+    owner: &OwnerId,
     key: &str,
 ) -> tidebreak_core::Result<Option<T>> {
+    let key = sticky_default_key(owner, key);
     Ok(store
-        .get_setting(key)
+        .get_setting(&key)
         .await?
         .and_then(|value| serde_json::from_value(value).ok()))
 }
@@ -884,11 +906,14 @@ pub(super) fn sticky_default_value<T: Serialize>(
 /// Record (or clear, with `None`) one sticky new-chat default.
 pub(super) async fn write_sticky_default<T: Serialize>(
     store: &dyn Store,
+    owner: &OwnerId,
     key: &str,
     value: Option<&T>,
 ) -> Result<(), ServerError> {
     let value = sticky_default_value(value)?;
-    Ok(store.set_setting(key, &value).await?)
+    Ok(store
+        .set_setting(&sticky_default_key(owner, key), &value)
+        .await?)
 }
 
 /// Read every sticky new-chat default, the permission mode clamped to any
@@ -896,23 +921,25 @@ pub(super) async fn write_sticky_default<T: Serialize>(
 /// composer should display before the chat exists.
 pub(super) async fn read_sticky_chat_defaults(
     state: &AppState,
+    owner: &OwnerId,
 ) -> Result<StickyChatDefaults, ServerError> {
     let store = &*state.store;
-    let permission_mode = match read_sticky_default(store, STICKY_PERMISSION_MODE_KEY).await? {
-        // The managed ceiling clamps a sticky mode recorded before the
-        // policy arrived: a remembered `allow` under an `ask` ceiling seeds
-        // (and reads back) `ask`, mirroring the turn gate's treatment of
-        // stored over-ceiling modes.
-        Some(mode) => {
-            crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
-                .clamp_permission_mode(Some(mode))
-        }
-        None => None,
-    };
+    let permission_mode =
+        match read_sticky_default(store, owner, STICKY_PERMISSION_MODE_KEY).await? {
+            // The managed ceiling clamps a sticky mode recorded before the
+            // policy arrived: a remembered `allow` under an `ask` ceiling seeds
+            // (and reads back) `ask`, mirroring the turn gate's treatment of
+            // stored over-ceiling modes.
+            Some(mode) => {
+                crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
+                    .clamp_permission_mode(Some(mode))
+            }
+            None => None,
+        };
     Ok(StickyChatDefaults {
-        model: read_sticky_default(store, STICKY_MODEL_KEY).await?,
-        reasoning_effort: read_sticky_default(store, STICKY_REASONING_EFFORT_KEY).await?,
+        model: read_sticky_default(store, owner, STICKY_MODEL_KEY).await?,
+        reasoning_effort: read_sticky_default(store, owner, STICKY_REASONING_EFFORT_KEY).await?,
         permission_mode,
-        network_policy: read_sticky_default(store, STICKY_NETWORK_POLICY_KEY).await?,
+        network_policy: read_sticky_default(store, owner, STICKY_NETWORK_POLICY_KEY).await?,
     })
 }

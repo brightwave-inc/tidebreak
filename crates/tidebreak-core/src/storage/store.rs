@@ -763,7 +763,7 @@ pub trait Store: Send + Sync {
         output_storage_unavailable()
     }
 
-    /// Create a profile-scoped local app together with its first revision.
+    /// Create a local app together with its first revision.
     ///
     /// The caller has already published the bundle bytes under the profile
     /// data directory at [`crate::local_app::app_revision_relative_path`] and
@@ -772,6 +772,20 @@ pub trait Store: Send + Sync {
     /// identical content returns the original record so an ambiguous store
     /// response can be retried; reusing it with different content is rejected.
     async fn create_app(&self, _request: &CreateApp) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
+    /// Create an app owned by the same principal as `chat_id`.
+    async fn create_app_for_chat(
+        &self,
+        _chat_id: ChatId,
+        _request: &CreateApp,
+    ) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
+    /// Create an app owned by `owner`.
+    async fn create_app_scoped(&self, _owner: &OwnerId, _request: &CreateApp) -> Result<AppRecord> {
         app_storage_unavailable()
     }
 
@@ -789,13 +803,48 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Append only when the app belongs to the same principal as `chat_id`.
+    async fn append_app_revision_for_chat(
+        &self,
+        _chat_id: ChatId,
+        _app_id: AppId,
+        _revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
+    /// Append a revision only to `owner`'s app.
+    async fn append_app_revision_scoped(
+        &self,
+        _owner: &OwnerId,
+        _app_id: AppId,
+        _revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        app_storage_unavailable()
+    }
+
     /// Fetch one app by opaque id, including a soft-deleted one.
     async fn get_app(&self, _id: AppId) -> Result<Option<AppRecord>> {
         app_storage_unavailable()
     }
 
-    /// List the profile's live apps, most recently updated first.
+    /// Fetch one app only when it belongs to `owner`.
+    async fn get_app_scoped(&self, _owner: &OwnerId, _id: AppId) -> Result<Option<AppRecord>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch one app only when it belongs to the same principal as `chat_id`.
+    async fn get_app_for_chat(&self, _chat_id: ChatId, _id: AppId) -> Result<Option<AppRecord>> {
+        app_storage_unavailable()
+    }
+
+    /// List the local profile's live apps, most recently updated first.
     async fn list_apps(&self, _limit: u64) -> Result<Vec<AppRecord>> {
+        app_storage_unavailable()
+    }
+
+    /// List `owner`'s live apps, most recently updated first.
+    async fn list_apps_scoped(&self, _owner: &OwnerId, _limit: u64) -> Result<Vec<AppRecord>> {
         app_storage_unavailable()
     }
 
@@ -804,8 +853,35 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// List revisions only when the parent app belongs to `owner`.
+    async fn list_app_revisions_scoped(
+        &self,
+        _owner: &OwnerId,
+        _app_id: AppId,
+    ) -> Result<Vec<AppRevision>> {
+        app_storage_unavailable()
+    }
+
     /// Fetch one app revision by opaque id.
     async fn get_app_revision(&self, _id: AppRevisionId) -> Result<Option<AppRevision>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch a revision only through an app `owner` owns.
+    async fn get_app_revision_scoped(
+        &self,
+        _owner: &OwnerId,
+        _id: AppRevisionId,
+    ) -> Result<Option<AppRevision>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch a revision only through an app owned by `chat_id`'s principal.
+    async fn get_app_revision_for_chat(
+        &self,
+        _chat_id: ChatId,
+        _id: AppRevisionId,
+    ) -> Result<Option<AppRevision>> {
         app_storage_unavailable()
     }
 
@@ -814,6 +890,16 @@ pub trait Store: Send + Sync {
     /// an already-deleted app is the same durable outcome, not a conflict.
     async fn delete_app(
         &self,
+        _id: AppId,
+        _deleted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        app_storage_unavailable()
+    }
+
+    /// Soft-delete only `owner`'s app.
+    async fn delete_app_scoped(
+        &self,
+        _owner: &OwnerId,
         _id: AppId,
         _deleted_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
@@ -832,6 +918,16 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Restore only `owner`'s app.
+    async fn restore_app_scoped(
+        &self,
+        _owner: &OwnerId,
+        _id: AppId,
+        _restored_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        app_storage_unavailable()
+    }
+
     /// Record explicit user consent for one app, replacing any previous grant.
     ///
     /// The grant is host-computed from the app's current manifest and the
@@ -842,14 +938,33 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Record consent only for an app `owner` owns.
+    async fn put_app_grant_scoped(&self, _owner: &OwnerId, _grant: &AppGrant) -> Result<()> {
+        app_storage_unavailable()
+    }
+
     /// Fetch one app's grant, when the user has consented and not revoked.
     async fn get_app_grant(&self, _app_id: AppId) -> Result<Option<AppGrant>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch a grant only through an app `owner` owns.
+    async fn get_app_grant_scoped(
+        &self,
+        _owner: &OwnerId,
+        _app_id: AppId,
+    ) -> Result<Option<AppGrant>> {
         app_storage_unavailable()
     }
 
     /// Revoke one app's grant. Returns `false` when no grant existed;
     /// revoking twice is the same durable outcome, not a conflict.
     async fn delete_app_grant(&self, _app_id: AppId) -> Result<bool> {
+        app_storage_unavailable()
+    }
+
+    /// Revoke only a grant belonging to `owner`.
+    async fn delete_app_grant_scoped(&self, _owner: &OwnerId, _app_id: AppId) -> Result<bool> {
         app_storage_unavailable()
     }
 
@@ -865,6 +980,11 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Every live app grant held by `owner`.
+    async fn list_live_app_grants_scoped(&self, _owner: &OwnerId) -> Result<Vec<AppGrant>> {
+        app_storage_unavailable()
+    }
+
     /// Record the gateway-side registration one app holds at one deployment,
     /// replacing any registration it already held there.
     ///
@@ -877,11 +997,30 @@ pub trait Store: Send + Sync {
         app_storage_unavailable()
     }
 
+    /// Record gateway state only for an app `owner` owns.
+    async fn put_app_gateway_draft_scoped(
+        &self,
+        _owner: &OwnerId,
+        _draft: &AppGatewayDraft,
+    ) -> Result<()> {
+        app_storage_unavailable()
+    }
+
     /// Fetch one app's gateway registration at `gateway_base_url`, when it
     /// holds one there. A registration made against a different deployment is
     /// simply absent, never a near match.
     async fn get_app_gateway_draft(
         &self,
+        _app_id: AppId,
+        _gateway_base_url: &str,
+    ) -> Result<Option<AppGatewayDraft>> {
+        app_storage_unavailable()
+    }
+
+    /// Fetch gateway state only through an app `owner` owns.
+    async fn get_app_gateway_draft_scoped(
+        &self,
+        _owner: &OwnerId,
         _app_id: AppId,
         _gateway_base_url: &str,
     ) -> Result<Option<AppGatewayDraft>> {

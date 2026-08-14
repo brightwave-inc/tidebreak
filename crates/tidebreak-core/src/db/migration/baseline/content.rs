@@ -599,15 +599,22 @@ pub(super) fn message_document_attachment_indexes() -> Vec<IndexCreateStatement>
     ]
 }
 
-/// The profile-scoped local-app record: one row per app.
+/// The principal-owned local-app record: one row per app.
 ///
 /// Follows `output`/`output_revision` with one deliberate difference: there is
-/// no chat foreign key anywhere. The profile owns the app, so an app and its
-/// history survive deletion of the conversation that authored them.
+/// no chat foreign key anywhere. The immutable owner on the app row keeps its
+/// history alive after the authoring conversation is deleted while still
+/// partitioning a shared database by principal.
 pub(super) fn app_table() -> TableCreateStatement {
     Table::create()
         .table(App::Table)
         .col(ColumnDef::new(App::Id).uuid().not_null().primary_key())
+        .col(
+            ColumnDef::new(App::Owner)
+                .text()
+                .not_null()
+                .default("local"),
+        )
         .col(ColumnDef::new(App::Name).text().not_null())
         .col(ColumnDef::new(App::CurrentRevisionId).uuid().not_null())
         .col(ColumnDef::new(App::RevisionCount).integer().not_null())
@@ -627,12 +634,21 @@ pub(super) fn app_table() -> TableCreateStatement {
 }
 
 pub(super) fn app_indexes() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx_app_updated")
-        .table(App::Table)
-        .col(App::UpdatedAt)
-        .col(App::Id)
-        .to_owned()]
+    vec![
+        Index::create()
+            .name("idx_app_updated")
+            .table(App::Table)
+            .col(App::UpdatedAt)
+            .col(App::Id)
+            .to_owned(),
+        Index::create()
+            .name("idx_app_owner_updated")
+            .table(App::Table)
+            .col(App::Owner)
+            .col(App::UpdatedAt)
+            .col(App::Id)
+            .to_owned(),
+    ]
 }
 
 /// Insert-only app revisions, each pairing a bounded manifest with the length

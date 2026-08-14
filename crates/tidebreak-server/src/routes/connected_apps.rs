@@ -26,6 +26,7 @@ use crate::mcp_curated::McpCuration;
 use crate::openapi_catalog::{
     enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
 };
+use crate::principal::AuthContext;
 use crate::providers::managed_profile_refusal;
 use crate::rest_executor::{
     admit_base_url, fetch_spec_document, CredentialPlacement, RestCredential,
@@ -184,8 +185,11 @@ pub struct RestCredentialSet {
 /// `GET /connected-apps` — every configured connected app, both kinds.
 pub async fn get_connected_apps(
     State(state): State<AppState>,
+    auth: AuthContext,
 ) -> Result<Json<ConnectedAppsInfo>, ServerError> {
-    Ok(Json(connected_apps_info(&state).await?))
+    Ok(Json(
+        connected_apps_info(&state, &auth.principal.owner_id()).await?,
+    ))
 }
 
 /// `PUT /connected-apps/rest/{id}` — create or replace one `rest_api`
@@ -198,6 +202,7 @@ pub async fn get_connected_apps(
 /// BYOK provider keys. An unreadable policy refuses too — fail closed.
 pub async fn put_rest_connected_app(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(id): Path<ConnectedAppId>,
     Json(body): Json<RestConnectedAppUpsert>,
 ) -> Result<Json<ConnectedAppsInfo>, ServerError> {
@@ -356,7 +361,9 @@ pub async fn put_rest_connected_app(
             .await;
     }
 
-    Ok(Json(connected_apps_info(&state).await?))
+    Ok(Json(
+        connected_apps_info(&state, &auth.principal.owner_id()).await?,
+    ))
 }
 
 /// `DELETE /connected-apps/rest/{id}` — remove one `rest_api` connected app
@@ -492,7 +499,10 @@ async fn rest_records(state: &AppState) -> Result<Vec<ConnectedApp>, ServerError
 }
 
 /// The combined listing behind `GET /connected-apps` and the upsert response.
-async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, ServerError> {
+async fn connected_apps_info(
+    state: &AppState,
+    owner: &tidebreak_core::OwnerId,
+) -> Result<ConnectedAppsInfo, ServerError> {
     // `mcp_server` entries reuse the runtime's health projection, joined to
     // their record ids by namespace. A definition without a record id has
     // nothing bindings could name, so it is not listed here (the MCP page
@@ -511,7 +521,7 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
     // connected app twice, so grants and apps count one-to-one.
     let mut used_by: std::collections::BTreeMap<ConnectedAppId, usize> =
         std::collections::BTreeMap::new();
-    for grant in state.store.list_live_app_grants().await? {
+    for grant in state.store.list_live_app_grants_scoped(owner).await? {
         for binding in &grant.bindings {
             // Folder grant bindings name broker roots and gateway grant
             // bindings name apps the gateway holds; neither is a record on
@@ -532,7 +542,7 @@ async fn connected_apps_info(state: &AppState) -> Result<ConnectedAppsInfo, Serv
         .iter()
         .any(|server| server.definition.gateway_endpoint.is_some())
     {
-        if let Ok(gateway_apps) = state.gateway.apps().await {
+        if let Ok(gateway_apps) = state.gateway.apps(owner).await {
             for app in gateway_apps.apps.into_iter().filter(|app| app.enabled) {
                 for slug in &app.mcp_endpoint_slugs {
                     gateway_app_names

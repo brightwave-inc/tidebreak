@@ -130,6 +130,8 @@ async fn titling_app_with_answers(
     tokio::spawn(async move {
         let _ = axum::serve(listener, endpoint).await;
     });
+    let provider_base_url = format!("http://{address}/v1");
+    providers::allow_test_loopback_provider_base_url(&provider_base_url);
 
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -146,7 +148,7 @@ async fn titling_app_with_answers(
         providers::ProviderKind::Openai,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: Some(format!("http://{address}/v1")),
+            base_url: Some(provider_base_url),
             models: Vec::new(),
         },
     )

@@ -109,11 +109,13 @@ pub async fn publish_app_bundle(
     .map_err(|error| AgentError::Store(format!("could not publish app bundle: {error}")))
 }
 
-/// One profile-owned app and its current revision.
+/// One principal-owned app and its current revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppRecord {
     /// Durable opaque identity, stable across every revision.
     pub id: AppId,
+    /// Principal that owns the app. Stamped once at creation and immutable.
+    pub owner: crate::OwnerId,
     /// Display name, following the current revision's manifest. Not identity.
     pub name: String,
     /// Revision currently presented as the app's content.
