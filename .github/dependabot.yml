@@ -73,6 +73,16 @@ updates:
       prefix: ci
       include: scope
 
+  - package-ecosystem: npm
+    directory: "/.github/vercel-cli"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    versioning-strategy: increase
+    commit-message:
+      prefix: ci
+      include: scope
+
   # GitHub Actions used by our workflows.
   - package-ecosystem: github-actions
     directory: "/"

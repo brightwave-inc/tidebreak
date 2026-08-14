@@ -44,7 +44,6 @@
     "postcss": "8.5.26",
     "serve": "14.2.6",
     "tailwindcss": "4.3.3",
-    "typescript": "6.0.3",
-    "vercel": "59.0.0"
+    "typescript": "6.0.3"
   }
 }
