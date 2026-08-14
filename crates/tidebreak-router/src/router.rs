@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::{stream::BoxStream, StreamExt};
 
 use tidebreak_core::error::{AgentError, Result};
 use tidebreak_core::provider::{ChatRequest, ModelProvider, ProviderEvent, ProviderId};
@@ -48,7 +48,7 @@ pub trait BearerTokenSource: Send + Sync {
     }
 
     /// Validate a host-only model selector against live route authority and
-    /// lease its provider wire id through request setup.
+    /// lease its provider wire id through the complete provider stream.
     async fn lease_model_route(&self, _route_model: &str) -> Result<Option<ModelRouteLease>> {
         Ok(None)
     }
@@ -385,9 +385,21 @@ impl ModelProvider for Router {
         // The route hint is host policy, not provider wire data. Adapters keep
         // it only to gate provider-native reasoning/tool replay; their request
         // builders enumerate wire fields explicitly and never serialize it.
-        let stream = adapter.stream(req).await;
-        drop(route_lease);
-        stream
+        let stream = adapter.stream(req).await?;
+        let Some(route_lease) = route_lease else {
+            return Ok(stream);
+        };
+        Ok(Box::pin(async_stream::stream! {
+            // An adapter may issue later HTTP legs while this stream is
+            // consumed (Anthropic `pause_turn` continuations). Keep the live
+            // route claim through the complete provider stream so catalog
+            // replacement cannot retarget any leg of one execution.
+            let _route_lease = route_lease;
+            let mut stream = stream;
+            while let Some(event) = stream.next().await {
+                yield event;
+            }
+        }))
     }
 }
 
@@ -573,11 +585,11 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt as _;
     #[cfg(feature = "xai")]
     use serde_json::json;
     use tidebreak_core::provider::{
         ChatMessage, ContentBlock, MessageReasoning, ProviderToolReplay, ReasoningOrigin,
+        VendorWebSearch,
     };
     use tidebreak_core::{ImageAttachments, Role};
 
@@ -757,6 +769,15 @@ mod tests {
     #[derive(Default)]
     struct LiveRouteSource {
         routes: std::sync::Mutex<HashMap<String, String>>,
+        active_leases: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct ActiveLease(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for ActiveLease {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -768,7 +789,11 @@ mod tests {
                 .unwrap()
                 .get(route_model)
                 .cloned()
-                .map(|wire| ModelRouteLease::new(wire, ())))
+                .map(|wire| {
+                    self.active_leases
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ModelRouteLease::new(wire, ActiveLease(self.active_leases.clone()))
+                }))
         }
 
         async fn bearer_token(&self) -> Result<String> {
@@ -1356,5 +1381,80 @@ mod tests {
         let body = rx.await.unwrap();
         assert_eq!(body["model"], reused_wire);
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn frozen_gateway_lease_covers_anthropic_pause_turn_continuations() {
+        use axum::body::Body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        async fn respond(
+            State(requests): State<Arc<std::sync::atomic::AtomicUsize>>,
+        ) -> impl IntoResponse {
+            let leg = requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let reason = if leg == 1 { "pause_turn" } else { "end_turn" };
+            (
+                [("content-type", "text/event-stream")],
+                Body::from(format!(
+                    "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{reason}\"}}}}\n\n"
+                )),
+            )
+        }
+
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .fallback(post(respond))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let frozen = "__tidebreak_gateway_v1.deployment.installation.route";
+        let wire = "claude-opus-5";
+        let authority = Arc::new(LiveRouteSource::default());
+        authority
+            .routes
+            .lock()
+            .unwrap()
+            .insert(frozen.into(), wire.into());
+        let mut route = route(
+            RouteKind::ModelGateway,
+            "",
+            &[frozen],
+            Some(&format!("http://{address}/compat/anthropic")),
+        );
+        route.token_source = Some(authority.clone());
+        route.model_rewrites.insert(frozen.into(), wire.into());
+        let router = Router::build(vec![route]);
+
+        let stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen.into(),
+                vendor_web_search: Some(VendorWebSearch { max_uses: 1 }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            authority
+                .active_leases
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the route lease must survive initial HTTP request setup"
+        );
+
+        let events = stream.collect::<Vec<_>>().await;
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(matches!(events.last(), Some(ProviderEvent::Stop { .. })));
+        assert_eq!(
+            authority
+                .active_leases
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the route lease is released only after every provider HTTP leg finishes"
+        );
     }
 }

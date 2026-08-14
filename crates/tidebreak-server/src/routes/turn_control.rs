@@ -303,14 +303,15 @@ pub async fn post_message(
     // An ambiguous HTTP retry names only its turn and content, not the resolved
     // model snapshot. Reuse the first acceptance's immutable model so a settings
     // change between attempts cannot turn the same request into a conflict.
-    let model = if let Some(existing) = store.get_turn_run(body.turn_id).await? {
+    let existing_turn = store.get_turn_run(body.turn_id).await?;
+    let model = if let Some(existing) = existing_turn.as_ref() {
         if existing.chat_id != id {
             return Err(ServerError::conflict(format!(
                 "turn {} was already accepted by another chat",
                 body.turn_id
             )));
         }
-        existing.model
+        existing.model.clone()
     } else {
         resolve_executable_chat_model(&state, &chat).await?
     };
@@ -326,7 +327,7 @@ pub async fn post_message(
             ),
         ));
     }
-    if !images.is_empty() {
+    if !images.is_empty() && existing_turn.is_none() {
         require_image_capable_model(&state, &model).await?;
     }
     match store
