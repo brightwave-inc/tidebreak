@@ -2828,6 +2828,135 @@ async fn client_execution_api_reconciles_a_known_result_after_exact_lease_expiry
 }
 
 #[tokio::test]
+async fn client_execution_poll_terminalizes_an_expired_lease_and_resumes_the_turn() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let (turn_id, call) =
+        park_client_wait_for_route_test(&*store, chat.id, test_client_checkpoint_progress(1)).await;
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed_at = chrono::Utc::now();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                lease_token,
+                claimed_at,
+                claimed_at + chrono::Duration::milliseconds(2),
+            )
+            .await
+            .unwrap(),
+        tidebreak_core::ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let pending = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending/raw", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    assert!(json_body::<Vec<ToolCallRecord>>(pending).await.is_empty());
+
+    let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.status, TurnRunStatus::Resuming);
+    let stored_call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|stored| stored.id == call.id)
+        .unwrap();
+    assert_eq!(stored_call.status, ToolCallStatus::Failed);
+    assert_eq!(
+        stored_call.error_code.as_deref(),
+        Some("client_executor_lease_expired")
+    );
+    assert_eq!(
+        stored_call.error_detail.as_deref(),
+        Some("The client execution lease expired.")
+    );
+
+    let completion = store
+        .list_events(chat.id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            matches!(
+                &event.event,
+                AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
+            )
+        })
+        .expect("expired client call completion is journaled");
+    let projected = serde_json::to_value(crate::event_projection::RendererSequencedEvent::from(
+        &completion,
+    ))
+    .unwrap();
+    assert_eq!(
+        projected["event"]["failure"],
+        serde_json::json!({
+            "code": "executor_unavailable",
+            "reason": "lease_expired",
+        })
+    );
+    assert!(!projected
+        .to_string()
+        .contains("client_executor_lease_expired"));
+}
+
+#[tokio::test]
+async fn cancellation_closes_an_expired_claimed_client_wait_without_executor_ack() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let (turn_id, call) =
+        park_client_wait_for_route_test(&*store, chat.id, test_client_checkpoint_progress(1)).await;
+    let claimed_at = chrono::Utc::now();
+    store
+        .claim_client_tool_call(
+            call.id,
+            chat.id,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            claimed_at,
+            claimed_at + chrono::Duration::milliseconds(2),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Cancelled
+    );
+    let stored_call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|stored| stored.id == call.id)
+        .unwrap();
+    assert_eq!(stored_call.status, ToolCallStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

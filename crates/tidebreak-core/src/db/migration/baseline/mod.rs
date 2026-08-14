@@ -131,6 +131,10 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             content::assistant_citation_indexes(),
         ),
         entry(
+            content::chat_image_publication_table(),
+            content::chat_image_publication_indexes(),
+        ),
+        entry(
             content::message_attachment_table(),
             content::message_attachment_indexes(),
         ),

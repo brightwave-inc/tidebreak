@@ -34,16 +34,20 @@
 //! multi-thread runtime. The host runs on one; every test here uses the
 //! multi-thread flavor.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use tidebreak_core::storage::RecordAgentRunModelStepOutcome;
 use tidebreak_core::{
     AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunId, AgentRunStatus,
-    BeginSandboxProvisionOutcome, ChatMessage, ChatRequest, ProviderEvent, Result, Role,
-    SandboxAdmissionMode, SandboxProvisionState, Store, SubmitAgentRunResultOutcome,
+    BeginSandboxProvisionOutcome, CancelToken, ChatMessage, ChatRequest, ProviderEvent, Result,
+    Role, SandboxAdmissionMode, SandboxProvisionState, Store, SubmitAgentRunResultOutcome, Usage,
 };
 use tidebreak_sandbox_protocol::{
     events::EventPayload,
@@ -77,6 +81,14 @@ const CONTAINER_PROVENANCE_PROVIDER: &str = "local-container";
 /// testable instead of existing only in matching comments across crates.
 const SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Final accounting and terminal writes are exact, idempotent CAS operations,
+/// so transient store failures can be retried without creating another model
+/// step or changing the terminal payload. Keep retries responsive while still
+/// backing off under a longer outage; the run's absolute deadline is the hard
+/// bound enforced below.
+const TERMINAL_RETRY_INITIAL: Duration = Duration::from_millis(10);
+const TERMINAL_RETRY_MAX: Duration = Duration::from_millis(250);
+
 /// How many steering instructions the host holds for one attached run before it
 /// refuses new ones. Steering is applied at the sandbox's step boundary, so a
 /// small backlog covers a burst arriving mid-step; past it the caller is told to
@@ -101,6 +113,15 @@ pub struct SandboxContainerRunConfig {
     /// terminalizes a background run whose lease expires. Must be well under
     /// [`lease`](Self::lease).
     pub heartbeat: Duration,
+    /// How often a container drive re-reads its exact durable execution fence
+    /// while setup or attached work is in flight.
+    ///
+    /// Process-local cancellation is only an acceleration: another server can
+    /// commit the same immutable cancellation receipt without sharing this
+    /// process's token. This shorter cadence observes that durable transition
+    /// promptly during model resolution, provisioning, attachment, and reverse
+    /// provider work instead of waiting for the ordinary lease heartbeat.
+    pub durable_fence_interval: Duration,
     /// How long to wait for one TCP dial of the container's loopback address.
     pub dial_timeout: Duration,
     /// How many times the driver re-dials after an unplanned disconnect before
@@ -140,6 +161,7 @@ impl Default for SandboxContainerRunConfig {
         Self {
             lease: Duration::from_secs(60),
             heartbeat: Duration::from_secs(15),
+            durable_fence_interval: Duration::from_millis(250),
             dial_timeout: Duration::from_secs(10),
             reattach_attempts: 5,
             reattach_backoff: Duration::from_millis(250),
@@ -188,6 +210,16 @@ pub enum SandboxContainerRunOutcome {
 /// reconnect replays that record rather than spending a second time.
 struct HostModelProxy {
     resolver: Arc<dyn ProviderResolver>,
+    /// Shared with the exact claimed container drive. A durable cancellation
+    /// trips it before the route acknowledges, fencing a reverse request that
+    /// races the outer drive's connection teardown from starting provider
+    /// egress.
+    cancel: CancelToken,
+    /// Exact durable execution authority checked immediately before resolver
+    /// and provider egress. The outer drive also polls this fence, but the
+    /// responder revalidates at the actual credential boundary so a remote
+    /// cancellation observed between polls fails closed.
+    lease_guard: Option<HostModelLeaseGuard>,
     /// The run's model selection already resolved through the host's model
     /// registry (provider route, reasoning shape, token and effort bounds), so
     /// every proxied completion egresses under exactly the policy an in-process
@@ -201,6 +233,202 @@ struct HostModelProxy {
     spent: AtomicU32,
     /// The per-run cap the count is checked against.
     budget: u32,
+    /// Cumulative durable baseline for the next provider operation. Serialized
+    /// because the reverse request lane may deliver concurrent operations,
+    /// while accounting is one ordered sequence per run.
+    accounting: Option<HostModelAccounting>,
+    /// Provider steps that have emitted a billable/completion-bearing event but
+    /// have not yet reached the durable accounting CAS. Detached reverse-RPC
+    /// tasks can outlive their connection, so the container driver drains this
+    /// set after cancelling those tasks and before terminalizing the run.
+    observed: HostModelObservedAccounting,
+}
+
+struct HostModelAccounting {
+    store: Arc<dyn Store>,
+    run_id: AgentRunId,
+    lease_token: Uuid,
+    baseline: tokio::sync::Mutex<(i32, Usage)>,
+}
+
+struct HostModelLeaseGuard {
+    store: Arc<dyn Store>,
+    run_id: AgentRunId,
+    lease_token: Uuid,
+}
+
+impl HostModelLeaseGuard {
+    async fn authorize_egress(&self, cancel: &CancelToken) -> Result<bool> {
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        let live = self
+            .store
+            .validate_agent_run_execution(
+                self.run_id,
+                self.lease_token,
+                AgentRunExecutionLocation::Container,
+            )
+            .await?;
+        if !live {
+            cancel.cancel();
+            return Ok(false);
+        }
+        Ok(!cancel.is_cancelled())
+    }
+}
+
+#[derive(Default)]
+struct HostModelObservedAccounting {
+    next_id: AtomicU64,
+    pending: Mutex<BTreeMap<u64, Usage>>,
+}
+
+impl HostModelObservedAccounting {
+    fn mark(&self, id: &mut Option<u64>) -> u64 {
+        *id.get_or_insert_with(|| {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            self.pending
+                .lock()
+                .expect("host model observed-accounting lock")
+                .insert(id, Usage::default());
+            id
+        })
+    }
+
+    fn add_usage(&self, id: &mut Option<u64>, reported: Usage) -> Result<()> {
+        let id = self.mark(id);
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("host model observed-accounting lock");
+        let usage = pending
+            .get(&id)
+            .copied()
+            .unwrap_or_default()
+            .checked_add(reported)
+            .ok_or_else(|| AgentError::msg("host model usage exceeded the supported total"))?;
+        pending.insert(id, usage);
+        Ok(())
+    }
+
+    fn usage(&self, id: u64) -> Option<Usage> {
+        self.pending
+            .lock()
+            .expect("host model observed-accounting lock")
+            .get(&id)
+            .copied()
+    }
+
+    fn remove(&self, id: u64) {
+        self.pending
+            .lock()
+            .expect("host model observed-accounting lock")
+            .remove(&id);
+    }
+
+    fn first(&self) -> Option<u64> {
+        self.pending
+            .lock()
+            .expect("host model observed-accounting lock")
+            .keys()
+            .next()
+            .copied()
+    }
+}
+
+impl HostModelProxy {
+    fn cancelled_response() -> Response<ReverseResult> {
+        Response::Error(ErrorResponse::new(
+            ErrorCode::Cancelled,
+            "the container run was cancelled",
+            false,
+        ))
+    }
+
+    async fn durable_egress_authorized(&self) -> std::result::Result<bool, ()> {
+        let Some(guard) = &self.lease_guard else {
+            return Ok(!self.cancel.is_cancelled());
+        };
+        guard.authorize_egress(&self.cancel).await.map_err(|error| {
+            eprintln!(
+                "tidebreak: host model proxy could not revalidate its execution fence: {error}"
+            );
+        })
+    }
+
+    async fn account_model_step(&self, usage: Usage) -> Result<()> {
+        let Some(accounting) = &self.accounting else {
+            return Ok(());
+        };
+        let mut baseline = accounting.baseline.lock().await;
+        let (model_steps, cumulative_usage) = *baseline;
+        let next_steps = model_steps
+            .checked_add(1)
+            .ok_or_else(|| AgentError::msg("container model-step total overflowed"))?;
+        let next_usage = cumulative_usage
+            .checked_add(usage)
+            .ok_or_else(|| AgentError::msg("container model usage total overflowed"))?;
+        let outcome = self
+            .accounting_store(accounting)
+            .record_agent_run_model_step(
+                accounting.run_id,
+                accounting.lease_token,
+                model_steps,
+                cumulative_usage,
+                usage,
+            )
+            .await;
+        match outcome {
+            Ok(RecordAgentRunModelStepOutcome::Recorded(run))
+            | Ok(RecordAgentRunModelStepOutcome::Existing(run)) => {
+                *baseline = (run.model_steps, run.usage);
+                Ok(())
+            }
+            Ok(RecordAgentRunModelStepOutcome::IdentityConflict(run)) => Err(AgentError::msg(
+                format!(
+                    "container model-step accounting conflicted: expected step {next_steps}, found {}",
+                    run.model_steps
+                ),
+            )),
+            Ok(RecordAgentRunModelStepOutcome::LeaseLost) => {
+                Err(AgentError::msg("container agent-run lease was lost"))
+            }
+            Err(error) => {
+                let recovered = accounting
+                    .store
+                    .get_agent_run(accounting.run_id)
+                    .await?
+                    .is_some_and(|run| run.model_steps == next_steps && run.usage == next_usage);
+                if recovered {
+                    *baseline = (next_steps, next_usage);
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn accounting_store<'a>(&self, accounting: &'a HostModelAccounting) -> &'a dyn Store {
+        &*accounting.store
+    }
+
+    async fn account_observation(&self, id: u64) -> Result<()> {
+        let Some(usage) = self.observed.usage(id) else {
+            return Ok(());
+        };
+        self.account_model_step(usage).await?;
+        self.observed.remove(id);
+        Ok(())
+    }
+
+    async fn flush_observed_accounting(&self) -> Result<()> {
+        while let Some(id) = self.observed.first() {
+            self.account_observation(id).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -216,6 +444,20 @@ impl CapabilityResponder for HostModelProxy {
                 false,
             ));
         };
+        if self.cancel.is_cancelled() {
+            return Self::cancelled_response();
+        }
+        match self.durable_egress_authorized().await {
+            Ok(true) => {}
+            Ok(false) => return Self::cancelled_response(),
+            Err(()) => {
+                return Response::Error(ErrorResponse::new(
+                    ErrorCode::Internal,
+                    "host model execution authority could not be verified",
+                    true,
+                ));
+            }
+        }
         // Spend before resolving: a call that fails retryably still consumed a
         // provider attempt, and counting refused calls keeps a sandbox that
         // ignores the refusal from probing forever at zero cost accounting.
@@ -226,7 +468,22 @@ impl CapabilityResponder for HostModelProxy {
                 false,
             ));
         }
-        let provider = self.resolver.resolve().await;
+        let provider = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Self::cancelled_response(),
+            provider = self.resolver.resolve() => provider,
+        };
+        match self.durable_egress_authorized().await {
+            Ok(true) => {}
+            Ok(false) => return Self::cancelled_response(),
+            Err(()) => {
+                return Response::Error(ErrorResponse::new(
+                    ErrorCode::Internal,
+                    "host model execution authority could not be verified",
+                    true,
+                ));
+            }
+        }
         // The sandbox names no model, provider, or endpoint: it supplies only a
         // prompt, and the host's policy-resolved config decides where it goes.
         let request = ChatRequest {
@@ -243,7 +500,12 @@ impl CapabilityResponder for HostModelProxy {
             prompt_cache: tidebreak_core::PromptCacheMode::OneShot,
             ..Default::default()
         };
-        let mut stream = match provider.stream(request).await {
+        let stream = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Self::cancelled_response(),
+            stream = provider.stream(request) => stream,
+        };
+        let mut stream = match stream {
             Ok(stream) => stream,
             Err(error) => {
                 // A transport-safe, retryable refusal: re-issuing the same
@@ -257,10 +519,38 @@ impl CapabilityResponder for HostModelProxy {
             }
         };
         let mut completion = String::new();
+        let mut observation = None;
         while let Some(event) = stream.next().await {
             match event {
-                ProviderEvent::TextDelta { text } => completion.push_str(&text),
+                ProviderEvent::TextDelta { text } => {
+                    self.observed.mark(&mut observation);
+                    completion.push_str(&text);
+                }
+                ProviderEvent::Usage(reported) => {
+                    if self.observed.add_usage(&mut observation, reported).is_err() {
+                        if let Some(id) = observation {
+                            let _ = self.account_observation(id).await;
+                        }
+                        return Response::Error(ErrorResponse::new(
+                            ErrorCode::Internal,
+                            "host model usage exceeded the supported total",
+                            false,
+                        ));
+                    }
+                }
+                ProviderEvent::Stop { .. } | ProviderEvent::Refusal { .. } => {
+                    self.observed.mark(&mut observation);
+                }
                 ProviderEvent::Failed { error } => {
+                    if let Some(id) = observation {
+                        if self.account_observation(id).await.is_err() {
+                            return Response::Error(ErrorResponse::new(
+                                ErrorCode::Internal,
+                                "host model usage could not be recorded",
+                                true,
+                            ));
+                        }
+                    }
                     eprintln!(
                         "tidebreak: host model proxy inference failed: {}",
                         error.message
@@ -271,10 +561,35 @@ impl CapabilityResponder for HostModelProxy {
                         true,
                     ));
                 }
-                // Reasoning, usage, tool-call, and stop events do not contribute
-                // to the completion text the sandbox loop reads back.
+                // These do not contribute to the completion text the sandbox
+                // loop reads back, but they prove the provider started a model
+                // step and therefore make cancellation accounting mandatory.
+                ProviderEvent::ReasoningDelta { .. }
+                | ProviderEvent::ReasoningBlock { .. }
+                | ProviderEvent::ToolCallStarted { .. }
+                | ProviderEvent::ToolCallArgsDelta { .. }
+                | ProviderEvent::ProviderExecutedToolCall { .. } => {
+                    self.observed.mark(&mut observation);
+                }
                 _ => {}
             }
+        }
+        if observation.is_none() {
+            // A provider that reports neither usage nor a stop still completed
+            // the stream Tidebreak is about to return. Count the step with zero
+            // usage rather than inventing cache or token telemetry.
+            self.observed.mark(&mut observation);
+        }
+        if self
+            .account_observation(observation.expect("completed stream was observed"))
+            .await
+            .is_err()
+        {
+            return Response::Error(ErrorResponse::new(
+                ErrorCode::Internal,
+                "host model usage could not be recorded",
+                true,
+            ));
         }
         Response::Ok(ReverseResult::ModelInference(ModelInferenceResult {
             completion,
@@ -293,9 +608,9 @@ pub struct SandboxContainerRunner {
     /// `scoped_model_token_available` input. Defaults to the gateway position
     /// — unavailable, fail-closed — until the gateway can mint for real.
     token_issuer: Arc<dyn ScopedModelTokenIssuer>,
-    /// Where this driver publishes the steering sink of every connection it
-    /// holds, so an API caller can reach a live run. A driver assembled without
-    /// one (a test that never steers) publishes into its own empty guard.
+    /// Where this driver registers each exact claimed drive for cancellation
+    /// and publishes the steering sink of every connection it holds. A driver
+    /// assembled without the server's shared guard uses its own local guard.
     steering: Arc<SandboxSteerGuard>,
 }
 
@@ -319,8 +634,8 @@ impl SandboxContainerRunner {
         }
     }
 
-    /// Publish this driver's live-connection steering sinks into `steering`, the
-    /// same guard the server's steer route resolves a run against.
+    /// Publish this driver's exact-drive cancellation handle and live-connection
+    /// steering sinks into `steering`, the same guard the server routes use.
     #[must_use]
     pub(crate) fn with_steering(mut self, steering: Arc<SandboxSteerGuard>) -> Self {
         self.steering = steering;
@@ -388,12 +703,270 @@ impl SandboxContainerRunner {
         Ok(Some(self.drive_claimed(run, lease_token).await?))
     }
 
+    /// Renew the exact container lease and resolve a no-op update against the
+    /// authoritative execution fence.
+    ///
+    /// `heartbeat_agent_run` reports whether its conditional UPDATE changed a
+    /// row, not whether the existing exact lease is still live. A renewal can
+    /// therefore return `false` when the requested expiry is equal to the
+    /// current expiry (for example in the same SQLite clock millisecond) or is
+    /// already clamped to the run deadline. Only the validation read can
+    /// distinguish that harmless no-op from cancellation or lease loss.
+    async fn renew_or_validate_execution(
+        store: Arc<dyn Store>,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        if store
+            .heartbeat_agent_run(run_id, lease_token, lease_duration)
+            .await?
+        {
+            return Ok(true);
+        }
+        store
+            .validate_agent_run_execution(run_id, lease_token, AgentRunExecutionLocation::Container)
+            .await
+    }
+
+    /// Race one setup operation against the exact local signal, the absolute
+    /// deadline, and a short durable heartbeat cadence. The durable heartbeat
+    /// is both lease maintenance and the cross-process cancellation watcher:
+    /// `false` means cancellation or another terminal transition won under the
+    /// shared claim lock, so the local token is tripped before this returns.
+    async fn await_pre_attach<T, F>(
+        &self,
+        run: &AgentRun,
+        lease_token: Uuid,
+        cancel: &CancelToken,
+        future: F,
+    ) -> PreAttachEnd<T>
+    where
+        F: Future<Output = T>,
+    {
+        let future = future;
+        tokio::pin!(future);
+        let deadline = self.deadline_sleep(run);
+        tokio::pin!(deadline);
+        let fence_interval = self
+            .config
+            .durable_fence_interval
+            .max(Duration::from_millis(1));
+        let mut fence = tokio::time::interval(fence_interval);
+        fence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The drive already performed an initial exact validation. Consume the
+        // interval's immediate tick so a quick setup operation does not issue a
+        // redundant write, while any blocked operation is still observed on the
+        // short configured cadence.
+        fence.tick().await;
+
+        // At most one durable fence may exist at a time. It stays in this
+        // select loop instead of being awaited inline: a setup transaction may
+        // already hold the shared agent-run claim lock and need another poll to
+        // release it, while the heartbeat is waiting for that same lock. Keep a
+        // completed setup value until the in-flight fence settles so returning
+        // cannot leave an unobserved lease check racing the next setup boundary.
+        let mut completed = None;
+        let mut durable_fence: Option<Pin<Box<dyn Future<Output = Result<bool>> + Send>>> = None;
+
+        loop {
+            if durable_fence.is_none() {
+                if let Some(value) = completed.take() {
+                    return PreAttachEnd::Completed(value);
+                }
+            }
+
+            let setup_pending = completed.is_none();
+            let fence_idle = durable_fence.is_none();
+            let poll_durable_fence = async {
+                match durable_fence.as_mut() {
+                    Some(future) => future.as_mut().await,
+                    None => std::future::pending::<Result<bool>>().await,
+                }
+            };
+            let event = tokio::select! {
+                biased;
+                () = cancel.cancelled() => PreAttachPoll::Cancelled,
+                result = poll_durable_fence => PreAttachPoll::FenceCompleted(result),
+                () = &mut deadline => PreAttachPoll::DeadlineExceeded,
+                value = &mut future, if setup_pending => PreAttachPoll::SetupCompleted(value),
+                _ = fence.tick(), if fence_idle => PreAttachPoll::FenceTick,
+            };
+            match event {
+                PreAttachPoll::Cancelled => return PreAttachEnd::Cancelled,
+                PreAttachPoll::DeadlineExceeded => return PreAttachEnd::DeadlineExceeded,
+                PreAttachPoll::SetupCompleted(value) => completed = Some(value),
+                PreAttachPoll::FenceTick => {
+                    let lease_duration = match chrono_duration(self.config.lease) {
+                        Ok(duration) => duration,
+                        Err(error) => return PreAttachEnd::FenceFailed(error),
+                    };
+                    let store = Arc::clone(&self.store);
+                    let run_id = run.id;
+                    durable_fence = Some(Box::pin(async move {
+                        Self::renew_or_validate_execution(
+                            store,
+                            run_id,
+                            lease_token,
+                            lease_duration,
+                        )
+                        .await
+                    }));
+                }
+                PreAttachPoll::FenceCompleted(Ok(true)) => durable_fence = None,
+                PreAttachPoll::FenceCompleted(Ok(false)) => {
+                    cancel.cancel();
+                    return PreAttachEnd::Cancelled;
+                }
+                PreAttachPoll::FenceCompleted(Err(error)) => {
+                    return PreAttachEnd::FenceFailed(error);
+                }
+            }
+        }
+    }
+
+    /// A setup store error may be the losing side of an ambiguous or
+    /// concurrently committed cancellation. Re-read durable state before
+    /// returning it so this exact driver never abandons the only cancellation
+    /// finalizer merely because model resolution or provisioning persistence
+    /// failed at the same time.
+    async fn setup_error_or_cancellation(
+        &self,
+        run: &AgentRun,
+        lease_token: Uuid,
+        cancel: &CancelToken,
+        mut error: AgentError,
+    ) -> Result<SandboxContainerRunOutcome> {
+        let mut delay = TERMINAL_RETRY_INITIAL;
+        loop {
+            if cancel.is_cancelled() {
+                return self
+                    .finish_cancellation_with_retry(run.id, lease_token, run.deadline_at, delay)
+                    .await;
+            }
+            match self.terminal_retry_state(run.id, lease_token).await {
+                Ok(TerminalRetryState::OwnedCancelling) | Ok(TerminalRetryState::Cancelled) => {
+                    cancel.cancel();
+                    return self
+                        .finish_cancellation_with_retry(run.id, lease_token, run.deadline_at, delay)
+                        .await;
+                }
+                Ok(TerminalRetryState::OwnedRunning(_)) => return Err(error),
+                Ok(
+                    TerminalRetryState::Completed
+                    | TerminalRetryState::Failed
+                    | TerminalRetryState::Lost,
+                ) => return Ok(SandboxContainerRunOutcome::LeaseLost(run.id)),
+                Err(state_error) => error = state_error,
+            }
+            if !Self::wait_for_terminal_retry(run.deadline_at, &mut delay).await {
+                return Err(error);
+            }
+        }
+    }
+
+    /// Terminalize a deterministic setup refusal while preserving a racing
+    /// cancellation's immutable outcome and retrying ambiguous store errors.
+    async fn fail_setup_with_retry(
+        &self,
+        run: &AgentRun,
+        lease_token: Uuid,
+        cancel: &CancelToken,
+        code: &str,
+        detail: &str,
+    ) -> Result<SandboxContainerRunOutcome> {
+        let mut delay = TERMINAL_RETRY_INITIAL;
+        loop {
+            if cancel.is_cancelled() {
+                return self
+                    .finish_cancellation_with_retry(run.id, lease_token, run.deadline_at, delay)
+                    .await;
+            }
+            match self.fail(run.id, lease_token, code, detail).await {
+                Ok(SandboxContainerRunOutcome::LeaseLost(_)) => {
+                    return self
+                        .finish_cancellation_with_retry(run.id, lease_token, run.deadline_at, delay)
+                        .await;
+                }
+                Ok(outcome) => return Ok(outcome),
+                Err(mut error) => {
+                    match self.terminal_retry_state(run.id, lease_token).await {
+                        Ok(TerminalRetryState::OwnedCancelling)
+                        | Ok(TerminalRetryState::Cancelled) => {
+                            cancel.cancel();
+                            return self
+                                .finish_cancellation_with_retry(
+                                    run.id,
+                                    lease_token,
+                                    run.deadline_at,
+                                    delay,
+                                )
+                                .await;
+                        }
+                        Ok(TerminalRetryState::Failed) => {
+                            return Ok(SandboxContainerRunOutcome::Failed(run.id));
+                        }
+                        Ok(TerminalRetryState::Completed | TerminalRetryState::Lost) => {
+                            return Ok(SandboxContainerRunOutcome::LeaseLost(run.id));
+                        }
+                        Ok(TerminalRetryState::OwnedRunning(lease_expires_at)) => {
+                            if let Err(heartbeat_error) = self
+                                .renew_terminal_lease_if_needed(
+                                    run.id,
+                                    lease_token,
+                                    lease_expires_at,
+                                )
+                                .await
+                            {
+                                error = heartbeat_error;
+                            }
+                        }
+                        Err(state_error) => error = state_error,
+                    }
+                    if !Self::wait_for_terminal_retry(run.deadline_at, &mut delay).await {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
     async fn drive_claimed(
         &self,
         run: AgentRun,
         lease_token: Uuid,
     ) -> Result<SandboxContainerRunOutcome> {
         let run_id = run.id;
+        let Some(active_drive) = self.steering.register_container_drive(run_id, lease_token) else {
+            return Ok(SandboxContainerRunOutcome::LeaseLost(run_id));
+        };
+        let cancel = active_drive.cancel_token();
+        // Close cancel-before-register exactly as the in-process worker does:
+        // once the local handle exists, revalidate the durable lease before any
+        // policy resolution, provisioning, or provider work can begin.
+        match self
+            .store
+            .validate_agent_run_execution(run_id, lease_token, AgentRunExecutionLocation::Container)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                cancel.cancel();
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                    .await;
+            }
+        }
         // The run's durable identity is the protocol run identity: the operation
         // log, event cursor, and grant provenance are all scoped to it and
         // outlive any single connection to the container.
@@ -401,9 +974,10 @@ impl SandboxContainerRunner {
             Ok(id) => id,
             Err(error) => {
                 return self
-                    .fail(
-                        run_id,
+                    .fail_setup_with_retry(
+                        &run,
                         lease_token,
+                        &cancel,
                         "invalid_run_identity",
                         &error.to_string(),
                     )
@@ -414,9 +988,10 @@ impl SandboxContainerRunner {
             Some(task) => task,
             None => {
                 return self
-                    .fail(
-                        run_id,
+                    .fail_setup_with_retry(
+                        &run,
                         lease_token,
+                        &cancel,
                         "missing_task",
                         "container agent run has no delegated task",
                     )
@@ -429,19 +1004,58 @@ impl SandboxContainerRunner {
         // egress under the same policy rather than a looser one. The chat's
         // network policy is compiled here too — the sandbox's egress proxy
         // enforces exactly the authority the owning conversation granted.
-        let (config, network_policy) = match self.resolve_model_config(&run).await {
-            Ok(resolved) => resolved,
-            Err(error) => {
+        let (config, network_policy) = match self
+            .await_pre_attach(&run, lease_token, &cancel, self.resolve_model_config(&run))
+            .await
+        {
+            PreAttachEnd::Completed(Ok(resolved)) => resolved,
+            PreAttachEnd::Completed(Err(error)) => {
                 return self
-                    .fail(
-                        run_id,
+                    .fail_setup_with_retry(
+                        &run,
                         lease_token,
+                        &cancel,
                         "model_policy_refused",
                         &error.to_string(),
                     )
                     .await;
             }
+            PreAttachEnd::Cancelled => {
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            PreAttachEnd::DeadlineExceeded => {
+                return self
+                    .commit_drive_end_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        &DriveEnd::DeadlineExceeded,
+                    )
+                    .await;
+            }
+            PreAttachEnd::FenceFailed(error) => {
+                return self
+                    .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                    .await;
+            }
         };
+        if cancel.is_cancelled() {
+            return self
+                .finish_cancellation_with_retry(
+                    run_id,
+                    lease_token,
+                    run.deadline_at,
+                    TERMINAL_RETRY_INITIAL,
+                )
+                .await;
+        }
 
         // The detached-admission gate (issue #824), evaluated before any
         // durable state is written and recorded on the provisioning intent:
@@ -462,39 +1076,205 @@ impl SandboxContainerRunner {
         let run_uuid = *run_id.as_uuid();
         let tag = SandboxTag::new();
         let window_expires_at = chrono::Utc::now() + chrono_duration(self.config.provision_window)?;
-        let handle = match self
-            .store
-            .begin_sandbox_provision(run_uuid, &tag.to_string(), window_expires_at, admission)
-            .await?
+        let tag_text = tag.to_string();
+        let begin = self.store.begin_sandbox_provision_for_agent_run(
+            run_id,
+            lease_token,
+            &tag_text,
+            window_expires_at,
+            admission,
+        );
+        let begin = match self
+            .await_pre_attach(&run, lease_token, &cancel, begin)
+            .await
         {
+            PreAttachEnd::Completed(Ok(Some(outcome))) => outcome,
+            PreAttachEnd::Completed(Ok(None)) | PreAttachEnd::Cancelled => {
+                cancel.cancel();
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            PreAttachEnd::Completed(Err(error)) | PreAttachEnd::FenceFailed(error) => {
+                return self
+                    .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                    .await;
+            }
+            PreAttachEnd::DeadlineExceeded => {
+                return self
+                    .commit_drive_end_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        &DriveEnd::DeadlineExceeded,
+                    )
+                    .await;
+            }
+        };
+        let handle = match begin {
             BeginSandboxProvisionOutcome::Started => {
+                // The intent transaction is the durable serialization point,
+                // then this second exact read closes cancellation committed in
+                // the return-to-caller gap before the external create is first
+                // polled. A cancellation after this read may still race the
+                // external call; the tag and post-create fence make that side
+                // effect teardown-only and forbid attachment/provider egress.
+                match self
+                    .await_pre_attach(
+                        &run,
+                        lease_token,
+                        &cancel,
+                        self.store.validate_agent_run_execution(
+                            run_id,
+                            lease_token,
+                            AgentRunExecutionLocation::Container,
+                        ),
+                    )
+                    .await
+                {
+                    PreAttachEnd::Completed(Ok(true)) => {}
+                    PreAttachEnd::Completed(Ok(false)) | PreAttachEnd::Cancelled => {
+                        cancel.cancel();
+                        return self
+                            .finish_cancellation_with_retry(
+                                run_id,
+                                lease_token,
+                                run.deadline_at,
+                                TERMINAL_RETRY_INITIAL,
+                            )
+                            .await;
+                    }
+                    PreAttachEnd::Completed(Err(error)) | PreAttachEnd::FenceFailed(error) => {
+                        let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
+                        return self
+                            .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                            .await;
+                    }
+                    PreAttachEnd::DeadlineExceeded => {
+                        return self
+                            .commit_drive_end_with_retry(
+                                run_id,
+                                lease_token,
+                                run.deadline_at,
+                                &DriveEnd::DeadlineExceeded,
+                            )
+                            .await;
+                    }
+                }
+                let provision = self.backend.provision(ProvisionRequest {
+                    run_id: protocol_run_id,
+                    tag,
+                    // A local container has no external lifetime cap, which
+                    // is why the run is attached-only.
+                    lifetime_cap_secs: None,
+                    network_policy,
+                });
                 let provisioned = self
-                    .backend
-                    .provision(ProvisionRequest {
-                        run_id: protocol_run_id,
-                        tag,
-                        // A local container has no external lifetime cap, which
-                        // is why the run is attached-only.
-                        lifetime_cap_secs: None,
-                        network_policy,
-                    })
+                    .await_pre_attach(&run, lease_token, &cancel, provision)
                     .await;
                 match provisioned {
-                    Ok(handle) => {
-                        if !self
+                    PreAttachEnd::Cancelled => {
+                        // The cancellation transition moves this handle-less
+                        // intent to teardown. If dropping `provision` cannot
+                        // stop an already-issued backend create, the tag is no
+                        // longer live and the orphan sweep reclaims the
+                        // ambiguous side effect without ever provisioning a
+                        // second sandbox for this run.
+                        return self
+                            .finish_cancellation_with_retry(
+                                run_id,
+                                lease_token,
+                                run.deadline_at,
+                                TERMINAL_RETRY_INITIAL,
+                            )
+                            .await;
+                    }
+                    PreAttachEnd::DeadlineExceeded => {
+                        // Use the same exact terminal reconciliation as an
+                        // attached drive: a durable cancellation that raced the
+                        // deadline keeps priority, while either terminal write
+                        // turns the open intent into a teardown obligation.
+                        return self
+                            .commit_drive_end_with_retry(
+                                run_id,
+                                lease_token,
+                                run.deadline_at,
+                                &DriveEnd::DeadlineExceeded,
+                            )
+                            .await;
+                    }
+                    PreAttachEnd::FenceFailed(error) => {
+                        // The backend future was dropped without proving
+                        // whether its tagged side effect escaped cancellation.
+                        // Disown the intent before surfacing the store failure;
+                        // recovery can now reclaim only by the durable tag and
+                        // no later driver can attach this create.
+                        let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
+                        return self
+                            .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                            .await;
+                    }
+                    PreAttachEnd::Completed(Ok(handle)) => {
+                        // The backend call is the unavoidable external
+                        // linearization gap. If cancellation committed after
+                        // the exact intent fence, the tagged create may still
+                        // have happened; from here it is teardown-only until a
+                        // fresh durable heartbeat proves this exact claim is
+                        // still running.
+                        let commit = self
                             .store
-                            .commit_sandbox_provision_handle(run_uuid, &handle.reference)
-                            .await?
+                            .commit_sandbox_provision_handle(run_uuid, &handle.reference);
+                        let committed = match self
+                            .await_pre_attach(&run, lease_token, &cancel, commit)
+                            .await
                         {
+                            PreAttachEnd::Completed(Ok(committed)) => committed,
+                            PreAttachEnd::Completed(Err(error))
+                            | PreAttachEnd::FenceFailed(error) => {
+                                self.teardown(run_uuid, &handle).await;
+                                return self
+                                    .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                                    .await;
+                            }
+                            PreAttachEnd::Cancelled => {
+                                self.teardown(run_uuid, &handle).await;
+                                return self
+                                    .finish_cancellation_with_retry(
+                                        run_id,
+                                        lease_token,
+                                        run.deadline_at,
+                                        TERMINAL_RETRY_INITIAL,
+                                    )
+                                    .await;
+                            }
+                            PreAttachEnd::DeadlineExceeded => {
+                                self.teardown(run_uuid, &handle).await;
+                                return self
+                                    .commit_drive_end_with_retry(
+                                        run_id,
+                                        lease_token,
+                                        run.deadline_at,
+                                        &DriveEnd::DeadlineExceeded,
+                                    )
+                                    .await;
+                            }
+                        };
+                        if !committed {
                             // The window lapsed mid-create and the sweep
                             // disowned the intent: this driver holds a
                             // container the durable state has already written
                             // off. Destroy it and fail on the intent.
                             self.teardown(run_uuid, &handle).await;
                             return self
-                                .fail(
-                                    run_id,
+                                .fail_setup_with_retry(
+                                    &run,
                                     lease_token,
+                                    &cancel,
                                     "provision_window_lapsed",
                                     "the provisioning window lapsed before the handle committed",
                                 )
@@ -502,12 +1282,18 @@ impl SandboxContainerRunner {
                         }
                         handle
                     }
-                    Err(error) => {
+                    PreAttachEnd::Completed(Err(error)) => {
                         // Whatever the create half-made carries this run's tag;
                         // the teardown obligation hands it to the tag sweep.
                         let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
                         return self
-                            .fail(run_id, lease_token, "provision_failed", &error.to_string())
+                            .fail_setup_with_retry(
+                                &run,
+                                lease_token,
+                                &cancel,
+                                "provision_failed",
+                                &error.to_string(),
+                            )
                             .await;
                     }
                 }
@@ -537,9 +1323,10 @@ impl SandboxContainerRunner {
                     _ => {
                         let _ = self.store.enqueue_sandbox_teardown(run_uuid).await;
                         return self
-                            .fail(
-                                run_id,
+                            .fail_setup_with_retry(
+                                &run,
                                 lease_token,
+                                &cancel,
                                 "provision_reclaimed",
                                 "the run's provisioning record was not reconcilable",
                             )
@@ -548,6 +1335,56 @@ impl SandboxContainerRunner {
                 }
             }
         };
+
+        // A remotely committed cancellation may have followed the exact
+        // pre-create fence while the external backend call was in flight. The
+        // create side effect is unavoidable in that ordering, but it is never
+        // attached or allowed to egress: revalidate the exact durable claim
+        // after the handle is persisted and tear it down on every losing path.
+        match self
+            .await_pre_attach(
+                &run,
+                lease_token,
+                &cancel,
+                self.store.validate_agent_run_execution(
+                    run_id,
+                    lease_token,
+                    AgentRunExecutionLocation::Container,
+                ),
+            )
+            .await
+        {
+            PreAttachEnd::Completed(Ok(true)) => {}
+            PreAttachEnd::Completed(Ok(false)) | PreAttachEnd::Cancelled => {
+                cancel.cancel();
+                self.teardown(run_uuid, &handle).await;
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            PreAttachEnd::Completed(Err(error)) | PreAttachEnd::FenceFailed(error) => {
+                self.teardown(run_uuid, &handle).await;
+                return self
+                    .setup_error_or_cancellation(&run, lease_token, &cancel, error)
+                    .await;
+            }
+            PreAttachEnd::DeadlineExceeded => {
+                self.teardown(run_uuid, &handle).await;
+                return self
+                    .commit_drive_end_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        &DriveEnd::DeadlineExceeded,
+                    )
+                    .await;
+            }
+        }
 
         // From here on a container exists, so every terminal path must drive its
         // teardown obligation.
@@ -560,6 +1397,7 @@ impl SandboxContainerRunner {
                 task,
                 &handle,
                 admission,
+                &cancel,
             )
             .await;
         self.teardown(run_uuid, &handle).await;
@@ -622,6 +1460,7 @@ impl SandboxContainerRunner {
         task: String,
         handle: &SandboxHandle,
         admission: SandboxAdmissionMode,
+        cancel: &CancelToken,
     ) -> Result<SandboxContainerRunOutcome> {
         let run_id = run.id;
         // One capability host per run, shared across every connection: it holds
@@ -632,14 +1471,36 @@ impl SandboxContainerRunner {
             run_id: protocol_run_id,
             provider: CONTAINER_PROVENANCE_PROVIDER.to_owned(),
         };
+        // The operation log claims every fresh reverse inference identity
+        // before this responder can reach the provider. Its cardinality is
+        // therefore the durable spend-reservation count, including retryable
+        // zero-observation failures and ambiguous calls left by a dead host.
+        // Seed the process-local fast path from that crash-safe count rather
+        // than completed `model_steps`, which intentionally excludes failed
+        // attempts.
+        let durable_spent = self.store.operation_log_len(run_id.0).await?;
+        let model_proxy = Arc::new(HostModelProxy {
+            resolver: Arc::clone(&self.resolver),
+            cancel: cancel.clone(),
+            lease_guard: Some(HostModelLeaseGuard {
+                store: Arc::clone(&self.store),
+                run_id,
+                lease_token,
+            }),
+            config,
+            spent: AtomicU32::new(u32::try_from(durable_spent).unwrap_or(u32::MAX)),
+            budget: self.config.max_inference_operations,
+            accounting: Some(HostModelAccounting {
+                store: Arc::clone(&self.store),
+                run_id,
+                lease_token,
+                baseline: tokio::sync::Mutex::new((run.model_steps, run.usage)),
+            }),
+            observed: HostModelObservedAccounting::default(),
+        });
         let host = CapabilityHost::new(
             GrantSet::new(provenance, [Capability::ModelInference]),
-            Arc::new(HostModelProxy {
-                resolver: Arc::clone(&self.resolver),
-                config,
-                spent: AtomicU32::new(0),
-                budget: self.config.max_inference_operations,
-            }),
+            model_proxy.clone(),
             Arc::new(DurableOperationStore::new(
                 Arc::clone(&self.store),
                 protocol_run_id,
@@ -662,21 +1523,93 @@ impl SandboxContainerRunner {
         // detached init without one; the run is never silently downgraded
         // against its durable admission record.
         let scoped_token = match self
-            .scoped_token_for(*run_id.as_uuid(), admission, deadline_unix_secs)
+            .await_pre_attach(
+                run,
+                lease_token,
+                cancel,
+                self.scoped_token_for(*run_id.as_uuid(), admission, deadline_unix_secs),
+            )
             .await
         {
-            Ok(token) => token,
-            Err(error) => {
+            PreAttachEnd::Completed(Ok(token)) => token,
+            PreAttachEnd::Completed(Err(error)) => {
                 return self
-                    .fail(
-                        run_id,
+                    .fail_setup_with_retry(
+                        run,
                         lease_token,
+                        cancel,
                         "scoped_token_unavailable",
                         &error.to_string(),
                     )
                     .await;
             }
+            PreAttachEnd::Cancelled => {
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            PreAttachEnd::DeadlineExceeded => {
+                return self
+                    .commit_drive_end_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        &DriveEnd::DeadlineExceeded,
+                    )
+                    .await;
+            }
+            PreAttachEnd::FenceFailed(error) => {
+                return self
+                    .setup_error_or_cancellation(run, lease_token, cancel, error)
+                    .await;
+            }
         };
+        match self
+            .await_pre_attach(
+                run,
+                lease_token,
+                cancel,
+                self.store.validate_agent_run_execution(
+                    run_id,
+                    lease_token,
+                    AgentRunExecutionLocation::Container,
+                ),
+            )
+            .await
+        {
+            PreAttachEnd::Completed(Ok(true)) => {}
+            PreAttachEnd::Completed(Ok(false)) | PreAttachEnd::Cancelled => {
+                cancel.cancel();
+                return self
+                    .finish_cancellation_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        TERMINAL_RETRY_INITIAL,
+                    )
+                    .await;
+            }
+            PreAttachEnd::Completed(Err(error)) | PreAttachEnd::FenceFailed(error) => {
+                return self
+                    .setup_error_or_cancellation(run, lease_token, cancel, error)
+                    .await;
+            }
+            PreAttachEnd::DeadlineExceeded => {
+                return self
+                    .commit_drive_end_with_retry(
+                        run_id,
+                        lease_token,
+                        run.deadline_at,
+                        &DriveEnd::DeadlineExceeded,
+                    )
+                    .await;
+            }
+        }
         let init = RunInit {
             run_id: protocol_run_id,
             provenance: RunProvenance {
@@ -710,54 +1643,249 @@ impl SandboxContainerRunner {
         // nothing accepts steering while the run is unattached, because the
         // guard entry exists only while a connection is live.
         let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel::<String>(STEER_BACKLOG);
-        let drive = self.drive_events(
-            run_id,
-            protocol_run_id,
-            handle,
-            &host,
-            &init,
-            lease_token,
-            &steer_tx,
-            &mut steer_rx,
-        );
-        tokio::pin!(drive);
-        let mut heartbeat = tokio::time::interval(self.config.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        heartbeat.tick().await;
-        let deadline = self.deadline_sleep(run);
-        tokio::pin!(deadline);
+        let end = {
+            // Keep the whole connection-owning drive in this scope. Whichever
+            // terminal signal wins drops the drive (and therefore its active
+            // `HostConnection`) before the capability host is closed and
+            // quiesced below. The reader task can still be racing its abort, so
+            // `CapabilityHost::close` remains the synchronized admission fence.
+            let drive = self.drive_events(
+                run_id,
+                protocol_run_id,
+                handle,
+                &host,
+                &init,
+                lease_token,
+                &steer_tx,
+                &mut steer_rx,
+            );
+            tokio::pin!(drive);
+            let heartbeat_interval = self
+                .config
+                .heartbeat
+                .min(self.config.durable_fence_interval)
+                .max(Duration::from_millis(1));
+            let mut heartbeat = tokio::time::interval(heartbeat_interval);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat.tick().await;
+            let deadline = self.deadline_sleep(run);
+            tokio::pin!(deadline);
 
-        let end = loop {
-            tokio::select! {
-                end = &mut drive => break end,
-                () = &mut deadline => break DriveEnd::DeadlineExceeded,
-                _ = heartbeat.tick() => {
-                    if !self
-                        .store
-                        .heartbeat_agent_run(
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break DriveEnd::LeaseLost,
+                    end = &mut drive => break end,
+                    () = &mut deadline => break DriveEnd::DeadlineExceeded,
+                    _ = heartbeat.tick() => {
+                        if !Self::renew_or_validate_execution(
+                            Arc::clone(&self.store),
                             run_id,
                             lease_token,
                             chrono_duration(self.config.lease)?,
                         )
                         .await?
-                    {
-                        // The lease is gone (cancelled, or reaped): stop driving
-                        // rather than keep a container working for a run this
-                        // host no longer owns. Teardown still runs.
-                        break DriveEnd::LeaseLost;
+                        {
+                            // The lease is gone (cancelled, or reaped): stop driving
+                            // rather than keep a container working for a run this
+                            // host no longer owns. Teardown still runs.
+                            break DriveEnd::LeaseLost;
+                        }
                     }
                 }
             }
         };
 
+        // Every terminal transition uses the same ordering. Closing admission
+        // and cancelling are one synchronized host operation: a racing reverse
+        // dispatch is either already in the in-flight set and cancelled, or it
+        // observes the closed state and never executes. Only after all responder
+        // futures have dropped do we persist their observed usage/model steps;
+        // the terminal CAS then snapshots those durable totals.
+        host.close();
+        host.wait_idle().await;
+        self.finish_after_quiescence(run, lease_token, &model_proxy, &end)
+            .await
+    }
+
+    /// Persist every provider step observed before quiescence and apply the
+    /// terminal transition selected by the drive. Both writes are exact CASes,
+    /// so retries recover an ambiguous commit rather than duplicating it.
+    ///
+    /// A durable cancellation can race any selected end variant. A fenced
+    /// result/failure therefore never means cancellation has been acknowledged:
+    /// after preserving any late result evidence, reconcile the exact owned
+    /// `cancelling` state and commit its immutable cancellation receipt.
+    async fn finish_after_quiescence(
+        &self,
+        run: &AgentRun,
+        lease_token: Uuid,
+        model_proxy: &HostModelProxy,
+        end: &DriveEnd,
+    ) -> Result<SandboxContainerRunOutcome> {
+        self.flush_observed_accounting_with_retry(
+            run.id,
+            lease_token,
+            run.deadline_at,
+            model_proxy,
+        )
+        .await?;
+        self.commit_drive_end_with_retry(run.id, lease_token, run.deadline_at, end)
+            .await
+    }
+
+    /// Retry the final observed-step drain while this lease still owns a live
+    /// running/cancelling run. `HostModelProxy` retains each observation until
+    /// its exact baseline-and-delta CAS succeeds, and that CAS recovers an
+    /// already-committed increment after an ambiguous response.
+    async fn flush_observed_accounting_with_retry(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+        model_proxy: &HostModelProxy,
+    ) -> Result<()> {
+        let mut delay = TERMINAL_RETRY_INITIAL;
+        loop {
+            let Err(mut error) = model_proxy.flush_observed_accounting().await else {
+                return Ok(());
+            };
+
+            match self.terminal_retry_state(run_id, lease_token).await {
+                Ok(TerminalRetryState::OwnedRunning(lease_expires_at)) => {
+                    if let Err(heartbeat_error) = self
+                        .renew_terminal_lease_if_needed(run_id, lease_token, lease_expires_at)
+                        .await
+                    {
+                        error = heartbeat_error;
+                    }
+                }
+                Ok(TerminalRetryState::OwnedCancelling) => {
+                    match self
+                        .renew_cancellation_finalization(run_id, lease_token)
+                        .await
+                    {
+                        Ok(true) => {}
+                        // The cancellation deadline or another terminal writer
+                        // won while state was being inspected. Its immutable
+                        // result is now authoritative, so no pending observation
+                        // can still be appended under this identity.
+                        Ok(false) => return Ok(()),
+                        Err(renewal_error) => error = renewal_error,
+                    }
+                }
+                // Another terminal writer or lease owner won. This driver can
+                // no longer add accounting; continue to the terminal CAS so an
+                // exact ambiguous result can recover and a late result can be
+                // retained as evidence.
+                Ok(
+                    TerminalRetryState::Completed
+                    | TerminalRetryState::Failed
+                    | TerminalRetryState::Cancelled
+                    | TerminalRetryState::Lost,
+                ) => return Ok(()),
+                Err(state_error) => error = state_error,
+            }
+
+            if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                return Err(error);
+            }
+        }
+    }
+
+    /// Apply the selected terminal transition with exact retry recovery. A
+    /// fenced transition always gets one cancellation reconciliation before it
+    /// is classified as lease loss, regardless of which `DriveEnd` won the
+    /// in-memory select.
+    async fn commit_drive_end_with_retry(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+        end: &DriveEnd,
+    ) -> Result<SandboxContainerRunOutcome> {
+        let mut delay = TERMINAL_RETRY_INITIAL;
+        loop {
+            match self.commit_drive_end(run_id, lease_token, end).await {
+                Ok(SandboxContainerRunOutcome::LeaseLost(_)) => {
+                    return self
+                        .finish_cancellation_with_retry(
+                            run_id,
+                            lease_token,
+                            deadline_at,
+                            TERMINAL_RETRY_INITIAL,
+                        )
+                        .await;
+                }
+                Ok(outcome) => return Ok(outcome),
+                Err(mut error) => {
+                    match self.terminal_retry_state(run_id, lease_token).await {
+                        Ok(TerminalRetryState::OwnedRunning(lease_expires_at)) => {
+                            if let Err(heartbeat_error) = self
+                                .renew_terminal_lease_if_needed(
+                                    run_id,
+                                    lease_token,
+                                    lease_expires_at,
+                                )
+                                .await
+                            {
+                                error = heartbeat_error;
+                            }
+                        }
+                        Ok(TerminalRetryState::OwnedCancelling)
+                        | Ok(TerminalRetryState::Cancelled) => {
+                            return self
+                                .finish_cancellation_with_retry(
+                                    run_id,
+                                    lease_token,
+                                    deadline_at,
+                                    delay,
+                                )
+                                .await;
+                        }
+                        // An error may have hidden a successful terminal CAS.
+                        // Retry the same exact identity so the durable method
+                        // can return its Existing receipt.
+                        Ok(TerminalRetryState::Completed) if matches!(end, DriveEnd::Result(_)) => {
+                        }
+                        Ok(TerminalRetryState::Failed)
+                            if matches!(
+                                end,
+                                DriveEnd::AgentFailed(_)
+                                    | DriveEnd::TransportFailed(_)
+                                    | DriveEnd::Unreachable
+                                    | DriveEnd::DeadlineExceeded
+                            ) => {}
+                        Ok(
+                            TerminalRetryState::Completed
+                            | TerminalRetryState::Failed
+                            | TerminalRetryState::Lost,
+                        ) => return Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+                        Err(state_error) => error = state_error,
+                    }
+
+                    if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn commit_drive_end(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        end: &DriveEnd,
+    ) -> Result<SandboxContainerRunOutcome> {
         match end {
-            DriveEnd::Result(text) => self.commit_result(run_id, lease_token, &text).await,
+            DriveEnd::Result(text) => self.commit_result(run_id, lease_token, text).await,
             DriveEnd::AgentFailed(detail) => {
-                self.fail(run_id, lease_token, "sandbox_agent_failed", &detail)
+                self.fail(run_id, lease_token, "sandbox_agent_failed", detail)
                     .await
             }
             DriveEnd::TransportFailed(detail) => {
-                self.fail(run_id, lease_token, "sandbox_transport_failed", &detail)
+                self.fail(run_id, lease_token, "sandbox_transport_failed", detail)
                     .await
             }
             DriveEnd::Unreachable => {
@@ -778,27 +1906,186 @@ impl SandboxContainerRunner {
                 )
                 .await
             }
-            DriveEnd::LeaseLost => {
-                // The heartbeat was refused. Cancellation moves a run to
-                // `cancelling`, which fails the running-only heartbeat filter —
-                // so before reading this as a lost lease, acknowledge a
-                // cancellation this driver still owns: commit the terminal
-                // cancellation, and let the teardown that follows be the
-                // signal that actually stops the container.
-                let run = self.store.get_agent_run(run_id).await?;
-                if run.as_ref().is_some_and(|run| {
-                    run.status == AgentRunStatus::Cancelling && run.lease_token == Some(lease_token)
-                }) && self
-                    .store
-                    .finish_agent_run_cancellation(run_id, lease_token)
-                    .await?
-                    .is_some()
-                {
-                    return Ok(SandboxContainerRunOutcome::Cancelled(run_id));
+            DriveEnd::LeaseLost => Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+        }
+    }
+
+    /// Commit or recover the exact cancellation receipt. `Err` can be an
+    /// ambiguous post-commit response, so a now-`cancelled` row is retryable;
+    /// `Ok(None)` on that row is definitive proof the receipt belongs to a
+    /// different identity.
+    async fn finish_cancellation_with_retry(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+        mut delay: Duration,
+    ) -> Result<SandboxContainerRunOutcome> {
+        loop {
+            match self
+                .store
+                .finish_agent_run_cancellation(run_id, lease_token)
+                .await
+            {
+                Ok(Some(_)) => return Ok(SandboxContainerRunOutcome::Cancelled(run_id)),
+                Ok(None) => match self.terminal_retry_state(run_id, lease_token).await {
+                    Ok(TerminalRetryState::OwnedCancelling) => {
+                        match self
+                            .renew_cancellation_finalization(run_id, lease_token)
+                            .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Ok(SandboxContainerRunOutcome::LeaseLost(run_id));
+                            }
+                            Err(error) => {
+                                if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                                    return Err(error);
+                                }
+                                continue;
+                            }
+                        }
+                        if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                            return Ok(SandboxContainerRunOutcome::LeaseLost(run_id));
+                        }
+                    }
+                    Ok(
+                        TerminalRetryState::OwnedRunning(_)
+                        | TerminalRetryState::Completed
+                        | TerminalRetryState::Failed
+                        | TerminalRetryState::Cancelled
+                        | TerminalRetryState::Lost,
+                    ) => return Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+                    Err(error) => {
+                        if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                            return Err(error);
+                        }
+                    }
+                },
+                Err(mut error) => {
+                    match self.terminal_retry_state(run_id, lease_token).await {
+                        Ok(TerminalRetryState::OwnedCancelling) => {
+                            match self
+                                .renew_cancellation_finalization(run_id, lease_token)
+                                .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return Ok(SandboxContainerRunOutcome::LeaseLost(run_id));
+                                }
+                                Err(renewal_error) => error = renewal_error,
+                            }
+                        }
+                        Ok(TerminalRetryState::Cancelled) => {}
+                        Ok(
+                            TerminalRetryState::OwnedRunning(_)
+                            | TerminalRetryState::Completed
+                            | TerminalRetryState::Failed
+                            | TerminalRetryState::Lost,
+                        ) => return Ok(SandboxContainerRunOutcome::LeaseLost(run_id)),
+                        Err(state_error) => error = state_error,
+                    }
+                    if !Self::wait_for_terminal_retry(deadline_at, &mut delay).await {
+                        return Err(error);
+                    }
                 }
-                Ok(SandboxContainerRunOutcome::LeaseLost(run_id))
             }
         }
+    }
+
+    async fn terminal_retry_state(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+    ) -> Result<TerminalRetryState> {
+        let Some(run) = self.store.get_agent_run(run_id).await? else {
+            return Ok(TerminalRetryState::Lost);
+        };
+        let now = chrono::Utc::now();
+        let exact_token = run.lease_token == Some(lease_token);
+        let deadline_open = run.deadline_at.is_some_and(|deadline| deadline > now);
+        let exact_live_lease =
+            exact_token && deadline_open && run.lease_expires_at.is_some_and(|expiry| expiry > now);
+        Ok(match run.status {
+            AgentRunStatus::Running if exact_live_lease => TerminalRetryState::OwnedRunning(
+                run.lease_expires_at
+                    .expect("an exact live running lease has an expiry"),
+            ),
+            // A durable cancellation freezes this token and claim identity:
+            // no scheduler may supersede it while `cancelling`. The dedicated
+            // renewal CAS below validates the immutable cancellation receipt
+            // before reopening an expired lease for accounting/finalization.
+            AgentRunStatus::Cancelling if exact_token && deadline_open => {
+                TerminalRetryState::OwnedCancelling
+            }
+            AgentRunStatus::Completed => TerminalRetryState::Completed,
+            AgentRunStatus::Failed => TerminalRetryState::Failed,
+            AgentRunStatus::Cancelled => TerminalRetryState::Cancelled,
+            _ => TerminalRetryState::Lost,
+        })
+    }
+
+    async fn renew_terminal_lease_if_needed(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let renew_by = chrono::Utc::now() + chrono_duration(self.config.heartbeat)?;
+        if lease_expires_at <= renew_by {
+            // A false result can mean cancellation won between the state read
+            // and heartbeat. The next retry re-reads and reconciles that state;
+            // only a store error needs to be surfaced as the retry cause.
+            let _ = self
+                .store
+                .heartbeat_agent_run(run_id, lease_token, chrono_duration(self.config.lease)?)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn renew_cancellation_finalization(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+    ) -> Result<bool> {
+        // Finalization does not authorize more container work, so its renewal
+        // window may safely be wider than an unusually short execution lease.
+        // Keep it long enough that the bounded retry backoff cannot expire the
+        // authority between a successful renewal and the next exact CAS.
+        let finalization_lease = self.config.lease.max(TERMINAL_RETRY_MAX.saturating_mul(2));
+        self.store
+            .renew_agent_run_cancellation_finalization(
+                run_id,
+                lease_token,
+                chrono_duration(finalization_lease)?,
+            )
+            .await
+    }
+
+    async fn wait_for_terminal_retry(
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+        delay: &mut Duration,
+    ) -> bool {
+        let Some(deadline_at) = deadline_at else {
+            return false;
+        };
+        let Ok(remaining) = deadline_at
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+        else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+        let sleep_for = (*delay).min(remaining);
+        tokio::time::sleep(sleep_for).await;
+        if sleep_for == remaining {
+            return false;
+        }
+        *delay = delay.saturating_mul(2).min(TERMINAL_RETRY_MAX);
+        true
     }
 
     /// The scoped model token a run's admission entitles it to: `None` for an
@@ -1243,6 +2530,18 @@ impl SandboxContainerRunner {
         // backend guarantees no sandbox outside the live set remains, which is
         // what lets a handle-less obligation (a lapsed intent whose create may
         // or may not have reached the provider) be marked done.
+        // Freeze the obligations this sweep is entitled to discharge before
+        // taking the live-tag snapshot. A teardown committed after that
+        // snapshot may have been represented there as live and therefore
+        // deliberately preserved by the backend; completing a fresh listing
+        // would lose its only retry record without destroying its container.
+        let sweep_teardowns = self
+            .store
+            .list_sandbox_teardowns()
+            .await?
+            .into_iter()
+            .map(|record| record.run_id)
+            .collect::<Vec<_>>();
         let live: std::collections::HashSet<SandboxTag> = self
             .store
             .live_sandbox_tags()
@@ -1258,8 +2557,8 @@ impl SandboxContainerRunner {
                         handle.reference
                     );
                 }
-                for record in self.store.list_sandbox_teardowns().await? {
-                    self.store.complete_sandbox_teardown(record.run_id).await?;
+                for run_id in sweep_teardowns {
+                    self.store.complete_sandbox_teardown(run_id).await?;
                 }
             }
             Err(error) => {
@@ -1268,6 +2567,29 @@ impl SandboxContainerRunner {
         }
         Ok(())
     }
+}
+
+/// How one fallible pre-attach await ended. Cancellation and deadline are
+/// explicit so the setup future is dropped before terminal storage work begins;
+/// a durable-fence failure is retained separately so the caller can reconcile a
+/// concurrently committed immutable cancellation before propagating it.
+enum PreAttachEnd<T> {
+    Completed(T),
+    Cancelled,
+    DeadlineExceeded,
+    FenceFailed(AgentError),
+}
+
+/// One poll result from [`SandboxContainerRunner::await_pre_attach`]. Keeping
+/// the setup and durable-fence completions distinct lets the runner retain one
+/// while continuing to poll the other without ever spawning overlapping lease
+/// heartbeats.
+enum PreAttachPoll<T> {
+    SetupCompleted(T),
+    Cancelled,
+    DeadlineExceeded,
+    FenceTick,
+    FenceCompleted(Result<bool>),
 }
 
 /// The result of draining one connection to the container.
@@ -1300,6 +2622,17 @@ enum DriveEnd {
     DeadlineExceeded,
     /// The lease was lost mid-drive; this host no longer owns the run.
     LeaseLost,
+}
+
+/// Durable state relevant to deciding whether a transient post-quiescence
+/// write can be retried under this exact container lease.
+enum TerminalRetryState {
+    OwnedRunning(chrono::DateTime<chrono::Utc>),
+    OwnedCancelling,
+    Completed,
+    Failed,
+    Cancelled,
+    Lost,
 }
 
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {

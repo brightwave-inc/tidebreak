@@ -494,6 +494,19 @@ pub enum AdmitSandboxAgentRunOutcome {
     OutputSuperseded(TurnRun),
 }
 
+/// Result of durably accounting one completed background model step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordAgentRunModelStepOutcome {
+    /// This call incremented the cumulative step and usage totals.
+    Recorded(AgentRun),
+    /// An exact retry found the same increment already committed.
+    Existing(AgentRun),
+    /// The supplied cumulative baseline does not identify the next step.
+    IdentityConflict(AgentRun),
+    /// The exact live worker lease no longer owns this run.
+    LeaseLost,
+}
+
 /// Result of atomically checkpointing one non-blocking sandbox spawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckpointSandboxSpawnOutcome {

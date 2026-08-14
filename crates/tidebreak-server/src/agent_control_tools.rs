@@ -18,14 +18,106 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tidebreak_core::{
-    AgentError, AgentRunId, AgentRunStatus, AgentRunTier, ApprovalClass, Result, Store, Tool,
-    ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec,
+    AgentError, AgentRunId, AgentRunStatus, AgentRunTier, ApprovalClass, Result,
+    SandboxToolCallStatus, Store, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec,
 };
+use tokio::sync::Notify;
+use uuid::Uuid;
+
+use crate::state::{SandboxAttemptGuard, SandboxSteerGuard};
 
 /// Stable name for the foreground child-resume tool.
 pub(crate) const RESUME_AGENT_TOOL: &str = "resume_agent";
 /// Stable name for the foreground child-cancel tool.
 pub(crate) const CANCEL_AGENT_TOOL: &str = "cancel_agent";
+
+/// Process-local acceleration after a durable sandbox cancellation commits.
+///
+/// The store's immutable cancellation receipts are the source of exact model
+/// and checkpoint identities. The optional lease supplied by the committing
+/// caller closes the smaller cancel-before-receipt-read window for an attached
+/// container drive. Every signal is only a latency hint: durable cancellation
+/// and terminal-write fencing remain authoritative.
+#[derive(Clone)]
+pub(crate) struct SandboxCancellationAcceleration {
+    store: Arc<dyn Store>,
+    attempts: Arc<SandboxAttemptGuard>,
+    steering: Arc<SandboxSteerGuard>,
+    worker_wake: Arc<Notify>,
+}
+
+impl SandboxCancellationAcceleration {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        attempts: Arc<SandboxAttemptGuard>,
+        steering: Arc<SandboxSteerGuard>,
+        worker_wake: Arc<Notify>,
+    ) -> Self {
+        Self {
+            store,
+            attempts,
+            steering,
+            worker_wake,
+        }
+    }
+
+    fn detached(store: Arc<dyn Store>) -> Self {
+        Self::new(
+            store,
+            Arc::new(SandboxAttemptGuard::default()),
+            Arc::new(SandboxSteerGuard::default()),
+            Arc::new(Notify::new()),
+        )
+    }
+
+    /// Signal the exact local owners named by a committed cancellation.
+    pub(crate) async fn signal_after_commit(
+        &self,
+        run_id: AgentRunId,
+        committed_lease_token: Option<Uuid>,
+    ) {
+        // A live cancellation outcome returns the exact durable run lease.
+        // Signal its container drive before any further store read so reverse
+        // provider admission cannot continue until the next heartbeat.
+        if let Some(lease_token) = committed_lease_token {
+            self.steering.cancel_container_drive(run_id, lease_token);
+        }
+
+        if let Ok(Some(signal)) = self.store.get_agent_run_cancellation_signal(run_id).await {
+            self.steering
+                .cancel_container_drive(run_id, signal.lease_token);
+            self.attempts.cancel_model(run_id, signal.lease_token);
+        }
+
+        // Cancelling a waiting run atomically terminalizes its live tool call
+        // and records the exact executor lease. Never infer that lease from
+        // mutable call state or signal every call belonging to a run.
+        if let Ok(calls) = self
+            .store
+            .list_sandbox_tool_calls_for_agent_run(run_id)
+            .await
+        {
+            for call in calls {
+                if call.status != SandboxToolCallStatus::Cancelled {
+                    continue;
+                }
+                if let Ok(Some(receipt)) = self.store.get_sandbox_tool_call_receipt(call.id).await {
+                    if receipt.status == SandboxToolCallStatus::Cancelled {
+                        self.attempts.cancel_checkpoint(
+                            call.id,
+                            run_id,
+                            receipt.executor_lease_token,
+                        );
+                    }
+                }
+            }
+        }
+
+        // A missed/coalesced wake is harmless: the worker's durable claim scan
+        // is authoritative. Waking here avoids waiting for its polling floor.
+        self.worker_wake.notify_one();
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,11 +262,23 @@ impl Tool for ResumeAgentTool {
 /// Cancel one of the conversation's background children.
 pub(crate) struct CancelAgentTool {
     store: Arc<dyn Store>,
+    cancellation_acceleration: SandboxCancellationAcceleration,
 }
 
 impl CancelAgentTool {
     pub(crate) fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+        Self {
+            cancellation_acceleration: SandboxCancellationAcceleration::detached(store.clone()),
+            store,
+        }
+    }
+
+    pub(crate) fn with_cancellation_acceleration(
+        mut self,
+        cancellation_acceleration: SandboxCancellationAcceleration,
+    ) -> Self {
+        self.cancellation_acceleration = cancellation_acceleration;
+        self
     }
 }
 
@@ -230,6 +334,11 @@ impl Tool for CancelAgentTool {
             Err(refusal) => return Ok(refusal),
         };
         if run.status.is_terminal() {
+            if run.status == AgentRunStatus::Cancelled {
+                self.cancellation_acceleration
+                    .signal_after_commit(run.id, run.lease_token)
+                    .await;
+            }
             return Ok(ToolOutput::text(format!(
                 "Agent {id} already finished (status: {status}); nothing to cancel.",
                 id = run.id,
@@ -264,6 +373,17 @@ impl Tool for CancelAgentTool {
         // loop does.
         for _ in 0..8 {
             if let Some(outcome) = self.store.request_agent_run_cancellation(run.id).await? {
+                let committed = match &outcome {
+                    tidebreak_core::RequestAgentRunCancellationOutcome::Cancelled(run)
+                    | tidebreak_core::RequestAgentRunCancellationOutcome::Requested(run)
+                    | tidebreak_core::RequestAgentRunCancellationOutcome::Existing(run)
+                    | tidebreak_core::RequestAgentRunCancellationOutcome::AlreadyTerminal(run) => {
+                        run
+                    }
+                };
+                self.cancellation_acceleration
+                    .signal_after_commit(committed.id, committed.lease_token)
+                    .await;
                 let cancelled = matches!(
                     outcome,
                     tidebreak_core::RequestAgentRunCancellationOutcome::Cancelled(_)
@@ -282,6 +402,9 @@ impl Tool for CancelAgentTool {
                 break;
             };
             if current.status == AgentRunStatus::Cancelled {
+                self.cancellation_acceleration
+                    .signal_after_commit(current.id, current.lease_token)
+                    .await;
                 return Ok(ToolOutput::text(format!(
                     "Cancelled agent {id}.",
                     id = run.id

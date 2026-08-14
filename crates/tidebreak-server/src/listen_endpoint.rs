@@ -2,8 +2,10 @@
 //!
 //! After a successful bind, the server writes `{data_dir}/listen.json` so a
 //! second process can attach without the token riding argv. See
-//! [`docs/decisions/0009-data-dir-listen-endpoint.md`]. The client-executor
-//! credential is deliberately absent — attach stays bearer-only.
+//! [`docs/decisions/0009-data-dir-listen-endpoint.md`] and
+//! [`docs/decisions/0016-scoped-local-import-capability.md`]. The
+//! client-executor credential is deliberately absent. A separate scoped token
+//! permits only publication of bytes the attached process already holds.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -25,6 +27,8 @@ pub struct ListenEndpoint {
     pub base_url: String,
     /// Per-launch bearer token (full LocalOwner authority).
     pub token: String,
+    /// Per-launch capability limited to local document/image publication.
+    pub local_import_token: String,
 }
 
 impl ListenEndpoint {
@@ -56,9 +60,12 @@ impl ListenEndpoint {
                 path.display()
             ))
         })?;
-        if endpoint.base_url.trim().is_empty() || endpoint.token.trim().is_empty() {
+        if endpoint.base_url.trim().is_empty()
+            || endpoint.token.trim().is_empty()
+            || endpoint.local_import_token.trim().is_empty()
+        {
             return Err(AgentError::config(format!(
-                "{} is missing base_url or token",
+                "{} is missing base_url, token, or local_import_token",
                 path.display()
             )));
         }
@@ -67,12 +74,13 @@ impl ListenEndpoint {
 }
 
 /// Atomically publish the endpoint at `0o600`. Overwrites any prior file.
-pub fn write(data_dir: &Path, base_url: &str, token: &str) -> Result<()> {
+pub fn write(data_dir: &Path, base_url: &str, token: &str, local_import_token: &str) -> Result<()> {
     std::fs::create_dir_all(data_dir)
         .map_err(|error| AgentError::config(format!("failed to create data dir: {error}")))?;
     let endpoint = ListenEndpoint {
         base_url: base_url.trim_end_matches('/').to_owned(),
         token: token.to_owned(),
+        local_import_token: local_import_token.to_owned(),
     };
     let mut bytes = serde_json::to_vec_pretty(&endpoint).map_err(|error| {
         AgentError::config(format!("failed to encode listen endpoint: {error}"))
@@ -116,8 +124,13 @@ pub struct ListenEndpointGuard {
 }
 
 impl ListenEndpointGuard {
-    pub fn publish(data_dir: PathBuf, base_url: &str, token: &str) -> Result<Self> {
-        write(&data_dir, base_url, token)?;
+    pub fn publish(
+        data_dir: PathBuf,
+        base_url: &str,
+        token: &str,
+        local_import_token: &str,
+    ) -> Result<Self> {
+        write(&data_dir, base_url, token, local_import_token)?;
         Ok(Self { data_dir })
     }
 }
@@ -135,12 +148,17 @@ mod tests {
     #[test]
     fn write_read_roundtrip_and_drop_clears() {
         let dir = tempfile::tempdir().unwrap();
-        let guard =
-            ListenEndpointGuard::publish(dir.path().to_path_buf(), "http://127.0.0.1:9/", "tok")
-                .unwrap();
+        let guard = ListenEndpointGuard::publish(
+            dir.path().to_path_buf(),
+            "http://127.0.0.1:9/",
+            "tok",
+            "import-tok",
+        )
+        .unwrap();
         let read = ListenEndpoint::read(dir.path()).unwrap();
         assert_eq!(read.base_url, "http://127.0.0.1:9");
         assert_eq!(read.token, "tok");
+        assert_eq!(read.local_import_token, "import-tok");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -152,7 +170,7 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
         let json = std::fs::read_to_string(ListenEndpoint::path(dir.path())).unwrap();
-        assert!(!json.contains("executor"));
+        assert!(!json.contains("client_executor"));
         drop(guard);
         assert!(ListenEndpoint::read(dir.path()).is_err());
     }

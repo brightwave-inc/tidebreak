@@ -45,7 +45,6 @@ pub const EXTRACT_TRUNCATION_MARKER: &str = "\n\n[... content truncated ...]\n\n
 pub const MIN_EXTRACT_WORDS: usize = 20;
 /// Legacy name for the serialized response output budget.
 pub const MAX_OUTPUT_CHARS: usize = MAX_OUTPUT_BYTES;
-const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_METADATA_ENTRIES: usize = 8;
 const MAX_METADATA_KEY_CHARS: usize = 64;
 const MAX_METADATA_VALUE_CHARS: usize = 256;
@@ -157,27 +156,8 @@ pub struct SearchDomain(String);
 
 impl SearchDomain {
     pub fn parse(value: impl AsRef<str>) -> Result<Self, WebSearchError> {
-        let value = value
-            .as_ref()
-            .trim()
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        if value.is_empty() || value.chars().count() > MAX_DOMAIN_CHARS {
-            return Err(WebSearchError::InvalidRequest(
-                "invalid domain filter".into(),
-            ));
-        }
-        let parsed = Url::parse(&format!("https://{value}"))
-            .map_err(|_| WebSearchError::InvalidRequest("invalid domain filter".into()))?;
-        if parsed.host_str() != Some(value.as_str())
-            || parsed.path() != "/"
-            || parsed.port().is_some()
-            || value.contains('*')
-        {
-            return Err(WebSearchError::InvalidRequest(
-                "invalid domain filter".into(),
-            ));
-        }
+        let value = tidebreak_core::agent_tools::canonical_web_search_domain(value.as_ref())
+            .ok_or_else(|| WebSearchError::InvalidRequest("invalid domain filter".into()))?;
         Ok(Self(value))
     }
 
@@ -950,12 +930,25 @@ mod tests {
     #[test]
     fn domain_filters_are_hosts_not_urls_or_wildcards() {
         assert_eq!(
-            SearchDomain::parse("Docs.Example.com.").unwrap().as_str(),
-            "docs.example.com"
+            SearchDomain::parse(" Docs.Example-Services.com. ")
+                .unwrap()
+                .as_str(),
+            "docs.example-services.com"
         );
-        assert!(SearchDomain::parse("https://example.com").is_err());
-        assert!(SearchDomain::parse("*.example.com").is_err());
-        assert!(SearchDomain::parse("example.com/path").is_err());
+
+        for invalid_domain in [
+            "*.example.com".to_owned(),
+            "https://example.com".to_owned(),
+            "example.com/path".to_owned(),
+            "example.com:443".to_owned(),
+            "a".repeat(tidebreak_core::agent_tools::MAX_WEB_SEARCH_DOMAIN_CHARS + 1),
+            "exa\u{1}mple.com".to_owned(),
+        ] {
+            assert!(
+                SearchDomain::parse(&invalid_domain).is_err(),
+                "{invalid_domain:?}"
+            );
+        }
     }
 
     #[test]

@@ -462,6 +462,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
                 fresh_completed_at,
                 &fresh_output,
                 std::slice::from_ref(&citation),
+                0,
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -481,6 +482,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
                 Utc::now(),
                 &fresh_output,
                 &[citation],
+                0,
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -499,6 +501,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
             Utc::now(),
             &fresh_output,
             &[],
+            0,
             Usage::default(),
             StopReason::EndTurn,
         )

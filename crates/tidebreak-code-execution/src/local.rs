@@ -52,6 +52,63 @@ const MAX_WRITTEN_FILE_BYTES: u64 = 16 * 1_024 * 1_024;
 // system default, so a descriptor leak dies quickly.
 const MAX_OPEN_FILES: u64 = 512;
 
+#[cfg(target_os = "macos")]
+const SANDBOX_PATH_DENIED_CODE: &str = "sandbox_path_denied";
+#[cfg(target_os = "macos")]
+const DENIED_READ_ROOTS: &[&str] = &[
+    "/Applications",
+    "/Library",
+    "/Network",
+    "/Users",
+    "/Volumes",
+    "/cores",
+    "/dev",
+    "/etc",
+    "/home",
+    "/mnt",
+    "/nix",
+    "/opt",
+    "/private",
+    "/tmp",
+    "/usr/local",
+    "/var",
+    "/System/Volumes/Data/Applications",
+    "/System/Volumes/Data/Library",
+    "/System/Volumes/Data/Users",
+    "/System/Volumes/Data/Volumes",
+    "/System/Volumes/Data/opt",
+    "/System/Volumes/Data/private",
+    "/System/Volumes/Data/tmp",
+    "/System/Volumes/Data/usr/local",
+    "/System/Volumes/Data/var",
+];
+#[cfg(target_os = "macos")]
+const ALLOWED_READ_LITERALS: &[&str] = &[
+    "/dev/null",
+    "/dev/random",
+    "/dev/urandom",
+    "/etc/localtime",
+    "/etc/zshenv",
+    "/private/etc/localtime",
+    "/private/etc/zshenv",
+    "/private/var/select/developer_dir",
+    "/private/var/select/sh",
+    "/var/select/developer_dir",
+];
+#[cfg(target_os = "macos")]
+const ALLOWED_RUNTIME_SUBPATHS: &[&str] = &[
+    "/Applications/Xcode.app/Contents/Developer",
+    "/etc/ssl",
+    "/Library/Developer/CommandLineTools",
+    "/System/Volumes/Data/Applications/Xcode.app/Contents/Developer",
+    "/System/Volumes/Data/Library/Developer/CommandLineTools",
+    "/System/Volumes/Data/private/var/select",
+    "/private/var/select",
+    "/private/etc/ssl",
+    "/var/select",
+    "/var/db/timezone",
+];
+
 /// Native local execution rooted at Tidebreak's private per-chat scratch.
 pub struct LocalExecutionProvider {
     scratch_root: PathBuf,
@@ -352,13 +409,44 @@ impl CodeExecutionProvider for LocalExecutionProvider {
         let folder_grants = canonicalize_folder_grants(&request.folder_grants)?;
         #[cfg(not(target_os = "macos"))]
         let folder_grants = Vec::new();
+        #[cfg(target_os = "macos")]
+        let denied_host_path = direct_denied_host_path(
+            &request,
+            &workspace,
+            &env_home,
+            self.document_scripts_dir.as_deref(),
+            self.shared_package_cache.as_deref(),
+            self.managed_node_dir.as_deref(),
+            &folder_grants,
+        );
         let fingerprint = request_fingerprint(&request)?;
         let receipt_path = receipts.join(format!("{}.json", request.execution_id.as_str()));
         match begin_execution(&receipt_path, &fingerprint)? {
             BeginExecution::Cached(response) => return Ok(response),
             BeginExecution::Started => {}
         }
-
+        #[cfg(target_os = "macos")]
+        if denied_host_path.is_some() {
+            let response = CodeExecutionResponse {
+                provider: CodeExecutionProviderKind::Local,
+                exit_code: Some(126),
+                stdout: String::new(),
+                stderr: sandbox_path_denied_message(&folder_grants),
+                timed_out: false,
+                output_truncated: false,
+                duration_ms: 0,
+                sync_notes: Vec::new(),
+                degraded: None,
+            };
+            finish_execution(
+                &receipt_path,
+                &ExecutionReceipt::Completed {
+                    fingerprint,
+                    response: response.clone(),
+                },
+            )?;
+            return Ok(response);
+        }
         let document_scripts_dir = self
             .document_scripts_dir
             .as_ref()
@@ -401,6 +489,20 @@ impl CodeExecutionProvider for LocalExecutionProvider {
         .await;
         match result {
             Ok(response) => {
+                #[cfg(target_os = "macos")]
+                let response = {
+                    let mut response = response;
+                    annotate_seatbelt_access_denial(
+                        &workspace,
+                        &env_home,
+                        document_scripts_dir.as_deref(),
+                        shared_package_cache.as_deref(),
+                        managed_node_dir.as_deref(),
+                        &folder_grants,
+                        &mut response,
+                    );
+                    response
+                };
                 finish_execution(
                     &receipt_path,
                     &ExecutionReceipt::Completed {
@@ -1027,6 +1129,386 @@ fn sandbox_path(developer_dir: Option<&Path>, managed_node_dir: Option<&Path>) -
 }
 
 #[cfg(target_os = "macos")]
+fn direct_denied_host_path(
+    request: &CodeExecutionRequest,
+    workspace: &Path,
+    env_home: &Path,
+    document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
+) -> Option<PathBuf> {
+    std::iter::once(request.command.as_str())
+        .chain(request.arguments.iter().map(String::as_str))
+        .filter_map(direct_absolute_path)
+        .find(|path| {
+            denied_host_path(
+                path,
+                workspace,
+                env_home,
+                document_scripts_dir,
+                shared_package_cache,
+                managed_node_dir,
+                folder_grants,
+            )
+        })
+        .map(Path::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn annotate_seatbelt_access_denial(
+    workspace: &Path,
+    env_home: &Path,
+    document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
+    response: &mut CodeExecutionResponse,
+) {
+    if response.stdout.contains(SANDBOX_PATH_DENIED_CODE)
+        || response.stderr.contains(SANDBOX_PATH_DENIED_CODE)
+    {
+        return;
+    }
+
+    let reports_permission_denial =
+        [&response.stdout, &response.stderr]
+            .into_iter()
+            .any(|output| {
+                output
+                    .to_ascii_lowercase()
+                    .contains("operation not permitted")
+            });
+    let reports_denied_path = [&response.stdout, &response.stderr]
+        .into_iter()
+        .any(|output| {
+            output_contains_denied_host_path(
+                output,
+                workspace,
+                env_home,
+                document_scripts_dir,
+                shared_package_cache,
+                managed_node_dir,
+                folder_grants,
+            )
+        });
+    if !reports_permission_denial || !reports_denied_path {
+        return;
+    }
+
+    // Seatbelt reports a denied access as EPERM, but that wording by itself is
+    // ordinary child-controlled output. Require a captured absolute path that
+    // resolves into a denied, non-allowed root before treating the response as
+    // a sandbox denial. The path may have been expanded or constructed inside
+    // the child, may be printed on either output stream, and may be caught by
+    // the child before a successful exit, so normalize both channels before
+    // the response is persisted or exposed to a model.
+    response.stdout.clear();
+    response.stderr = sandbox_path_denied_message(folder_grants);
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn output_contains_denied_host_path(
+    output: &str,
+    workspace: &Path,
+    env_home: &Path,
+    document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
+) -> bool {
+    let decoded = decode_path_separators_for_classification(output);
+    let output = decoded.as_str();
+    let bytes = output.as_bytes();
+    let mut cursor = 0;
+    while let Some(relative_start) = bytes[cursor..].iter().position(|byte| *byte == b'/') {
+        let start = cursor + relative_start;
+        if let Some((url_end, path)) = file_url_path(output, start) {
+            if denied_host_path(
+                &path,
+                workspace,
+                env_home,
+                document_scripts_dir,
+                shared_package_cache,
+                managed_node_dir,
+                folder_grants,
+            ) {
+                return true;
+            }
+            cursor = url_end.max(start + 1);
+            continue;
+        }
+        if let Some(url_end) = non_file_url_end(output, start) {
+            cursor = url_end.max(start + 1);
+            continue;
+        }
+        let quote = start
+            .checked_sub(1)
+            .filter(|index| !byte_is_escaped(bytes, *index))
+            .map(|index| bytes[index])
+            .filter(|byte| matches!(byte, b'\'' | b'"'));
+        let end = quote
+            .and_then(|quote| find_unescaped_quote(bytes, start, quote))
+            .unwrap_or_else(|| {
+                bytes[start..]
+                    .iter()
+                    .position(|byte| unquoted_path_delimiter(*byte))
+                    .map_or(bytes.len(), |relative_end| start + relative_end)
+            });
+        let candidate = if quote.is_some() {
+            &output[start..end]
+        } else {
+            output[start..end].trim_end_matches(unquoted_path_trailing_punctuation)
+        };
+        if candidate.len() > 1
+            && denied_host_path(
+                Path::new(candidate),
+                workspace,
+                env_home,
+                document_scripts_dir,
+                shared_package_cache,
+                managed_node_dir,
+                folder_grants,
+            )
+        {
+            return true;
+        }
+        cursor = end.max(start + 1);
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn decode_path_separators_for_classification(output: &str) -> String {
+    // Captured output is size-bounded. Decode only these adjacent separator
+    // spellings in one pass; never recursively interpret the decoded text.
+    let bytes = output.as_bytes();
+    let mut decoded = String::with_capacity(output.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            if bytes.get(cursor + 1) == Some(&b'/') {
+                decoded.push('/');
+                cursor += 2;
+                continue;
+            }
+            if bytes.get(cursor + 1) == Some(&b'u')
+                && bytes
+                    .get(cursor + 2..cursor + 6)
+                    .is_some_and(|hex| hex.eq_ignore_ascii_case(b"002f"))
+            {
+                decoded.push('/');
+                cursor += 6;
+                continue;
+            }
+        }
+
+        let character = output[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a character boundary");
+        decoded.push(character);
+        cursor += character.len_utf8();
+    }
+    decoded
+}
+
+#[cfg(target_os = "macos")]
+fn find_unescaped_quote(bytes: &[u8], start: usize, quote: u8) -> Option<usize> {
+    (start..bytes.len()).find(|index| bytes[*index] == quote && !byte_is_escaped(bytes, *index))
+}
+
+#[cfg(target_os = "macos")]
+fn byte_is_escaped(bytes: &[u8], index: usize) -> bool {
+    bytes[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+#[cfg(target_os = "macos")]
+fn file_url_path(output: &str, slash: usize) -> Option<(usize, PathBuf)> {
+    let (scheme_start, colon, token_end) = hierarchical_url_token_bounds(output, slash)?;
+    if !output[scheme_start..colon].eq_ignore_ascii_case("file") {
+        return None;
+    }
+    let parsed = url::Url::parse(&output[scheme_start..token_end]).ok()?;
+    let path = parsed.to_file_path().ok()?;
+    Some((token_end, path))
+}
+
+#[cfg(target_os = "macos")]
+fn non_file_url_end(output: &str, slash: usize) -> Option<usize> {
+    let (scheme_start, colon, token_end) = hierarchical_url_token_bounds(output, slash)?;
+    let scheme = &output[scheme_start..colon];
+    if scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+
+    let authority_start = slash + 2;
+    let authority_end = output.as_bytes()[authority_start..token_end]
+        .iter()
+        .position(|byte| matches!(byte, b'/' | b'?' | b'#'))
+        .map_or(token_end, |relative_end| authority_start + relative_end);
+    if authority_end == authority_start {
+        return None;
+    }
+
+    let parsed = url::Url::parse(&output[scheme_start..token_end]).ok()?;
+    parsed.has_host().then_some(token_end)
+}
+
+#[cfg(target_os = "macos")]
+fn hierarchical_url_token_bounds(output: &str, slash: usize) -> Option<(usize, usize, usize)> {
+    let bytes = output.as_bytes();
+    let colon = slash.checked_sub(1)?;
+    if bytes.get(colon) != Some(&b':') || bytes.get(slash + 1) != Some(&b'/') {
+        return None;
+    }
+
+    let mut scheme_start = colon;
+    while scheme_start > 0 && url_scheme_byte(bytes[scheme_start - 1]) {
+        scheme_start -= 1;
+    }
+    let scheme = &output[scheme_start..colon];
+    if !scheme
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+        || (scheme_start > 0 && !url_start_boundary(bytes[scheme_start - 1]))
+    {
+        return None;
+    }
+
+    let token_end = bytes[slash + 2..]
+        .iter()
+        .position(|byte| url_delimiter(*byte))
+        .map_or(bytes.len(), |relative_end| slash + 2 + relative_end);
+    Some((scheme_start, colon, token_end))
+}
+
+#[cfg(target_os = "macos")]
+fn url_scheme_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+}
+
+#[cfg(target_os = "macos")]
+fn url_start_boundary(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(
+            byte,
+            b'\'' | b'"' | b'=' | b':' | b'(' | b'[' | b'{' | b'<' | b'>' | b',' | b';'
+        )
+}
+
+#[cfg(target_os = "macos")]
+fn url_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(byte, b'\'' | b'"' | b'<' | b'>')
+}
+
+#[cfg(target_os = "macos")]
+fn unquoted_path_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace()
+        || byte.is_ascii_control()
+        || matches!(byte, b'\'' | b'"' | b'<' | b'>')
+}
+
+#[cfg(target_os = "macos")]
+fn unquoted_path_trailing_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        ':' | ',' | ';' | '.' | '!' | '?' | ')' | ']' | '}'
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn direct_absolute_path(value: &str) -> Option<&Path> {
+    let value = if value.starts_with('-') {
+        value.split_once('=').map_or(value, |(_, value)| value)
+    } else {
+        value
+    }
+    .trim_matches(|character: char| matches!(character, '\'' | '"'));
+    Path::new(value).is_absolute().then(|| Path::new(value))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn denied_host_path(
+    path: &Path,
+    workspace: &Path,
+    env_home: &Path,
+    document_scripts_dir: Option<&Path>,
+    shared_package_cache: Option<&Path>,
+    managed_node_dir: Option<&Path>,
+    folder_grants: &[CanonicalExecFolderGrant],
+) -> bool {
+    let resolved = resolve_existing_path_prefix(path);
+    let denied = DENIED_READ_ROOTS
+        .iter()
+        .any(|root| resolved.starts_with(resolve_existing_path_prefix(Path::new(root))));
+    if !denied {
+        return false;
+    }
+    let explicitly_allowed = ALLOWED_READ_LITERALS
+        .iter()
+        .any(|allowed| resolved == resolve_existing_path_prefix(Path::new(allowed)))
+        || ALLOWED_RUNTIME_SUBPATHS
+            .iter()
+            .any(|allowed| resolved.starts_with(resolve_existing_path_prefix(Path::new(allowed))))
+        || [
+            Some(workspace),
+            Some(env_home),
+            document_scripts_dir,
+            shared_package_cache,
+            managed_node_dir,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|allowed| resolved.starts_with(resolve_existing_path_prefix(allowed)))
+        || folder_grants.iter().any(|grant| {
+            resolved.starts_with(&grant.path)
+                || grant
+                    .overlay
+                    .as_deref()
+                    .is_some_and(|overlay| resolved.starts_with(overlay))
+        });
+    !explicitly_allowed
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_existing_path_prefix(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        let Ok(canonical) = fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let suffix = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+        return canonical.join(suffix);
+    }
+    path.to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_path_denied_message(folder_grants: &[CanonicalExecFolderGrant]) -> String {
+    let connected = if folder_grants.is_empty() {
+        "no connected folders are currently available"
+    } else {
+        "connected folders are available"
+    };
+    format!(
+        "{SANDBOX_PATH_DENIED_CODE}: the requested path is outside the local execution sandbox; available capabilities: the private chat workspace (use paths relative to '.') and {connected}; recovery: attach or copy the file into the chat workspace, or connect its containing folder, then retry with a workspace-relative or connected-folder path"
+    )
+}
+
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn macos_profile(
     workspace: &Path,
@@ -1038,57 +1520,6 @@ fn macos_profile(
     folder_grants: &[CanonicalExecFolderGrant],
     broker_port: Option<u16>,
 ) -> Result<String, CodeExecutionError> {
-    const DENIED_READS: &[&str] = &[
-        "/Applications",
-        "/Library",
-        "/Network",
-        "/Users",
-        "/Volumes",
-        "/cores",
-        "/dev",
-        "/etc",
-        "/home",
-        "/mnt",
-        "/nix",
-        "/opt",
-        "/private",
-        "/tmp",
-        "/usr/local",
-        "/var",
-        "/System/Volumes/Data/Applications",
-        "/System/Volumes/Data/Library",
-        "/System/Volumes/Data/Users",
-        "/System/Volumes/Data/Volumes",
-        "/System/Volumes/Data/opt",
-        "/System/Volumes/Data/private",
-        "/System/Volumes/Data/tmp",
-        "/System/Volumes/Data/usr/local",
-        "/System/Volumes/Data/var",
-    ];
-    const ALLOWED_LITERALS: &[&str] = &[
-        "/dev/null",
-        "/dev/random",
-        "/dev/urandom",
-        "/etc/localtime",
-        "/etc/zshenv",
-        "/private/etc/localtime",
-        "/private/etc/zshenv",
-        "/private/var/select/developer_dir",
-        "/private/var/select/sh",
-        "/var/select/developer_dir",
-    ];
-    const ALLOWED_RUNTIME_SUBPATHS: &[&str] = &[
-        "/Applications/Xcode.app/Contents/Developer",
-        "/etc/ssl",
-        "/Library/Developer/CommandLineTools",
-        "/System/Volumes/Data/Applications/Xcode.app/Contents/Developer",
-        "/System/Volumes/Data/Library/Developer/CommandLineTools",
-        "/System/Volumes/Data/private/var/select",
-        "/private/var/select",
-        "/private/etc/ssl",
-        "/var/select",
-        "/var/db/timezone",
-    ];
     const RUNTIME_ANCESTORS: &[&str] = &[
         "/Applications",
         "/Applications/Xcode.app",
@@ -1101,12 +1532,12 @@ fn macos_profile(
         "/System/Volumes/Data/Library",
         "/System/Volumes/Data/Library/Developer",
     ];
-    let denied = DENIED_READS
+    let denied = DENIED_READ_ROOTS
         .iter()
         .map(|path| sbpl_subpath(path))
         .collect::<Vec<_>>()
         .join("\n  ");
-    let literals = ALLOWED_LITERALS
+    let literals = ALLOWED_READ_LITERALS
         .iter()
         .map(|path| sbpl_literal(path))
         .collect::<Vec<_>>()
@@ -1343,14 +1774,570 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn direct_host_path_denial_is_actionable_and_distinct_from_workspace_enoent() {
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let connected_path = root.path().join("sentinel-connected-folder-do-not-leak");
+        fs::create_dir(&connected_path).unwrap();
+        let connected_path = fs::canonicalize(connected_path).unwrap();
+        let grants =
+            vec![ExecFolderGrant::new(&connected_path, ExecFolderAccess::ReadOnly).unwrap()];
+        let canonical_grants = canonicalize_folder_grants(&grants).unwrap();
+        let rendered = sandbox_path_denied_message(&canonical_grants);
+        assert!(rendered.contains("connected folders are available"));
+        assert!(!rendered.contains("sentinel-connected-folder-do-not-leak"));
+        assert!(!rendered.contains(&connected_path.display().to_string()));
+
+        let denied_path = "/tmp/sentinel-denied-path-do-not-leak.md";
+        let denied = CodeExecutionRequest::new(
+            ExecutionId::parse("call-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec![denied_path.into()],
+            ".",
+        )
+        .unwrap()
+        .with_folder_grants(grants)
+        .unwrap();
+
+        let first = provider.execute(denied.clone()).await.unwrap();
+        let replay = provider.execute(denied).await.unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(first.provider, CodeExecutionProviderKind::Local);
+        assert_eq!(first.exit_code, Some(126));
+        assert!(first.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+        assert!(first.stderr.contains("available capabilities"));
+        assert!(first.stderr.contains("connected folders are available"));
+        assert!(first.stderr.contains("attach or copy"));
+        assert!(!first.stderr.contains(denied_path));
+        assert!(!first.stderr.contains("sentinel-denied-path-do-not-leak"));
+        assert!(!first
+            .stderr
+            .contains("sentinel-connected-folder-do-not-leak"));
+        assert!(!first.stderr.contains(&connected_path.display().to_string()));
+
+        let changed = CodeExecutionRequest::new(
+            ExecutionId::parse("call-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec!["/tmp/a-different-file".into()],
+            ".",
+        )
+        .unwrap();
+        assert!(matches!(
+            provider.execute(changed).await.unwrap_err(),
+            CodeExecutionError::IdentityConflict
+        ));
+
+        let missing = CodeExecutionRequest::new(
+            ExecutionId::parse("call-missing-workspace-file").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec!["incident-notes.md".into()],
+            ".",
+        )
+        .unwrap();
+        let response = provider.execute(missing).await.unwrap();
+        assert_ne!(response.exit_code, Some(0));
+        assert!(response.stderr.contains("No such file or directory"));
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn failed_shell_access_to_denied_host_path_gets_the_stable_result_code() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let response = provider
+            .execute(request(
+                &workspace,
+                "call-shell-denied-path",
+                "cat /tmp/tidebreak-incident-notes.md",
+            ))
+            .await
+            .unwrap();
+
+        assert_ne!(response.exit_code, Some(0));
+        assert!(
+            response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE),
+            "unexpected stderr: {:?}",
+            response.stderr
+        );
+        assert!(response.stderr.contains("available capabilities"));
+        assert!(response
+            .stderr
+            .contains("no connected folders are currently available"));
+        assert!(!response.stderr.contains("/tmp/tidebreak-incident-notes.md"));
+        assert!(!response.stderr.contains("Operation not permitted"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn dynamically_constructed_host_path_denial_does_not_leak_process_diagnostics() {
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let connected = root
+            .path()
+            .join("sentinel-dynamic-connected-folder-do-not-leak");
+        fs::create_dir(&connected).unwrap();
+        let connected = fs::canonicalize(connected).unwrap();
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-dynamic-python-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec![
+                "-c".into(),
+                "open('/' + 'tmp' + '/sentinel-dynamic-denied-path-do-not-leak').read()".into(),
+            ],
+            ".",
+        )
+        .unwrap()
+        .with_folder_grants(vec![ExecFolderGrant::new(
+            &connected,
+            ExecFolderAccess::ReadOnly,
+        )
+        .unwrap()])
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_ne!(response.exit_code, Some(0));
+        assert!(
+            response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE),
+            "unexpected stderr: {:?}",
+            response.stderr
+        );
+        assert!(response.stderr.contains("available capabilities"));
+        assert!(response.stderr.contains("connected folders are available"));
+        assert!(!response.stderr.contains("/tmp/"));
+        assert!(!response
+            .stderr
+            .contains("sentinel-dynamic-denied-path-do-not-leak"));
+        assert!(!response
+            .stderr
+            .contains("sentinel-dynamic-connected-folder-do-not-leak"));
+        assert!(!response.stderr.contains(&connected.display().to_string()));
+        assert!(!response.stderr.contains("Operation not permitted"));
+        assert!(!response.stderr.contains("PermissionError"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn redirected_shell_path_denial_does_not_leak_through_stdout() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-redirected-denied-path-do-not-leak";
+        let response = provider
+            .execute(request(
+                &workspace,
+                "call-redirected-shell-denied-path",
+                &format!("cat {denied_path} 2>&1; exit 31"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.exit_code, Some(31));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("Operation not permitted"));
+        assert!(!response.stderr.contains("cat:"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn caught_python_path_denial_does_not_leak_through_stdout() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-caught-python-denied-path-do-not-leak";
+        let script = "try:\n    open('/' + 'tmp' + '/sentinel-caught-python-denied-path-do-not-leak').read()\nexcept PermissionError as error:\n    print(error)\n    raise SystemExit(19)";
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-caught-python-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_eq!(response.exit_code, Some(19));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("Operation not permitted"));
+        assert!(!response.stderr.contains("PermissionError"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn caught_python_path_denial_does_not_leak_after_successful_exit() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-caught-success-denied-path-do-not-leak";
+        let script = "path = '/' + 'tmp' + '/sentinel-caught-success-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print(f'Operation not permitted: x{path}')";
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-caught-success-python-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_eq!(response.exit_code, Some(0));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("Operation not permitted"));
+        assert!(!response.stderr.contains("PermissionError"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn malformed_url_shaped_denied_path_is_normalized_after_successful_exit() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-malformed-url-denied-path-do-not-leak";
+        let script = r#"path = "/" + "tmp" + "/sentinel-malformed-url-denied-path-do-not-leak"
+try:
+    open(path).read()
+except PermissionError as error:
+    print("Operation not permitted: https://" + error.filename)"#;
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-malformed-url-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_eq!(response.exit_code, Some(0));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("https:///tmp"));
+        assert!(!response.stderr.contains("Operation not permitted"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn escaped_denied_paths_are_normalized_across_output_channels() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let cases = [
+            (
+                "call-escaped-slash-denied-path",
+                r#"import sys
+path = "/" + "tmp" + "/sentinel-escaped-slash-denied-path-do-not-leak"
+try:
+    open(path).read()
+except PermissionError as error:
+    print("Operation not permitted")
+    print(error.filename.replace("/", "\\/"), file=sys.stderr)"#,
+                "sentinel-escaped-slash-denied-path-do-not-leak",
+            ),
+            (
+                "call-unicode-slash-denied-path",
+                r#"path = "/" + "tmp" + "/sentinel-unicode-slash-denied-path-do-not-leak"
+try:
+    open(path).read()
+except PermissionError as error:
+    print("Operation not permitted: " + error.filename.replace("/", "\\u002F"))"#,
+                "sentinel-unicode-slash-denied-path-do-not-leak",
+            ),
+        ];
+
+        for (execution_id, script, sentinel) in cases {
+            let request = CodeExecutionRequest::new(
+                ExecutionId::parse(execution_id).unwrap(),
+                ExecutionWorkspaceId::parse(&workspace).unwrap(),
+                "/usr/bin/python3",
+                vec!["-c".into(), script.into()],
+                ".",
+            )
+            .unwrap();
+
+            let response = provider.execute(request).await.unwrap();
+
+            assert_eq!(response.exit_code, Some(0), "case {execution_id}");
+            assert!(response.stdout.is_empty(), "case {execution_id}");
+            assert!(
+                response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE),
+                "case {execution_id}: {:?}",
+                response.stderr
+            );
+            assert!(!response.stderr.contains(sentinel), "case {execution_id}");
+            assert!(
+                !response.stderr.contains("Operation not permitted"),
+                "case {execution_id}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn file_url_denied_path_is_normalized_after_successful_exit() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-file-url-denied-path-do-not-leak";
+        let script = r#"import sys
+path = "/" + "tmp" + "/sentinel-file-url-denied-path-do-not-leak"
+try:
+    open(path).read()
+except PermissionError as error:
+    print("Operation not permitted: file://" + error.filename, file=sys.stderr)"#;
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-file-url-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_eq!(response.exit_code, Some(0));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("file:///tmp"));
+        assert!(!response.stderr.contains("Operation not permitted"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn prefixed_denied_path_across_output_channels_is_normalized_on_failure() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let denied_path = "/tmp/sentinel-cross-channel-denied-path-do-not-leak";
+        let script = "import sys\npath = '/' + 'tmp' + '/sentinel-cross-channel-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print('Operation not permitted')\n    print(f'x{path}', file=sys.stderr)\n    raise SystemExit(29)";
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-cross-channel-python-denied-path").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_eq!(response.exit_code, Some(29));
+        assert!(response.stdout.is_empty());
+        assert!(response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(denied_path));
+        assert!(!response.stderr.contains("Operation not permitted"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn shell_tilde_expansion_denial_does_not_leak_the_expanded_host_path() {
+        use std::os::unix::fs::symlink;
+
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let connected = root
+            .path()
+            .join("sentinel-tilde-connected-folder-do-not-leak");
+        fs::create_dir(&connected).unwrap();
+        let connected = fs::canonicalize(connected).unwrap();
+        let env_home = root.path().join(ENV_HOME_DIR).join(&workspace);
+        fs::create_dir_all(&env_home).unwrap();
+        let expanded_link = env_home.join("sentinel-tilde-link-do-not-leak");
+        symlink("/tmp", &expanded_link).unwrap();
+        let expanded_path = expanded_link.join("sentinel-tilde-denied-path-do-not-leak");
+        let request = request(
+            &workspace,
+            "call-shell-tilde-denied-path",
+            "cat ~/sentinel-tilde-link-do-not-leak/sentinel-tilde-denied-path-do-not-leak",
+        )
+        .with_folder_grants(vec![ExecFolderGrant::new(
+            &connected,
+            ExecFolderAccess::ReadOnly,
+        )
+        .unwrap()])
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+
+        assert_ne!(response.exit_code, Some(0));
+        assert!(
+            response.stderr.starts_with(SANDBOX_PATH_DENIED_CODE),
+            "unexpected tilde stderr: {:?}",
+            response.stderr
+        );
+        assert!(response.stderr.contains("available capabilities"));
+        assert!(response.stderr.contains("connected folders are available"));
+        assert!(!response.stderr.contains(&env_home.display().to_string()));
+        assert!(!response
+            .stderr
+            .contains(&expanded_path.display().to_string()));
+        assert!(!response.stderr.contains("sentinel-tilde-link-do-not-leak"));
+        assert!(!response
+            .stderr
+            .contains("sentinel-tilde-denied-path-do-not-leak"));
+        assert!(!response
+            .stderr
+            .contains("sentinel-tilde-connected-folder-do-not-leak"));
+        assert!(!response.stderr.contains(&connected.display().to_string()));
+        assert!(!response.stderr.contains("Operation not permitted"));
+        assert!(!response.stderr.contains("cat:"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn ordinary_command_failure_is_not_reclassified_as_a_path_denial() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let response = provider
+            .execute(request(
+                &workspace,
+                "call-ordinary-command-failure",
+                "printf 'application validation failed\\n' >&2; exit 23",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.exit_code, Some(23));
+        assert_eq!(response.stderr, "application validation failed\n");
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn permission_denial_phrase_without_a_denied_path_is_preserved() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let response = provider
+            .execute(request(
+                &workspace,
+                "call-permission-denial-phrase",
+                "printf 'Operation not permitted\\n'; printf 'Operation not permitted\\n' >&2; exit 23",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.exit_code, Some(23));
+        assert_eq!(response.stdout, "Operation not permitted\n");
+        assert_eq!(response.stderr, "Operation not permitted\n");
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn successful_output_with_allowed_path_and_url_diagnostics_is_preserved() {
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let allowed_path = fs::canonicalize(root.path().join(&workspace))
+            .unwrap()
+            .join("allowed.txt");
+        let script = r#"import os
+import sys
+path = os.path.join(os.getcwd(), "allowed.txt")
+print('Operation not permitted: "' + path.replace("/", "\\/") + '"')
+print("Operation not permitted: https://example.com/tmp/sentinel-url-path")
+print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sys.stderr)"#;
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-successful-allowed-path-diagnostic").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/usr/bin/python3",
+            vec!["-c".into(), script.into()],
+            ".",
+        )
+        .unwrap();
+        let response = provider.execute(request).await.unwrap();
+        let escaped_allowed = allowed_path.display().to_string().replace('/', "\\/");
+        let unicode_allowed = allowed_path.display().to_string().replace('/', "\\u002f");
+
+        assert_eq!(response.exit_code, Some(0));
+        assert_eq!(
+            response.stdout,
+            format!(
+                "Operation not permitted: \"{escaped_allowed}\"\nOperation not permitted: https://example.com/tmp/sentinel-url-path\n"
+            )
+        );
+        assert_eq!(
+            response.stderr,
+            format!("Operation not permitted: '{unicode_allowed}'\n")
+        );
+        assert!(!response.stdout.contains(SANDBOX_PATH_DENIED_CODE));
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn missing_file_below_connected_folder_is_not_a_sandbox_path_denial() {
+        let (_root, provider, workspace) = fixture(Duration::from_secs(3));
+        let connected = tempfile::tempdir().unwrap();
+        let connected_path = fs::canonicalize(connected.path()).unwrap();
+        let missing = connected_path.join("incident-notes.md");
+        let request = CodeExecutionRequest::new(
+            ExecutionId::parse("call-connected-missing").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec![missing.display().to_string()],
+            ".",
+        )
+        .unwrap()
+        .with_folder_grants(vec![ExecFolderGrant::new(
+            &connected_path,
+            ExecFolderAccess::ReadOnly,
+        )
+        .unwrap()])
+        .unwrap();
+
+        let response = provider.execute(request).await.unwrap();
+        assert_ne!(response.exit_code, Some(0));
+        assert!(response.stderr.contains("No such file or directory"));
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn resolved_workspace_paths_keep_enoent_and_symlink_escapes_are_denied() {
+        use std::os::unix::fs::symlink;
+
+        let (root, provider, workspace) = fixture(Duration::from_secs(3));
+        let workspace_path = fs::canonicalize(root.path().join(&workspace)).unwrap();
+        fs::create_dir(workspace_path.join("nested")).unwrap();
+        let in_workspace = workspace_path.join("nested/../incident-notes.md");
+        let missing = CodeExecutionRequest::new(
+            ExecutionId::parse("call-absolute-workspace-missing").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec![in_workspace.display().to_string()],
+            ".",
+        )
+        .unwrap();
+        let response = provider.execute(missing).await.unwrap();
+        assert_ne!(response.exit_code, Some(0));
+        assert!(response.stderr.contains("No such file or directory"));
+        assert!(!response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), workspace_path.join("escaped")).unwrap();
+        let escaped = CodeExecutionRequest::new(
+            ExecutionId::parse("call-workspace-symlink-escape").unwrap(),
+            ExecutionWorkspaceId::parse(&workspace).unwrap(),
+            "/bin/cat",
+            vec![workspace_path
+                .join("escaped/incident-notes.md")
+                .display()
+                .to_string()],
+            ".",
+        )
+        .unwrap();
+        let response = provider.execute(escaped).await.unwrap();
+        assert_eq!(response.exit_code, Some(126));
+        assert!(response.stderr.contains(SANDBOX_PATH_DENIED_CODE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn local_sandbox_confines_writes_and_network_and_caches_exact_retry() {
         let (root, provider, workspace) = fixture(Duration::from_secs(3));
         let outside = root.path().join("outside");
         let script = format!(
             "printf ok > result; \
-             if printf no > '{}'; then echo outside-write; else echo write-blocked; fi; \
+             if printf no > '{}'; then echo outside-write > write-status; \
+             else echo write-blocked > write-status; fi; \
              if /usr/bin/curl -fsS --max-time 1 https://example.com >/dev/null 2>&1; \
-             then echo network-open; else echo network-blocked; fi; \
+             then echo network-open > network-status; \
+             else echo network-blocked > network-status; fi; \
              cat result",
             outside.display()
         );
@@ -1361,13 +2348,20 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.exit_code, Some(0));
-        assert!(first.stdout.contains("write-blocked"));
-        assert!(first.stdout.contains("network-blocked"));
-        assert!(first.stdout.ends_with("ok"));
+        assert!(first.stdout.is_empty());
+        assert!(first.stderr.starts_with(SANDBOX_PATH_DENIED_CODE));
         assert!(!outside.exists());
         assert_eq!(
-            fs::read_to_string(root.path().join(workspace).join("result")).unwrap(),
+            fs::read_to_string(root.path().join(&workspace).join("result")).unwrap(),
             "ok"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join(&workspace).join("write-status")).unwrap(),
+            "write-blocked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join(&workspace).join("network-status")).unwrap(),
+            "network-blocked\n"
         );
 
         for (execution, command) in [

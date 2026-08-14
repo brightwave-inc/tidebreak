@@ -20,7 +20,7 @@ use crate::state::SandboxAttemptGuard;
 use super::*;
 
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
@@ -58,6 +58,12 @@ impl ModelProvider for RecordingProvider {
             ProviderEvent::TextDelta {
                 text: "done".into(),
             },
+            ProviderEvent::Usage(Usage {
+                input_tokens: 13,
+                output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }),
             ProviderEvent::Stop {
                 reason: StopReason::EndTurn,
             },
@@ -304,6 +310,10 @@ struct BlockingProvider {
     started: Arc<Notify>,
 }
 
+struct CountingPendingProvider {
+    entries: Arc<AtomicUsize>,
+}
+
 struct DropMarker(Arc<AtomicBool>);
 
 impl Drop for DropMarker {
@@ -329,11 +339,13 @@ impl ProviderResolver for DropAwareResolver {
 struct DropAwareProvider {
     started: Arc<Notify>,
     dropped: Arc<AtomicBool>,
+    first_event: Option<ProviderEvent>,
 }
 
 struct DropAwareStream {
     started: Arc<Notify>,
     dropped: Arc<AtomicBool>,
+    first_event: Option<ProviderEvent>,
     announced: bool,
 }
 
@@ -341,6 +353,9 @@ impl futures::Stream for DropAwareStream {
     type Item = ProviderEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.first_event.take() {
+            return Poll::Ready(Some(event));
+        }
         if !self.announced {
             self.announced = true;
             self.started.notify_one();
@@ -365,6 +380,7 @@ impl ModelProvider for DropAwareProvider {
         Ok(DropAwareStream {
             started: self.started.clone(),
             dropped: self.dropped.clone(),
+            first_event: self.first_event.clone(),
             announced: false,
         }
         .boxed())
@@ -404,6 +420,18 @@ impl ModelProvider for BlockingProvider {
 
     async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         self.started.notify_one();
+        Ok(stream::pending().boxed())
+    }
+}
+
+#[async_trait]
+impl ModelProvider for CountingPendingProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("counting-pending")
+    }
+
+    async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        self.entries.fetch_add(1, Ordering::SeqCst);
         Ok(stream::pending().boxed())
     }
 }
@@ -725,6 +753,17 @@ async fn sandbox_run_inherits_the_chat_model_and_reasoning_effort() {
             .model
             .as_deref(),
         Some("chat-cheap-model")
+    );
+    let accounted = store.get_agent_run(run.id).await.unwrap().unwrap();
+    assert_eq!(accounted.model_steps, 1);
+    assert_eq!(
+        accounted.usage,
+        Usage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -1188,9 +1227,257 @@ async fn refuses_malformed_sandbox_tool_events_without_checkpointing() {
         assert!(
             complete_sandbox_task(Arc::new(EventProvider(events)), request.clone())
                 .await
+                .outcome
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn sandbox_provider_receipts_require_vendor_entitlement_canonical_shape_and_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DbStore::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("t.db").display()
+    ))
+    .await
+    .unwrap();
+    let vendor = tidebreak_core::VendorWebSearch { max_uses: 3 };
+    let canonical_input = serde_json::json!({"query": "Tidebreak release notes"});
+    let canonical_output = serde_json::json!({
+        "provider": "anthropic",
+        "results": [{
+            "url": "https://example.com/notes",
+            "title": "Release notes",
+            "snippet": "What shipped",
+        }],
+    });
+    let usage = Usage {
+        input_tokens: 17,
+        output_tokens: 4,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+    };
+    let request_for = |web_search| AgentConfig {
+        provider: Some(ProviderId::new("anthropic")),
+        model: "claude-opus-5".into(),
+        web_search,
+        ..AgentConfig::default()
+    };
+    let vendor_request = sandbox_request(
+        &request_for(TurnWebSearch::Vendor(vendor)),
+        "task".into(),
+        &[],
+        &store,
+        false,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+    let off_request = sandbox_request(
+        &request_for(TurnWebSearch::Off),
+        "task".into(),
+        &[],
+        &store,
+        false,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+    let host_request = sandbox_request(
+        &request_for(TurnWebSearch::Host),
+        "task".into(),
+        &[],
+        &store,
+        false,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+    let receipt = |name: &str,
+                   input: serde_json::Value,
+                   output: serde_json::Value,
+                   replay: Option<tidebreak_core::ProviderToolReplay>| {
+        ProviderEvent::ProviderExecutedToolCall {
+            name: name.into(),
+            input,
+            output,
+            is_error: false,
+            replay,
+        }
+    };
+    let mismatched_replay = tidebreak_core::ProviderToolReplay::captured(
+        tidebreak_core::ReasoningOrigin {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "different-model".into(),
+        },
+        vec![
+            serde_json::json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_search",
+                "name": tidebreak_core::WEB_SEARCH_TOOL,
+                "input": canonical_input.clone(),
+            }),
+            serde_json::json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_search",
+                "content": [{"encrypted_content": "opaque"}],
+            }),
+        ],
+    );
+    let rejected = vec![
+        (
+            "fake provider exec",
+            vendor_request.clone(),
+            receipt(
+                SANDBOX_EXEC_TOOL,
+                serde_json::json!({"command": "echo"}),
+                serde_json::json!({"stdout": "forged"}),
+                None,
+            ),
+        ),
+        (
+            "web search while off",
+            off_request,
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input.clone(),
+                canonical_output.clone(),
+                None,
+            ),
+        ),
+        (
+            "web search while host-routed",
+            host_request,
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input.clone(),
+                canonical_output.clone(),
+                None,
+            ),
+        ),
+        (
+            "malformed normalized output",
+            vendor_request.clone(),
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input.clone(),
+                serde_json::json!({"results": []}),
+                None,
+            ),
+        ),
+        (
+            "oversized normalized input",
+            vendor_request.clone(),
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                serde_json::json!({"query": "x".repeat(tidebreak_core::MAX_WEB_SEARCH_QUERY_CHARS + 1)}),
+                canonical_output.clone(),
+                None,
+            ),
+        ),
+        (
+            "oversized normalized output",
+            vendor_request.clone(),
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input.clone(),
+                serde_json::json!({
+                    "provider": "anthropic",
+                    "results": [{
+                        "url": "https://example.com/notes",
+                        "title": "Release notes",
+                        "snippet": "What shipped",
+                        "content": "x".repeat(16_000),
+                    }],
+                }),
+                None,
+            ),
+        ),
+        (
+            "mismatched native replay origin",
+            vendor_request.clone(),
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input.clone(),
+                canonical_output.clone(),
+                Some(mismatched_replay),
+            ),
+        ),
+    ];
+
+    for (label, request, event) in rejected {
+        let attempt = complete_sandbox_task(
+            Arc::new(EventProvider(vec![
+                event,
+                ProviderEvent::Usage(usage),
+                ProviderEvent::TextDelta {
+                    text: "answer".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])),
+            request,
+        )
+        .await;
+        assert_eq!(attempt.usage, usage, "{label} must not erase usage");
+        assert!(attempt.account, "{label} must remain accounted");
+        let step = attempt.outcome.unwrap();
+        assert!(
+            step.provider_executed.is_empty(),
+            "{label} must not publish provider progress: {:?}",
+            step.provider_executed
+        );
+    }
+
+    let matching_replay = tidebreak_core::ProviderToolReplay::captured(
+        tidebreak_core::ReasoningOrigin {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-5".into(),
+        },
+        vec![
+            serde_json::json!({
+                "type": "server_tool_use",
+                "id": "srvtoolu_search",
+                "name": tidebreak_core::WEB_SEARCH_TOOL,
+                "input": canonical_input.clone(),
+            }),
+            serde_json::json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_search",
+                "content": [{"encrypted_content": "opaque"}],
+            }),
+        ],
+    );
+    let accepted = complete_sandbox_task(
+        Arc::new(EventProvider(vec![
+            receipt(
+                tidebreak_core::WEB_SEARCH_TOOL,
+                canonical_input,
+                canonical_output,
+                Some(matching_replay),
+            ),
+            ProviderEvent::TextDelta {
+                text: "answer".into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::EndTurn,
+            },
+        ])),
+        vendor_request,
+    )
+    .await
+    .outcome
+    .unwrap();
+    assert_eq!(accepted.provider_executed.len(), 1);
+    assert_eq!(
+        accepted.provider_executed[0].progress_line(),
+        "Ran web_search: Tidebreak release notes"
+    );
 }
 
 /// A tool the run was never offered is the model's mistake, not the
@@ -1229,6 +1516,7 @@ async fn unadvertised_sandbox_tool_call_is_answered_rather_than_refused() {
         request,
     )
     .await
+    .outcome
     .unwrap()
     .completion;
     let SandboxCompletion::ToolCalls(intents) = completion else {
@@ -1271,6 +1559,7 @@ async fn sandbox_completion_treats_bare_and_structured_refusals_as_failures() {
         request.clone(),
     )
     .await
+    .outcome
     {
         Err(error) => error,
         Ok(_) => panic!("bare refusal must not complete a sandbox run"),
@@ -1292,6 +1581,7 @@ async fn sandbox_completion_treats_bare_and_structured_refusals_as_failures() {
         request,
     )
     .await
+    .outcome
     {
         Err(error) => error,
         Ok(_) => panic!("structured refusal must not complete a sandbox run"),
@@ -1853,6 +2143,120 @@ async fn cancellation_while_resolving_prevents_the_provider_request() {
 }
 
 #[tokio::test]
+async fn deadline_clamped_noop_heartbeat_keeps_the_exact_in_process_lease_live() {
+    let (_unused, store, provider, chat, dir) = fixture().await;
+    let call = CallId::new();
+    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
+    admit_sandbox(&store, chat.id, call, "finish despite a clamped lease").await;
+
+    // The claim is capped at the run's absolute deadline. Every heartbeat asks
+    // for the same cap and therefore changes no row, even though the exact
+    // claim remains live. A no-op renewal must be validated rather than
+    // misclassified as lease loss before provider egress.
+    let worker = SandboxAgentRunWorker::new(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(provider.clone())),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        AgentConfig {
+            model: "m".into(),
+            ..AgentConfig::default()
+        },
+        Some(dir.path().join("scratch-clamped-lease")),
+        SandboxAgentRunWorkerConfig {
+            lease: Duration::from_secs(24 * 60 * 60),
+            heartbeat: Duration::from_millis(10),
+            ..SandboxAgentRunWorkerConfig::default()
+        },
+    );
+
+    assert_eq!(
+        worker.run_once().await.unwrap(),
+        SandboxAgentRunWorkerOutcome::Completed(id)
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pre_signalled_cancellation_after_egress_heartbeat_never_polls_provider() {
+    let (_unused, store, _provider, chat, _dir) = fixture().await;
+    let call = CallId::new();
+    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
+    admit_sandbox(
+        &store,
+        chat.id,
+        call,
+        "cancel at the provider authorization fence",
+    )
+    .await;
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_agent_run(lease_token, chrono::Duration::seconds(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("sandbox run should claim");
+    assert_eq!(claimed.id, id);
+
+    let provider_entries = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::new(SandboxAttemptGuard::default());
+    let worker = SandboxAgentRunWorker::with_attempts(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(Arc::new(CountingPendingProvider {
+            entries: provider_entries.clone(),
+        }))),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        attempts.clone(),
+        AgentConfig {
+            model: "m".into(),
+            ..AgentConfig::default()
+        },
+        None,
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let cancellation_store = store.clone();
+    let cancellation_attempts = attempts.clone();
+    let outcome = worker
+        .process_after_pre_egress(claimed, lease_token, async move {
+            assert!(matches!(
+                cancellation_store
+                    .request_agent_run_cancellation(id)
+                    .await
+                    .unwrap(),
+                Some(tidebreak_core::RequestAgentRunCancellationOutcome::Requested(_))
+            ));
+            let signal = cancellation_store
+                .get_agent_run_cancellation_signal(id)
+                .await
+                .unwrap()
+                .expect("cancellation receipt should retain the claimed lease");
+            assert_eq!(signal.lease_token, lease_token);
+            assert!(cancellation_attempts.cancel_model(id, lease_token));
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, SandboxAgentRunWorkerOutcome::Cancelled(id));
+    assert_eq!(provider_entries.load(Ordering::SeqCst), 0);
+    let run = store.get_agent_run(id).await.unwrap().unwrap();
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+    assert_eq!(run.model_steps, 0);
+    assert_eq!(run.usage, Usage::default());
+    let result = store.get_agent_run_result(id).await.unwrap().unwrap();
+    assert!(matches!(
+        result.payload,
+        tidebreak_core::AgentRunResultPayload::Cancelled { .. }
+    ));
+    assert_eq!(result.model_steps, 0);
+    assert_eq!(result.usage, Usage::default());
+}
+
+#[tokio::test]
 async fn local_signal_drops_resolver_before_durable_cancellation_ack() {
     let (_unused, store, _provider, chat, _dir) = fixture().await;
     let call = CallId::new();
@@ -1919,6 +2323,7 @@ async fn local_signal_drops_provider_stream_before_durable_cancellation_ack() {
         Arc::new(FixedResolver(Arc::new(DropAwareProvider {
             started: started.clone(),
             dropped: dropped.clone(),
+            first_event: None,
         }))),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -1954,6 +2359,255 @@ async fn local_signal_drops_provider_stream_before_durable_cancellation_ack() {
         store.get_agent_run(id).await.unwrap().unwrap().status,
         AgentRunStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn local_cancellation_accounts_usage_observed_before_stream_drop() {
+    let (_unused, store, _provider, chat, _dir) = fixture().await;
+    let call = CallId::new();
+    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
+    admit_sandbox(&store, chat.id, call, "cancel after usage").await;
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(SandboxAttemptGuard::default());
+    let usage = Usage {
+        input_tokens: 13,
+        output_tokens: 5,
+        ..Usage::default()
+    };
+    let worker = SandboxAgentRunWorker::with_attempts(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(Arc::new(DropAwareProvider {
+            started: started.clone(),
+            dropped: dropped.clone(),
+            first_event: Some(ProviderEvent::Usage(usage)),
+        }))),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        attempts.clone(),
+        AgentConfig {
+            model: "m".into(),
+            ..AgentConfig::default()
+        },
+        None,
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let started_wait = started.notified();
+    let execution = tokio::spawn(async move { worker.run_once().await });
+    started_wait.await;
+    assert!(matches!(
+        store.request_agent_run_cancellation(id).await.unwrap(),
+        Some(tidebreak_core::RequestAgentRunCancellationOutcome::Requested(_))
+    ));
+    let signal = store
+        .get_agent_run_cancellation_signal(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(attempts.cancel_model(id, signal.lease_token));
+    assert_eq!(
+        execution.await.unwrap().unwrap(),
+        SandboxAgentRunWorkerOutcome::Cancelled(id)
+    );
+    assert!(dropped.load(Ordering::SeqCst));
+
+    let run = store.get_agent_run(id).await.unwrap().unwrap();
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+    assert_eq!(run.model_steps, 1);
+    assert_eq!(run.usage, usage);
+    let result = store.get_agent_run_result(id).await.unwrap().unwrap();
+    assert_eq!(result.model_steps, 1);
+    assert_eq!(result.usage, usage);
+}
+
+/// Final accounting can remain unavailable beyond the execution lease that
+/// was live when cancellation began. The immutable cancellation identity must
+/// renew finalization-only authority, retry the same accounting CAS, and only
+/// then snapshot the totals into the cancelled receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_cancellation_finalization_survives_accounting_failure_past_execution_lease() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                dir.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let chat = sandbox_chat();
+        store.create_chat(&chat).await.unwrap();
+        let call = CallId::new();
+        let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
+        admit_sandbox(&store, chat.id, call, "cancel after delayed accounting").await;
+
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(SandboxAttemptGuard::default());
+        let usage = Usage {
+            input_tokens: 19,
+            output_tokens: 11,
+            cache_read_input_tokens: 7,
+            cache_creation_input_tokens: 3,
+        };
+        let lease = Duration::from_millis(150);
+        let worker = SandboxAgentRunWorker::with_attempts(
+            store.clone(),
+            test_secrets(),
+            Arc::new(FixedResolver(Arc::new(DropAwareProvider {
+                started: started.clone(),
+                dropped: dropped.clone(),
+                first_event: Some(ProviderEvent::Usage(usage)),
+            }))),
+            Arc::new(Notify::new()),
+            Arc::new(Notify::new()),
+            Arc::new(EventBus::default()),
+            attempts.clone(),
+            AgentConfig {
+                model: "m".into(),
+                ..AgentConfig::default()
+            },
+            None,
+            None,
+            SandboxAgentRunWorkerConfig {
+                lease,
+                heartbeat: Duration::from_millis(40),
+                ..SandboxAgentRunWorkerConfig::default()
+            },
+        );
+        worker.fail_cancellation_accounting_until_released();
+        let accounting_failure_observed = worker.cancellation_accounting_failure_observed.clone();
+        let first_failure = accounting_failure_observed.notified();
+        tokio::pin!(first_failure);
+        let finalization_control = worker.clone();
+        let started_wait = started.notified();
+        let execution = tokio::spawn(async move { worker.run_once().await });
+
+        started_wait.await;
+        assert!(matches!(
+            store.request_agent_run_cancellation(id).await.unwrap(),
+            Some(tidebreak_core::RequestAgentRunCancellationOutcome::Requested(_))
+        ));
+        let cancelling = store.get_agent_run(id).await.unwrap().unwrap();
+        let original_expiry = cancelling
+            .lease_expires_at
+            .expect("the cancelling run retains its execution lease expiry");
+        let signal = store
+            .get_agent_run_cancellation_signal(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(attempts.cancel_model(id, signal.lease_token));
+
+        tokio::time::timeout(Duration::from_secs(2), first_failure)
+            .await
+            .expect("post-quiescence accounting reaches the injected outage");
+        assert!(dropped.load(Ordering::SeqCst));
+        let until_original_expiry = original_expiry
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(until_original_expiry + Duration::from_millis(75)).await;
+        assert!(Utc::now() > original_expiry);
+        let still_cancelling = store.get_agent_run(id).await.unwrap().unwrap();
+        assert_eq!(still_cancelling.status, AgentRunStatus::Cancelling);
+        assert!(still_cancelling
+            .lease_expires_at
+            .is_some_and(|expiry| expiry > Utc::now()));
+
+        finalization_control.release_cancellation_accounting();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), execution)
+                .await
+                .expect("finalization resumes after accounting recovers")
+                .unwrap()
+                .unwrap(),
+            SandboxAgentRunWorkerOutcome::Cancelled(id)
+        );
+        assert!(
+            finalization_control
+                .cancellation_accounting_calls
+                .load(Ordering::SeqCst)
+                >= 2
+        );
+
+        let cancelled = store.get_agent_run(id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        assert_eq!(cancelled.model_steps, 1);
+        assert_eq!(cancelled.usage, usage);
+        let result = store.get_agent_run_result(id).await.unwrap().unwrap();
+        assert!(matches!(
+            &result.payload,
+            tidebreak_core::AgentRunResultPayload::Cancelled { .. }
+        ));
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.usage, usage);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+#[tokio::test]
+async fn local_cancellation_accounts_output_observed_without_usage() {
+    let (_unused, store, _provider, chat, _dir) = fixture().await;
+    let call = CallId::new();
+    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
+    admit_sandbox(&store, chat.id, call, "cancel after output").await;
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(SandboxAttemptGuard::default());
+    let worker = SandboxAgentRunWorker::with_attempts(
+        store.clone(),
+        test_secrets(),
+        Arc::new(FixedResolver(Arc::new(DropAwareProvider {
+            started: started.clone(),
+            dropped: dropped.clone(),
+            first_event: Some(ProviderEvent::TextDelta {
+                text: "partial".into(),
+            }),
+        }))),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(EventBus::default()),
+        attempts.clone(),
+        AgentConfig {
+            model: "m".into(),
+            ..AgentConfig::default()
+        },
+        None,
+        None,
+        SandboxAgentRunWorkerConfig::default(),
+    );
+    let started_wait = started.notified();
+    let execution = tokio::spawn(async move { worker.run_once().await });
+    started_wait.await;
+    assert!(matches!(
+        store.request_agent_run_cancellation(id).await.unwrap(),
+        Some(tidebreak_core::RequestAgentRunCancellationOutcome::Requested(_))
+    ));
+    let signal = store
+        .get_agent_run_cancellation_signal(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(attempts.cancel_model(id, signal.lease_token));
+    assert_eq!(
+        execution.await.unwrap().unwrap(),
+        SandboxAgentRunWorkerOutcome::Cancelled(id)
+    );
+    assert!(dropped.load(Ordering::SeqCst));
+
+    let run = store.get_agent_run(id).await.unwrap().unwrap();
+    assert_eq!(run.status, AgentRunStatus::Cancelled);
+    assert_eq!(run.model_steps, 1);
+    assert_eq!(run.usage, Usage::default());
+    let result = store.get_agent_run_result(id).await.unwrap().unwrap();
+    assert_eq!(result.model_steps, 1);
+    assert_eq!(result.usage, Usage::default());
 }
 
 #[tokio::test]
@@ -2155,6 +2809,9 @@ async fn one_model_step_never_advertises_unconsumable_web_search_work() {
         &AgentConfig {
             model: "m".into(),
             max_steps: 1,
+            web_search: TurnWebSearch::Vendor(tidebreak_core::VendorWebSearch {
+                max_uses: tidebreak_core::VendorWebSearch::DEFAULT_MAX_USES,
+            }),
             ..AgentConfig::default()
         },
         "task".into(),
@@ -2166,6 +2823,11 @@ async fn one_model_step_never_advertises_unconsumable_web_search_work() {
     )
     .await
     .unwrap();
+    assert!(request.vendor_web_search.is_none());
+    assert!(request
+        .system
+        .as_deref()
+        .is_some_and(|prompt| !prompt.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
     assert_eq!(
         request
             .tools
@@ -2196,6 +2858,7 @@ async fn one_model_step_never_advertises_unconsumable_web_search_work() {
     // not a burned attempt.
     let completion = complete_sandbox_task(provider, request)
         .await
+        .outcome
         .unwrap()
         .completion;
     let SandboxCompletion::ToolCalls(intents) = completion else {
@@ -2262,7 +2925,11 @@ async fn desktop_delegation_advertises_one_canonical_file_read() {
         },
     ]));
     assert!(matches!(
-        complete_sandbox_task(provider, request).await.unwrap().completion,
+        complete_sandbox_task(provider, request)
+            .await
+            .outcome
+            .unwrap()
+            .completion,
         SandboxCompletion::ToolCalls(ref intents)
             if matches!(
                 intents.as_slice(),
@@ -2314,6 +2981,7 @@ async fn delegated_file_read_answers_nonempty_arguments_without_parking_work() {
     ]));
     let completion = complete_sandbox_task(provider, request)
         .await
+        .outcome
         .unwrap()
         .completion;
     let SandboxCompletion::ToolCalls(intents) = completion else {
@@ -2528,7 +3196,7 @@ impl ModelProvider for VendorSearchProvider {
             ProviderEvent::ProviderExecutedToolCall {
                 name: tidebreak_core::SANDBOX_WEB_SEARCH_TOOL.into(),
                 input: serde_json::json!({"query": "Tidebreak release notes"}),
-                output: serde_json::json!({"results": []}),
+                output: serde_json::json!({"provider": "vendor-search", "results": []}),
                 is_error: false,
                 replay: None,
             },
@@ -3127,6 +3795,75 @@ async fn spend_the_cadence(
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn vendor_search_is_withdrawn_with_work_tools_near_the_step_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = sandbox_chat();
+    store.create_chat(&chat).await.unwrap();
+    let spawn = CallId::new();
+    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(spawn);
+    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
+    spend_the_cadence(&store, id, chat.id, 7).await;
+    let calls = store
+        .list_sandbox_tool_calls_for_agent_run(id)
+        .await
+        .unwrap();
+
+    let request = sandbox_request(
+        &AgentConfig {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-5".into(),
+            max_steps: 8,
+            web_search: TurnWebSearch::Vendor(tidebreak_core::VendorWebSearch {
+                max_uses: tidebreak_core::VendorWebSearch::DEFAULT_MAX_USES,
+            }),
+            ..AgentConfig::default()
+        },
+        "Research this.".into(),
+        &calls,
+        store.as_ref(),
+        false,
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+
+    assert!(request.vendor_web_search.is_none());
+    assert!(!request.tools.iter().any(|tool| {
+        matches!(
+            tool.name.as_str(),
+            SANDBOX_EXEC_TOOL
+                | tidebreak_core::SANDBOX_WEB_SEARCH_TOOL
+                | tidebreak_core::UPDATE_TASK_PLAN_TOOL
+        )
+    }));
+    assert!(request
+        .system
+        .as_deref()
+        .is_some_and(|prompt| !prompt.contains(SANDBOX_PROMPT_WEB_SEARCH_CLAUSE)));
+    let notice = request
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(notice.contains("search are no longer available"));
 }
 
 /// A run that calls a tool after its cadence is spent checks in, not dies.

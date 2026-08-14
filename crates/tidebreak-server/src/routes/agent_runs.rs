@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use tidebreak_code_execution::CodeExecutionProviderKind;
 use tidebreak_core::{
     AgentRun, AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, CallId, ChatId,
-    RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, TurnId,
+    RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, TurnId,
 };
 
+use crate::agent_control_tools::SandboxCancellationAcceleration;
 use crate::code_execution;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
@@ -65,6 +65,11 @@ pub struct AgentRunSnapshot {
     /// setting at list time — the same selection the next `exec` would use.
     pub code_execution_provider: CodeExecutionProviderSnapshot,
     pub status: AgentRunStatus,
+    /// Completed provider calls accumulated across every attempt.
+    pub model_steps: i32,
+    /// Disjoint provider usage accumulated across every attempt. Providers
+    /// without cache telemetry leave both cache fields at zero.
+    pub usage: AgentRunUsageSnapshot,
     /// The exact bounded task delegated by the visible spawn step.
     pub task: Option<String>,
     pub started_at: Option<chrono::DateTime<Utc>>,
@@ -121,6 +126,8 @@ impl AgentRunSnapshot {
             execution_location: run.execution_location,
             code_execution_provider,
             status: run.status,
+            model_steps: run.model_steps,
+            usage: run.usage.into(),
             task: run.input,
             started_at: run.started_at,
             finished_at: run.finished_at,
@@ -131,6 +138,26 @@ impl AgentRunSnapshot {
             terminal_text,
             created_at: run.created_at,
             updated_at: run.updated_at,
+        }
+    }
+}
+
+/// Renderer-safe disjoint token accounting for one background run.
+#[derive(Debug, Clone, Copy, Default, Serialize, ts_rs::TS)]
+pub struct AgentRunUsageSnapshot {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+}
+
+impl From<tidebreak_core::Usage> for AgentRunUsageSnapshot {
+    fn from(usage: tidebreak_core::Usage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
         }
     }
 }
@@ -375,35 +402,6 @@ fn sandbox_activity_history_item(
     })
 }
 
-fn foreground_activity(
-    calls: &[ToolCallRecord],
-    now: chrono::DateTime<Utc>,
-) -> Option<AgentActivitySnapshot> {
-    // A foreground turn can park on exactly one client tool call. Looking at
-    // the latest live supported call means a completed folder operation never
-    // lingers after its continuation advances.
-    let call = calls.iter().rev().find(|call| {
-        call.execution == ToolCallExecution::Client && call.status == ToolCallStatus::Pending
-    })?;
-    let kind = match call.name.as_str() {
-        "list_connected_folders" => AgentActivityKind::ListConnectedFolders,
-        "list_folder" => AgentActivityKind::ListFolder,
-        "read_connected_file" => AgentActivityKind::ReadConnectedFile,
-        "import_connected_file" => AgentActivityKind::ImportConnectedFile,
-        // Unknown client tools are executor data, not a renderer API contract.
-        _ => return None,
-    };
-    let status = if call
-        .client_lease_expires_at
-        .is_some_and(|expires_at| expires_at > now)
-    {
-        AgentActivityStatus::Running
-    } else {
-        AgentActivityStatus::Waiting
-    };
-    Some(AgentActivitySnapshot { kind, status })
-}
-
 /// `GET /chats/{id}/agent-runs` — list renderer-safe execution state.
 pub async fn list_agent_runs(
     State(state): State<AppState>,
@@ -418,11 +416,6 @@ pub async fn list_agent_runs(
     let code_execution_provider = CodeExecutionProviderSnapshot::from_config(
         code_execution::read_config(&*state.store).await?.provider,
     );
-    // This read model needs only live client checkpoints. Loading the complete
-    // tool-call transcript here would needlessly deserialize historical model
-    // arguments, results, and local diagnostics just to render current work.
-    let client_calls = store.list_pending_client_tool_calls(id).await?;
-    let now = Utc::now();
     let mut snapshots = Vec::with_capacity(runs.len());
     for run in runs {
         let mut submitted_outputs = Vec::new();
@@ -454,22 +447,13 @@ pub async fn list_agent_runs(
                 .map(|code| format!("Sandbox task failed ({code})")),
             _ => None,
         };
-        let mut task_plan = None;
-        let activity = if run.tier == AgentRunTier::Background {
-            let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
-            // Only a background run keeps a run-scoped plan. The foreground
-            // coordinator's plan belongs to the chat and has its own route.
-            task_plan = store
-                .get_agent_run_task_plan(run.id)
-                .await?
-                .as_ref()
-                .map(AgentRunTaskPlanProgress::from_plan);
-            sandbox_activity(&calls)
-        } else if run.tier == AgentRunTier::Foreground {
-            foreground_activity(&client_calls, now)
-        } else {
-            None
-        };
+        let calls = store.list_sandbox_tool_calls_for_agent_run(run.id).await?;
+        let task_plan = store
+            .get_agent_run_task_plan(run.id)
+            .await?
+            .as_ref()
+            .map(AgentRunTaskPlanProgress::from_plan);
+        let activity = sandbox_activity(&calls);
         snapshots.push(AgentRunSnapshot::from_run(
             run,
             activity,
@@ -743,8 +727,7 @@ pub async fn post_agent_run_cancel(
         }
     };
 
-    signal_sandbox_run_after_commit(&state, run.id).await;
-    state.agent_run_wake.notify_one();
+    signal_sandbox_run_after_commit(&state, run.id, run.lease_token).await;
     Ok((
         StatusCode::ACCEPTED,
         Json(AgentRunCancellationSnapshot { id: run.id, status }),
@@ -867,35 +850,16 @@ pub async fn post_agent_run_steer(
 pub(super) async fn signal_sandbox_run_after_commit(
     state: &AppState,
     run_id: tidebreak_core::AgentRunId,
+    committed_lease_token: Option<uuid::Uuid>,
 ) {
-    if let Ok(Some(signal)) = state.store.get_agent_run_cancellation_signal(run_id).await {
-        state
-            .sandbox_attempts
-            .cancel_model(run_id, signal.lease_token);
-    }
-    // Cancelling a waiting run atomically terminalizes its live tool call and
-    // records the exact executor lease. Never infer that lease from mutable
-    // call state or signal every call belonging to a run.
-    if let Ok(calls) = state
-        .store
-        .list_sandbox_tool_calls_for_agent_run(run_id)
-        .await
-    {
-        for call in calls {
-            if call.status != SandboxToolCallStatus::Cancelled {
-                continue;
-            }
-            if let Ok(Some(receipt)) = state.store.get_sandbox_tool_call_receipt(call.id).await {
-                if receipt.status == SandboxToolCallStatus::Cancelled {
-                    state.sandbox_attempts.cancel_checkpoint(
-                        call.id,
-                        run_id,
-                        receipt.executor_lease_token,
-                    );
-                }
-            }
-        }
-    }
+    SandboxCancellationAcceleration::new(
+        state.store.clone(),
+        state.sandbox_attempts.clone(),
+        state.sandbox_steering.clone(),
+        state.agent_run_wake.clone(),
+    )
+    .signal_after_commit(run_id, committed_lease_token)
+    .await;
 }
 
 /// Signal only children durably owned by the cancelled origin turn.
@@ -920,83 +884,7 @@ pub(super) async fn signal_origin_sandbox_runs_after_commit(
             continue;
         };
         if admission.origin_turn_id == origin_turn_id {
-            signal_sandbox_run_after_commit(state, run.id).await;
-        }
-    }
-}
-
-#[cfg(test)]
-mod activity_tests {
-    use super::*;
-
-    fn client_call(name: &str, lease_expires_at: Option<chrono::DateTime<Utc>>) -> ToolCallRecord {
-        ToolCallRecord {
-            id: CallId::new(),
-            chat_id: ChatId::new(),
-            turn_id: TurnId::new(),
-            provider_id: "provider-call-identity".into(),
-            name: name.into(),
-            arguments: serde_json::json!({
-                "root_id": "5b3e9987-5ebf-4bb0-bc6f-0c041b156027",
-                "path": "taxes/2026/private-return.txt",
-                "grant": "private-grant"
-            }),
-            raw_arguments: None,
-            execution: ToolCallExecution::Client,
-            status: ToolCallStatus::Pending,
-            result: None,
-            result_preview: None,
-            provider_replay: None,
-            error_code: Some("private-error-code".into()),
-            error_detail: Some("private error detail".into()),
-            client_executor_id: Some(uuid::Uuid::new_v4()),
-            client_lease_expires_at: lease_expires_at,
-            created_at: Utc::now(),
-            resolved_at: None,
-        }
-    }
-
-    #[test]
-    fn foreground_folder_activity_has_a_closed_safe_vocabulary() {
-        let now = Utc::now();
-        for (name, kind) in [
-            ("list_connected_folders", "list_connected_folders"),
-            ("list_folder", "list_folder"),
-            ("read_connected_file", "read_connected_file"),
-        ] {
-            let activity = foreground_activity(
-                &[client_call(name, Some(now + chrono::Duration::minutes(1)))],
-                now,
-            )
-            .expect("supported foreground folder work is visible");
-            assert_eq!(
-                serde_json::to_value(activity).unwrap(),
-                serde_json::json!({"kind": kind, "status": "running"})
-            );
-        }
-
-        let waiting = foreground_activity(&[client_call("list_folder", None)], now)
-            .expect("an unclaimed folder operation is visible");
-        assert_eq!(
-            serde_json::to_value(waiting).unwrap(),
-            serde_json::json!({"kind": "list_folder", "status": "waiting"})
-        );
-
-        assert!(foreground_activity(&[client_call("unknown_client_tool", None)], now).is_none());
-
-        let rendered = serde_json::to_string(
-            &foreground_activity(&[client_call("read_connected_file", None)], now).unwrap(),
-        )
-        .unwrap();
-        for forbidden in [
-            "5b3e9987-5ebf-4bb0-bc6f-0c041b156027",
-            "taxes/2026/private-return.txt",
-            "private-grant",
-            "provider-call-identity",
-            "private-error-code",
-            "private error detail",
-        ] {
-            assert!(!rendered.contains(forbidden), "activity leaked {forbidden}");
+            signal_sandbox_run_after_commit(state, run.id, None).await;
         }
     }
 }

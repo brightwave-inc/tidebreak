@@ -81,6 +81,9 @@ pub const WS_TOKEN_SUBPROTOCOL_PREFIX: &str = "tidebreak-token.";
 pub const CLIENT_EXECUTOR_HEADER: HeaderName =
     HeaderName::from_static("x-tidebreak-client-executor");
 
+/// Scoped credential for publishing caller-held bytes into one chat.
+pub const LOCAL_IMPORT_HEADER: HeaderName = HeaderName::from_static("x-tidebreak-local-import");
+
 /// Reject requests whose bearer token does not resolve to a principal — from
 /// `Authorization: Bearer <token>`, or (on WebSocket upgrades only)
 /// `Sec-WebSocket-Protocol: tidebreak-token.<token>`.
@@ -315,6 +318,41 @@ pub async fn require_client_executor_token(
             next.run(request).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// Require either the native executor credential or the narrower local-import
+/// capability over an already authenticated principal.
+///
+/// This middleware gates only raw chat-document and image publication. The
+/// scoped token never marks the request as a client executor and therefore
+/// cannot satisfy native claim/resolve routes or extractors.
+pub async fn require_local_import_capability(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.extensions().get::<AuthContext>().is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let local_import = request
+        .headers()
+        .get(&LOCAL_IMPORT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| {
+            constant_time_eq(token.as_bytes(), state.local_import_token.as_bytes())
+        });
+    let client_executor = request
+        .headers()
+        .get(&CLIENT_EXECUTOR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| {
+            constant_time_eq(token.as_bytes(), state.client_executor_token.as_bytes())
+        });
+    if local_import || client_executor {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
     }
 }
 

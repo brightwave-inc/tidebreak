@@ -49,6 +49,7 @@ pub(in crate::db) async fn complete_turn_run(
         output,
         &[],
         None,
+        None,
     )
     .await?
     .map(|resolution| resolution.outcome))
@@ -62,6 +63,7 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
     expected_steer_revision: i64,
     now: chrono::DateTime<Utc>,
     output: &Message,
+    model_steps: i32,
     usage: Usage,
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -74,6 +76,7 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
         now,
         output,
         &[],
+        Some(model_steps),
         Some(&event),
     )
     .await
@@ -88,6 +91,7 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
     now: chrono::DateTime<Utc>,
     output: &Message,
     citations: &[crate::AssistantCitationInput],
+    model_steps: i32,
     usage: Usage,
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -100,6 +104,7 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
         now,
         output,
         citations,
+        Some(model_steps),
         Some(&event),
     )
     .await
@@ -114,6 +119,7 @@ pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_e
     now: chrono::DateTime<Utc>,
     output: &Message,
     citations: &[crate::AssistantCitationInput],
+    model_steps: i32,
     usage: Usage,
     refusal: RefusalOutcome,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -132,6 +138,7 @@ pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_e
         now,
         output,
         citations,
+        Some(model_steps),
         Some(&event),
     )
     .await
@@ -163,6 +170,7 @@ async fn complete_turn_run_inner(
     now: chrono::DateTime<Utc>,
     output: &Message,
     citations: &[crate::AssistantCitationInput],
+    terminal_model_steps: Option<i32>,
     terminal_event: Option<&AgentEvent>,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     validate_turn_output(id, lease_token, output)?;
@@ -235,6 +243,7 @@ async fn complete_turn_run_inner(
         let sequenced_event =
             exact_terminal_event_on(&transaction, id, Some(lease_token), terminal_event).await?;
         let existing = turn_run_from_model(existing)?;
+        validate_exact_terminal_model_steps(terminal_model_steps, existing.model_steps)?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(JournaledTurnOutcome {
             outcome: CompleteTurnRunOutcome::Existing(existing),
@@ -252,6 +261,9 @@ async fn complete_turn_run_inner(
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
+    }
+    if let Some(model_steps) = terminal_model_steps {
+        validate_terminal_model_steps(model_steps, existing.model_steps)?;
     }
     if let Some(AgentEvent::TurnCompleted { usage, .. } | AgentEvent::TurnRefused { usage, .. }) =
         terminal_event
@@ -309,6 +321,7 @@ async fn complete_turn_run_inner(
         if let Some(existing) =
             exact_completed_turn_on(store, id, lease_token, output, citations).await?
         {
+            validate_exact_terminal_model_steps(terminal_model_steps, existing.model_steps)?;
             let sequenced_event =
                 exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
             return Ok(Some(JournaledTurnOutcome {
@@ -338,6 +351,7 @@ async fn complete_turn_run_inner(
         if let Some(existing) =
             exact_completed_turn_on(store, id, lease_token, output, citations).await?
         {
+            validate_exact_terminal_model_steps(terminal_model_steps, existing.model_steps)?;
             let sequenced_event =
                 exact_terminal_event_on(&store.conn, id, Some(lease_token), terminal_event).await?;
             return Ok(Some(JournaledTurnOutcome {
@@ -349,7 +363,7 @@ async fn complete_turn_run_inner(
     }
     super::super::citation::insert_for_message_on(&transaction, output, citations).await?;
 
-    let completed = entities::turn_run::Entity::update_many()
+    let mut completed = entities::turn_run::Entity::update_many()
         .col_expr(
             entities::turn_run::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
@@ -373,7 +387,38 @@ async fn complete_turn_run_inner(
         .col_expr(
             entities::turn_run::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
-        )
+        );
+    if let Some(model_steps) = terminal_model_steps {
+        completed = completed.col_expr(
+            entities::turn_run::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(model_steps),
+        );
+    }
+    // Checkpoints are cumulative subtotals. The terminal values are the
+    // authoritative totals for the whole turn, so replace rather than add to
+    // the row in the same transaction as the output and terminal event.
+    if let Some(AgentEvent::TurnCompleted { usage, .. } | AgentEvent::TurnRefused { usage, .. }) =
+        terminal_event
+    {
+        completed = completed
+            .col_expr(
+                entities::turn_run::Column::InputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::OutputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheReadInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
+            )
+            .col_expr(
+                entities::turn_run::Column::CacheCreationInputTokens,
+                sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
+            );
+    }
+    let completed = completed
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .filter(entities::turn_run::Column::AttemptCount.eq(receipt.attempt_count))
@@ -410,6 +455,24 @@ async fn complete_turn_run_inner(
         outcome: CompleteTurnRunOutcome::Completed(completed),
         terminal_event: sequenced_event,
     }))
+}
+
+fn validate_terminal_model_steps(total: i32, checkpoint: i32) -> Result<()> {
+    if total < checkpoint {
+        return Err(AgentError::Store(
+            "terminal turn model steps regress its durable checkpoint".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_terminal_model_steps(expected: Option<i32>, stored: i32) -> Result<()> {
+    if expected.is_some_and(|expected| expected != stored) {
+        return Err(AgentError::Store(
+            "turn was already completed with different model-step totals".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_terminal_usage(total: Usage, checkpoint: Usage) -> Result<()> {

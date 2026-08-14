@@ -384,6 +384,9 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_HIGH_AND_MAX,
     },
+    // OpenAI's Responses hosted-search tool has no wire control for the
+    // mandatory per-turn `VendorWebSearch::max_uses` budget. Keep every OpenAI
+    // row honest until the adapter can enforce that cap before provider egress.
     ModelSpec {
         id: "gpt-5.6-sol",
         display_name: "GPT-5.6 Sol",
@@ -394,7 +397,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: true,
+        supports_vendor_web_search: false,
         // The whole GPT-5 line reasons on a caller-selected effort, which the
         // OpenAI-compatible adapter already sends alongside
         // `max_completion_tokens`. Only the 5.6 generation added `max`.
@@ -410,7 +413,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -423,7 +426,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
     ModelSpec {
@@ -436,7 +439,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -449,7 +452,7 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         max_output_tokens: 128_000,
         input_modalities: TEXT_AND_IMAGE,
         supports_reasoning: true,
-        supports_vendor_web_search: true,
+        supports_vendor_web_search: false,
         reasoning_efforts: EFFORT_NONE_TO_XHIGH,
     },
     ModelSpec {
@@ -1270,6 +1273,19 @@ mod tests {
                 "{} claims a provider-executed web search under `{}`, whose endpoint Tidebreak cannot assume implements one",
                 spec.id,
                 spec.provider
+            );
+        }
+    }
+
+    #[test]
+    fn no_openai_entry_claims_an_unenforceable_vendor_search_budget() {
+        let openai: Vec<_> = models_for(ProviderKind::Openai).collect();
+        assert!(!openai.is_empty());
+        for spec in openai {
+            assert!(
+                !spec.supports_vendor_web_search,
+                "{} claims vendor search even though the OpenAI route cannot enforce max_uses",
+                spec.id
             );
         }
     }

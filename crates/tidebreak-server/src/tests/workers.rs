@@ -151,29 +151,6 @@ async fn approve_delegation(router: &axum::Router, bearer: &str, chat: ChatId, c
     assert_eq!(decide.status(), StatusCode::NO_CONTENT);
 }
 
-async fn wait_for_completed_spawn_call_ids(
-    store: &Arc<dyn Store>,
-    chat: ChatId,
-    count: usize,
-) -> Vec<CallId> {
-    for _ in 0..500 {
-        let calls = store.list_tool_calls(chat).await.unwrap();
-        let spawns = calls
-            .iter()
-            .filter(|call| call.name == tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL)
-            .collect::<Vec<_>>();
-        if spawns.len() == count
-            && spawns
-                .iter()
-                .all(|call| call.status == tidebreak_core::ToolCallStatus::Completed)
-        {
-            return spawns.iter().map(|call| call.id).collect();
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{count} spawn calls should complete under their original call ids");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_model_is_used_for_the_turn() {
     let recorder = RecordingProvider::default();
@@ -526,15 +503,10 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         .any(|message| message.content.contains("premature parent answer")));
 }
 
-/// A batch of gated delegations keeps its tail across the approval park.
-///
-/// One model step can name several delegations, and a card for one of them is
-/// not consent for the rest, so the turn parks after each approval. The tail
-/// used to be dropped at that park: the resumed attempt asked the model again,
-/// which cost a round trip per approval, re-issued the same delegations under
-/// fresh call ids, and left the originals hanging in the transcript forever.
+/// Multiple delegations in one model step are rejected before approval or
+/// child admission, then the model gets one clean retry.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
+async fn a_spawn_batch_is_rejected_before_any_approval_or_child_admission() {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -563,7 +535,6 @@ async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
     spawn_turn_worker(&state);
     let router = app(state);
     let bearer = format!("Bearer {token}");
-    // Left in `Ask`: every spawn in the batch has to cross the gate on its own.
     let chat = make_chat(&router, &bearer).await;
 
     assert_eq!(
@@ -571,154 +542,24 @@ async fn a_gated_spawn_batch_is_carried_across_the_approval_park() {
         StatusCode::ACCEPTED
     );
 
-    let first = wait_for_approvals(&store, chat.id, 1).await[0];
-    approve_delegation(&router, &bearer, chat.id, first).await;
-
-    let both = wait_for_approvals(&store, chat.id, 2).await;
-    assert_eq!(both[0], first);
-    assert_ne!(
-        both[1], first,
-        "each spawn is decided under its own call id"
-    );
-    // The whole point: the second card came from the batch the checkpoint
-    // carried, not from a second look at the model.
-    assert_eq!(
-        provider.foreground_calls.load(Ordering::SeqCst),
-        1,
-        "the carried batch must reach the gate without another model call"
-    );
-    approve_delegation(&router, &bearer, chat.id, both[1]).await;
-
-    // Both delegations were answered under the call ids the model streamed,
-    // so nothing is left dangling in the transcript.
-    assert_eq!(
-        wait_for_completed_spawn_call_ids(&store, chat.id, 2)
-            .await
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
-        both.iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>()
-    );
-}
-
-/// An approval that commits before a spawn checkpoint is superseded remains
-/// admitted. The worker applies the steer, replays that exact call without a
-/// second card, then resumes gating the still-ungated siblings in model order.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_approved_spawn_is_replayed_after_checkpoint_steer() {
-    let dir = tempfile::tempdir().unwrap();
-    let inner: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let checkpoint_entered = Arc::new(Notify::new());
-    let release_checkpoint = Arc::new(Notify::new());
-    let injected = Arc::new(PauseTerminalStore::new(
-        inner,
-        checkpoint_entered.clone(),
-        release_checkpoint.clone(),
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCompleted { .. })
     ));
-    injected.do_not_pause_terminal();
-    injected.pause_before_next_spawn_checkpoint();
-    let store: Arc<dyn Store> = injected;
-    let provider = Arc::new(GatedSpawnBatchProvider::default());
-    let mut tools = ToolRegistry::new();
-    tools.register_foreground_agent_orchestration();
-    let state = AppState::new(
-        Config::desktop(dir.path()),
-        store.clone(),
-        Arc::new(FixedResolver(provider.clone())),
-        Arc::new(MemSecrets::default()),
-        Arc::new(tools),
-        AgentConfig {
-            model: "fake".into(),
-            max_steps: 4,
-            ..AgentConfig::default()
-        },
-    );
-    let token = state.token.clone();
-    spawn_turn_worker(&state);
-    let router = app(state);
-    let bearer = format!("Bearer {token}");
-    let chat = make_chat(&router, &bearer).await;
-    let turn_id = TurnId::new();
-
-    assert_eq!(
-        send_message_with_id(
-            &router,
-            &bearer,
-            chat.id,
-            turn_id,
-            "delegate both questions",
-        )
-        .await,
-        StatusCode::ACCEPTED
-    );
-
-    let first = wait_for_approvals(&store, chat.id, 1).await[0];
-    approve_delegation(&router, &bearer, chat.id, first).await;
-    tokio::time::timeout(Duration::from_secs(2), checkpoint_entered.notified())
-        .await
-        .expect("approved spawn reached its checkpoint");
-
-    assert_eq!(
-        steer_turn(
-            &router,
-            &bearer,
-            chat.id,
-            turn_id,
-            "incorporate this new constraint",
-            false,
-        )
-        .await,
-        StatusCode::ACCEPTED
-    );
-    release_checkpoint.notify_one();
-
-    let both = wait_for_approvals(&store, chat.id, 2).await;
-    assert_eq!(both.len(), 2, "the admitted head must not ask twice");
-    assert_eq!(both[0], first);
-    assert_ne!(both[1], first, "the tail keeps its own approval card");
     assert_eq!(
         provider.foreground_calls.load(Ordering::SeqCst),
-        1,
-        "the admitted request and tail must replay without another model call"
+        2,
+        "the invalid batch should receive exactly one corrective retry"
     );
-    let first_call = store
+    assert!(approval_call_ids(&store, chat.id).await.is_empty());
+    assert!(store.list_agent_runs(chat.id).await.unwrap().is_empty());
+    assert!(store
         .list_tool_calls(chat.id)
         .await
         .unwrap()
-        .into_iter()
-        .find(|call| call.id == first)
-        .expect("the approved spawn keeps its original call id");
-    assert_eq!(first_call.status, tidebreak_core::ToolCallStatus::Completed);
-    assert!(store
-        .list_events(chat.id, 0)
-        .await
-        .unwrap()
         .iter()
-        .any(|event| matches!(
-            &event.event,
-            AgentEvent::UserSteered { content, .. }
-                if content == "incorporate this new constraint"
-        )));
-
-    approve_delegation(&router, &bearer, chat.id, both[1]).await;
-    assert_eq!(
-        wait_for_completed_spawn_call_ids(&store, chat.id, 2)
-            .await
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
-        both.iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>()
-    );
-    assert_eq!(approval_call_ids(&store, chat.id).await, both);
+        .all(|call| call.name != tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2310,6 +2151,205 @@ async fn cancellation_reports_conflict_after_completion_wins() {
         cancel_turn(&router, &bearer, chat.id, turn_id).await,
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_after_drive_result_persists_the_completed_model_step() {
+    struct AccountedOneStepProvider;
+
+    #[async_trait]
+    impl ModelProvider for AccountedOneStepProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("accounted-one-step")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 11,
+                    output_tokens: 5,
+                    ..Usage::default()
+                }),
+                ProviderEvent::TextDelta {
+                    text: "finished before cancellation".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(AccountedOneStepProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let drive_returned = Arc::new(Notify::new());
+    let release_outcome = Arc::new(Notify::new());
+    let worker = turn_worker::TurnWorker::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.provisioned_policy.clone(),
+        state.os_policy.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
+        state.agent_config.clone(),
+        None,
+        turn_worker::TurnWorkerConfig::default(),
+    )
+    .with_post_drive_pause(drive_returned.clone(), release_outcome.clone());
+    let token = state.token.clone();
+    tokio::spawn(worker.run());
+    let router = app(state);
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "finish one step").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), drive_returned.notified())
+        .await
+        .expect("the one-step drive returned before outcome handling");
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    release_outcome.notify_one();
+
+    let expected_usage = Usage {
+        input_tokens: 11,
+        output_tokens: 5,
+        ..Usage::default()
+    };
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { usage }) if *usage == expected_usage
+    ));
+    let turn = store
+        .get_turn_run(turn_id)
+        .await
+        .unwrap()
+        .expect("cancelled turn remains queryable");
+    assert_eq!(turn.status, TurnRunStatus::Cancelled);
+    assert_eq!(turn.model_steps, 1);
+    assert_eq!(turn.usage, expected_usage);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_during_stream_persists_the_started_model_step() {
+    struct StreamingUntilCancelledProvider;
+
+    #[async_trait]
+    impl ModelProvider for StreamingUntilCancelledProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("streaming-until-cancelled")
+        }
+
+        async fn stream(&self, _req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+            Ok(stream::iter(vec![
+                ProviderEvent::Usage(Usage {
+                    input_tokens: 13,
+                    output_tokens: 4,
+                    ..Usage::default()
+                }),
+                ProviderEvent::TextDelta {
+                    text: "partial before cancellation".into(),
+                },
+            ])
+            .chain(stream::pending())
+            .boxed())
+        }
+    }
+
+    let (router, token, store, _dir) =
+        test_app_with(Arc::new(StreamingUntilCancelledProvider)).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, turn_id, "stream one step").await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if store
+                .list_events(chat.id, 0)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.event,
+                        AgentEvent::TextDelta { text }
+                            if text == "partial before cancellation"
+                    )
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first provider delta was durably journaled");
+
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+
+    let expected_usage = Usage {
+        input_tokens: 13,
+        output_tokens: 4,
+        ..Usage::default()
+    };
+    let events = wait_for_turn(&store, chat.id).await;
+    assert!(matches!(
+        events.last().map(|event| &event.event),
+        Some(AgentEvent::TurnCancelled { usage }) if *usage == expected_usage
+    ));
+    let turn = store
+        .get_turn_run(turn_id)
+        .await
+        .unwrap()
+        .expect("cancelled turn remains queryable");
+    assert_eq!(turn.status, TurnRunStatus::Cancelled);
+    assert_eq!(turn.model_steps, 1);
+    assert_eq!(turn.usage, expected_usage);
+    assert!(store
+        .list_messages(chat.id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message.role == Role::Assistant && message.content == "partial before cancellation"
+        }));
 }
 
 #[tokio::test(flavor = "multi_thread")]

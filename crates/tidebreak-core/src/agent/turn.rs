@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,12 +17,13 @@ use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, ChatId, MessageId, TurnId};
 use crate::model::{
-    Chat, Message, PermissionMode, Role, ToolCallRecord, ToolCallResolution, TurnRunStatus,
+    Chat, Message, PermissionMode, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
+    ToolCallStatus, TurnRunStatus,
 };
 use crate::preview::ToolResultPreview;
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
-    ReasoningOrigin, RefusalOutcome, StopReason, Usage,
+    ReasoningOrigin, RefusalDetails, RefusalOutcome, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
 use crate::storage::{
@@ -34,11 +35,11 @@ use crate::tool::{ToolErrorCategory, ToolOutput};
 
 use super::events::{AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent, EventSink};
 use super::registry::ToolRegistry;
-use super::transcript::{parse_args, tool_result_blocks};
+use super::transcript::{parse_args, parse_tool_args, tool_result_blocks};
 use super::types::{AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest, WRAP_UP_INSTRUCTION};
 use super::{
     AcceptedServerCall, Agent, AssistantCandidate, CallIsolation, ClientArgumentResolution,
-    PendingCall, SandboxSpawnGate, StreamAttempt, StreamEnd, TurnExecution,
+    PendingCall, SandboxSpawnGate, StreamAttempt, StreamEnd, StreamItem, TurnExecution,
     MAX_PARALLEL_READ_ONLY_CALLS, REPEATED_CALL_LIMIT,
 };
 
@@ -360,6 +361,15 @@ impl Agent {
             transcript.push(ChatMessage::text(Role::System, instruction.clone()));
         }
         let mut total_usage = Usage::default();
+        // Provider adapters enforce vendor-search limits per request, while
+        // Tidebreak's contract is per turn. Offer the allowance to at most one
+        // foreground request: once an egress attempt receives the full cap,
+        // Tidebreak cannot prove how much it spent after a failed or partial
+        // stream, so every retry and later model step must fail closed to none.
+        let mut remaining_vendor_web_search = match self.config.web_search {
+            super::types::TurnWebSearch::Vendor(vendor) if vendor.max_uses > 0 => Some(vendor),
+            _ => None,
+        };
         self.resume_pending_server_calls(chat, turn_id, events, &mut transcript)
             .await?;
         let mut reduction_level: u32 = 0;
@@ -424,7 +434,7 @@ impl Agent {
                 end: stream_end,
                 text,
                 mut calls,
-                provider_executed,
+                items,
                 mut reasoning,
                 stop_reason,
                 refusal_details,
@@ -437,7 +447,6 @@ impl Agent {
                             reduction_level,
                             checkpoint.as_ref(),
                             checkpoint_boundary,
-                            wrap_up,
                         )
                         .await?;
                     // Compaction rides this exact prefix, so it is assembled
@@ -485,7 +494,6 @@ impl Agent {
                                 reduction_level,
                                 checkpoint.as_ref(),
                                 checkpoint_boundary,
-                                wrap_up,
                             )
                             .await?;
                     }
@@ -510,6 +518,11 @@ impl Agent {
                     // an answer. With no tools the step is already terminal by
                     // construction, so the control has nothing to add.
                     let advertises_tools = !prefix.tools.is_empty();
+                    let vendor_web_search = if wrap_up {
+                        None
+                    } else {
+                        remaining_vendor_web_search.take()
+                    };
                     let request = ChatRequest {
                         provider: self.config.provider.clone(),
                         conversation: Some(chat.id),
@@ -536,7 +549,7 @@ impl Agent {
                         max_tokens: self.config.max_tokens,
                         temperature: self.config.temperature,
                         reasoning_effort: self.config.reasoning_effort,
-                        vendor_web_search: prefix.vendor_web_search,
+                        vendor_web_search,
                         images: prefix.images,
                         ..Default::default()
                     };
@@ -596,6 +609,9 @@ impl Agent {
                 reduction_level = 0;
                 break 'step_attempt attempt;
             };
+            let has_provider_executed = items
+                .iter()
+                .any(|item| matches!(item, StreamItem::ProviderExecuted { .. }));
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
                 // Calls that started before the cancel were already journaled,
                 // so terminalizing silently would leave replay and live clients
@@ -665,6 +681,7 @@ impl Agent {
                 // A refusal terminalizes the candidate. Tool arguments emitted
                 // before it are incomplete and must never execute.
                 if !calls.is_empty() {
+                    Self::publish_deferred_host_stream_events(&items, &calls, events);
                     // Those calls were already journaled as they streamed, so
                     // clearing them silently would leave replay and live
                     // clients holding calls that never resolve. Mark them
@@ -682,6 +699,7 @@ impl Agent {
             // text the reader can already see is the failure this whole path
             // exists to avoid, so a discard marker is deliberately not sent.
             if wrap_up && !calls.is_empty() {
+                Self::publish_deferred_host_stream_events(&items, &calls, events);
                 for call in &calls {
                     self.decline_call(
                         call,
@@ -728,6 +746,154 @@ impl Agent {
             let refusal = refused.then(|| {
                 RefusalOutcome::new(refusal_details.unwrap_or_default(), !text.is_empty())
             });
+
+            // Foreground control calls are protocol boundaries, not ordinary
+            // batch members. Reject a mixed step before any assistant message,
+            // tool-call row, provider-native receipt, or sibling side effect is
+            // persisted. The transient tool results give the model an explicit
+            // correction while a retry after a crash safely starts from the
+            // last durable transcript, where none of this invalid batch exists.
+            if let Some(control_name) = calls
+                .iter()
+                .find_map(|call| self.standalone_control_name(call))
+                .filter(|_| calls.len() != 1 || has_provider_executed || !text.trim().is_empty())
+            {
+                if !text.trim().is_empty() {
+                    events.send(AgentEvent::StreamInterrupted);
+                }
+                let correction = format!(
+                    "not run: `{control_name}` must be called alone, with no assistant text or sibling tool calls. No calls from this step were executed or persisted. Reissue only `{control_name}` in a fresh model step."
+                );
+                Self::publish_deferred_host_stream_events(&items, &calls, events);
+                let outputs = calls
+                    .iter()
+                    .map(|call| self.decline_call(call, events, correction.clone()))
+                    .collect::<Vec<_>>();
+                let blocks = Self::stream_content_blocks(&items, &calls);
+                transcript.push(ChatMessage {
+                    role: Role::Assistant,
+                    content: blocks,
+                    reasoning: candidate.reasoning.clone(),
+                });
+                transcript.push(ChatMessage {
+                    role: Role::User,
+                    reasoning: MessageReasoning::default(),
+                    content: calls
+                        .iter()
+                        .zip(outputs)
+                        .flat_map(|(call, output)| {
+                            tool_result_blocks(
+                                call.provider_id.clone(),
+                                self.tool_result_for_model(&output.content, call.call_id),
+                                output.is_error,
+                                &output.images,
+                                self.config.image_input,
+                            )
+                        })
+                        .collect(),
+                });
+                repeat_streak = None;
+                continue;
+            }
+
+            // A valid model-declared blocker is terminal by construction: the
+            // call is recorded as a successful control operation, its
+            // explanation becomes the assistant message, and the existing
+            // refused lifecycle supplies non-success semantics to every driver.
+            if calls.len() == 1 && self.is_report_blocked_call(&calls[0]) {
+                let call = &calls[0];
+                let parsed = parse_tool_args(&call.args).and_then(|arguments| {
+                    crate::agent_tools::parse_report_blocked_arguments(&arguments)
+                });
+                let Some(blocked) = parsed else {
+                    let output = self.decline_call(
+                        call,
+                        events,
+                        "not run: `report_blocked` requires exactly a lowercase `reason_code` and a concise non-empty `explanation`, with no extra properties. Correct the arguments and reissue `report_blocked` alone."
+                            .into(),
+                    );
+                    transcript.push(ChatMessage {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: call.provider_id.clone(),
+                            name: call.name.clone(),
+                            input: parse_args(&call.args).0,
+                        }],
+                        reasoning: candidate.reasoning.clone(),
+                    });
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        reasoning: MessageReasoning::default(),
+                        content: tool_result_blocks(
+                            call.provider_id.clone(),
+                            self.tool_result_for_model(&output.content, call.call_id),
+                            true,
+                            &output.images,
+                            self.config.image_input,
+                        ),
+                    });
+                    repeat_streak = None;
+                    continue;
+                };
+                let Some(steer_revision) = generation_steer_revision else {
+                    let output = self.decline_call(
+                        call,
+                        events,
+                        "not run: `report_blocked` is available only from a durably claimed foreground turn. Continue with the capabilities available on this surface."
+                            .into(),
+                    );
+                    transcript.push(ChatMessage {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: call.provider_id.clone(),
+                            name: call.name.clone(),
+                            input: parse_args(&call.args).0,
+                        }],
+                        reasoning: candidate.reasoning.clone(),
+                    });
+                    transcript.push(ChatMessage {
+                        role: Role::User,
+                        reasoning: MessageReasoning::default(),
+                        content: tool_result_blocks(
+                            call.provider_id.clone(),
+                            self.tool_result_for_model(&output.content, call.call_id),
+                            true,
+                            &output.images,
+                            self.config.image_input,
+                        ),
+                    });
+                    repeat_streak = None;
+                    continue;
+                };
+                self.ensure_durable_lease_current(turn_id).await?;
+                self.persist_report_blocked_call(
+                    chat.id,
+                    turn_id,
+                    call,
+                    &blocked.explanation,
+                    events,
+                )
+                .await?;
+                let output = AssistantCandidate {
+                    message_id: output_message_id,
+                    content: blocked.explanation,
+                    citations: Vec::new(),
+                    reasoning: candidate.reasoning,
+                }
+                .message(output_message_id, chat.id, turn_id);
+                return Ok(AgentTurnOutcome::Completed {
+                    output,
+                    citations: Vec::new(),
+                    usage: total_usage,
+                    stop_reason: StopReason::Refusal,
+                    refusal: Some(RefusalOutcome::new(
+                        RefusalDetails::from_category(Some("blocked")),
+                        true,
+                    )),
+                    steer_revision: Some(steer_revision),
+                    model_steps: steps_used,
+                });
+            }
 
             // Sequence the batch rather than refuse its shape. A refusal
             // discarded the whole step — the assistant's prose and every
@@ -789,15 +955,11 @@ impl Agent {
             // it, and a stale segment must neither commit nor replay an effect a
             // later attempt now owns. Terminal completion is left to the worker's
             // own lease compare-and-swap, so only fence the tool-bearing path.
-            if !calls.is_empty() || !provider_executed.is_empty() {
+            if !calls.is_empty() || has_provider_executed {
                 self.ensure_durable_lease_current(turn_id).await?;
             }
 
             // Record the assistant message (text + any tool-use blocks).
-            let mut blocks: Vec<ContentBlock> = Vec::new();
-            if !text.is_empty() {
-                blocks.push(ContentBlock::Text { text: text.clone() });
-            }
             if !calls.is_empty() && (!text.is_empty() || !candidate.reasoning.is_empty()) {
                 // A checkpoint returns from the loop and the resumed attempt
                 // rebuilds its transcript from the store, so an unpersisted
@@ -806,27 +968,94 @@ impl Agent {
                 // assistant message solely as the durable replay carrier.
                 self.persist_assistant(chat.id, turn_id, &candidate).await?;
             }
-            // Searches the provider ran on its own infrastructure during this
-            // step. They sit between the prose and the calls the loop is about
-            // to make, which is where they happened. Nothing dispatches them.
-            //
-            // They are persisted here, before the step's own calls are
-            // admitted, so the journal and a rebuilt transcript both keep them
-            // in the order they occurred.
-            for block in &provider_executed {
-                self.record_provider_executed_call(chat.id, turn_id, block, events)
-                    .await?;
+
+            // Reserve durable history order for every ordinary call and
+            // provider-executed receipt before resolving the latter. Provider
+            // receipts arrive complete, but terminalizing one before a later
+            // same-stream host call is admitted would make transcript rebuild
+            // treat that host call as a new model step.
+            let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
+            let mut admitted_provider_calls = HashSet::new();
+            for item in &items {
+                match item {
+                    StreamItem::HostCall(index) => {
+                        let Some(call) = calls.get(*index) else {
+                            continue;
+                        };
+                        if isolations[*index].is_none() && !sensitives[*index] {
+                            if let Some(recovered) =
+                                self.accept_server_call(chat.id, turn_id, call).await?
+                            {
+                                recovered_results.insert(call.call_id, recovered);
+                            }
+                        }
+                    }
+                    StreamItem::ProviderExecuted { call_id, block } => {
+                        if self
+                            .accept_provider_executed_call(chat.id, turn_id, *call_id, block)
+                            .await?
+                        {
+                            admitted_provider_calls.insert(*call_id);
+                        }
+                    }
+                    StreamItem::HostCallArgsDelta { .. } => {}
+                }
             }
-            blocks.extend(provider_executed);
-            for call in &calls {
-                // The transcript block stays the coerced value: it goes back
-                // to the provider, whose tool-use input must be valid JSON.
-                // The garbled fragment is kept on the durable record instead.
-                blocks.push(ContentBlock::ToolUse {
-                    id: call.provider_id.clone(),
-                    name: call.name.clone(),
-                    input: parse_args(&call.args).0,
-                });
+
+            // Reproduce the provider's arrival order in both the live activity
+            // stream and the assistant transcript. Host events before the first
+            // provider receipt were already forwarded while streaming; later
+            // ones were held so the receipt can be announced in between.
+            let mut blocks: Vec<ContentBlock> = Vec::new();
+            if !text.is_empty() {
+                blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+            let mut provider_seen = false;
+            for item in &items {
+                match item {
+                    StreamItem::HostCall(index) => {
+                        let Some(call) = calls.get(*index) else {
+                            continue;
+                        };
+                        if provider_seen {
+                            events.send(AgentEvent::ToolCallStarted {
+                                call_id: call.call_id,
+                                name: call.name.clone(),
+                            });
+                        }
+                        // The transcript block stays the coerced value: it goes
+                        // back to the provider, whose tool-use input must be
+                        // valid JSON. The garbled fragment is kept durably.
+                        blocks.push(ContentBlock::ToolUse {
+                            id: call.provider_id.clone(),
+                            name: call.name.clone(),
+                            input: parse_args(&call.args).0,
+                        });
+                    }
+                    StreamItem::HostCallArgsDelta {
+                        call_index,
+                        fragment,
+                    } => {
+                        if provider_seen {
+                            if let Some(call) = calls.get(*call_index) {
+                                events.send(AgentEvent::ToolCallArgsDelta {
+                                    call_id: call.call_id,
+                                    fragment: fragment.clone(),
+                                });
+                            }
+                        }
+                    }
+                    StreamItem::ProviderExecuted { call_id, block, .. } => {
+                        if admitted_provider_calls.contains(call_id) {
+                            self.complete_provider_executed_call(
+                                chat.id, turn_id, *call_id, block, events,
+                            )
+                            .await?;
+                        }
+                        blocks.push(block.clone());
+                        provider_seen = true;
+                    }
+                }
             }
             if !blocks.is_empty() {
                 transcript.push(ChatMessage {
@@ -840,21 +1069,6 @@ impl Agent {
                     // reaches the transcript.
                     reasoning: candidate.reasoning.clone(),
                 });
-            }
-
-            // Admit the plain calls, whose rows may all be pending at once:
-            // recovery replays or abandons them without having to guess which
-            // one an approval belonged to. Sensitive calls are admitted lazily
-            // further down, one at a time, and the isolated call last, after
-            // everything else has resolved.
-            let mut recovered_results: HashMap<CallId, ToolOutput> = HashMap::new();
-            for (index, call) in calls.iter().enumerate() {
-                if isolations[index].is_some() || sensitives[index] {
-                    continue;
-                }
-                if let Some(recovered) = self.accept_server_call(chat.id, turn_id, call).await? {
-                    recovered_results.insert(call.call_id, recovered);
-                }
             }
 
             if calls.is_empty() {
@@ -1309,6 +1523,108 @@ impl Agent {
             model_steps: self.config.max_steps,
         })
     }
+
+    fn standalone_control_name<'a>(&self, call: &'a PendingCall) -> Option<&'a str> {
+        let name = call.name.as_str();
+        let registered = match name {
+            crate::ASK_USER_QUESTIONS_TOOL | crate::agent_tools::REPORT_BLOCKED_TOOL => {
+                self.durable_steer_lease.is_some() && self.tools.is_foreground_client(name)
+            }
+            crate::SPAWN_SANDBOX_AGENT_TOOL => {
+                self.agent_orchestration_active() && self.tools.is_foreground_sandbox_spawn(name)
+            }
+            crate::WAIT_FOR_AGENTS_TOOL => {
+                self.agent_orchestration_active() && self.tools.is_foreground_agent_wait(name)
+            }
+            _ => false,
+        };
+        registered.then_some(name)
+    }
+
+    fn is_report_blocked_call(&self, call: &PendingCall) -> bool {
+        call.name == crate::agent_tools::REPORT_BLOCKED_TOOL
+            && self.standalone_control_name(call).is_some()
+    }
+
+    async fn persist_report_blocked_call(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        call: &PendingCall,
+        explanation: &str,
+        events: &EventSink<'_>,
+    ) -> Result<()> {
+        let (arguments, raw_arguments) = parse_args(&call.args);
+        let record = ToolCallRecord {
+            id: call.call_id,
+            chat_id,
+            turn_id,
+            provider_id: call.provider_id.clone(),
+            name: call.name.clone(),
+            arguments,
+            raw_arguments,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        let needs_resolution = match self.accept_server_call_retry(&record).await? {
+            AcceptedServerCall::Accepted => true,
+            AcceptedServerCall::Existing(existing) if existing.status.is_terminal() => {
+                if existing.status != ToolCallStatus::Completed
+                    || existing.result.as_deref() != Some(explanation)
+                {
+                    return Err(AgentError::Store(format!(
+                        "terminal report_blocked call {} does not match its explanation",
+                        call.call_id
+                    )));
+                }
+                false
+            }
+            AcceptedServerCall::Existing(_) => true,
+            AcceptedServerCall::IdentityConflict => {
+                return Err(AgentError::Store(format!(
+                    "report_blocked call {} identity conflicts with its canonical request",
+                    call.call_id
+                )));
+            }
+            AcceptedServerCall::LeaseLost => {
+                return Err(AgentError::Store(format!(
+                    "turn {turn_id} lost its lease while accepting report_blocked call {}",
+                    call.call_id
+                )));
+            }
+        };
+        let output = ToolOutput::text(explanation.to_owned());
+        let preview = ToolResultPreview::build(&call.name, &output);
+        if needs_resolution {
+            self.resolve_server_call_retry(
+                chat_id,
+                turn_id,
+                call.call_id,
+                &ToolCallResolution::Completed {
+                    result: explanation.to_owned(),
+                },
+                preview.as_ref(),
+            )
+            .await?;
+        }
+        events.send(AgentEvent::ToolCallCompleted {
+            call_id: call.call_id,
+            output: self.tool_output_for_event(&output, call.call_id),
+            action: None,
+            result: preview,
+        });
+        Ok(())
+    }
+
     pub(crate) async fn read_stream(
         &self,
         mut stream: futures::stream::BoxStream<'static, ProviderEvent>,
@@ -1318,9 +1634,10 @@ impl Agent {
     ) -> Result<StreamAttempt> {
         let mut text = String::new();
         let mut calls = Vec::new();
-        let mut provider_executed = Vec::new();
+        let mut items = Vec::new();
         let mut reasoning = Vec::new();
         let mut by_index = HashMap::new();
+        let mut provider_seen = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut refusal_details = None;
         let mut streamed_events = AssistantStreamEventFilter::new(events);
@@ -1347,11 +1664,15 @@ impl Agent {
                 ProviderEvent::ReasoningBlock { data } => reasoning.push(data),
                 ProviderEvent::ToolCallStarted { index, id, name } => {
                     let call_id = CallId::new();
-                    streamed_events.send(AgentEvent::ToolCallStarted {
-                        call_id,
-                        name: name.clone(),
-                    });
-                    by_index.insert(index, calls.len());
+                    if !provider_seen {
+                        streamed_events.send(AgentEvent::ToolCallStarted {
+                            call_id,
+                            name: name.clone(),
+                        });
+                    }
+                    let call_index = calls.len();
+                    by_index.insert(index, call_index);
+                    items.push(StreamItem::HostCall(call_index));
                     calls.push(PendingCall {
                         call_id,
                         provider_id: id,
@@ -1361,8 +1682,14 @@ impl Agent {
                 }
                 ProviderEvent::ToolCallArgsDelta { index, fragment } => {
                     if let Some(&i) = by_index.get(&index) {
-                        streamed_events.send(AgentEvent::ToolCallArgsDelta {
-                            call_id: calls[i].call_id,
+                        if !provider_seen {
+                            streamed_events.send(AgentEvent::ToolCallArgsDelta {
+                                call_id: calls[i].call_id,
+                                fragment: fragment.clone(),
+                            });
+                        }
+                        items.push(StreamItem::HostCallArgsDelta {
+                            call_index: i,
                             fragment: fragment.clone(),
                         });
                         calls[i].args.push_str(&fragment);
@@ -1388,13 +1715,20 @@ impl Agent {
                     is_error,
                     replay,
                 } => {
-                    provider_executed.push(ContentBlock::ProviderExecutedToolCall {
+                    let block = ContentBlock::ProviderExecutedToolCall {
                         name,
                         input,
                         output,
                         is_error,
                         replay,
-                    });
+                    };
+                    if self.provider_executed_call_is_admissible(&block) {
+                        items.push(StreamItem::ProviderExecuted {
+                            call_id: CallId::new(),
+                            block,
+                        });
+                        provider_seen = true;
+                    }
                 }
                 ProviderEvent::Stop { reason } => stop_reason = reason,
                 ProviderEvent::Refusal { details } => {
@@ -1409,15 +1743,68 @@ impl Agent {
         } else {
             streamed_events.finish();
         }
+        if !matches!(end, StreamEnd::Done) {
+            Self::publish_deferred_host_stream_events(&items, &calls, events);
+        }
         Ok(StreamAttempt {
             end,
             text,
             calls,
-            provider_executed,
+            items,
             reasoning,
             stop_reason,
             refusal_details,
         })
+    }
+
+    fn publish_deferred_host_stream_events(
+        items: &[StreamItem],
+        calls: &[PendingCall],
+        events: &EventSink<'_>,
+    ) {
+        let mut provider_seen = false;
+        for item in items {
+            match item {
+                StreamItem::ProviderExecuted { .. } => provider_seen = true,
+                StreamItem::HostCall(index) if provider_seen => {
+                    if let Some(call) = calls.get(*index) {
+                        events.send(AgentEvent::ToolCallStarted {
+                            call_id: call.call_id,
+                            name: call.name.clone(),
+                        });
+                    }
+                }
+                StreamItem::HostCallArgsDelta {
+                    call_index,
+                    fragment,
+                } if provider_seen => {
+                    if let Some(call) = calls.get(*call_index) {
+                        events.send(AgentEvent::ToolCallArgsDelta {
+                            call_id: call.call_id,
+                            fragment: fragment.clone(),
+                        });
+                    }
+                }
+                StreamItem::HostCall(_) | StreamItem::HostCallArgsDelta { .. } => {}
+            }
+        }
+    }
+
+    fn stream_content_blocks(items: &[StreamItem], calls: &[PendingCall]) -> Vec<ContentBlock> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                StreamItem::HostCall(index) => {
+                    calls.get(*index).map(|call| ContentBlock::ToolUse {
+                        id: call.provider_id.clone(),
+                        name: call.name.clone(),
+                        input: parse_args(&call.args).0,
+                    })
+                }
+                StreamItem::ProviderExecuted { block, .. } => Some(block.clone()),
+                StreamItem::HostCallArgsDelta { .. } => None,
+            })
+            .collect()
     }
 
     /// Emit the cancellation terminal event and end the turn as a (non-error)

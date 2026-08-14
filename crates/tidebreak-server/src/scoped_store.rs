@@ -32,11 +32,11 @@ use tidebreak_core::{
     AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot,
     ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome,
     DocumentId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
-    PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
-    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
+    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
+    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
+    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
     TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
 };
 
@@ -447,6 +447,13 @@ impl ScopedStore {
         chat_id: ChatId,
     ) -> Result<Vec<MessageAttachment>> {
         self.store.list_message_attachments(chat_id).await
+    }
+
+    /// Durably authorize this principal's chat to attach `image`.
+    pub async fn publish_chat_image(&self, chat_id: ChatId, image: &ImageRef) -> Result<bool> {
+        self.store
+            .publish_chat_image_scoped(&self.owner, chat_id, image)
+            .await
     }
 
     /// [`Store::list_tool_calls`].

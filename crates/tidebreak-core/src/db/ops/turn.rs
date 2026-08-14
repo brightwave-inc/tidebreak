@@ -18,6 +18,7 @@ use crate::storage::{
 };
 
 use super::super::{entities, store_err, DbStore};
+use super::chat_image_publication as chat_image_publication_ops;
 use super::message_attachment as message_attachment_ops;
 use super::message_document_attachment as message_document_attachment_ops;
 use super::{
@@ -303,6 +304,13 @@ async fn accept_turn_inner(
         .await?;
         transaction.commit().await.map_err(store_err)?;
         return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(existing)));
+    }
+
+    if let Err(error) =
+        chat_image_publication_ops::require_exact_on(&transaction, chat_id, images).await
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(error);
     }
 
     if foreground.status != AgentRunStatus::Active {

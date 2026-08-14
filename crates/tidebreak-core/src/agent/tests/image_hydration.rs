@@ -134,6 +134,7 @@ async fn hydration_gives_the_adapter_bytes_for_every_surviving_image_block() {
     let blob_id = uuid::Uuid::from_u128(7);
     blobs.put(blob_id, pixels.clone()).await.unwrap();
     let image = image_ref(blob_id, &pixels);
+    assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
     store
         .accept_turn_with_attachments(
             TurnId::new(),
@@ -178,6 +179,7 @@ async fn an_agent_without_a_byte_source_tells_the_model_instead_of_sending_a_bar
     let (store, chat, _dir) = store_with_chat("no-blobs.db").await;
     let pixels = b"pixels".to_vec();
     let image = image_ref(uuid::Uuid::from_u128(9), &pixels);
+    assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
     store
         .accept_turn_with_attachments(TurnId::new(), chat.id, "fake", "look", &[image], &[], &[])
         .await
@@ -211,13 +213,15 @@ async fn hydration_is_bounded_so_a_long_chat_cannot_grow_the_outbound_body() {
         let blob_id = uuid::Uuid::from_u128(100 + index as u128);
         blobs.put(blob_id, pixels.clone()).await.unwrap();
         let turn_id = TurnId::new();
+        let image = image_ref(blob_id, &pixels);
+        assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
         store
             .accept_turn_with_attachments(
                 turn_id,
                 chat.id,
                 "fake",
                 &format!("image {index}"),
-                &[image_ref(blob_id, &pixels)],
+                &[image],
                 &[],
                 &[],
             )

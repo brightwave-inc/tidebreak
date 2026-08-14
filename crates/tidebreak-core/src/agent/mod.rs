@@ -80,9 +80,10 @@ pub(crate) struct StreamAttempt {
     end: StreamEnd,
     text: String,
     calls: Vec<PendingCall>,
-    /// Tool calls the provider ran server-side, already complete. Never
-    /// dispatched — see [`ContentBlock::ProviderExecutedToolCall`].
-    provider_executed: Vec<ContentBlock>,
+    /// Host calls and provider-executed receipts in the order the adapter
+    /// reported them. Argument deltas stay in this sequence for live event
+    /// ordering while [`PendingCall`] keeps the accumulated argument string.
+    items: Vec<StreamItem>,
     reasoning: Vec<Value>,
     stop_reason: StopReason,
     refusal_details: Option<RefusalDetails>,
@@ -134,6 +135,21 @@ pub(crate) struct PendingCall {
     provider_id: String,
     name: String,
     args: String,
+}
+
+/// One ordered item from a provider stream.
+pub(crate) enum StreamItem {
+    /// The first event for one ordinary host call; the index addresses the
+    /// final, argument-accumulated [`PendingCall`].
+    HostCall(usize),
+    /// A host-call argument fragment. Fragments after a provider receipt are
+    /// replayed later so that live activity preserves provider arrival order.
+    HostCallArgsDelta { call_index: usize, fragment: String },
+    /// A provider-side call that was already complete when it arrived.
+    ProviderExecuted {
+        call_id: CallId,
+        block: ContentBlock,
+    },
 }
 
 /// The rebuilt provider transcript and the point covered by a durable

@@ -415,6 +415,44 @@ pub mod message_attachment {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod chat_image_publication {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "chat_image_publication")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub chat_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub blob_id: Uuid,
+        pub media_type: String,
+        pub width: i32,
+        pub height: i32,
+        pub byte_len: i64,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::chat::Entity",
+            from = "Column::ChatId",
+            to = "super::chat::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Restrict"
+        )]
+        Chat,
+    }
+
+    impl Related<super::chat::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Chat.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod exec_file_change {
     use sea_orm::entity::prelude::*;
 
@@ -533,6 +571,11 @@ pub mod agent_run {
         pub claim_count: i32,
         pub checkin_grants: i32,
         pub checkin_watermark: i32,
+        pub model_steps: i32,
+        pub input_tokens: i64,
+        pub output_tokens: i64,
+        pub cache_read_input_tokens: i64,
+        pub cache_creation_input_tokens: i64,
         pub available_at: DateTimeUtc,
         pub deadline_at: Option<DateTimeUtc>,
         pub lease_token: Option<Uuid>,
@@ -703,6 +746,11 @@ pub mod agent_run_result {
         pub payload_kind: String,
         pub payload_json: String,
         pub text: String,
+        pub model_steps: i32,
+        pub input_tokens: i64,
+        pub output_tokens: i64,
+        pub cache_read_input_tokens: i64,
+        pub cache_creation_input_tokens: i64,
         pub submitted_at: DateTimeUtc,
     }
 

@@ -229,6 +229,11 @@ pub(crate) enum RendererAgentEvent {
     ToolCallCompleted {
         call_id: CallId,
         status: RendererToolStatus,
+        /// A bounded, server-authored reason the renderer can act on without
+        /// receiving model-facing output or executor diagnostics.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        failure: Option<RendererToolFailure>,
         /// What the call did, when its tool projects it. Approval is not the
         /// only moment a person needs to see the action.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -371,6 +376,24 @@ pub(crate) enum RendererToolStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub(crate) struct RendererToolFailure {
+    pub code: RendererToolFailureCode,
+    pub reason: RendererToolFailureReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RendererToolFailureCode {
+    ExecutorUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RendererToolFailureReason {
+    LeaseExpired,
+}
+
 impl From<&SequencedEvent> for RendererSequencedEvent {
     fn from(value: &SequencedEvent) -> Self {
         let event = match &value.event {
@@ -441,6 +464,7 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 } else {
                     RendererToolStatus::Completed
                 },
+                failure: renderer_tool_failure(output),
                 action: action.clone(),
                 result: result.clone(),
             },
@@ -491,6 +515,17 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
             replayed: None,
         }
     }
+}
+
+fn renderer_tool_failure(output: &tidebreak_core::ToolOutput) -> Option<RendererToolFailure> {
+    let data = output.data.as_ref()?;
+    (output.is_error
+        && data.get("failure").and_then(serde_json::Value::as_str) == Some("executor_unavailable")
+        && data.get("reason").and_then(serde_json::Value::as_str) == Some("lease_expired"))
+    .then_some(RendererToolFailure {
+        code: RendererToolFailureCode::ExecutorUnavailable,
+        reason: RendererToolFailureReason::LeaseExpired,
+    })
 }
 
 impl RendererSequencedEvent {

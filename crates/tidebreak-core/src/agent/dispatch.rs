@@ -23,13 +23,47 @@ use super::events::EventSink;
 use super::transcript::{
     exec_preview_images, parse_args, parse_tool_args, tool_result_blocks, truncate_to_bytes,
 };
-use super::types::{ForegroundAgentWaitRequest, SandboxAgentSpawnRequest};
+use super::types::{ForegroundAgentWaitRequest, SandboxAgentSpawnRequest, TurnWebSearch};
 use super::{
     call_action_preview, provider_executed_entries, AcceptedServerCall, Agent, CallIsolation,
     ClientArgumentResolution, PendingCall, SandboxSpawnGate,
 };
 
 impl Agent {
+    /// Whether a completed provider-side action may enter Tidebreak's tool
+    /// history at all.
+    ///
+    /// The provider event channel is shared by adapters, so the event's name
+    /// is not authority. Only a turn configured for vendor search may admit a
+    /// provider-executed receipt, and the complete receipt must already be the
+    /// bounded canonical shape of Tidebreak's `web_search` tool. The same gate
+    /// is used before the live transcript block is created and again before
+    /// persistence, so a future caller cannot accidentally bypass ingress.
+    pub(crate) fn provider_executed_call_is_admissible(&self, block: &ContentBlock) -> bool {
+        let ContentBlock::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+            replay,
+        } = block
+        else {
+            return false;
+        };
+        let active_origin = self.reasoning_origin();
+        matches!(self.config.web_search, TurnWebSearch::Vendor(_))
+            && name == crate::WEB_SEARCH_TOOL
+            && replay
+                .as_ref()
+                .is_none_or(|replay| replay.origin() == Some(&active_origin))
+            && crate::agent_tools::provider_web_search_receipt_is_canonical(
+                input,
+                output,
+                *is_error,
+                replay.as_ref(),
+            )
+    }
+
     /// Why `call` cannot run beside its siblings, if it cannot.
     ///
     /// A name this turn does not advertise is deliberately plain: it reaches
@@ -76,43 +110,35 @@ impl Agent {
             .is_some_and(|tool| tool.approval_class() == ApprovalClass::ReadOnly)
     }
 
-    /// Persist one call the provider already ran, and announce it.
+    /// Admit one call the provider already ran at its exact stream position.
     ///
-    /// The work is finished before Tidebreak sees it, so the row is written and
-    /// resolved back to back rather than admitted pending. Everything after
-    /// that is deliberately identical to a host tool call of the same name: the
-    /// journal carries the same started/completed pair, the activity card is
-    /// built by the same projection, and a later turn rebuilds it as an
-    /// ordinary `ToolUse`/`ToolResult` pair, because it is an ordinary row.
+    /// Admission is separate from resolution so every item from one provider
+    /// step can reserve durable history order before this already-complete call
+    /// is terminalized. Otherwise its early `resolved_at` would make transcript
+    /// rebuilding mistake a following host call from the same stream for a new
+    /// model step.
     ///
-    /// A row that cannot be written is not a reason to fail the turn — the
-    /// search already happened and the model already has its results — so the
-    /// step continues without it.
-    pub(crate) async fn record_provider_executed_call(
+    /// Returns whether this attempt admitted the fresh row and therefore owns
+    /// its completion and activity events.
+    pub(crate) async fn accept_provider_executed_call(
         &self,
         chat_id: ChatId,
         turn_id: TurnId,
+        call_id: CallId,
         block: &ContentBlock,
-        events: &EventSink<'_>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let ContentBlock::ProviderExecutedToolCall {
             name,
             input,
-            output,
-            is_error,
             replay,
+            ..
         } = block
         else {
-            return Ok(());
+            return Ok(false);
         };
-        let call_id = CallId::new();
-        let result = output.to_string();
-        let tool_output = if *is_error {
-            ToolOutput::error(result.clone())
-        } else {
-            ToolOutput::text(result.clone()).with_entries(provider_executed_entries(output))
-        };
-        let preview = ToolResultPreview::build(name, &tool_output);
+        if !self.provider_executed_call_is_admissible(block) {
+            return Ok(false);
+        }
         let record = ToolCallRecord {
             id: call_id,
             chat_id,
@@ -135,16 +161,46 @@ impl Agent {
             created_at: Utc::now(),
             resolved_at: None,
         };
+        Ok(matches!(
+            self.accept_server_call_retry(&record).await?,
+            AcceptedServerCall::Accepted
+        ))
+    }
+
+    /// Resolve and announce a provider-executed call whose row was admitted by
+    /// [`Self::accept_provider_executed_call`].
+    pub(crate) async fn complete_provider_executed_call(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        call_id: CallId,
+        block: &ContentBlock,
+        events: &EventSink<'_>,
+    ) -> Result<()> {
+        let ContentBlock::ProviderExecutedToolCall {
+            name,
+            input,
+            output,
+            is_error,
+            ..
+        } = block
+        else {
+            return Ok(());
+        };
+        if !self.provider_executed_call_is_admissible(block) {
+            return Ok(());
+        }
+        let result = output.to_string();
+        let tool_output = if *is_error {
+            ToolOutput::error(result.clone())
+        } else {
+            ToolOutput::text(result.clone()).with_entries(provider_executed_entries(output))
+        };
+        let preview = ToolResultPreview::build(name, &tool_output);
         events.send(AgentEvent::ToolCallStarted {
             call_id,
             name: name.clone(),
         });
-        if !matches!(
-            self.accept_server_call_retry(&record).await?,
-            AcceptedServerCall::Accepted
-        ) {
-            return Ok(());
-        }
         let resolution = if *is_error {
             ToolCallResolution::Failed {
                 result,

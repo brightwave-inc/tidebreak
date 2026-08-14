@@ -25,6 +25,7 @@ use crate::storage::{
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::blob as blob_ops;
+use super::chat_image_publication as chat_image_publication_ops;
 use super::exec_file_change as exec_file_change_ops;
 use super::message_attachment as message_attachment_ops;
 use super::turn::canonical_db_timestamp;
@@ -671,17 +672,23 @@ pub(in crate::db) async fn delete_chat(
         }
     }
 
-    // Image attachments are the conversation's other class of blob reference.
-    // Dropping them here only creates retirement candidates: blob ids are
-    // content-derived, so another conversation may still attach the same bytes.
-    // The retirement claim performs the authoritative union reference check and
-    // cancels a candidate that is still live, exactly as it does for documents.
+    // Published-image reservations and message attachments are the
+    // conversation's image blob references. Dropping them here only creates
+    // retirement candidates: blob ids are content-derived, so another
+    // conversation may still reserve or attach the same bytes. The retirement
+    // claim performs the authoritative union reference check and cancels a
+    // candidate that is still live, exactly as it does for documents.
+    let mut image_blob_ids =
+        chat_image_publication_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
+    chat_image_publication_ops::delete_for_chat_on(&transaction, chat_id).await?;
+    image_blob_ids
+        .extend(message_attachment_ops::list_chat_blob_ids_on(&transaction, chat_id).await?);
     // Attachments must go before the message rows they point at, which the
     // ordering below depends on.
-    let attachment_blob_ids =
-        message_attachment_ops::list_chat_blob_ids_on(&transaction, chat_id).await?;
     message_attachment_ops::delete_for_chat_on(&transaction, chat_id).await?;
-    for blob_id in attachment_blob_ids {
+    image_blob_ids.sort_unstable();
+    image_blob_ids.dedup();
+    for blob_id in image_blob_ids {
         blob_ops::enqueue_on(&transaction, blob_id).await?;
     }
 

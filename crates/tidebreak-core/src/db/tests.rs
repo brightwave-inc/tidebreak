@@ -22,6 +22,7 @@ mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
 mod turn_steer;
+mod turn_terminal_usage;
 
 struct MigratedSqliteTemplate {
     _directory: tempfile::TempDir,
@@ -4335,6 +4336,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
                 2,
                 regressing_output.created_at,
                 &regressing_output,
+                0,
                 crate::provider::Usage::default(),
                 crate::provider::StopReason::EndTurn,
             )
@@ -4350,6 +4352,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
             2,
             regressing_output.created_at,
             &regressing_output,
+            0,
             crate::provider::Usage::default(),
             crate::provider::StopReason::EndTurn,
         )
@@ -6808,11 +6811,13 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
         output_tokens: 8,
         ..Usage::default()
     };
+    let final_model_steps = 2;
     let journaled = store
         .finish_turn_cancellation_and_append_event(
             turn.id,
             token,
             acknowledged_at,
+            final_model_steps,
             usage,
             None,
             &[],
@@ -6827,6 +6832,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     assert_eq!(cancelled.lease_token, None);
     assert_eq!(cancelled.lease_expires_at, None);
     assert_eq!(cancelled.finished_at, Some(acknowledged_at));
+    assert_eq!(cancelled.model_steps, final_model_steps);
     let terminal = journaled
         .terminal_event
         .expect("worker acknowledgement must append a terminal event");
@@ -6836,6 +6842,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             turn.id,
             token,
             acknowledged_at + chrono::Duration::hours(1),
+            final_model_steps,
             usage,
             None,
             &[],
@@ -6853,6 +6860,19 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             turn.id,
             token,
             acknowledged_at + chrono::Duration::hours(1),
+            final_model_steps + 1,
+            usage,
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn.id,
+            token,
+            acknowledged_at + chrono::Duration::hours(1),
+            final_model_steps,
             Usage::default(),
             None,
             &[],
@@ -6889,6 +6909,50 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
             finished_at: acknowledged_at,
         }]
     );
+}
+
+#[tokio::test]
+async fn cancellation_acknowledgement_accepts_the_request_callers_clock() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn = match store
+        .accept_turn(TurnId::new(), chat.id, "gpt-5", "cancel immediately")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let token = uuid::Uuid::new_v4();
+    let claimed_at = Utc::now();
+    store
+        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("the queued turn is claimable");
+
+    // Cancellation stamps its transition from the authoritative database
+    // clock. That clock may be later than the caller's timestamp even though
+    // both operations happen in the same application tick (SQLite explicitly
+    // rounds it to the end of the current millisecond). The exact worker must
+    // still be able to acknowledge with the timestamp it already captured.
+    let caller_now = Utc::now();
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn.id, caller_now)
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Requested(_))
+    ));
+    assert!(matches!(
+        store
+            .finish_turn_cancellation(turn.id, token, caller_now)
+            .await
+            .unwrap(),
+        Some(FinishTurnCancellationOutcome::Cancelled(_))
+    ));
 }
 
 #[tokio::test]
@@ -6954,6 +7018,7 @@ async fn claim_scan_terminalizes_an_expired_cancelling_lease() {
             turn.id,
             token,
             expires_at + chrono::Duration::hours(1),
+            0,
             Usage::default(),
             None,
             &[],
@@ -7747,6 +7812,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
             0,
             output.created_at,
             &output,
+            0,
             Usage::default(),
             StopReason::EndTurn,
         )
@@ -8564,6 +8630,7 @@ async fn refused_turn_metadata_hydrates_with_its_exact_durable_output() {
                 output.created_at,
                 &output,
                 &[],
+                0,
                 Usage::default(),
                 refusal.clone(),
             )
@@ -10572,6 +10639,7 @@ async fn reasoning_deltas_rebuild_into_the_transcript() {
             0,
             output.created_at,
             &output,
+            0,
             Usage::default(),
             StopReason::EndTurn,
         )
@@ -10674,6 +10742,7 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
             cancelled_id,
             cancelled_lease,
             cancellation_requested_at + chrono::Duration::seconds(1),
+            0,
             Usage::default(),
             None,
             &[],
@@ -10800,6 +10869,7 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
 async fn cancellation_with_partial_output_commits_a_durable_message() {
     use crate::event::AgentEvent;
     use crate::provider::Usage;
+    use crate::{AssistantCitationInput, CitationLocator};
 
     let (_dir, store) = temp_store().await;
 
@@ -10846,13 +10916,35 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
         .unwrap()
         .expect("running cancellation is accepted");
 
+    let document_id = DocumentId::new();
+    store
+        .upsert_document(&DocumentUpsert {
+            id: document_id,
+            project_id: None,
+            chat_id: Some(chat.id),
+            origin_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "the cited answer".into(),
+            updated_at: requested_at,
+        })
+        .await
+        .unwrap();
+    let citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 1 },
+    };
     let output = Message {
         id: MessageId::new(),
         chat_id: chat.id,
         turn_id,
         role: Role::Assistant,
         reasoning: Default::default(),
-        content: "the answer so far".into(),
+        content: crate::format_citation_directive(
+            "the answer so far",
+            document_id,
+            &citation.locator,
+        ),
         llm_content: None,
         created_at: requested_at,
     };
@@ -10861,9 +10953,10 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
             turn_id,
             lease,
             requested_at + chrono::Duration::seconds(1),
+            0,
             Usage::default(),
             Some(&output),
-            &[],
+            std::slice::from_ref(&citation),
         )
         .await
         .unwrap()
@@ -10894,7 +10987,7 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
         .expect("partial output is a durable message");
     assert_eq!(
         (committed.role, committed.content.as_str()),
-        (Role::Assistant, "the answer so far")
+        (Role::Assistant, output.content.as_str())
     );
 
     // An exact retry of the same acknowledgement stays idempotent.
@@ -10903,9 +10996,10 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
             turn_id,
             lease,
             requested_at + chrono::Duration::seconds(2),
+            0,
             Usage::default(),
             Some(&output),
-            &[],
+            std::slice::from_ref(&citation),
         )
         .await
         .unwrap()
@@ -10920,6 +11014,94 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
             .count(),
         1,
         "a retried acknowledgement must not duplicate the output message"
+    );
+
+    assert!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                requested_at + chrono::Duration::seconds(3),
+                0,
+                Usage::default(),
+                None,
+                &[],
+            )
+            .await
+            .is_err(),
+        "a retry may not drop the committed partial output"
+    );
+
+    let changed_id = Message {
+        id: MessageId::new(),
+        ..output.clone()
+    };
+    assert!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                requested_at + chrono::Duration::seconds(4),
+                0,
+                Usage::default(),
+                Some(&changed_id),
+                std::slice::from_ref(&citation),
+            )
+            .await
+            .is_err(),
+        "a retry may not substitute another output message identity"
+    );
+
+    let changed_content = Message {
+        content: crate::format_citation_directive(
+            "a different answer",
+            document_id,
+            &citation.locator,
+        ),
+        ..output.clone()
+    };
+    assert!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                requested_at + chrono::Duration::seconds(5),
+                0,
+                Usage::default(),
+                Some(&changed_content),
+                std::slice::from_ref(&citation),
+            )
+            .await
+            .is_err(),
+        "a retry may not change the committed partial output content"
+    );
+
+    let changed_citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 2 },
+    };
+    let changed_citations = Message {
+        content: crate::format_citation_directive(
+            "the answer so far",
+            document_id,
+            &changed_citation.locator,
+        ),
+        ..output.clone()
+    };
+    assert!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                requested_at + chrono::Duration::seconds(6),
+                0,
+                Usage::default(),
+                Some(&changed_citations),
+                std::slice::from_ref(&changed_citation),
+            )
+            .await
+            .is_err(),
+        "a retry may not change the committed partial-output citations"
     );
 }
 
@@ -11005,6 +11187,7 @@ async fn cancellation_after_committed_step_does_not_rebuild_its_prose() {
             turn_id,
             lease,
             requested_at + chrono::Duration::seconds(1),
+            0,
             Usage::default(),
             None,
             &[],

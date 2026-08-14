@@ -62,34 +62,7 @@ async fn create_then_get_and_list() {
         assert_eq!(response.status(), StatusCode::OK);
         json_body(response).await
     };
-    assert_eq!(agent_runs.len(), 1);
-    assert_eq!(
-        agent_runs[0].get("id"),
-        Some(&serde_json::Value::String(
-            tidebreak_core::AgentRunId::foreground_for_chat(created.id).to_string()
-        ))
-    );
-    let snapshot = agent_runs[0].as_object().unwrap();
-    assert!(snapshot.get("lease_token").is_none());
-    assert!(snapshot.get("lease_expires_at").is_none());
-    assert!(snapshot.get("input").is_none());
-    assert!(snapshot.get("chat_id").is_none());
-    // Default host selection: local where the sandbox exists, otherwise off.
-    // Never confused with execution_location (the run-loop seat).
-    let expected_provider =
-        if tidebreak_code_execution::LocalExecutionProvider::availability().is_ok() {
-            "local"
-        } else {
-            "off"
-        };
-    assert_eq!(
-        snapshot.get("code_execution_provider"),
-        Some(&serde_json::json!(expected_provider))
-    );
-    assert_eq!(
-        snapshot.get("execution_location"),
-        Some(&serde_json::json!("in_process"))
-    );
+    assert!(agent_runs.is_empty());
 
     let listed: Vec<Chat> = {
         let response = router
@@ -1172,7 +1145,7 @@ async fn sandbox_cancel_route_rejects_completed_and_failed_runs() {
 }
 
 #[tokio::test]
-async fn sandbox_cancel_route_signals_only_the_durable_model_receipt() {
+async fn sandbox_cancel_route_signals_only_the_durable_run_receipt() {
     let (router, token, state, store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -1196,6 +1169,14 @@ async fn sandbox_cancel_route_signals_only_the_durable_model_receipt() {
         .sandbox_attempts
         .register_model(unrelated_run, lease)
         .expect("register unrelated model attempt");
+    let container_drive = state
+        .sandbox_steering
+        .register_container_drive(run.id, lease)
+        .expect("register exact container drive");
+    let unrelated_container_drive = state
+        .sandbox_steering
+        .register_container_drive(unrelated_run, lease)
+        .expect("register unrelated container drive");
 
     let response = post_json(
         &router,
@@ -1211,6 +1192,8 @@ async fn sandbox_cancel_route_signals_only_the_durable_model_receipt() {
     );
     assert!(active.cancel_token().is_cancelled());
     assert!(!unrelated.cancel_token().is_cancelled());
+    assert!(container_drive.cancel_token().is_cancelled());
+    assert!(!unrelated_container_drive.cancel_token().is_cancelled());
     assert_eq!(
         store.get_agent_run(run.id).await.unwrap().unwrap().status,
         AgentRunStatus::Cancelling,
@@ -1230,6 +1213,153 @@ async fn sandbox_cancel_route_signals_only_the_durable_model_receipt() {
         serde_json::json!({"id": run.id, "status": "cancelling"})
     );
     assert!(!unrelated.cancel_token().is_cancelled());
+    assert!(!unrelated_container_drive.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn foreground_cancel_tool_uses_exact_receipts_and_wakes_the_worker() {
+    let (router, token, state, store, dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let run = admit_sandbox_for_test(&store, chat.id, "running foreground child").await;
+    let lease = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .claim_agent_run(lease, chrono::Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run.id
+    );
+    let active_model = state
+        .sandbox_attempts
+        .register_model(run.id, lease)
+        .expect("register exact model attempt");
+    let stale_model = state
+        .sandbox_attempts
+        .register_model(run.id, uuid::Uuid::new_v4())
+        .expect("register stale model attempt");
+    let active_container = state
+        .sandbox_steering
+        .register_container_drive(run.id, lease)
+        .expect("register exact container drive");
+    let stale_container = state
+        .sandbox_steering
+        .register_container_drive(run.id, uuid::Uuid::new_v4())
+        .expect("register stale container drive");
+
+    let cancellation_acceleration =
+        crate::agent_control_tools::SandboxCancellationAcceleration::new(
+            store.clone(),
+            state.sandbox_attempts.clone(),
+            state.sandbox_steering.clone(),
+            state.agent_run_wake.clone(),
+        );
+    let cancel = crate::agent_control_tools::CancelAgentTool::new(store.clone())
+        .with_cancellation_acceleration(cancellation_acceleration.clone());
+    let ctx = ToolCtx::new_legacy_workspace(chat.id, None, dir.path().join("workspace"));
+    let wake = state.agent_run_wake.clone();
+    let wake_wait = tokio::spawn(async move { wake.notified().await });
+    tokio::task::yield_now().await;
+
+    let output = Tool::execute(
+        &cancel,
+        &ctx,
+        serde_json::json!({"agent_id": run.id, "reason": "stop now"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !output.is_error,
+        "foreground cancellation failed: {output:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(1), wake_wait)
+        .await
+        .expect("foreground cancellation wakes the sandbox worker")
+        .expect("wake waiter remains live");
+    assert!(active_model.cancel_token().is_cancelled());
+    assert!(!stale_model.cancel_token().is_cancelled());
+    assert!(active_container.cancel_token().is_cancelled());
+    assert!(!stale_container.cancel_token().is_cancelled());
+    assert_eq!(
+        store.get_agent_run(run.id).await.unwrap().unwrap().status,
+        AgentRunStatus::Cancelling
+    );
+    store
+        .finish_agent_run_cancellation(run.id, lease)
+        .await
+        .unwrap()
+        .expect("release the single test scheduler slot");
+
+    // A waiting child has no live model lease. Its immutable cancelled-call
+    // receipt is the only authority for which checkpoint executor to stop.
+    let waiting_chat = make_chat(&router, &bearer).await;
+    let waiting = admit_sandbox_for_test(&store, waiting_chat.id, "waiting foreground child").await;
+    let model_lease = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(model_lease, chrono::Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .expect("claim waiting child");
+    let request = SandboxToolCallRequest {
+        id: CallId::new(),
+        agent_run_id: waiting.id,
+        chat_id: waiting_chat.id,
+        provider_id: "foreground-checkpoint".into(),
+        name: tidebreak_core::SANDBOX_WEB_SEARCH_TOOL.into(),
+        arguments: serde_json::json!({"query": "cancel me"}),
+    };
+    assert!(matches!(
+        store
+            .park_agent_run_for_sandbox_tool_calls(
+                waiting.id,
+                model_lease,
+                &[crate::tests::dispatchable(&request)]
+            )
+            .await
+            .unwrap(),
+        ParkSandboxToolCallOutcome::Parked { .. }
+    ));
+    let checkpoint_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_sandbox_tool_call(request.id, checkpoint_lease, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        tidebreak_core::ClaimSandboxToolCallOutcome::Claimed(_)
+    ));
+    let active_checkpoint = state
+        .sandbox_attempts
+        .register_checkpoint(request.id, waiting.id, checkpoint_lease)
+        .expect("register exact checkpoint");
+    let stale_checkpoint = state
+        .sandbox_attempts
+        .register_checkpoint(request.id, waiting.id, uuid::Uuid::new_v4())
+        .expect("register stale checkpoint");
+    let waiting_ctx =
+        ToolCtx::new_legacy_workspace(waiting_chat.id, None, dir.path().join("waiting-workspace"));
+    let waiting_cancel = crate::agent_control_tools::CancelAgentTool::new(store.clone())
+        .with_cancellation_acceleration(cancellation_acceleration);
+    let output = Tool::execute(
+        &waiting_cancel,
+        &waiting_ctx,
+        serde_json::json!({"agent_id": waiting.id}),
+    )
+    .await
+    .unwrap();
+    assert!(!output.is_error, "waiting cancellation failed: {output:?}");
+    assert!(active_checkpoint.cancel_token().is_cancelled());
+    assert!(!stale_checkpoint.cancel_token().is_cancelled());
+    assert_eq!(
+        store
+            .get_sandbox_tool_call_receipt(request.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        tidebreak_core::SandboxToolCallStatus::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -1383,7 +1513,7 @@ async fn parent_turn_cancellation_signals_its_exact_running_child_search() {
 }
 
 #[tokio::test]
-async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() {
+async fn agent_run_list_omits_foreground_client_activity() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -1480,7 +1610,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
         outcome => panic!("unexpected client-call admission: {outcome:?}"),
     };
 
-    let snapshot = |router: Router| async {
+    let snapshots = |router: Router| async {
         let response = router
             .oneshot(
                 Request::builder()
@@ -1492,21 +1622,11 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let snapshots: Vec<serde_json::Value> = json_body(response).await;
-        snapshots
-            .into_iter()
-            .find(|snapshot| snapshot.get("tier") == Some(&serde_json::json!("foreground")))
-            .expect("foreground snapshot is returned")
+        json_body::<Vec<serde_json::Value>>(response).await
     };
 
-    let waiting = snapshot(router.clone()).await;
-    assert_eq!(
-        waiting.get("activity"),
-        Some(&serde_json::json!({
-            "kind": "read_connected_file",
-            "status": "waiting"
-        }))
-    );
+    let waiting = snapshots(router.clone()).await;
+    assert!(waiting.is_empty());
     let encoded = serde_json::to_string(&waiting).unwrap();
     for forbidden in [
         root_id,
@@ -1535,13 +1655,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
             .unwrap(),
         tidebreak_core::ClaimClientToolCallOutcome::Claimed(_)
     ));
-    assert_eq!(
-        snapshot(router.clone()).await.get("activity"),
-        Some(&serde_json::json!({
-            "kind": "read_connected_file",
-            "status": "running"
-        }))
-    );
+    assert!(snapshots(router.clone()).await.is_empty());
 
     assert!(matches!(
         store
@@ -1560,10 +1674,7 @@ async fn agent_run_snapshots_expose_only_safe_live_foreground_folder_activity() 
             .outcome,
         tidebreak_core::ResolveToolCallOutcome::Resolved
     ));
-    assert_eq!(
-        snapshot(router).await.get("activity"),
-        Some(&serde_json::Value::Null)
-    );
+    assert!(snapshots(router).await.is_empty());
 }
 
 #[tokio::test]

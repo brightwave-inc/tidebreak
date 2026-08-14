@@ -348,6 +348,12 @@ pub(crate) fn build_request_json_for(
     req: &ChatRequest,
     profile: ResponsesProfile,
 ) -> Result<Value> {
+    if profile == ResponsesProfile::OpenAi && req.vendor_web_search.is_some() {
+        return Err(AgentError::Provider(
+            "Responses API cannot enforce the vendor web-search max_uses budget".into(),
+        ));
+    }
+
     let input = build_input_for(req, profile)?;
     let mut body = json!({
         "model": req.wire_model(),
@@ -380,12 +386,11 @@ pub(crate) fn build_request_json_for(
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(openai_tool).collect());
     }
-    // The vendor search is a hosted tool, declared alongside the function tools
-    // rather than instead of them: the model may still call anything the host
-    // advertised in the same response. The Responses API exposes no cap on how
-    // many searches one response may run — its knobs are context size, domain
-    // filters and location — so `max_uses` has nothing to map onto here and is
-    // deliberately dropped.
+    // xAI's vendor search is a hosted tool, declared alongside the function
+    // tools rather than instead of them: the model may still call anything the
+    // host advertised in the same response. OpenAI requests carrying this
+    // capability are rejected above because that endpoint cannot enforce the
+    // mandatory per-turn `max_uses` budget before provider egress.
     if req.vendor_web_search.is_some() {
         let vendor_tool = json!({ "type": VENDOR_WEB_SEARCH_TOOL });
         match body["tools"].as_array_mut() {
@@ -722,9 +727,9 @@ struct StreamState {
 struct PendingSearch {
     input: Value,
     results: Vec<Value>,
-    /// URL and title of every result already taken, so a source cited in
-    /// several places is reported once.
-    seen: HashSet<(String, String)>,
+    /// Canonical URL of every result already taken, so a source cited in
+    /// several places or with several titles is reported once.
+    seen: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -937,6 +942,9 @@ fn collect_citation(annotation: &Value, state: &mut StreamState) {
     /// The cap the host's own search applies, so a hosted search cannot put
     /// more into context than the tool it stands in for.
     const MAX_RESULTS: usize = tidebreak_core::MAX_WEB_SEARCH_RESULTS;
+    /// Kept equal to the canonical provider-search receipt title bound. The
+    /// adapter must not emit a row the core admission gate will discard.
+    const MAX_TITLE_CHARS: usize = 300;
 
     if annotation["type"] != "url_citation" {
         return;
@@ -947,12 +955,20 @@ fn collect_citation(annotation: &Value, state: &mut StreamState) {
     if search.results.len() >= MAX_RESULTS {
         return;
     }
-    let url = annotation["url"].as_str().unwrap_or_default();
-    if url.is_empty() {
+    let Some(url) = annotation["url"].as_str().and_then(canonical_citation_url) else {
         return;
-    }
-    let title = annotation["title"].as_str().unwrap_or_default();
-    if !search.seen.insert((url.to_owned(), title.to_owned())) {
+    };
+    // OpenAI supplies no page excerpt with a citation, so an absent, blank,
+    // or otherwise unsafe title would produce a row with neither a title nor
+    // a snippet. Omit that row while retaining usable sibling citations.
+    let Some(title) = annotation["title"].as_str().map(str::trim).filter(|title| {
+        !title.is_empty()
+            && title.chars().count() <= MAX_TITLE_CHARS
+            && !title.chars().any(char::is_control)
+    }) else {
+        return;
+    };
+    if !search.seen.insert(url.clone()) {
         return;
     }
     search.results.push(json!({
@@ -963,6 +979,56 @@ fn collect_citation(annotation: &Value, state: &mut StreamState) {
         // not vary by provider.
         "snippet": "",
     }));
+}
+
+/// Normalize a provider citation URL into the exact network-URL shape the
+/// canonical provider-search receipt accepts.
+fn canonical_citation_url(raw: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.fragment().is_some() {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    if host.is_empty() || !host.is_ascii() {
+        return None;
+    }
+    if host.contains(':') {
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+    } else if host.parse::<std::net::Ipv4Addr>().is_err()
+        && !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+    {
+        return None;
+    }
+
+    let canonical = parsed.to_string();
+    (canonical.len() <= tidebreak_core::MAX_WEB_EXTRACT_URL_BYTES
+        && !canonical.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(
+                    character,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+        }))
+    .then_some(canonical)
 }
 
 /// Emit the pending search, if there is one, as a finished provider-executed
@@ -1232,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_search_declares_the_hosted_tool_and_renames_prior_client_calls() {
+    fn openai_refuses_unbounded_vendor_search_without_changing_xai() {
         let history = vec![
             tidebreak_core::ChatMessage {
                 role: Role::Assistant,
@@ -1262,7 +1328,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let body = build_request_json(&req).unwrap();
+        let error = build_request_json(&req)
+            .expect_err("OpenAI must not receive a hosted search without a wire budget");
+        assert!(error.to_string().contains("max_uses"), "{error}");
+
+        let body = build_request_json_for(&req, ResponsesProfile::Xai)
+            .expect("the OpenAI capability guard must not change xAI requests");
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[1], json!({"type":"web_search"}));
@@ -1322,7 +1393,11 @@ mod tests {
             // The same source cited twice is one result.
             json!({
                 "type":"response.output_text.annotation.added",
-                "annotation":{"type":"url_citation","url":"https://example.com/a","title":"A"}
+                "annotation":{
+                    "type":"url_citation",
+                    "url":"https://EXAMPLE.com:443/a",
+                    "title":"A second title"
+                }
             }),
             json!({
                 "type":"response.output_text.annotation.added",
@@ -1354,6 +1429,108 @@ mod tests {
                 },
                 // A hosted search is not a call anyone answers, so the turn
                 // still ends rather than asking for tool results.
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hosted_search_omits_untitled_citations_without_dropping_valid_siblings() {
+        let mut state = StreamState::default();
+        let events: Vec<_> = [
+            json!({
+                "type":"response.output_item.done",
+                "item":{
+                    "type":"web_search_call",
+                    "id":"ws_1",
+                    "status":"completed",
+                    "action":{"type":"search","query":"rust 2027"}
+                }
+            }),
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{
+                    "type":"url_citation",
+                    "url":"https://example.com/untitled"
+                }
+            }),
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{
+                    "type":"url_citation",
+                    "url":"https://example.com/titled",
+                    "title":"Release notes"
+                }
+            }),
+            json!({"type":"response.completed","response":{}}),
+        ]
+        .iter()
+        .flat_map(|event| normalize(event, &mut state))
+        .collect();
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: "web_search".into(),
+                    input: json!({"query":"rust 2027"}),
+                    output: json!({
+                        "provider": "openai",
+                        "results": [{
+                            "url":"https://example.com/titled",
+                            "title":"Release notes",
+                            "snippet":""
+                        }]
+                    }),
+                    is_error: false,
+                    replay: None,
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hosted_search_with_only_untitled_citations_reports_empty_results() {
+        let mut state = StreamState::default();
+        let events: Vec<_> = [
+            json!({
+                "type":"response.output_item.done",
+                "item":{
+                    "type":"web_search_call",
+                    "id":"ws_1",
+                    "status":"completed",
+                    "action":{"type":"search","query":"rust 2027"}
+                }
+            }),
+            json!({
+                "type":"response.output_text.annotation.added",
+                "annotation":{
+                    "type":"url_citation",
+                    "url":"https://example.com/untitled",
+                    "title":"   "
+                }
+            }),
+            json!({"type":"response.completed","response":{}}),
+        ]
+        .iter()
+        .flat_map(|event| normalize(event, &mut state))
+        .collect();
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ProviderExecutedToolCall {
+                    name: "web_search".into(),
+                    input: json!({"query":"rust 2027"}),
+                    output: json!({"provider":"openai","results":[]}),
+                    is_error: false,
+                    replay: None,
+                },
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn
                 },

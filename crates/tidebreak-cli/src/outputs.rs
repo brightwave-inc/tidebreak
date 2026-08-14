@@ -252,7 +252,10 @@ pub async fn attach(chat: ChatId, path: PathBuf, server: Server) -> Result<()> {
     let session = Session::open(&server).await?;
     let client = session.client();
     if media_type.starts_with("image/") {
-        let attachment_id = client.attach_image(chat, &media_type, bytes).await?;
+        let attachment_id = client
+            .attach_image(chat, &media_type, bytes)
+            .await
+            .map_err(|error| local_import_error(client, error))?;
         println!("{attachment_id}");
         eprintln!(
             "tidebreak: published {title} as an image attachment; reference it from the next turn"
@@ -260,9 +263,22 @@ pub async fn attach(chat: ChatId, path: PathBuf, server: Server) -> Result<()> {
     } else {
         let document_id = client
             .attach_document(chat, &title, &media_type, bytes)
-            .await?;
+            .await
+            .map_err(|error| local_import_error(client, error))?;
         println!("{document_id}");
         eprintln!("tidebreak: attached {title} as {media_type}");
     }
     Ok(())
+}
+
+fn local_import_error(client: &Client, error: AgentError) -> AgentError {
+    if !client.has_local_import_capability() && error.to_string().contains("401 Unauthorized") {
+        AgentError::msg(
+            "the running desktop requires its scoped local-import capability; use --attach with \
+             that desktop profile's data directory instead of --server, or restart the desktop \
+             if listen.json predates this capability",
+        )
+    } else {
+        error
+    }
 }

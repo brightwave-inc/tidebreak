@@ -112,11 +112,12 @@ async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Resul
 
 /// Resolve published attachment ids into authoritative image identity.
 ///
-/// The bytes are inspected again here rather than trusting what the publish
-/// response said, because nothing durable connects the two requests and the
-/// metadata persisted with the turn must describe the bytes that actually exist.
+/// The target chat's durable publication reservation is checked before the
+/// global blob store. The bytes are then inspected again so the metadata
+/// persisted with the turn describes the content that actually exists.
 async fn resolve_message_attachments(
     state: &AppState,
+    chat_id: ChatId,
     ids: &[uuid::Uuid],
 ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
     if ids.is_empty() {
@@ -136,15 +137,20 @@ async fn resolve_message_attachments(
         let missing = || {
             ServerError::bad_request_kind(
                 "image_attachment_not_found",
-                format!("image attachment {id} has not been published"),
+                format!("image attachment {id} has not been published for chat {chat_id}"),
             )
         };
+        let published = state
+            .store
+            .get_published_chat_image(chat_id, id)
+            .await?
+            .ok_or_else(missing)?;
         let bytes = state.blobs.get(id).await?.ok_or_else(missing)?;
         let image = image_attachment::inspect_image_bytes(&bytes)?;
         // Attachment ids are content addresses. Bytes that do not hash back to
-        // the requested id are some other blob, so the reference is unresolved
-        // rather than merely mismatched.
-        if image.blob_id != id {
+        // the requested id, or no longer match the descriptor reserved by this
+        // chat, are unresolved rather than merely mismatched.
+        if image.blob_id != id || image != published {
             return Err(missing());
         }
         images.push(image);
@@ -378,7 +384,7 @@ pub async fn post_message(
         let prepared = async {
             let model = resolve_executable_chat_model(&state, &chat).await?;
             require_invocable_skills(&state, &body.invoked_skills).await?;
-            let images = resolve_message_attachments(&state, &body.attachments).await?;
+            let images = resolve_message_attachments(&state, id, &body.attachments).await?;
             let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
             if !images.is_empty() {
                 require_image_capable_model(&state, &model).await?;
@@ -779,7 +785,7 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
             state.store.delete_queued_turn_if_current(&next).await?;
             continue;
         }
-        let images = match resolve_message_attachments(state, &next.attachments).await {
+        let images = match resolve_message_attachments(state, chat_id, &next.attachments).await {
             Ok(images) => images,
             Err(_) => {
                 dropped("an image attachment no longer resolves");

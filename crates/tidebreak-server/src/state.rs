@@ -199,6 +199,12 @@ pub struct AppState {
     pub(crate) principal_tokens: Arc<crate::auth::TokenMap>,
     /// A second per-launch secret required for native-only operations.
     pub(crate) client_executor_token: Arc<str>,
+    /// A per-launch capability limited to publishing caller-supplied bytes.
+    ///
+    /// Unlike the client-executor credential this authorizes no host action;
+    /// it exists so a local process that discovered the server through the
+    /// restricted listen file can add a document or image it already holds.
+    pub(crate) local_import_token: Arc<str>,
     /// Stable private identity owning native attachment reconciliation work.
     pub(crate) client_executor_id: Uuid,
     /// Whether this embedding supplied a restart-stable attachment executor.
@@ -211,11 +217,13 @@ pub struct AppState {
     /// only let an authenticated cancellation request promptly drop provider
     /// futures owned by this server process.
     pub(crate) sandbox_attempts: Arc<SandboxAttemptGuard>,
-    /// Process-local steering sinks for sandbox-resident runs attached here.
+    /// Process-local steering sinks and cancellation handles for container runs.
     ///
     /// Mid-run steering is delivered over the connection the container driver
     /// holds, so a run this process is not attached to cannot be steered and
-    /// the request is refused rather than queued.
+    /// the request is refused rather than queued. Cancellation is registered
+    /// for the whole exact claimed drive so a committed request wakes it even
+    /// while it is provisioning or between attachments.
     pub(crate) sandbox_steering: Arc<SandboxSteerGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
@@ -412,6 +420,7 @@ impl AppState {
             token: Uuid::new_v4().to_string().into(),
             principal_tokens,
             client_executor_token: mint_client_executor_token(),
+            local_import_token: mint_local_import_token(),
             client_executor_id,
             root_attachment_routes_enabled: true,
             active_turns: Arc::new(TurnGuard::default()),
@@ -521,8 +530,7 @@ impl SandboxAttemptGuard {
     }
 }
 
-/// Steering handles for sandbox-resident runs this process currently holds a
-/// live connection to.
+/// Process-local handles for container-resident runs this process is driving.
 ///
 /// Steering a background run is attached-only: the instruction rides the
 /// connection the container driver is holding right now, and there is no durable
@@ -530,11 +538,16 @@ impl SandboxAttemptGuard {
 /// connection — the driver registers after its attach handshake is accepted and
 /// the RAII handle deregisters when that connection ends — so an absent entry
 /// means "nobody can carry this instruction", which is what the API reports.
-/// Like [`SandboxAttemptGuard`], this map is process-local and never
-/// participates in admission or terminal decisions.
+///
+/// Cancellation spans the whole exact claimed container drive, including
+/// provisioning and reconnects. Its separate RAII registration lets a durable
+/// cancellation wake the drive immediately instead of waiting for its next
+/// heartbeat. Like [`SandboxAttemptGuard`], both maps are process-local latency
+/// accelerators and never participate in admission or terminal decisions.
 #[derive(Default)]
 pub(crate) struct SandboxSteerGuard {
     attached: Mutex<HashMap<(AgentRunId, Uuid), mpsc::Sender<String>>>,
+    container_drives: Mutex<HashMap<(AgentRunId, Uuid), CancelToken>>,
 }
 
 /// Why one steering instruction could not be handed to a live run.
@@ -549,6 +562,49 @@ pub(crate) enum SandboxSteerRefusal {
 }
 
 impl SandboxSteerGuard {
+    /// Register one exact claimed container drive for prompt cancellation.
+    ///
+    /// The durable run lease remains authoritative. This handle only closes the
+    /// latency gap between the committed cancellation and the drive's next
+    /// heartbeat.
+    pub(crate) fn register_container_drive(
+        self: &Arc<Self>,
+        agent_run_id: AgentRunId,
+        lease_token: Uuid,
+    ) -> Option<ActiveSandboxContainerDrive> {
+        let mut drives = self.container_drives.lock().unwrap();
+        let identity = (agent_run_id, lease_token);
+        if drives.contains_key(&identity) {
+            return None;
+        }
+        let cancel = CancelToken::new();
+        drives.insert(identity, cancel.clone());
+        Some(ActiveSandboxContainerDrive {
+            guard: Arc::clone(self),
+            agent_run_id,
+            lease_token,
+            cancel,
+        })
+    }
+
+    /// Signal only the container drive owned by the exact durable run lease.
+    pub(crate) fn cancel_container_drive(
+        &self,
+        agent_run_id: AgentRunId,
+        lease_token: Uuid,
+    ) -> bool {
+        if let Some(cancel) = self
+            .container_drives
+            .lock()
+            .unwrap()
+            .get(&(agent_run_id, lease_token))
+        {
+            cancel.cancel();
+            return true;
+        }
+        false
+    }
+
     /// Register the live connection's steering sink for one exact run and lease.
     ///
     /// Returns `None` when that identity is already registered, so a superseded
@@ -599,6 +655,30 @@ impl SandboxSteerGuard {
             mpsc::error::TrySendError::Full(_) => SandboxSteerRefusal::Backlogged,
             mpsc::error::TrySendError::Closed(_) => SandboxSteerRefusal::NotAttached,
         })
+    }
+}
+
+/// One exact claimed container drive, deregistered when that drive finishes.
+pub(crate) struct ActiveSandboxContainerDrive {
+    guard: Arc<SandboxSteerGuard>,
+    agent_run_id: AgentRunId,
+    lease_token: Uuid,
+    cancel: CancelToken,
+}
+
+impl ActiveSandboxContainerDrive {
+    pub(crate) fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+}
+
+impl Drop for ActiveSandboxContainerDrive {
+    fn drop(&mut self) {
+        self.guard
+            .container_drives
+            .lock()
+            .unwrap()
+            .remove(&(self.agent_run_id, self.lease_token));
     }
 }
 
@@ -669,9 +749,20 @@ impl Drop for ActiveSandboxCheckpointAttempt {
 #[cfg(test)]
 pub(crate) const TEST_CLIENT_EXECUTOR_TOKEN: &str = "test-native-client-executor";
 
+#[cfg(test)]
+pub(crate) const TEST_LOCAL_IMPORT_TOKEN: &str = "test-scoped-local-import";
+
 fn mint_client_executor_token() -> Arc<str> {
     #[cfg(test)]
     return TEST_CLIENT_EXECUTOR_TOKEN.into();
+
+    #[cfg(not(test))]
+    return Uuid::new_v4().to_string().into();
+}
+
+fn mint_local_import_token() -> Arc<str> {
+    #[cfg(test)]
+    return TEST_LOCAL_IMPORT_TOKEN.into();
 
     #[cfg(not(test))]
     return Uuid::new_v4().to_string().into();
@@ -987,6 +1078,30 @@ mod tests {
         assert!(!held.cancel_token().is_cancelled());
         assert!(guard.cancel_checkpoint(call, run, lease));
         assert!(held.cancel_token().is_cancelled());
+    }
+
+    #[test]
+    fn container_drive_signals_require_the_exact_run_lease() {
+        let guard = Arc::new(SandboxSteerGuard::default());
+        let run = AgentRunId::sandbox_for_spawn_call(CallId::new());
+        let lease = Uuid::new_v4();
+        let held = guard
+            .register_container_drive(run, lease)
+            .expect("register container drive");
+
+        assert!(!guard.cancel_container_drive(run, Uuid::new_v4()));
+        assert!(
+            !guard.cancel_container_drive(AgentRunId::sandbox_for_spawn_call(CallId::new()), lease)
+        );
+        assert!(!held.cancel_token().is_cancelled());
+        assert!(guard.cancel_container_drive(run, lease));
+        assert!(held.cancel_token().is_cancelled());
+        assert!(
+            guard.cancel_container_drive(run, lease),
+            "exact retry stays signalled"
+        );
+        drop(held);
+        assert!(!guard.cancel_container_drive(run, lease));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use super::identity::{
 };
 use super::messages::{ToolCallRecord, ToolCallResolution};
 use super::turns::{TurnCheckpointProgress, TurnRun};
+use crate::provider::Usage;
 
 /// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -194,6 +195,12 @@ pub struct AgentRun {
     pub last_error_code: Option<String>,
     /// Bounded diagnostic detail for local operators.
     pub last_error_detail: Option<String>,
+    /// Completed provider model steps accumulated across every attempt.
+    #[serde(default)]
+    pub model_steps: i32,
+    /// Disjoint provider usage accumulated across every completed model step.
+    #[serde(default)]
+    pub usage: Usage,
     /// When the run was durably accepted.
     pub created_at: DateTime<Utc>,
     /// When its durable state last changed.
@@ -388,6 +395,12 @@ pub struct AgentRunResult {
     pub payload: AgentRunResultPayload,
     /// Bounded deterministic display text for the terminal payload.
     pub text: String,
+    /// Cumulative model steps snapshotted from the run at submission.
+    #[serde(default)]
+    pub model_steps: i32,
+    /// Cumulative disjoint usage snapshotted from the run at submission.
+    #[serde(default)]
+    pub usage: Usage,
     /// Database time at which the terminal submission committed.
     pub submitted_at: DateTime<Utc>,
 }

@@ -14,6 +14,13 @@ function run(status: AgentRun["status"] = "running"): AgentRun {
     execution_location: "in_process",
     code_execution_provider: "local",
     status,
+    model_steps: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
     task: "Task for run-1",
     started_at: null,
     finished_at: null,

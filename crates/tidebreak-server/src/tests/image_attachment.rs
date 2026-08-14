@@ -344,6 +344,109 @@ async fn a_turn_records_its_attachments_and_an_unpublished_id_is_refused() {
 }
 
 #[tokio::test]
+async fn a_known_blob_id_requires_a_separate_publication_in_each_chat() {
+    let (router, token, state, store, dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    let first_chat = make_chat(&router, &bearer).await;
+    let second_chat = make_chat(&router, &bearer).await;
+    let bytes = png_header(480, 320);
+
+    let attachment_id = publish_png(&router, &bearer, first_chat.id, bytes.clone()).await;
+    assert!(store
+        .get_published_chat_image(first_chat.id, attachment_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_published_chat_image(second_chat.id, attachment_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // Content ids are intentionally stable and may be learned elsewhere, but
+    // knowing one does not publish it to another conversation.
+    let rebound = send_message_with_attachments(
+        &router,
+        &bearer,
+        second_chat.id,
+        TurnId::new(),
+        "describe the image from the other chat",
+        &[attachment_id],
+    )
+    .await;
+    assert_eq!(rebound.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(rebound).await;
+    assert_eq!(error.kind, "image_attachment_not_found");
+    assert!(store
+        .list_messages(second_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Promotion rechecks the same authority boundary. A forged/stale queued
+    // row cannot bypass publication merely because it was already durable.
+    let now = chrono::Utc::now();
+    store
+        .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
+            id: TurnId::new(),
+            chat_id: second_chat.id,
+            content: "queued cross-chat rebind".into(),
+            attachments: vec![attachment_id],
+            file_attachments: Vec::new(),
+            invoked_skills: Vec::new(),
+            voice_input_used: false,
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    crate::routes::promote_queued_turns(&state).await.unwrap();
+    assert!(store
+        .list_queued_turns(second_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .list_messages(second_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Publishing the same bytes to the target chat creates independent
+    // authority while retaining one globally deduplicated blob.
+    let second_id = publish_png(&router, &bearer, second_chat.id, bytes).await;
+    assert_eq!(second_id, attachment_id);
+    assert_eq!(stored_blob_count(dir.path()), 1);
+    assert!(store
+        .get_published_chat_image(second_chat.id, attachment_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        send_message_with_attachments(
+            &router,
+            &bearer,
+            second_chat.id,
+            TurnId::new(),
+            "now describe this image",
+            &[attachment_id],
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store
+            .list_message_attachments(second_chat.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn transcript_projects_image_identity_and_fetches_pixels_with_the_chat_bearer() {
     let (router, token, _state, _store, _dir) = test_app_with_state().await;
     let bearer = format!("Bearer {token}");

@@ -10,14 +10,14 @@ and from crates/tidebreak-code-execution/baseline_python_deps.txt (the baseline
 set every execution backend guarantees), resolves their transitive closure for
 the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
-pins and the baseline pins together for the local sandbox's fixed runtime
-(macOS arm64 cp310), so a pin the local backend could never install — the
-baseline set's whole promise — fails regeneration instead of making every local
-cache-population pass retry it. The Dockerfile's documents stage installs the
-result with `pip install --require-hashes`, so the publish moment trusts these
-recorded digests rather than whatever the index serves that day. Also asserts
-that every compiled package publishes an aarch64 manylinux wheel, so the arm64
-image build cannot discover a missing wheel at publish time.
+pins and the baseline pins together for every supported local sandbox runtime
+(macOS arm64 cp39 and cp310), so a pin the local backend could never install —
+the baseline set's whole promise — fails regeneration instead of making every
+local cache-population pass retry it. The Dockerfile's documents stage installs
+the result with `pip install --require-hashes`, so the publish moment trusts
+these recorded digests rather than whatever the index serves that day. Also
+asserts that every compiled package publishes an aarch64 manylinux wheel, so
+the arm64 image build cannot discover a missing wheel at publish time.
 """
 
 import json
@@ -33,9 +33,14 @@ import urllib.request
 BASELINE = pathlib.Path("crates/tidebreak-code-execution/baseline_python_deps.txt")
 
 OUTPUT = pathlib.Path("crates/tidebreak-sandbox-agent/documents-requirements.txt")
-LOCAL_SANDBOX_PLATFORM = "macosx_11_0_arm64"
-LOCAL_SANDBOX_PYTHON = "3.10"
-LOCAL_SANDBOX_ABI = "cp310"
+
+# Keep this list aligned with the macOS system interpreters the local backend
+# supports. The static pin test guards the cp39 floor because a cp310-only pin
+# would otherwise pass image generation while failing on older local hosts.
+LOCAL_SANDBOX_TARGETS = (
+    ("macosx_11_0_arm64", "3.9", "cp39"),
+    ("macosx_11_0_arm64", "3.10", "cp310"),
+)
 
 HEADER = """\
 # Hash-checked closure for the documents image variant. Installed by the
@@ -77,18 +82,19 @@ def skill_pins():
 
 
 def validate_local_sandbox(pins):
-    with tempfile.TemporaryDirectory() as scratch:
-        subprocess.run(
-            [
-                sys.executable, "-m", "pip", "download", "-q",
-                "--dest", scratch, "--no-cache-dir", "--only-binary=:all:",
-                "--platform", LOCAL_SANDBOX_PLATFORM,
-                "--python-version", LOCAL_SANDBOX_PYTHON,
-                "--implementation", "cp", "--abi", LOCAL_SANDBOX_ABI,
-                *pins,
-            ],
-            check=True,
-        )
+    for platform, python_version, abi in LOCAL_SANDBOX_TARGETS:
+        with tempfile.TemporaryDirectory() as scratch:
+            subprocess.run(
+                [
+                    sys.executable, "-m", "pip", "download", "-q",
+                    "--dest", scratch, "--no-cache-dir", "--only-binary=:all:",
+                    "--platform", platform,
+                    "--python-version", python_version,
+                    "--implementation", "cp", "--abi", abi,
+                    *pins,
+                ],
+                check=True,
+            )
 
 
 def resolve_closure(pins):

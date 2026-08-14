@@ -1,16 +1,19 @@
 //! Claimed sandbox agent-run worker loop.
 
+use std::future::Future;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tidebreak_core::storage::RecordAgentRunModelStepOutcome;
 use tidebreak_core::{
-    AgentConfig, AgentError, AgentRun, AgentRunStatus, AgentRunSubmittedOutput, CallId,
-    FailAgentRunOutcome, ModelProvider, ParkSandboxToolCallOutcome, RequestFolderAccessArgs,
-    Result, ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
-    SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
+    AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunStatus,
+    AgentRunSubmittedOutput, CallId, FailAgentRunOutcome, ModelProvider,
+    ParkSandboxToolCallOutcome, RequestFolderAccessArgs, Result,
+    ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
+    SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution, Usage,
 };
 use tokio::sync::Notify;
 
@@ -25,6 +28,19 @@ use super::model_step::*;
 /// The receipt code the plan reminder writes, and the exact marker that says a
 /// run has already had its one push-back.
 const TASK_PLAN_INCOMPLETE: &str = "task_plan_incomplete";
+
+/// Final cancellation accounting and acknowledgement are exact, idempotent
+/// CAS operations. Retry transient storage failures responsively, but keep the
+/// absolute run deadline as the hard bound on finalization authority.
+const CANCELLATION_FINALIZATION_RETRY_INITIAL: Duration = Duration::from_millis(10);
+const CANCELLATION_FINALIZATION_RETRY_MAX: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancellationFinalizationState {
+    OwnedCancelling,
+    Cancelled,
+    Lost,
+}
 
 /// Bound the error excerpt a check-in carries: enough to act on, never a blob.
 fn truncate_checkin_detail(text: &str) -> String {
@@ -95,6 +111,12 @@ impl SandboxAgentRunWorker {
             attempts,
             #[cfg(test)]
             fail_wait_set_resume_responses: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            fail_cancellation_accounting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            cancellation_accounting_failure_observed: Arc::new(Notify::new()),
+            #[cfg(test)]
+            cancellation_accounting_calls: Arc::new(AtomicUsize::new(0)),
             agent_config,
             private_scratch_root,
             code_execution,
@@ -282,6 +304,35 @@ impl SandboxAgentRunWorker {
         run: AgentRun,
         lease_token: uuid::Uuid,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
+        self.process_with_pre_egress_hook(run, lease_token, std::future::ready(()))
+            .await
+    }
+
+    /// Test seam for signalling cancellation in the exact interval after the
+    /// final durable lease proof and before provider egress is first polled.
+    #[cfg(test)]
+    pub(super) async fn process_after_pre_egress<F>(
+        &self,
+        run: AgentRun,
+        lease_token: uuid::Uuid,
+        pre_egress_hook: F,
+    ) -> Result<SandboxAgentRunWorkerOutcome>
+    where
+        F: Future<Output = ()>,
+    {
+        self.process_with_pre_egress_hook(run, lease_token, pre_egress_hook)
+            .await
+    }
+
+    async fn process_with_pre_egress_hook<F>(
+        &self,
+        run: AgentRun,
+        lease_token: uuid::Uuid,
+        pre_egress_hook: F,
+    ) -> Result<SandboxAgentRunWorkerOutcome>
+    where
+        F: Future<Output = ()>,
+    {
         if run.status != AgentRunStatus::Running || run.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
                 "claimed sandbox agent run {} has an invalid execution identity",
@@ -295,8 +346,7 @@ impl SandboxAgentRunWorker {
         // Close cancel-before-register: registration happens before resolver or
         // provider work, then the durable lease is immediately revalidated.
         if !self
-            .store
-            .heartbeat_agent_run(run.id, lease_token, chrono_duration(self.config.lease)?)
+            .renew_or_validate_execution(run.id, lease_token, self.config.lease)
             .await?
         {
             return self
@@ -470,27 +520,44 @@ impl SandboxAgentRunWorker {
         // claim. It is still the final DB-clock lease proof before egress.
         let pre_egress_lease = self.config.lease.saturating_add(Duration::from_millis(1));
         if !self
-            .store
-            .heartbeat_agent_run(run.id, lease_token, chrono_duration(pre_egress_lease)?)
+            .renew_or_validate_execution(run.id, lease_token, pre_egress_lease)
             .await?
         {
             return self
                 .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
                 .await;
         }
+        pre_egress_hook.await;
+        if cancel.is_cancelled() {
+            return self
+                .finalize_cancellation_after_quiescence(
+                    &run,
+                    lease_token,
+                    SandboxStepAccountingSnapshot::default(),
+                )
+                .await;
+        }
+        let step_accounting = SandboxStepAccounting::default();
         let completion_result = {
-            let mut completion = Box::pin(complete_sandbox_task(provider, request));
+            let mut completion = Box::pin(complete_sandbox_task_with_accounting(
+                provider,
+                request,
+                step_accounting.clone(),
+            ));
             let mut heartbeat = tokio::time::interval(self.config.heartbeat);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             heartbeat.tick().await;
             loop {
+                if cancel.is_cancelled() {
+                    break None;
+                }
                 tokio::select! {
-                    result = &mut completion => break Some(result),
+                    biased;
                     _ = cancel.cancelled() => break None,
+                    result = &mut completion => break Some(result),
                     _ = heartbeat.tick() => {
                         if self
-                            .store
-                            .heartbeat_agent_run(run.id, lease_token, chrono_duration(self.config.lease)?)
+                            .renew_or_validate_execution(run.id, lease_token, self.config.lease)
                             .await?
                         {
                             continue;
@@ -503,11 +570,27 @@ impl SandboxAgentRunWorker {
         // The outbound completion future is out of scope and quiesced before
         // cancellation acknowledgement can commit a terminal durable state.
         let Some(completion_result) = completion_result else {
+            let accounting = step_accounting.snapshot();
             return self
-                .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                .finalize_cancellation_after_quiescence(&run, lease_token, accounting)
                 .await;
         };
-        let step = match completion_result {
+        let SandboxStepAttempt {
+            outcome: step,
+            usage,
+            account,
+        } = completion_result;
+        let run = if account {
+            let Some(run) = self.account_model_step(&run, lease_token, usage).await? else {
+                return self
+                    .acknowledge_cancellation_or_lease_loss(run.id, lease_token)
+                    .await;
+            };
+            run
+        } else {
+            run
+        };
+        let step = match step {
             Ok(step) => step,
             Err(error) => return self.record_failure(&run, lease_token, error).await,
         };
@@ -580,27 +663,330 @@ impl SandboxAgentRunWorker {
         outcome
     }
 
+    /// Commit one provider step's disjoint usage before any checkpoint,
+    /// retry, check-in, or terminal transition can advance the run.
+    ///
+    /// The store operation is keyed by the cumulative state in `run`. If its
+    /// transaction committed but the response was lost, the read-back below
+    /// recognizes only the exact next totals and continues with this same
+    /// completion rather than issuing another provider request.
+    async fn account_model_step(
+        &self,
+        run: &AgentRun,
+        lease_token: uuid::Uuid,
+        usage: Usage,
+    ) -> Result<Option<AgentRun>> {
+        #[cfg(test)]
+        {
+            self.cancellation_accounting_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self.fail_cancellation_accounting.load(Ordering::SeqCst) {
+                self.cancellation_accounting_failure_observed.notify_one();
+                return Err(AgentError::Store(
+                    "injected transient in-process cancellation accounting failure".into(),
+                ));
+            }
+        }
+        let expected_steps = run.model_steps;
+        let expected_usage = run.usage;
+        let next_usage = expected_usage
+            .checked_add(usage)
+            .ok_or_else(|| AgentError::msg("sandbox provider usage total overflowed"))?;
+        let next_steps = expected_steps
+            .checked_add(1)
+            .ok_or_else(|| AgentError::msg("sandbox model-step total overflowed"))?;
+        match self
+            .store
+            .record_agent_run_model_step(
+                run.id,
+                lease_token,
+                expected_steps,
+                expected_usage,
+                usage,
+            )
+            .await
+        {
+            Ok(RecordAgentRunModelStepOutcome::Recorded(run))
+            | Ok(RecordAgentRunModelStepOutcome::Existing(run)) => Ok(Some(run)),
+            Ok(RecordAgentRunModelStepOutcome::LeaseLost) => Ok(None),
+            Ok(RecordAgentRunModelStepOutcome::IdentityConflict(current)) => {
+                Err(AgentError::msg(format!(
+                    "sandbox model-step accounting identity conflicted: expected step {next_steps}, found {}",
+                    current.model_steps
+                )))
+            }
+            Err(error) => {
+                let recovered = self.store.get_agent_run(run.id).await?.filter(|current| {
+                    current.model_steps == next_steps && current.usage == next_usage
+                });
+                match recovered {
+                    Some(run) => Ok(Some(run)),
+                    None => Err(error),
+                }
+            }
+        }
+    }
+
+    /// After the provider future has dropped, preserve every observed step and
+    /// then commit the immutable cancellation receipt. Cancellation freezes the
+    /// exact lease token and claim provenance, so the dedicated renewal CAS may
+    /// reopen finalization authority after the execution lease expires without
+    /// authorizing another provider request.
+    async fn finalize_cancellation_after_quiescence(
+        &self,
+        run: &AgentRun,
+        lease_token: uuid::Uuid,
+        accounting: SandboxStepAccountingSnapshot,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        if accounting.account
+            && !self
+                .account_cancelled_model_step_with_retry(run, lease_token, accounting.usage)
+                .await?
+        {
+            return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(run.id));
+        }
+        self.finish_cancellation_with_retry(run.id, lease_token, run.deadline_at)
+            .await
+    }
+
+    /// Retry one exact baseline-plus-delta accounting identity. Reusing the
+    /// original `run` snapshot is intentional: a lost response recovers as
+    /// `Existing`, while a second model step cannot match this identity.
+    async fn account_cancelled_model_step_with_retry(
+        &self,
+        run: &AgentRun,
+        lease_token: uuid::Uuid,
+        usage: Usage,
+    ) -> Result<bool> {
+        let mut delay = CANCELLATION_FINALIZATION_RETRY_INITIAL;
+        loop {
+            let mut retry_error = match self.account_model_step(run, lease_token, usage).await {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) => None,
+                Err(error) => Some(error),
+            };
+
+            match self
+                .cancellation_finalization_state(run.id, lease_token)
+                .await
+            {
+                Ok(CancellationFinalizationState::OwnedCancelling) => {
+                    match self
+                        .renew_cancellation_finalization(run.id, lease_token)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(false),
+                        Err(error) => retry_error = Some(error),
+                    }
+                }
+                Ok(
+                    CancellationFinalizationState::Cancelled | CancellationFinalizationState::Lost,
+                ) => return Ok(false),
+                Err(error) => retry_error = Some(error),
+            }
+
+            if !Self::wait_for_cancellation_finalization_retry(run.deadline_at, &mut delay).await {
+                return Err(retry_error.unwrap_or_else(|| {
+                    AgentError::Store(format!(
+                        "sandbox cancellation accounting reached the deadline for {}",
+                        run.id
+                    ))
+                }));
+            }
+        }
+    }
+
+    /// Commit or recover the exact cancellation receipt. A store error can be
+    /// an ambiguous successful commit, so an exact `cancelled` row is retried
+    /// until `finish_agent_run_cancellation` returns its `Existing` receipt.
+    async fn finish_cancellation_with_retry(
+        &self,
+        id: tidebreak_core::AgentRunId,
+        lease_token: uuid::Uuid,
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<SandboxAgentRunWorkerOutcome> {
+        let mut delay = CANCELLATION_FINALIZATION_RETRY_INITIAL;
+        loop {
+            match self
+                .store
+                .finish_agent_run_cancellation(id, lease_token)
+                .await
+            {
+                Ok(Some(_)) => return Ok(SandboxAgentRunWorkerOutcome::Cancelled(id)),
+                Ok(None) => {
+                    let retry_error =
+                        match self.cancellation_finalization_state(id, lease_token).await {
+                            Ok(CancellationFinalizationState::OwnedCancelling) => {
+                                match self.renew_cancellation_finalization(id, lease_token).await {
+                                    Ok(true) => None,
+                                    Ok(false) => {
+                                        return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id));
+                                    }
+                                    Err(error) => Some(error),
+                                }
+                            }
+                            Ok(
+                                CancellationFinalizationState::Cancelled
+                                | CancellationFinalizationState::Lost,
+                            ) => return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id)),
+                            Err(error) => Some(error),
+                        };
+                    if !Self::wait_for_cancellation_finalization_retry(deadline_at, &mut delay)
+                        .await
+                    {
+                        return match retry_error {
+                            Some(error) => Err(error),
+                            None => Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id)),
+                        };
+                    }
+                }
+                Err(mut error) => {
+                    match self.cancellation_finalization_state(id, lease_token).await {
+                        Ok(CancellationFinalizationState::OwnedCancelling) => {
+                            match self.renew_cancellation_finalization(id, lease_token).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id));
+                                }
+                                Err(renewal_error) => error = renewal_error,
+                            }
+                        }
+                        // The first finish may have committed before its
+                        // response was lost. Retry the exact identity so the
+                        // durable method can return `Existing`.
+                        Ok(CancellationFinalizationState::Cancelled) => {}
+                        Ok(CancellationFinalizationState::Lost) => {
+                            return Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id));
+                        }
+                        Err(state_error) => error = state_error,
+                    }
+                    if !Self::wait_for_cancellation_finalization_retry(deadline_at, &mut delay)
+                        .await
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn cancellation_finalization_state(
+        &self,
+        id: tidebreak_core::AgentRunId,
+        lease_token: uuid::Uuid,
+    ) -> Result<CancellationFinalizationState> {
+        let Some(run) = self.store.get_agent_run(id).await? else {
+            return Ok(CancellationFinalizationState::Lost);
+        };
+        let exact_token = run.lease_token == Some(lease_token);
+        let deadline_open = run
+            .deadline_at
+            .is_some_and(|deadline| deadline > chrono::Utc::now());
+        Ok(match run.status {
+            AgentRunStatus::Cancelling if exact_token && deadline_open => {
+                CancellationFinalizationState::OwnedCancelling
+            }
+            AgentRunStatus::Cancelled => CancellationFinalizationState::Cancelled,
+            _ => CancellationFinalizationState::Lost,
+        })
+    }
+
+    async fn renew_cancellation_finalization(
+        &self,
+        id: tidebreak_core::AgentRunId,
+        lease_token: uuid::Uuid,
+    ) -> Result<bool> {
+        // Keep finalization authority wider than the retry ceiling so an
+        // unusually short execution lease cannot expire between renewal and
+        // the next accounting/terminal CAS.
+        let finalization_lease = self
+            .config
+            .lease
+            .max(CANCELLATION_FINALIZATION_RETRY_MAX.saturating_mul(2));
+        self.store
+            .renew_agent_run_cancellation_finalization(
+                id,
+                lease_token,
+                chrono_duration(finalization_lease)?,
+            )
+            .await
+    }
+
+    async fn wait_for_cancellation_finalization_retry(
+        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
+        delay: &mut Duration,
+    ) -> bool {
+        let Some(deadline_at) = deadline_at else {
+            return false;
+        };
+        let Ok(remaining) = deadline_at
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+        else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+        let sleep_for = (*delay).min(remaining);
+        tokio::time::sleep(sleep_for).await;
+        if sleep_for == remaining {
+            return false;
+        }
+        *delay = delay
+            .saturating_mul(2)
+            .min(CANCELLATION_FINALIZATION_RETRY_MAX);
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_cancellation_accounting_until_released(&self) {
+        self.fail_cancellation_accounting
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_cancellation_accounting(&self) {
+        self.fail_cancellation_accounting
+            .store(false, Ordering::SeqCst);
+    }
+
     async fn resolve_provider(
         &self,
         id: tidebreak_core::AgentRunId,
         lease_token: uuid::Uuid,
         cancel: &tidebreak_core::CancelToken,
     ) -> Result<Option<Arc<dyn ModelProvider>>> {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
         let resolver = self.resolver.resolve();
         tokio::pin!(resolver);
         #[cfg(test)]
         if self.config.suppress_resolver_heartbeats {
-            return Ok(Some(resolver.await));
+            return tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Ok(None),
+                provider = &mut resolver => Ok(Some(provider)),
+            };
         }
         let mut heartbeat = tokio::time::interval(self.config.heartbeat);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await;
         loop {
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
             tokio::select! {
-                provider = &mut resolver => return Ok(Some(provider)),
+                biased;
                 _ = cancel.cancelled() => return Ok(None),
+                provider = &mut resolver => return Ok(Some(provider)),
                 _ = heartbeat.tick() => {
-                    if !self.store.heartbeat_agent_run(id, lease_token, chrono_duration(self.config.lease)?).await? {
+                    if !self
+                        .renew_or_validate_execution(id, lease_token, self.config.lease)
+                        .await?
+                    {
                         return Ok(None);
                     }
                 }
@@ -1178,6 +1564,31 @@ impl SandboxAgentRunWorker {
             return Ok(SandboxAgentRunWorkerOutcome::Cancelled(id));
         }
         Ok(SandboxAgentRunWorkerOutcome::LeaseLost(id))
+    }
+
+    /// Renew one exact in-process execution lease, resolving a monotonic
+    /// heartbeat no-op against the authoritative live claim.
+    ///
+    /// `heartbeat_agent_run` reports whether its conditional UPDATE extended
+    /// the expiry. Equal SQLite clock ticks and deadline clamping can leave a
+    /// still-live exact lease unchanged, so `false` is not itself proof that
+    /// execution authority was lost.
+    async fn renew_or_validate_execution(
+        &self,
+        id: tidebreak_core::AgentRunId,
+        lease_token: uuid::Uuid,
+        lease: Duration,
+    ) -> Result<bool> {
+        if self
+            .store
+            .heartbeat_agent_run(id, lease_token, chrono_duration(lease)?)
+            .await?
+        {
+            return Ok(true);
+        }
+        self.store
+            .validate_agent_run_execution(id, lease_token, AgentRunExecutionLocation::InProcess)
+            .await
     }
 
     fn prepare_private_scratch(&self, id: tidebreak_core::AgentRunId) -> Result<()> {

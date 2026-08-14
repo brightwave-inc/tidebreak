@@ -76,10 +76,11 @@ impl From<ImageRef> for PublishedImageAttachment {
 /// `POST /chats/{chat_id}/attachments/images` — validate and durably retain one
 /// image for a conversation, returning identity a turn can reference.
 ///
-/// The bytes become a content-addressed blob immediately but gain no durable
-/// reference until a turn carries them, so an attachment that is published and
-/// never sent is reclaimed by the orphan sweep rather than leaking. Publishing
-/// identical bytes twice yields the same id and one stored copy.
+/// The bytes become one globally deduplicated content-addressed blob, while a
+/// durable per-chat reservation is the authority to attach that id. Publishing
+/// identical bytes twice yields the same id and one stored copy; publishing
+/// them to another chat creates a separate reservation without duplicating the
+/// blob.
 pub async fn publish_chat_image_attachment(
     State(state): State<AppState>,
     store: ScopedStore,
@@ -97,6 +98,12 @@ pub async fn publish_chat_image_attachment(
     // accepted identity never points at missing bytes.
     let _blob_write = state.blob_writes.acquire(image.blob_id).await?;
     state.blobs.put(image.blob_id, bytes).await?;
+    if !store.publish_chat_image(chat_id, &image).await? {
+        // The chat can disappear after the initial authorization check. The
+        // blob remains unreferenced and is eligible for the orphan sweep, but
+        // no authority is granted by a failed publication.
+        return Err(ServerError::not_found(format!("chat {chat_id} not found")));
+    }
     Ok((
         StatusCode::CREATED,
         crate::extract::Json(PublishedImageAttachment::from(image)),

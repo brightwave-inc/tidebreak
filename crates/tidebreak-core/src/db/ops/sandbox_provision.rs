@@ -14,15 +14,21 @@
 
 use chrono::Utc;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, TryInsertResult};
+use sea_orm::{
+    ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set, TransactionTrait,
+    TryInsertResult,
+};
 
-use crate::error::Result;
+use crate::error::{AgentError, Result};
+use crate::id::AgentRunId;
+use crate::model::{AgentRunExecutionLocation, AgentRunStatus, AgentRunTier};
 use crate::storage::{
     BeginSandboxProvisionOutcome, SandboxAdmissionMode, SandboxProvision, SandboxProvisionState,
 };
 
 use super::super::entities::sandbox_provision;
 use super::super::{entities, store_err, DbStore};
+use super::agent_run::{acquire_agent_run_claim_lock, database_now};
 
 const STATE_INTENDED: &str = "intended";
 const STATE_COMMITTED: &str = "committed";
@@ -81,6 +87,123 @@ pub(in crate::db) async fn begin(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let now = Utc::now();
 
+    let outcome = begin_on(&transaction, run_id, tag, window_expires_at, admission, now).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(outcome)
+}
+
+/// Atomically validate the exact live container execution claim and commit its
+/// provisioning intent under the same claim lock used by cancellation.
+///
+/// If cancellation or another terminal transition got the lock first, no
+/// intent is written and the caller is forbidden from invoking the external
+/// backend. If this transaction gets the lock first, the intent is durable
+/// before the backend call; a later cancellation is detected by the driver's
+/// durable watcher and leaves the tagged side effect teardown-only.
+pub(in crate::db) async fn begin_for_agent_run(
+    store: &DbStore,
+    run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+    tag: &str,
+    window_expires_at: chrono::DateTime<chrono::Utc>,
+    admission: SandboxAdmissionMode,
+) -> Result<Option<BeginSandboxProvisionOutcome>> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "sandbox provisioning requires a non-nil agent-run lease token".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    if !exact_live_agent_run_claim_on(
+        &transaction,
+        run_id,
+        lease_token,
+        AgentRunExecutionLocation::Container,
+        now,
+    )
+    .await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+
+    let outcome = begin_on(
+        &transaction,
+        run_id.0,
+        tag,
+        window_expires_at,
+        admission,
+        now,
+    )
+    .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(outcome))
+}
+
+pub(in crate::db) async fn validate_agent_run_execution(
+    store: &DbStore,
+    run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+    execution_location: AgentRunExecutionLocation,
+) -> Result<bool> {
+    if lease_token.is_nil() {
+        return Err(AgentError::Store(
+            "sandbox execution validation requires a non-nil lease token".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let valid =
+        exact_live_agent_run_claim_on(&transaction, run_id, lease_token, execution_location, now)
+            .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(valid)
+}
+
+async fn exact_live_agent_run_claim_on(
+    transaction: &DatabaseTransaction,
+    run_id: AgentRunId,
+    lease_token: uuid::Uuid,
+    execution_location: AgentRunExecutionLocation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let run = entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Id.eq(run_id.0))
+        .one(transaction)
+        .await
+        .map_err(store_err)?;
+    let claim = entities::agent_run_claim::Entity::find_by_id(lease_token)
+        .one(transaction)
+        .await
+        .map_err(store_err)?;
+    Ok(run
+        .as_ref()
+        .zip(claim.as_ref())
+        .is_some_and(|(run, claim)| {
+            run.tier == AgentRunTier::Background.as_str()
+                && run.execution_location == execution_location.as_str()
+                && run.status == AgentRunStatus::Running.as_str()
+                && run.lease_token == Some(lease_token)
+                && run.lease_expires_at.is_some_and(|expiry| expiry > now)
+                && run.deadline_at.is_some_and(|deadline| deadline > now)
+                && run.updated_at <= now
+                && claim.agent_run_id == Some(run.id)
+                && claim.attempt_count == Some(run.attempt_count)
+                && claim.claim_count == Some(run.claim_count)
+        }))
+}
+
+async fn begin_on(
+    transaction: &DatabaseTransaction,
+    run_id: uuid::Uuid,
+    tag: &str,
+    window_expires_at: chrono::DateTime<chrono::Utc>,
+    admission: SandboxAdmissionMode,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<BeginSandboxProvisionOutcome> {
     // The insert is the serialization point: a duplicate run id is refused by
     // the primary key, so exactly one racing driver commits the intent and the
     // rest observe the existing record.
@@ -96,17 +219,16 @@ pub(in crate::db) async fn begin(
         updated_at: Set(now),
     })
     .on_conflict_do_nothing()
-    .exec_without_returning(&transaction)
+    .exec_without_returning(transaction)
     .await
     .map_err(store_err)?;
 
     if matches!(inserted, TryInsertResult::Inserted(1)) {
-        transaction.commit().await.map_err(store_err)?;
         return Ok(BeginSandboxProvisionOutcome::Started);
     }
 
     let existing = entities::sandbox_provision::Entity::find_by_id(run_id)
-        .one(&transaction)
+        .one(transaction)
         .await
         .map_err(store_err)?
         .ok_or_else(|| {
@@ -114,7 +236,6 @@ pub(in crate::db) async fn begin(
                 "sandbox provision record vanished between insert and read".into(),
             )
         })?;
-    transaction.commit().await.map_err(store_err)?;
     Ok(BeginSandboxProvisionOutcome::Existing(from_model(existing)))
 }
 

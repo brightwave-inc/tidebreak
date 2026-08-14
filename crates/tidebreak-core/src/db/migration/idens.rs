@@ -206,6 +206,11 @@ pub(crate) enum AgentRun {
     ClaimCount,
     CheckinGrants,
     CheckinWatermark,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     AvailableAt,
     DeadlineAt,
     LeaseToken,
@@ -276,6 +281,11 @@ pub(crate) enum AgentRunResult {
     PayloadKind,
     PayloadJson,
     Text,
+    ModelSteps,
+    InputTokens,
+    OutputTokens,
+    CacheReadInputTokens,
+    CacheCreationInputTokens,
     SubmittedAt,
 }
 
@@ -473,6 +483,18 @@ pub(crate) enum ExecFileChange {
     UndoState,
     Reason,
     RecordedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum ChatImagePublication {
+    Table,
+    ChatId,
+    BlobId,
+    MediaType,
+    Width,
+    Height,
+    ByteLen,
+    CreatedAt,
 }
 
 #[derive(DeriveIden)]

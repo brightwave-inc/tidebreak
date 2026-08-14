@@ -287,6 +287,103 @@ pub(super) fn assistant_citation_indexes() -> Vec<IndexCreateStatement> {
     Vec::new()
 }
 
+/// Reserves one validated content-addressed image for one chat.
+///
+/// Publication is authority, not merely a blob upload: knowing another chat's
+/// content id must not let a caller bind those bytes into this chat. The
+/// composite primary key makes exact retries idempotent while still requiring
+/// identical bytes to be published separately to every chat that may attach
+/// them. Metadata is retained so resolution can verify the blob still matches
+/// the validated publication record.
+///
+/// This is a live blob reference. A published image remains attachable until
+/// its chat is deleted, even if no message has used it yet.
+pub(super) fn chat_image_publication_table() -> TableCreateStatement {
+    Table::create()
+        .table(ChatImagePublication::Table)
+        .col(
+            ColumnDef::new(ChatImagePublication::ChatId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::BlobId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::MediaType)
+                .string_len(64)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::Width)
+                .integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::Height)
+                .integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::ByteLen)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ChatImagePublication::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(ChatImagePublication::ChatId)
+                .col(ChatImagePublication::BlobId),
+        )
+        // Restrict rather than cascade: chat deletion must first collect the
+        // freed blob ids and enqueue their shared content for retirement.
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_chat_image_publication_chat")
+                .from(ChatImagePublication::Table, ChatImagePublication::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(ChatImagePublication::BlobId).ne(uuid::Uuid::nil()))
+        .check(Expr::col(ChatImagePublication::MediaType).is_in([
+            crate::image::ImageMediaType::Png.as_str(),
+            crate::image::ImageMediaType::Jpeg.as_str(),
+            crate::image::ImageMediaType::Webp.as_str(),
+            crate::image::ImageMediaType::Gif.as_str(),
+        ]))
+        .check(
+            Expr::col(ChatImagePublication::Width)
+                .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+        )
+        .check(
+            Expr::col(ChatImagePublication::Height)
+                .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+        )
+        .check(
+            Expr::col(ChatImagePublication::ByteLen)
+                .between(1, crate::image::MAX_IMAGE_BYTES as i64),
+        )
+        .to_owned()
+}
+
+pub(super) fn chat_image_publication_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        // Every retirement decision asks whether any chat still reserves the
+        // shared blob; that lookup must not scan publications by chat.
+        Index::create()
+            .name("idx_chat_image_publication_blob")
+            .table(ChatImagePublication::Table)
+            .col(ChatImagePublication::BlobId)
+            .to_owned(),
+    ]
+}
+
 /// Records the images a message was submitted with, so a reloaded conversation
 /// replays the same turn rather than a text-only approximation of it.
 ///
@@ -295,9 +392,10 @@ pub(super) fn assistant_citation_indexes() -> Vec<IndexCreateStatement> {
 /// deliberately absent — the bytes live in the blob store and are reachable
 /// only through the blob id.
 ///
-/// This makes `message_attachment.blob_id` a second class of live blob
-/// reference alongside `document.source_blob_id`. Blob liveness is a union
-/// across both, computed in one place; see `db::ops::blob::is_referenced_on`.
+/// This makes `message_attachment.blob_id` another class of live blob
+/// reference alongside document sources and chat publications. Blob liveness
+/// is a union across all of them, computed in one place; see
+/// `db::ops::blob::is_referenced_on`.
 pub(super) fn message_attachment_table() -> TableCreateStatement {
     Table::create()
         .table(MessageAttachment::Table)

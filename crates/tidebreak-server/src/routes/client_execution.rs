@@ -196,6 +196,7 @@ pub struct PendingOutputWritebackRequest {
 /// Unknown, malformed, or non-folder-access client calls are omitted rather
 /// than exposing their canonical records across the renderer boundary.
 pub async fn list_pending_folder_access_requests(
+    State(state): State<AppState>,
     store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingFolderAccessRequest>>, ServerError> {
@@ -206,6 +207,7 @@ pub async fn list_pending_folder_access_requests(
         .into_iter()
         .filter_map(renderer_folder_access_request)
         .collect();
+    state.turn_job_wake.notify_one();
     Ok(Json(requests))
 }
 
@@ -215,6 +217,7 @@ pub async fn list_pending_folder_access_requests(
 /// says workspace mutations ask; under `Auto` and `Allow` the native executor
 /// takes it automatically and it is intentionally omitted from the renderer.
 pub async fn list_pending_output_writebacks(
+    State(state): State<AppState>,
     store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingOutputWritebackRequest>>, ServerError> {
@@ -225,24 +228,26 @@ pub async fn list_pending_output_writebacks(
         .into_iter()
         .filter_map(|call| renderer_output_writeback_request(call, chat.permission_mode))
         .collect();
+    state.turn_job_wake.notify_one();
     Ok(Json(requests))
 }
 
 /// Native-only authoritative pending work used by the trusted executor.
 pub async fn list_pending_client_executions_raw(
+    State(state): State<AppState>,
     store: ScopedStore,
     _executor: ClientExecutor,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
     store.require_chat(id).await?;
-    Ok(Json(
-        store
-            .list_pending_client_tool_calls(id)
-            .await?
-            .into_iter()
-            .filter(|call| call.name != tidebreak_core::ASK_USER_QUESTIONS_TOOL)
-            .collect(),
-    ))
+    let calls = store
+        .list_pending_client_tool_calls(id)
+        .await?
+        .into_iter()
+        .filter(|call| call.name != tidebreak_core::ASK_USER_QUESTIONS_TOOL)
+        .collect();
+    state.turn_job_wake.notify_one();
+    Ok(Json(calls))
 }
 
 fn renderer_folder_access_request(call: ToolCallRecord) -> Option<PendingFolderAccessRequest> {
@@ -290,6 +295,7 @@ fn renderer_output_writeback_request(
 
 /// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.
 pub async fn claim_client_execution(
+    State(state): State<AppState>,
     store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
@@ -298,6 +304,12 @@ pub async fn claim_client_execution(
     store.require_chat(id).await?;
     ensure_non_nil(body.executor_id, "executor_id")?;
     ensure_non_nil(body.lease_token, "lease_token")?;
+    // Polling is also the recovery watchdog after a server restart: sweep a
+    // prior executor's expired claim before deciding whether this call can be
+    // claimed. The store performs the failure, event append, wait closure, and
+    // turn transition atomically.
+    store.list_pending_client_tool_calls(id).await?;
+    state.turn_job_wake.notify_one();
     let now = Utc::now();
     let outcome = store
         .claim_client_tool_call(

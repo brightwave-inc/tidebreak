@@ -14,35 +14,39 @@
 //! than hanging CI, and every test uses the multi-thread runtime the durable
 //! operation store's `block_in_place` bridge requires.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
+use sea_orm::ConnectOptions;
 use tidebreak_core::{
-    AdmitSandboxAgentRunOutcome, AgentConfig, AgentRun, AgentRunExecutionLocation, AgentRunId,
-    AgentRunStatus, CallId, Chat, ChatId, ChatRequest, DbStore, ModelProvider, ProviderEvent,
-    ProviderId, Result, StopReason, Store,
+    AdmitSandboxAgentRunOutcome, AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation,
+    AgentRunId, AgentRunStatus, CallId, CancelToken, Chat, ChatId, ChatRequest, DbStore,
+    ModelProvider, ProviderEvent, ProviderId, Result, StopReason, Store,
 };
 use tidebreak_sandbox_agent::{run_agent, STEERING_PREFIX};
 use tidebreak_sandbox_protocol::{
     ids::{OperationId, RunId, SandboxTag},
-    protocol::{Response, PROTOCOL_VERSION},
+    protocol::{ErrorCode, Response, PROTOCOL_VERSION},
     reverse::{
-        Capability, GrantSet, ModelInferenceParams, ReverseEnvelope, ReverseRequest, ReverseResult,
-        RunProvenance,
+        Capability, CapabilityResponder, GrantSet, ModelInferenceParams, ReverseEnvelope,
+        ReverseRequest, ReverseResult, RunProvenance,
     },
-    serve_connection, BackendError, CapabilityHost, ProvisionRequest, SandboxAddress,
-    SandboxBackend, SandboxHandle, SandboxRun, TransportSecret,
+    serve_connection, BackendError, CapabilityHost, ProvisionRequest, ReverseOutcome,
+    SandboxAddress, SandboxBackend, SandboxHandle, SandboxRun, TransportSecret,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
 use super::{
-    HostModelProxy, SandboxContainerRunConfig, SandboxContainerRunOutcome, SandboxContainerRunner,
+    DriveEnd, HostModelAccounting, HostModelObservedAccounting, HostModelProxy, PreAttachEnd,
+    SandboxContainerRunConfig, SandboxContainerRunOutcome, SandboxContainerRunner,
 };
 use crate::durable_oplog::DurableOperationStore;
 use crate::resolver::ProviderResolver;
@@ -174,6 +178,542 @@ impl ProviderResolver for FixedResolver {
     }
 }
 
+struct UsageThenPendingProvider {
+    stalled: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+    drop_observed: Arc<Notify>,
+    drop_gate: Option<Arc<Barrier>>,
+    calls: AtomicUsize,
+    usage: tidebreak_core::Usage,
+}
+
+struct UsageThenPendingStream {
+    stalled: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+    drop_observed: Arc<Notify>,
+    drop_gate: Option<Arc<Barrier>>,
+    usage: Option<tidebreak_core::Usage>,
+    announced: bool,
+}
+
+impl futures::Stream for UsageThenPendingStream {
+    type Item = ProviderEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(usage) = self.usage.take() {
+            return Poll::Ready(Some(ProviderEvent::Usage(usage)));
+        }
+        if !self.announced {
+            self.announced = true;
+            self.stalled.notify_one();
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for UsageThenPendingStream {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+        self.drop_observed.notify_one();
+        if let Some(gate) = &self.drop_gate {
+            gate.wait();
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for UsageThenPendingProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("usage-then-pending")
+    }
+
+    async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(UsageThenPendingStream {
+            stalled: self.stalled.clone(),
+            dropped: self.dropped.clone(),
+            drop_observed: self.drop_observed.clone(),
+            drop_gate: (call_index == 0).then(|| self.drop_gate.clone()).flatten(),
+            usage: Some(self.usage),
+            announced: false,
+        }
+        .boxed())
+    }
+}
+
+struct UsageThenPendingResolver(Arc<UsageThenPendingProvider>);
+
+#[async_trait]
+impl ProviderResolver for UsageThenPendingResolver {
+    async fn resolve(&self) -> Arc<dyn ModelProvider> {
+        self.0.clone()
+    }
+}
+
+/// Store seam for deterministic post-quiescence fault injection. The runner
+/// only sees this wrapper during the final accounting/terminal phase; fixture
+/// setup and assertions use the underlying real database directly.
+struct TerminalFaultStore {
+    inner: Arc<dyn Store>,
+    setup_fault: Option<SetupFault>,
+    setup_claim_lock: tokio::sync::Mutex<()>,
+    setup_claim_lock_held: AtomicBool,
+    setup_entered: Notify,
+    setup_release: Notify,
+    fence_entered: Notify,
+    block_next_result: AtomicBool,
+    result_entered: Notify,
+    result_release: Notify,
+    fail_accounting: AtomicBool,
+    accounting_failure_observed: Notify,
+    accounting_calls: AtomicUsize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupFault {
+    ModelResolution,
+    ProvisionIntentDelayed,
+    ProvisionIntentFailure,
+    ProvisionIntentClaimLockYield,
+}
+
+impl TerminalFaultStore {
+    fn new(inner: Arc<dyn Store>) -> Arc<Self> {
+        Self::with_optional_setup_fault(inner, None)
+    }
+
+    /// Shared-store seam for setup races. The durable cancellation is
+    /// committed through the underlying database, while this process is held
+    /// in one fallible pre-attach await and owns no process-local signal from
+    /// the cancelling caller.
+    fn with_setup_fault(inner: Arc<dyn Store>, fault: SetupFault) -> Arc<Self> {
+        Self::with_optional_setup_fault(inner, Some(fault))
+    }
+
+    fn with_optional_setup_fault(
+        inner: Arc<dyn Store>,
+        setup_fault: Option<SetupFault>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            setup_fault,
+            setup_claim_lock: tokio::sync::Mutex::new(()),
+            setup_claim_lock_held: AtomicBool::new(false),
+            setup_entered: Notify::new(),
+            setup_release: Notify::new(),
+            fence_entered: Notify::new(),
+            block_next_result: AtomicBool::new(false),
+            result_entered: Notify::new(),
+            result_release: Notify::new(),
+            fail_accounting: AtomicBool::new(false),
+            accounting_failure_observed: Notify::new(),
+            accounting_calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn block_next_result(&self) {
+        self.block_next_result.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_accounting_until_released(&self) {
+        self.fail_accounting.store(true, Ordering::SeqCst);
+    }
+
+    fn release_accounting(&self) {
+        self.fail_accounting.store(false, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Store for TerminalFaultStore {
+    async fn create_project(&self, project: &tidebreak_core::Project) -> Result<()> {
+        self.inner.create_project(project).await
+    }
+
+    async fn get_project(
+        &self,
+        id: tidebreak_core::ProjectId,
+    ) -> Result<Option<tidebreak_core::Project>> {
+        self.inner.get_project(id).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<tidebreak_core::Project>> {
+        self.inner.list_projects().await
+    }
+
+    async fn create_chat(&self, chat: &Chat) -> Result<()> {
+        self.inner.create_chat(chat).await
+    }
+
+    async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
+        self.inner.create_chat_with_project_defaults(chat).await
+    }
+
+    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+        if self.setup_fault == Some(SetupFault::ModelResolution) {
+            self.setup_entered.notify_one();
+            self.setup_release.notified().await;
+            return Err(AgentError::Store(
+                "injected model-resolution storage failure".into(),
+            ));
+        }
+        self.inner.get_chat(id).await
+    }
+
+    async fn list_chats(&self) -> Result<Vec<Chat>> {
+        self.inner.list_chats().await
+    }
+
+    async fn get_chat_transcript(
+        &self,
+        id: ChatId,
+    ) -> Result<Option<tidebreak_core::ChatTranscriptSnapshot>> {
+        self.inner.get_chat_transcript(id).await
+    }
+
+    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+        self.inner.set_chat_model(id, model).await
+    }
+
+    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+        self.inner.set_chat_title(id, title).await
+    }
+
+    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+        self.inner.set_chat_title_if_unset(id, title).await
+    }
+
+    async fn update_chat_metadata(
+        &self,
+        id: ChatId,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+        reasoning_effort: Option<Option<tidebreak_core::ReasoningEffort>>,
+        permission_mode: Option<Option<tidebreak_core::PermissionMode>>,
+        network_policy: Option<tidebreak_core::NetworkPolicy>,
+    ) -> Result<bool> {
+        self.inner
+            .update_chat_metadata(
+                id,
+                title,
+                model,
+                reasoning_effort,
+                permission_mode,
+                network_policy,
+            )
+            .await
+    }
+
+    async fn resumed_sandbox_spawn_batch(
+        &self,
+        turn_id: tidebreak_core::TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Vec<tidebreak_core::SandboxAgentSpawnRequest>> {
+        self.inner
+            .resumed_sandbox_spawn_batch(turn_id, attempt_count, claim_count)
+            .await
+    }
+
+    async fn get_agent_run(&self, id: AgentRunId) -> Result<Option<AgentRun>> {
+        self.inner.get_agent_run(id).await
+    }
+
+    async fn claim_container_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+        lease_duration: chrono::Duration,
+        max_running_containers: u32,
+    ) -> Result<Option<AgentRun>> {
+        self.inner
+            .claim_container_agent_run(id, lease_token, lease_duration, max_running_containers)
+            .await
+    }
+
+    async fn begin_sandbox_provision_for_agent_run(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        tag: &str,
+        window_expires_at: chrono::DateTime<chrono::Utc>,
+        admission: tidebreak_core::SandboxAdmissionMode,
+    ) -> Result<Option<tidebreak_core::BeginSandboxProvisionOutcome>> {
+        if self.setup_fault == Some(SetupFault::ProvisionIntentClaimLockYield) {
+            // Model the real provisioning transaction after it has acquired
+            // the agent-run claim lock but while an awaited database operation
+            // still needs another poll to complete and release that lock.
+            let claim_lock = self.setup_claim_lock.lock().await;
+            self.setup_claim_lock_held.store(true, Ordering::SeqCst);
+            self.setup_entered.notify_one();
+            self.setup_release.notified().await;
+            drop(claim_lock);
+            self.setup_claim_lock_held.store(false, Ordering::SeqCst);
+        }
+        if matches!(
+            self.setup_fault,
+            Some(SetupFault::ProvisionIntentDelayed | SetupFault::ProvisionIntentFailure)
+        ) {
+            self.setup_entered.notify_one();
+            self.setup_release.notified().await;
+        }
+        if self.setup_fault == Some(SetupFault::ProvisionIntentFailure) {
+            return Err(AgentError::Store(
+                "injected provisioning-intent storage failure".into(),
+            ));
+        }
+        self.inner
+            .begin_sandbox_provision_for_agent_run(
+                run_id,
+                lease_token,
+                tag,
+                window_expires_at,
+                admission,
+            )
+            .await
+    }
+
+    async fn validate_agent_run_execution(
+        &self,
+        run_id: AgentRunId,
+        lease_token: Uuid,
+        execution_location: AgentRunExecutionLocation,
+    ) -> Result<bool> {
+        self.inner
+            .validate_agent_run_execution(run_id, lease_token, execution_location)
+            .await
+    }
+
+    async fn record_agent_run_model_step(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+        expected_model_steps: i32,
+        expected_usage: tidebreak_core::Usage,
+        usage: tidebreak_core::Usage,
+    ) -> Result<tidebreak_core::storage::RecordAgentRunModelStepOutcome> {
+        self.accounting_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_accounting.load(Ordering::SeqCst) {
+            self.accounting_failure_observed.notify_one();
+            return Err(AgentError::Store(
+                "injected transient container accounting failure".into(),
+            ));
+        }
+        self.inner
+            .record_agent_run_model_step(
+                id,
+                lease_token,
+                expected_model_steps,
+                expected_usage,
+                usage,
+            )
+            .await
+    }
+
+    async fn renew_agent_run_cancellation_finalization(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        self.inner
+            .renew_agent_run_cancellation_finalization(id, lease_token, lease_duration)
+            .await
+    }
+
+    async fn heartbeat_agent_run(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        if self.setup_fault == Some(SetupFault::ProvisionIntentClaimLockYield)
+            && self.setup_claim_lock_held.load(Ordering::SeqCst)
+        {
+            // A periodic durable fence contends on the same serialization lock
+            // as the held setup transaction. The notification makes the
+            // deadlock interleaving deterministic for the regression below.
+            self.fence_entered.notify_one();
+            let _claim_lock = self.setup_claim_lock.lock().await;
+        }
+        self.inner
+            .heartbeat_agent_run(id, lease_token, lease_duration)
+            .await
+    }
+
+    async fn finish_agent_run_cancellation(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+    ) -> Result<Option<tidebreak_core::storage::FinishAgentRunCancellationOutcome>> {
+        self.inner
+            .finish_agent_run_cancellation(id, lease_token)
+            .await
+    }
+
+    async fn submit_agent_run_result(
+        &self,
+        id: AgentRunId,
+        lease_token: Uuid,
+        text: &str,
+    ) -> Result<Option<tidebreak_core::storage::SubmitAgentRunResultOutcome>> {
+        if self.block_next_result.swap(false, Ordering::SeqCst) {
+            self.result_entered.notify_one();
+            self.result_release.notified().await;
+        }
+        self.inner
+            .submit_agent_run_result(id, lease_token, text)
+            .await
+    }
+
+    async fn record_late_container_result_evidence(
+        &self,
+        run_id: Uuid,
+        text: &str,
+    ) -> Result<bool> {
+        self.inner
+            .record_late_container_result_evidence(run_id, text)
+            .await
+    }
+
+    async fn append_message(&self, message: &tidebreak_core::Message) -> Result<()> {
+        self.inner.append_message(message).await
+    }
+
+    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::Message>> {
+        self.inner.list_messages(chat_id).await
+    }
+
+    async fn accept_tool_call(
+        &self,
+        call: &tidebreak_core::ToolCallRecord,
+    ) -> Result<tidebreak_core::AcceptToolCallOutcome> {
+        self.inner.accept_tool_call(call).await
+    }
+
+    async fn claim_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        executor_id: Uuid,
+        lease_token: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::ClaimClientToolCallOutcome> {
+        self.inner
+            .claim_client_tool_call(id, chat_id, executor_id, lease_token, now, lease_expires_at)
+            .await
+    }
+
+    async fn heartbeat_client_tool_call(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::HeartbeatClientToolCallOutcome> {
+        self.inner
+            .heartbeat_client_tool_call(id, chat_id, lease_token, now, lease_expires_at)
+            .await
+    }
+
+    async fn resolve_server_tool_call(
+        &self,
+        id: CallId,
+        resolution: &tidebreak_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::ResolveToolCallOutcome> {
+        self.inner
+            .resolve_server_tool_call(id, resolution, resolved_at)
+            .await
+    }
+
+    async fn resolve_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &tidebreak_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::JournaledClientToolCallOutcome> {
+        self.inner
+            .resolve_client_tool_call_and_append_event(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
+            .await
+    }
+
+    async fn resolve_expired_client_tool_call_and_append_event(
+        &self,
+        id: CallId,
+        chat_id: ChatId,
+        lease_token: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        resolution: &tidebreak_core::ToolCallResolution,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::JournaledClientToolCallOutcome> {
+        self.inner
+            .resolve_expired_client_tool_call_and_append_event(
+                id,
+                chat_id,
+                lease_token,
+                now,
+                resolution,
+                resolved_at,
+            )
+            .await
+    }
+
+    async fn list_pending_client_tool_calls(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
+        self.inner.list_pending_client_tool_calls(chat_id).await
+    }
+
+    async fn list_tool_calls(
+        &self,
+        chat_id: ChatId,
+    ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
+        self.inner.list_tool_calls(chat_id).await
+    }
+
+    async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        self.inner.get_setting(key).await
+    }
+
+    async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        self.inner.set_setting(key, value).await
+    }
+
+    async fn delete_setting(&self, key: &str) -> Result<()> {
+        self.inner.delete_setting(key).await
+    }
+
+    async fn append_event(
+        &self,
+        chat_id: ChatId,
+        event: &tidebreak_core::AgentEvent,
+    ) -> Result<i64> {
+        self.inner.append_event(chat_id, event).await
+    }
+
+    async fn list_events(
+        &self,
+        chat_id: ChatId,
+        after: i64,
+    ) -> Result<Vec<tidebreak_core::SequencedEvent>> {
+        self.inner.list_events(chat_id, after).await
+    }
+}
+
 // --- Mock Docker backend ------------------------------------------------------
 
 /// A [`SandboxBackend`] that stands in for Docker.
@@ -286,18 +826,175 @@ impl SandboxBackend for MockBackend {
     }
 }
 
+/// A backend that holds the orphan sweep after it receives the live-tag
+/// snapshot, exposing obligations committed while that snapshot is in use.
+struct HeldReclaimBackend {
+    started: Notify,
+    release: Notify,
+}
+
+impl HeldReclaimBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl SandboxBackend for HeldReclaimBackend {
+    async fn provision(
+        &self,
+        _request: ProvisionRequest,
+    ) -> std::result::Result<SandboxHandle, BackendError> {
+        Err(BackendError::Provision("not used by test".to_owned()))
+    }
+
+    async fn address(
+        &self,
+        _handle: &SandboxHandle,
+    ) -> std::result::Result<SandboxAddress, BackendError> {
+        Err(BackendError::Unaddressable("not used by test".to_owned()))
+    }
+
+    async fn destroy(&self, _handle: &SandboxHandle) -> std::result::Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn reclaim_orphans(
+        &self,
+        _live_tags: &std::collections::HashSet<SandboxTag>,
+    ) -> std::result::Result<Vec<SandboxHandle>, BackendError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(Vec::new())
+    }
+}
+
+/// A backend whose create has already produced an ambiguous tagged side effect
+/// but whose `provision` future does not return until the test releases it.
+/// Dropping the future models a runtime command that may keep running after its
+/// caller stops awaiting it; the tag sweep is the only portable cleanup seam in
+/// the backend contract when no handle was returned.
+struct HeldProvisionBackend {
+    started: Notify,
+    release: Notify,
+    provisions: AtomicUsize,
+    returned: AtomicBool,
+    dropped: Arc<AtomicBool>,
+    orphans: Mutex<std::collections::HashSet<SandboxTag>>,
+    reclaimed: Mutex<Vec<SandboxTag>>,
+}
+
+impl HeldProvisionBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: Notify::new(),
+            release: Notify::new(),
+            provisions: AtomicUsize::new(0),
+            returned: AtomicBool::new(false),
+            dropped: Arc::new(AtomicBool::new(false)),
+            orphans: Mutex::new(std::collections::HashSet::new()),
+            reclaimed: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+struct HeldProvisionDrop {
+    dropped: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl Drop for HeldProvisionDrop {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait]
+impl SandboxBackend for HeldProvisionBackend {
+    async fn provision(
+        &self,
+        request: ProvisionRequest,
+    ) -> std::result::Result<SandboxHandle, BackendError> {
+        self.provisions.fetch_add(1, Ordering::SeqCst);
+        self.orphans.lock().unwrap().insert(request.tag);
+        let mut drop_guard = HeldProvisionDrop {
+            dropped: self.dropped.clone(),
+            completed: false,
+        };
+        self.started.notify_one();
+        self.release.notified().await;
+        drop_guard.completed = true;
+        self.returned.store(true, Ordering::SeqCst);
+        Ok(SandboxHandle {
+            reference: format!("held-{}", request.run_id),
+            tag: request.tag,
+        })
+    }
+
+    async fn address(
+        &self,
+        _handle: &SandboxHandle,
+    ) -> std::result::Result<SandboxAddress, BackendError> {
+        Err(BackendError::Unaddressable(
+            "held provisioning has no address".to_owned(),
+        ))
+    }
+
+    async fn destroy(&self, handle: &SandboxHandle) -> std::result::Result<(), BackendError> {
+        self.orphans.lock().unwrap().remove(&handle.tag);
+        Ok(())
+    }
+
+    async fn reclaim_orphans(
+        &self,
+        live_tags: &std::collections::HashSet<SandboxTag>,
+    ) -> std::result::Result<Vec<SandboxHandle>, BackendError> {
+        let mut orphans = self.orphans.lock().unwrap();
+        let reclaimable = orphans
+            .iter()
+            .copied()
+            .filter(|tag| !live_tags.contains(tag))
+            .collect::<Vec<_>>();
+        for tag in &reclaimable {
+            orphans.remove(tag);
+        }
+        self.reclaimed
+            .lock()
+            .unwrap()
+            .extend(reclaimable.iter().copied());
+        Ok(reclaimable
+            .into_iter()
+            .map(|tag| SandboxHandle {
+                reference: format!("held-{tag}"),
+                tag,
+            })
+            .collect())
+    }
+}
+
 // --- Store / admission fixture ------------------------------------------------
 
 async fn store() -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
+    store_with_pool(None).await
+}
+
+async fn store_with_pool(
+    max_connections: Option<u32>,
+) -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let mut options = ConnectOptions::new(url);
+    if let Some(max_connections) = max_connections {
+        options
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(120));
+    }
+    let store: Arc<dyn Store> = Arc::new(DbStore::connect_with_options(options).await.unwrap());
     let chat = Chat {
         id: ChatId::new(),
         project_id: None,
@@ -357,8 +1054,6 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
 /// dials model completions back over the reverse channel. Returns the bound
 /// `http://` base URL.
 async fn spawn_sandbox_agent() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base_url = format!("http://{}", listener.local_addr().unwrap());
     // The supervisor expects the same per-run secret the MockBackend hands the
     // driver from `address()`, so the driver's authenticated attach is accepted.
     let run = SandboxRun::new(
@@ -377,6 +1072,15 @@ async fn spawn_sandbox_agent() -> String {
         let init = agent_run.init().await;
         let _ = run_agent(agent_run, init.task, workspace_path).await;
     });
+    spawn_sandbox_run(run).await
+}
+
+/// Serve a caller-controlled sandbox run over loopback without starting the
+/// real agent loop. Lifecycle tests use this to race reverse calls and terminal
+/// events at exact points while still exercising the production wire stack.
+async fn spawn_sandbox_run(run: SandboxRun) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
             let run = run.clone();
@@ -453,6 +1157,7 @@ fn fast_config() -> SandboxContainerRunConfig {
     SandboxContainerRunConfig {
         lease: Duration::from_secs(30),
         heartbeat: Duration::from_secs(5),
+        durable_fence_interval: Duration::from_millis(250),
         dial_timeout: Duration::from_secs(2),
         reattach_attempts: 2,
         reattach_backoff: Duration::from_millis(10),
@@ -615,8 +1320,22 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         ]));
         let resolver = Arc::new(FixedResolver(provider.clone()));
 
-        let runner =
-            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config());
+        // Prompt durable-cancellation polling is covered by the cancellation
+        // tests below. This case deliberately performs all eight model steps,
+        // so keep its lease alive without adding a 250 ms heartbeat contender
+        // to the same SQLite pool while the full server suite runs in parallel.
+        // The exact fence checks at each provider operation remain active.
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            resolver,
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(120),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_secs(30),
+                ..fast_config()
+            },
+        );
         let outcome = runner
             .drive(run_id)
             .await
@@ -907,8 +1626,13 @@ async fn the_sweep_revokes_tokens_for_lapsed_and_reaped_runs() {
 /// what closes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let (_dir, store, chat) = store().await;
+    // This path intentionally drives the sandbox through its full step budget.
+    // Under the parallel server suite, the nested runtime and durable writes can
+    // spend most of the ordinary 30-second guard waiting for scheduler time even
+    // though the same flow completes immediately in isolation. Keep a hard
+    // bound while leaving enough headroom for the integration-heavy suite.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (_dir, store, chat) = store_with_pool(Some(32)).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
 
         let backend = MockBackend::spawning();
@@ -999,6 +1723,72 @@ async fn stops_proxying_inference_at_the_runs_spend_budget() {
             "the host must not answer inference past the run's budget"
         );
         // The refusal closed the run rather than leaking the container.
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A retryable provider attempt reserved by a prior host lifetime still
+/// consumes the run's hard spend budget after the container is reattached.
+/// Completed model-step accounting deliberately excludes this zero-observation
+/// failure, so recovery must seed the cap from the durable reverse-operation
+/// claims rather than from `model_steps` alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovered_drive_keeps_failed_provider_attempts_in_the_spend_budget() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "resume a partly spent run").await;
+
+        let prior_operation = Uuid::new_v4();
+        assert_eq!(
+            store
+                .claim_operation(
+                    *run_id.as_uuid(),
+                    prior_operation,
+                    b"prior retryable model attempt",
+                    true,
+                    Uuid::new_v4(),
+                )
+                .await
+                .unwrap(),
+            tidebreak_core::OperationClaimOutcome::Fresh
+        );
+        store
+            .fail_operation(
+                *run_id.as_uuid(),
+                prior_operation,
+                b"provider stream failed before observation",
+            )
+            .await
+            .unwrap();
+
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a\"}".to_owned();
+            4
+        ]));
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                max_inference_operations: 2,
+                ..fast_config()
+            },
+        );
+
+        let outcome = runner
+            .drive(run_id)
+            .await
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Failed(run_id));
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "the prior durable failed attempt leaves only one provider call"
+        );
         assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
     })
     .await
@@ -1134,6 +1924,41 @@ async fn the_in_process_reaper_leaves_an_expired_container_lease_alone() {
 /// re-issue replays its recorded completion. This is the reverse-RPC exactly-once
 /// guarantee the reattachment path depends on, at the seam this slice adds
 /// (the host proxy over the durable operation store).
+#[tokio::test]
+async fn cancelled_host_model_proxy_refuses_before_provider_egress() {
+    let provider = Arc::new(ScriptedProvider::new(vec!["must not execute".to_owned()]));
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let proxy = HostModelProxy {
+        resolver: Arc::new(FixedResolver(provider.clone())),
+        cancel,
+        lease_guard: None,
+        config: AgentConfig {
+            model: "host-model".to_owned(),
+            ..AgentConfig::default()
+        },
+        spent: AtomicU32::new(0),
+        budget: 24,
+        accounting: None,
+        observed: HostModelObservedAccounting::default(),
+    };
+
+    let response = proxy
+        .respond(ReverseRequest::ModelInference(ModelInferenceParams {
+            prompt: "post-cancellation request".to_owned(),
+        }))
+        .await;
+    match response {
+        Response::Error(error) => assert_eq!(error.code, ErrorCode::Cancelled),
+        other => panic!("cancelled proxy returned {other:?}"),
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "a cancelled container reverse request must not start provider egress"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_model_proxy_answers_a_reissued_inference_from_the_op_log() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1150,12 +1975,16 @@ async fn host_model_proxy_answers_a_reissued_inference_from_the_op_log() {
             ),
             Arc::new(HostModelProxy {
                 resolver: Arc::new(FixedResolver(provider.clone())),
+                cancel: CancelToken::new(),
+                lease_guard: None,
                 config: AgentConfig {
                     model: "host-model".to_owned(),
                     ..AgentConfig::default()
                 },
                 spent: AtomicU32::new(0),
                 budget: 24,
+                accounting: None,
+                observed: HostModelObservedAccounting::default(),
             }),
             Arc::new(DurableOperationStore::new(store.clone(), run_id)),
         );
@@ -1387,6 +2216,69 @@ async fn the_sweep_reclaims_a_lapsed_intent_and_preserves_live_ones() {
         store.live_sandbox_tags().await.unwrap(),
         vec![live_tag.to_string()]
     );
+}
+
+/// A teardown committed after the sweep freezes its live-tag view must retain
+/// its retry obligation. Its tag may have been preserved as live by that view,
+/// so only obligations captured before reclamation are safe to complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_obligation_created_during_orphan_reclamation_survives_for_the_next_sweep() {
+    let (_dir, store, _chat) = store().await;
+    let prior_run = Uuid::new_v4();
+    store
+        .begin_sandbox_provision(
+            prior_run,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+            tidebreak_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap();
+    store
+        .enqueue_sandbox_teardown(prior_run)
+        .await
+        .unwrap()
+        .expect("the prior intent becomes a teardown obligation");
+
+    let backend = HeldReclaimBackend::new();
+    let runner = Arc::new(SandboxContainerRunner::new(
+        store.clone(),
+        backend.clone(),
+        Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+        fast_config(),
+    ));
+    let sweep = tokio::spawn({
+        let runner = runner.clone();
+        async move { runner.sweep().await }
+    });
+    backend.started.notified().await;
+
+    let late_run = Uuid::new_v4();
+    store
+        .begin_sandbox_provision(
+            late_run,
+            &SandboxTag::new().to_string(),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+            tidebreak_core::SandboxAdmissionMode::AttachedOnly,
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .commit_sandbox_provision_handle(late_run, "late-container")
+        .await
+        .unwrap());
+    store
+        .enqueue_sandbox_teardown(late_run)
+        .await
+        .unwrap()
+        .expect("the late handle becomes a teardown obligation");
+
+    backend.release.notify_one();
+    sweep.await.unwrap().unwrap();
+
+    let remaining = store.list_sandbox_teardowns().await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].run_id, late_run);
 }
 
 /// An unconfirmed teardown outlives the driver: the obligation is persisted at
@@ -1704,6 +2596,222 @@ async fn a_late_result_is_retained_as_evidence_not_committed() {
     assert_eq!(run.status, AgentRunStatus::Failed);
 }
 
+/// A result can win the in-memory select after cancellation already moved the
+/// durable run to `cancelling`. The fenced result remains late evidence, while
+/// the same driver must still acknowledge the exact cancellation instead of
+/// abandoning the run in its nonterminal state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_result_fenced_by_cancellation_still_finishes_cancellation() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "result races cancellation").await;
+        let lease_token = Uuid::new_v4();
+        let run = store
+            .claim_container_agent_run(run_id, lease_token, chrono::Duration::seconds(30), 4)
+            .await
+            .unwrap()
+            .expect("the container run claims");
+        store
+            .begin_sandbox_provision(
+                *run_id.as_uuid(),
+                &SandboxTag::new().to_string(),
+                chrono::Utc::now() + chrono::Duration::seconds(600),
+                tidebreak_core::SandboxAdmissionMode::AttachedOnly,
+            )
+            .await
+            .unwrap();
+
+        let fault_store = TerminalFaultStore::new(store.clone());
+        fault_store.block_next_result();
+        let resolver: Arc<dyn ProviderResolver> =
+            Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(Vec::new()))));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            MockBackend::spawning(),
+            resolver.clone(),
+            fast_config(),
+        ));
+        let model_proxy = Arc::new(HostModelProxy {
+            resolver,
+            cancel: CancelToken::new(),
+            lease_guard: None,
+            config: AgentConfig::default(),
+            spent: AtomicU32::new(0),
+            budget: 24,
+            accounting: None,
+            observed: HostModelObservedAccounting::default(),
+        });
+        let finalize = tokio::spawn({
+            let runner = runner.clone();
+            let model_proxy = model_proxy.clone();
+            async move {
+                runner
+                    .finish_after_quiescence(
+                        &run,
+                        lease_token,
+                        &model_proxy,
+                        &DriveEnd::Result("the raced answer".to_owned()),
+                    )
+                    .await
+            }
+        });
+
+        fault_store.result_entered.notified().await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request wins the durable race");
+        fault_store.result_release.notify_one();
+
+        let outcome = finalize.await.unwrap().expect("finalization succeeds");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        let result = store
+            .get_agent_run_result(run_id)
+            .await
+            .unwrap()
+            .expect("cancellation writes its immutable receipt");
+        assert_eq!(result.model_steps, 0);
+        assert_eq!(result.usage, tidebreak_core::Usage::default());
+        let provision = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the provisioning record exists");
+        assert_eq!(
+            provision.late_result_evidence.as_deref(),
+            Some("the raced answer")
+        );
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Final accounting may remain unavailable past the execution lease that was
+/// live when cancellation began. The exact durable cancellation identity keeps
+/// renewing finalization authority until storage recovers, then records one
+/// step and snapshots it into the immutable cancelled receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_finalization_survives_accounting_failure_past_execution_lease() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "retry cancellation accounting").await;
+        let lease_token = Uuid::new_v4();
+        let lease = Duration::from_millis(150);
+        let run = store
+            .claim_container_agent_run(
+                run_id,
+                lease_token,
+                chrono::Duration::from_std(lease).unwrap(),
+                4,
+            )
+            .await
+            .unwrap()
+            .expect("the container run claims");
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+
+        let usage = tidebreak_core::Usage {
+            input_tokens: 19,
+            output_tokens: 11,
+            cache_read_input_tokens: 7,
+            cache_creation_input_tokens: 3,
+        };
+        let fault_store = TerminalFaultStore::new(store.clone());
+        fault_store.fail_accounting_until_released();
+        let resolver: Arc<dyn ProviderResolver> =
+            Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(Vec::new()))));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            MockBackend::spawning(),
+            resolver.clone(),
+            SandboxContainerRunConfig {
+                lease,
+                heartbeat: Duration::from_millis(40),
+                ..fast_config()
+            },
+        ));
+        let model_proxy = Arc::new(HostModelProxy {
+            resolver,
+            cancel: CancelToken::new(),
+            lease_guard: None,
+            config: AgentConfig::default(),
+            spent: AtomicU32::new(0),
+            budget: 24,
+            accounting: Some(HostModelAccounting {
+                store: fault_store.clone(),
+                run_id,
+                lease_token,
+                baseline: tokio::sync::Mutex::new((run.model_steps, run.usage)),
+            }),
+            observed: HostModelObservedAccounting::default(),
+        });
+        let mut observation = None;
+        model_proxy
+            .observed
+            .add_usage(&mut observation, usage)
+            .unwrap();
+
+        let first_failure = fault_store.accounting_failure_observed.notified();
+        tokio::pin!(first_failure);
+        let original_expiry = run
+            .lease_expires_at
+            .expect("the claimed execution lease has an expiry");
+        let finalize = tokio::spawn({
+            let runner = runner.clone();
+            let model_proxy = model_proxy.clone();
+            async move {
+                runner
+                    .finish_after_quiescence(&run, lease_token, &model_proxy, &DriveEnd::LeaseLost)
+                    .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), first_failure)
+            .await
+            .expect("final accounting reaches the injected outage");
+        let until_original_expiry = original_expiry
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(until_original_expiry + Duration::from_millis(75)).await;
+        assert!(chrono::Utc::now() > original_expiry);
+        let still_cancelling = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(still_cancelling.status, AgentRunStatus::Cancelling);
+        assert!(still_cancelling
+            .lease_expires_at
+            .is_some_and(|expiry| expiry > chrono::Utc::now()));
+
+        fault_store.release_accounting();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), finalize)
+            .await
+            .expect("finalization resumes after accounting storage recovers")
+            .unwrap()
+            .expect("accounting recovery finishes the exact cancellation");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert!(fault_store.accounting_calls.load(Ordering::SeqCst) >= 2);
+
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        assert_eq!(cancelled.model_steps, 1);
+        assert_eq!(cancelled.usage, usage);
+        let result = store
+            .get_agent_run_result(run_id)
+            .await
+            .unwrap()
+            .expect("cancellation writes its immutable receipt");
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.usage, usage);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
 /// Cancelling a run mid-drive: the heartbeat refusal is read as cancellation,
 /// the driver commits the terminal cancellation it still owns, and the teardown
 /// that follows is what actually stops the container.
@@ -1754,6 +2862,967 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
     .expect("test completed within its time bound");
 }
 
+/// Cancellation interrupts a backend create that has not returned a handle,
+/// rather than waiting for the next heartbeat or for provisioning to finish.
+/// The pre-create durable tag moves to teardown with the cancelled run, so a
+/// backend side effect that escaped future cancellation is reclaimed by the
+/// orphan sweep and the run is never provisioned a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_interrupts_held_provision_and_sweeps_its_tagged_side_effect() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "cancel while provisioning").await;
+        let backend = HeldProvisionBackend::new();
+        let steering = Arc::new(SandboxSteerGuard::default());
+        let runner = Arc::new(
+            SandboxContainerRunner::new(
+                store.clone(),
+                backend.clone(),
+                Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+                SandboxContainerRunConfig {
+                    lease: Duration::from_secs(60),
+                    heartbeat: Duration::from_secs(30),
+                    ..fast_config()
+                },
+            )
+            .with_steering(steering.clone()),
+        );
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        backend.started.notified().await;
+        let intended = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the provisioning intent precedes the held backend call");
+        assert_eq!(
+            intended.state,
+            tidebreak_core::SandboxProvisionState::Intended
+        );
+        let tag = intended.tag.parse::<SandboxTag>().unwrap();
+
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+        let signal = store
+            .get_agent_run_cancellation_signal(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation receipt names the exact drive");
+        assert!(
+            steering.cancel_container_drive(run_id, signal.lease_token),
+            "the held provisioning call is registered under the exact durable lease"
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+            .await
+            .expect("cancellation must not wait for provision or the 30-second heartbeat")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert!(
+            backend.dropped.load(Ordering::SeqCst),
+            "the losing provisioning future is dropped before cancellation returns"
+        );
+        assert!(
+            !backend.returned.load(Ordering::SeqCst),
+            "the run cancels before the backend is released"
+        );
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
+
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        let teardown = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the ambiguous create remains durably correlated");
+        assert_eq!(
+            teardown.state,
+            tidebreak_core::SandboxProvisionState::Teardown
+        );
+        assert_eq!(teardown.handle, None);
+        assert!(store.live_sandbox_tags().await.unwrap().is_empty());
+
+        // A terminal run cannot start another create, even while the first
+        // backend side effect is known only by its tag.
+        assert!(runner.drive(run_id).await.unwrap().is_none());
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
+
+        runner.sweep().await.expect("the tag sweep succeeds");
+        assert_eq!(backend.reclaimed.lock().unwrap().as_slice(), &[tag]);
+        assert!(backend.orphans.lock().unwrap().is_empty());
+        assert!(store.list_sandbox_teardowns().await.unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_sandbox_provision(*run_id.as_uuid())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            tidebreak_core::SandboxProvisionState::Done
+        );
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A cancellation committed through another server process cannot use this
+/// process's exact-drive registry. The short durable fence must still drop a
+/// held create promptly, terminalize the immutable cancellation, and leave the
+/// ambiguous tagged side effect exclusively to teardown/orphan recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_process_cancellation_interrupts_held_provision_without_a_local_signal() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "remote cancel while provisioning").await;
+        let backend = HeldProvisionBackend::new();
+        let provider = Arc::new(ScriptedProvider::new(vec!["must not execute".to_owned()]));
+        let drive_guard = Arc::new(SandboxSteerGuard::default());
+        let remote_guard = SandboxSteerGuard::default();
+        let runner = Arc::new(
+            SandboxContainerRunner::new(
+                store.clone(),
+                backend.clone(),
+                Arc::new(FixedResolver(provider.clone())),
+                SandboxContainerRunConfig {
+                    lease: Duration::from_secs(60),
+                    heartbeat: Duration::from_secs(30),
+                    durable_fence_interval: Duration::from_millis(10),
+                    ..fast_config()
+                },
+            )
+            .with_steering(drive_guard),
+        );
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        backend.started.notified().await;
+        let intended = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the exact durable admission writes its tag before create");
+        let tag = intended.tag.parse::<SandboxTag>().unwrap();
+
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the remote cancellation commits");
+        let signal = store
+            .get_agent_run_cancellation_signal(run_id)
+            .await
+            .unwrap()
+            .expect("the immutable cancellation receipt exists");
+        assert!(
+            !remote_guard.cancel_container_drive(run_id, signal.lease_token),
+            "the cancelling process owns no registration for the remote drive"
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+            .await
+            .expect("the durable watcher must beat the 30-second heartbeat")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the run was claimed");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert!(backend.dropped.load(Ordering::SeqCst));
+        assert!(!backend.returned.load(Ordering::SeqCst));
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+        let record = store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .expect("the ambiguous create remains correlated");
+        assert_eq!(
+            record.state,
+            tidebreak_core::SandboxProvisionState::Teardown
+        );
+        assert_eq!(record.handle, None);
+        runner.sweep().await.expect("the tag sweep succeeds");
+        assert_eq!(backend.reclaimed.lock().unwrap().as_slice(), &[tag]);
+        assert!(backend.orphans.lock().unwrap().is_empty());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Model-policy resolution may block in storage after the exact drive is
+/// registered. A cancellation committed in another process is observed by the
+/// durable watcher, which drops that setup future and remains the cancellation
+/// finalizer without provisioning or reaching a provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_process_cancellation_interrupts_blocked_model_resolution() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id =
+            admit_container_run(&store, chat.id, "remote cancel during model lookup").await;
+        let fault_store =
+            TerminalFaultStore::with_setup_fault(store.clone(), SetupFault::ModelResolution);
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec!["must not execute".to_owned()]));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(60),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_millis(10),
+                ..fast_config()
+            },
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        fault_store.setup_entered.notified().await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the remote cancellation commits");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+            .await
+            .expect("blocked model resolution is preempted by durable cancellation")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the run was claimed");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .is_none());
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A provisioning transaction may yield after taking the shared agent-run
+/// claim lock. Once the short durable fence starts waiting for that lock, the
+/// runner must keep polling the setup future so it can finish and release the
+/// lock; awaiting the heartbeat inline self-deadlocks this exact interleaving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pre_attach_fence_keeps_polling_setup_that_holds_the_claim_lock() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "yield while holding claim lock").await;
+        let lease_token = Uuid::new_v4();
+        let fault_store = TerminalFaultStore::with_setup_fault(
+            store.clone(),
+            SetupFault::ProvisionIntentClaimLockYield,
+        );
+        let run = fault_store
+            .claim_container_agent_run(run_id, lease_token, chrono::Duration::seconds(60), 4)
+            .await
+            .unwrap()
+            .expect("the fixture run claims");
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "completed after fence".to_owned()
+        ]));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(60),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_millis(10),
+                ..fast_config()
+            },
+        ));
+        let wait = tokio::spawn({
+            let runner = runner.clone();
+            let fault_store = fault_store.clone();
+            async move {
+                let cancel = CancelToken::new();
+                let tag = SandboxTag::new().to_string();
+                let window_expires_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+                runner
+                    .await_pre_attach(
+                        &run,
+                        lease_token,
+                        &cancel,
+                        fault_store.begin_sandbox_provision_for_agent_run(
+                            run_id,
+                            lease_token,
+                            &tag,
+                            window_expires_at,
+                            tidebreak_core::SandboxAdmissionMode::AttachedOnly,
+                        ),
+                    )
+                    .await
+            }
+        });
+
+        fault_store.setup_entered.notified().await;
+        fault_store.fence_entered.notified().await;
+        fault_store.setup_release.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the setup and contending durable fence must both keep making progress")
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            PreAttachEnd::Completed(Ok(Some(
+                tidebreak_core::BeginSandboxProvisionOutcome::Started
+            )))
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert!(store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .is_some());
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// The provisioning-intent transaction itself is the exact durable admission
+/// fence. If remote cancellation gets the shared claim lock first, the delayed
+/// transaction returns no authority and no external create begins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exact_provision_admission_refuses_a_remotely_cancelled_claim() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id =
+            admit_container_run(&store, chat.id, "cancel before exact provision fence").await;
+        let fault_store =
+            TerminalFaultStore::with_setup_fault(store.clone(), SetupFault::ProvisionIntentDelayed);
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec!["must not execute".to_owned()]));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(60),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_secs(30),
+                ..fast_config()
+            },
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        fault_store.setup_entered.notified().await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the remote cancellation commits before admission resumes");
+        fault_store.setup_release.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+            .await
+            .expect("the refused exact admission finalizes cancellation promptly")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the run was claimed");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .is_none());
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A provisioning-intent storage error can arrive after remote cancellation
+/// committed. The driver must reconcile the immutable receipt before returning
+/// that setup error, keeping the only finalizer alive and never calling the
+/// backend or provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failing_provision_intent_reconciles_remote_cancellation() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id =
+            admit_container_run(&store, chat.id, "cancel races provision persistence").await;
+        let fault_store =
+            TerminalFaultStore::with_setup_fault(store.clone(), SetupFault::ProvisionIntentFailure);
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::new(vec!["must not execute".to_owned()]));
+        let runner = Arc::new(SandboxContainerRunner::new(
+            fault_store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(60),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_secs(30),
+                ..fast_config()
+            },
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        fault_store.setup_entered.notified().await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the remote cancellation commits");
+        fault_store.setup_release.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+            .await
+            .expect("the setup error is reconciled as cancellation")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the run was claimed");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(store
+            .get_sandbox_provision(*run_id.as_uuid())
+            .await
+            .unwrap()
+            .is_none());
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A heartbeat reports whether it extended the lease, not whether the exact
+/// claim is still valid. When the requested lease is longer than the run's
+/// remaining absolute lifetime, the claim is clamped to the deadline and every
+/// renewal is a deterministic no-op. The driver must validate that live claim
+/// instead of treating the no-op as cancellation or lease loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "finish under a clamped lease").await;
+        let lease_token = Uuid::new_v4();
+        let lease = chrono::Duration::hours(2);
+        let run = store
+            .claim_container_agent_run(run_id, lease_token, lease, 4)
+            .await
+            .unwrap()
+            .expect("the fixture run claims");
+
+        assert!(
+            store
+                .validate_agent_run_execution(
+                    run_id,
+                    lease_token,
+                    AgentRunExecutionLocation::Container,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .heartbeat_agent_run(run_id, lease_token, lease)
+                .await
+                .unwrap(),
+            "the deadline-clamped lease makes extension a deterministic no-op"
+        );
+        assert!(
+            store
+                .validate_agent_run_execution(
+                    run_id,
+                    lease_token,
+                    AgentRunExecutionLocation::Container,
+                )
+                .await
+                .unwrap(),
+            "the exact execution claim remains live after the no-op"
+        );
+
+        let backend = MockBackend::spawning();
+        let provider = Arc::new(ScriptedProvider::slow(
+            vec!["finished under the live claim".to_owned()],
+            Duration::from_millis(100),
+        ));
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(FixedResolver(provider.clone())),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(2 * 60 * 60),
+                heartbeat: Duration::from_millis(10),
+                durable_fence_interval: Duration::from_millis(10),
+                ..fast_config()
+            },
+        );
+
+        let outcome = runner
+            .drive_claimed(run, lease_token)
+            .await
+            .expect("driving succeeds despite no-op renewals");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Cancellation waits for an in-flight reverse model inference to quiesce,
+/// persists the usage it already observed, and only then snapshots the
+/// immutable cancelled result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_drop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "account before cancellation").await;
+
+        let backend = MockBackend::spawning();
+        let stalled = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let usage = tidebreak_core::Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 3,
+        };
+        let provider = Arc::new(UsageThenPendingProvider {
+            stalled: stalled.clone(),
+            dropped: dropped.clone(),
+            drop_observed: Arc::new(Notify::new()),
+            drop_gate: None,
+            calls: AtomicUsize::new(0),
+            usage,
+        });
+        let runner = Arc::new(SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(UsageThenPendingResolver(provider)),
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(2),
+                heartbeat: Duration::from_millis(100),
+                ..fast_config()
+            },
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        stalled.notified().await;
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+
+        let outcome = drive
+            .await
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the reverse provider stream must quiesce before cancellation completes"
+        );
+
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        assert_eq!(cancelled.model_steps, 1);
+        assert_eq!(cancelled.usage, usage);
+
+        let result = store
+            .get_agent_run_result(run_id)
+            .await
+            .unwrap()
+            .expect("cancellation persists an immutable result");
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.usage, usage);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Cancellation closes the active connection and the host's admission gate
+/// immediately after the durable route transition, without waiting for the
+/// next lease heartbeat. A reverse request attempted after that signal may see
+/// either the stable cancellation refusal or connection teardown, but it must
+/// never start another provider call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before_heartbeat() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "cancel before heartbeat").await;
+
+        let sandbox = SandboxRun::new(
+            [Capability::ModelInference],
+            Some(TransportSecret::new("test-secret")),
+        );
+        let base_url = spawn_sandbox_run(sandbox.clone()).await;
+        let backend = MockBackend::unreachable(base_url);
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            "first answer".to_owned(),
+            "must not execute".to_owned(),
+        ]));
+        let steering = Arc::new(SandboxSteerGuard::default());
+        let runner = Arc::new(
+            SandboxContainerRunner::new(
+                store.clone(),
+                backend.clone(),
+                Arc::new(FixedResolver(provider.clone())),
+                SandboxContainerRunConfig {
+                    lease: Duration::from_secs(60),
+                    // Attachment below proves the registration/revalidation
+                    // heartbeat completed. The cancellation must finish long
+                    // before this next periodic heartbeat can fire.
+                    heartbeat: Duration::from_secs(30),
+                    ..fast_config()
+                },
+            )
+            .with_steering(steering.clone()),
+        );
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        let _init = sandbox.init().await;
+        let first = sandbox
+            .call(
+                OperationId::new(),
+                ReverseRequest::ModelInference(ModelInferenceParams {
+                    prompt: "first reverse request".to_owned(),
+                }),
+            )
+            .await;
+        assert!(matches!(
+            first,
+            ReverseOutcome::Settled(Response::Ok(ReverseResult::ModelInference(_)))
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+        let signal = store
+            .get_agent_run_cancellation_signal(run_id)
+            .await
+            .unwrap()
+            .expect("the durable cancellation receipt names the exact drive");
+        assert!(
+            steering.cancel_container_drive(run_id, signal.lease_token),
+            "the attached container drive is registered under the durable lease"
+        );
+
+        let late = tokio::time::timeout(
+            Duration::from_secs(1),
+            sandbox.call(
+                OperationId::new(),
+                ReverseRequest::ModelInference(ModelInferenceParams {
+                    prompt: "post-cancellation reverse request".to_owned(),
+                }),
+            ),
+        )
+        .await
+        .expect("the post-cancellation reverse request settles or disconnects promptly");
+        match late {
+            ReverseOutcome::Disconnected => {}
+            ReverseOutcome::Settled(Response::Error(error)) => {
+                assert_eq!(error.code, ErrorCode::Cancelled);
+            }
+            other => panic!("post-cancellation reverse request returned {other:?}"),
+        }
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), drive)
+            .await
+            .expect("cancellation must not wait for the 30-second heartbeat")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "no provider call may begin after the committed cancellation signal"
+        );
+        assert_eq!(
+            store.get_agent_run(run_id).await.unwrap().unwrap().status,
+            AgentRunStatus::Cancelled
+        );
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// Cancellation closes the active connection and the host's admission gate
+/// before it snapshots terminal totals. A fresh reverse request attempted while
+/// the first provider stream is being cancelled must never reach the provider or
+/// keep the cancellation waiting forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "close admission on cancellation").await;
+
+        let sandbox = SandboxRun::new(
+            [Capability::ModelInference],
+            Some(TransportSecret::new("test-secret")),
+        );
+        let base_url = spawn_sandbox_run(sandbox.clone()).await;
+        let backend = MockBackend::unreachable(base_url);
+        let stalled = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let drop_observed = Arc::new(Notify::new());
+        let drop_gate = Arc::new(Barrier::new(2));
+        let usage = tidebreak_core::Usage {
+            input_tokens: 13,
+            output_tokens: 8,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 2,
+        };
+        let provider = Arc::new(UsageThenPendingProvider {
+            stalled: stalled.clone(),
+            dropped: dropped.clone(),
+            drop_observed: drop_observed.clone(),
+            drop_gate: Some(drop_gate.clone()),
+            calls: AtomicUsize::new(0),
+            usage,
+        });
+        let steering = Arc::new(SandboxSteerGuard::default());
+        let runner = Arc::new(
+            SandboxContainerRunner::new(
+                store.clone(),
+                backend.clone(),
+                Arc::new(UsageThenPendingResolver(provider.clone())),
+                SandboxContainerRunConfig {
+                    lease: Duration::from_secs(2),
+                    heartbeat: Duration::from_millis(50),
+                    ..fast_config()
+                },
+            )
+            .with_steering(steering.clone()),
+        );
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        let _init = sandbox.init().await;
+        let first_call = tokio::spawn({
+            let sandbox = sandbox.clone();
+            async move {
+                sandbox
+                    .call(
+                        OperationId::new(),
+                        ReverseRequest::ModelInference(ModelInferenceParams {
+                            prompt: "first reverse request".to_owned(),
+                        }),
+                    )
+                    .await
+            }
+        });
+        stalled.notified().await;
+
+        let first_drop = drop_observed.notified();
+        tokio::pin!(first_drop);
+        store
+            .request_agent_run_cancellation(run_id)
+            .await
+            .unwrap()
+            .expect("the cancellation request lands");
+        let signal = store
+            .get_agent_run_cancellation_signal(run_id)
+            .await
+            .unwrap()
+            .expect("the durable cancellation receipt names the exact drive");
+        assert!(steering.cancel_container_drive(run_id, signal.lease_token));
+        first_drop.await;
+
+        // The first stream is now blocked in Drop, holding quiescence open.
+        // Attempt a fresh request during that exact window. Before the fix the
+        // still-live connection admitted it after `cancel_all` took its snapshot,
+        // spending a second provider call and wedging `wait_idle` forever.
+        let late_call = tokio::spawn({
+            let sandbox = sandbox.clone();
+            async move {
+                sandbox
+                    .call(
+                        OperationId::new(),
+                        ReverseRequest::ModelInference(ModelInferenceParams {
+                            prompt: "late reverse request".to_owned(),
+                        }),
+                    )
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::spawn_blocking(move || drop_gate.wait())
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
+            .await
+            .expect("cancellation must not hang behind a late reverse request")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "the request attempted after terminal cleanup began must not execute"
+        );
+
+        let first = tokio::time::timeout(Duration::from_secs(1), first_call)
+            .await
+            .expect("the original sandbox call observes connection teardown")
+            .unwrap();
+        assert!(matches!(first, ReverseOutcome::Disconnected));
+        late_call.abort();
+        let _ = late_call.await;
+
+        let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+        assert_eq!(cancelled.model_steps, 1);
+        assert_eq!(cancelled.usage, usage);
+        let result = store
+            .get_agent_run_result(run_id)
+            .await
+            .unwrap()
+            .expect("cancellation persists an immutable result");
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.usage, usage);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
+/// A terminal event can arrive while a detached reverse responder is still
+/// pending. The driver must close and quiesce that responder, persist its
+/// observed usage, and only then commit the result that snapshots the totals.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_result_waits_for_pending_reverse_accounting() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (_dir, store, chat) = store().await;
+        let run_id = admit_container_run(&store, chat.id, "result races reverse inference").await;
+
+        let sandbox = SandboxRun::new(
+            [Capability::ModelInference],
+            Some(TransportSecret::new("test-secret")),
+        );
+        let base_url = spawn_sandbox_run(sandbox.clone()).await;
+        let backend = MockBackend::unreachable(base_url);
+        let stalled = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let usage = tidebreak_core::Usage {
+            input_tokens: 17,
+            output_tokens: 9,
+            cache_read_input_tokens: 4,
+            cache_creation_input_tokens: 1,
+        };
+        let provider = Arc::new(UsageThenPendingProvider {
+            stalled: stalled.clone(),
+            dropped: dropped.clone(),
+            drop_observed: Arc::new(Notify::new()),
+            drop_gate: None,
+            calls: AtomicUsize::new(0),
+            usage,
+        });
+        let runner = Arc::new(SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            Arc::new(UsageThenPendingResolver(provider.clone())),
+            fast_config(),
+        ));
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+
+        let _init = sandbox.init().await;
+        let reverse_call = tokio::spawn({
+            let sandbox = sandbox.clone();
+            async move {
+                sandbox
+                    .call(
+                        OperationId::new(),
+                        ReverseRequest::ModelInference(ModelInferenceParams {
+                            prompt: "pending reverse request".to_owned(),
+                        }),
+                    )
+                    .await
+            }
+        });
+        stalled.notified().await;
+        sandbox
+            .emit_result("terminal answer")
+            .await
+            .expect("the sandbox emits its terminal result");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
+            .await
+            .expect("terminal result must not race past reverse quiescence")
+            .unwrap()
+            .expect("driving succeeds")
+            .expect("the container run is claimable");
+        assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the pending provider stream is dropped before the result commits"
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        let reverse = tokio::time::timeout(Duration::from_secs(1), reverse_call)
+            .await
+            .expect("the sandbox call observes connection teardown")
+            .unwrap();
+        assert!(matches!(reverse, ReverseOutcome::Disconnected));
+
+        let completed = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(completed.status, AgentRunStatus::Completed);
+        assert_eq!(completed.model_steps, 1);
+        assert_eq!(completed.usage, usage);
+        let result = store
+            .get_agent_run_result(run_id)
+            .await
+            .unwrap()
+            .expect("completion persists an immutable result");
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.usage, usage);
+        assert_eq!(backend.destroys.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .expect("test completed within its time bound");
+}
+
 /// Steering a live sandbox-resident run: an instruction the host sends while the
 /// container is mid-run reaches the agent's *next* model step, and a run nobody
 /// is attached to refuses the instruction instead of queueing it.
@@ -1764,7 +3833,13 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
 /// asserted on the frame in isolation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // This test starts a real loopback sandbox, a host-side wire driver, and a
+    // nested multi-thread runtime. Under the full server suite those tasks can
+    // spend most of the ordinary 30-second guard waiting behind the other
+    // integration-style tests even though the exercised flow takes well under
+    // a second in isolation. Keep a hard bound, but leave enough headroom for
+    // the parallel suite to schedule the end-to-end stack.
+    tokio::time::timeout(Duration::from_secs(60), async {
         const INSTRUCTION: &str = "stop listing files and report what you have";
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "inspect the workspace").await;
@@ -2107,9 +4182,13 @@ async fn docker_container_conforms_at_the_transport_boundary() {
                 // No scripted directives: every completion defaults to a final
                 // answer, so the agent emits progress then a terminal result.
                 resolver: Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+                cancel: CancelToken::new(),
+                lease_guard: None,
                 config: AgentConfig::default(),
                 spent: AtomicU32::new(0),
                 budget: 24,
+                accounting: None,
+                observed: HostModelObservedAccounting::default(),
             }),
             Arc::new(DurableOperationStore::new(store.clone(), run_id)),
         );
