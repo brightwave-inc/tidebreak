@@ -234,15 +234,35 @@ async fn hydration_is_bounded_so_a_long_chat_cannot_grow_the_outbound_body() {
 
     let request =
         captured_request(store, Some(blobs as Arc<dyn BlobStore>), &chat, "summarize").await;
-    assert_eq!(request.images.len(), context::MAX_HYDRATED_IMAGES);
+    // The count cap is a ceiling, not an exact fill: eviction advances its
+    // boundary in quantized half-cap jumps to spare the provider prompt cache,
+    // so the kept count lands in the documented `cap - bucket + 1 ..= cap` band
+    // (see `evict_images_beyond`, whose own test owns the band property). At
+    // this transcript length that band resolves to one number, and pinning the
+    // number rather than re-deriving it is what would catch a boundary that
+    // started sliding image by image again.
+    //
+    // 11 attachments, cap 8, bucket 4: cutoff = ceil((11 - 8) / 4) * 4 = 4, so
+    // 7 keep their pixels.
+    let expected_hydrated = 7;
+    assert_eq!(
+        total, 11,
+        "the pinned count of {expected_hydrated} assumes 11 attachments; re-derive it"
+    );
+    assert_eq!(
+        request.images.len(),
+        expected_hydrated,
+        "{total} attachments under a cap of {} evict one bucket",
+        context::MAX_HYDRATED_IMAGES,
+    );
     // The newest attachments keep their pixels; the oldest become stand-ins.
-    for blob_id in &newest[total - context::MAX_HYDRATED_IMAGES..] {
+    for blob_id in &newest[total - expected_hydrated..] {
         assert!(
             request.images.contains(*blob_id),
             "{blob_id} lost its bytes"
         );
     }
-    for blob_id in &newest[..total - context::MAX_HYDRATED_IMAGES] {
+    for blob_id in &newest[..total - expected_hydrated] {
         assert!(
             !request.images.contains(*blob_id),
             "{blob_id} was hydrated past the bound"

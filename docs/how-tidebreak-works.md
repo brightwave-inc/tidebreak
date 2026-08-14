@@ -142,15 +142,20 @@ policy.
 Models are chosen per *role*, not once globally. `chat` is the model a
 foreground turn runs on: the chat's override, then the global default, then the
 boot default. `utility` is the model for background work the user did not ask
-for, such as compacting a long transcript, so maintenance is not billed at the
-model and reasoning effort chosen for the conversation. Each role can be pinned
-to one model (`PUT /models/roles/{role}`, stored under `model.<role>`); left
-automatic, it resolves against an ordered list of curated defaults and takes the
-first entry whose provider is enabled and credentialed. That happens on read, so
-enabling a provider changes the answer without a restart, and it degrades rather
-than fails: when nothing resolves for `utility`, the work that would have used
-it is skipped instead of falling back to the conversation's model. `GET /models`
-reports what each role resolves to so a client can label the automatic choice.
+for, such as naming a new chat or judging an approval, so maintenance is not
+billed at the model and reasoning effort chosen for the conversation. Compacting
+a long transcript is deliberately *not* one of those: it runs on the chat's own
+model so the summarization call can read the conversation's prompt cache instead
+of paying for a second full copy of the transcript — see
+[decision 0015](decisions/0015-compaction-rides-the-conversation-cache.md). Each
+role can be pinned to one model (`PUT /models/roles/{role}`, stored under
+`model.<role>`); left automatic, it resolves against an ordered list of curated
+defaults and takes the first entry whose provider is enabled and credentialed.
+That happens on read, so enabling a provider changes the answer without a
+restart, and it degrades rather than fails: when nothing resolves for `utility`,
+the work that would have used it is skipped instead of falling back to the
+conversation's model. `GET /models` reports what each role resolves to so a
+client can label the automatic choice.
 
 OpenAI-compatible endpoints and OpenRouter can register custom model IDs and
 their context and output limits in provider settings. Those models enter the

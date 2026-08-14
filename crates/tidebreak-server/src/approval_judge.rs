@@ -33,8 +33,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
-    input_schema_for, AgentError, ChatMessage, ChatRequest, Message, ModelProvider, ProviderEvent,
-    ResponseFormat, Result, Role, StopReason, Store, ToolActionPreview, ToolApproval, UtilityModel,
+    input_schema_for, AgentError, ChatMessage, ChatRequest, Message, ModelProvider,
+    PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, StopReason, Store,
+    ToolActionPreview, ToolApproval, UtilityModel,
 };
 
 use crate::approvals::ApprovalBroker;
@@ -421,6 +422,9 @@ async fn request_verdict(
         temperature: None,
         reasoning_effort: utility.reasoning_effort,
         response_format: Some(JudgeVerdict::response_format()),
+        // One call, one prompt nothing else re-sends: cache writes here would
+        // be a premium paid for entries that expire unread.
+        prompt_cache: PromptCacheMode::OneShot,
         ..Default::default()
     };
     let mut stream = provider.stream(request).await?;

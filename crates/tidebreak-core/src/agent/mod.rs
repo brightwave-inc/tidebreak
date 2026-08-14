@@ -14,8 +14,9 @@
 //! - approval is **auto** for `ReadOnly`/`Workspace`; `Sensitive` parks via an
 //!   [`ApprovalGate`] until approve/reject unless a standing grant covers it;
 //! - context reduction is deterministic floor+restore, with optional semantic
-//!   checkpoints on the utility model when compaction policy triggers;
-//!   retries with progressive reduction on provider prompt-too-long errors.
+//!   checkpoints — written by the conversation's own model, riding its prompt
+//!   cache — when compaction policy triggers; retries with progressive
+//!   reduction on provider prompt-too-long errors.
 
 mod context;
 mod dispatch;

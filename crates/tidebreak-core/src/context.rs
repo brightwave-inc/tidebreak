@@ -148,8 +148,31 @@ pub const MAX_HYDRATED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const TOOL_RESULT_IMAGE_MESSAGE_WINDOW: usize = 10;
 
 /// Evict preview images from tool-result messages outside the recent window.
+///
+/// The window is a *floor*: the newest `keep_messages` messages always keep
+/// their pixels. The boundary below it is quantized down to a multiple of the
+/// window so it does not creep forward with the transcript.
+///
+/// That quantization is a prompt-cache constraint, not a nicety. Rewriting an
+/// already-sent message invalidates the provider's cached prefix from that byte
+/// onward, and an agentic step appends about two messages — so an exact
+/// `len - keep_messages` boundary rewrites a new mid-transcript message on
+/// nearly every step, re-billing the whole prefix each time in exactly the
+/// screenshot-heavy sessions that carry the most tokens. Advancing in
+/// window-sized jumps amortizes that to one invalidation per bucket of appended
+/// messages. Rounding *down* is what keeps the guarantee honest: pixels may
+/// survive longer than the window promises, never less.
+///
+/// The standing rule this follows — a boundary never slides through
+/// already-sent bytes — is recorded in
+/// `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
 pub fn evict_old_tool_result_images(messages: &mut [ChatMessage], keep_messages: usize) {
-    let cutoff = messages.len().saturating_sub(keep_messages);
+    // Quantizing down can only shrink the cutoff, so the newest
+    // `keep_messages` are never touched; in the worst case the pixels of up to
+    // `2 * keep_messages - 1` messages survive. That costs no outbound bytes:
+    // `evict_images_beyond` still caps how many images are hydrated.
+    let bucket = keep_messages.max(1);
+    let cutoff = messages.len().saturating_sub(keep_messages) / bucket * bucket;
     for message in messages.iter_mut().take(cutoff) {
         let is_tool_result = message
             .content
@@ -168,27 +191,58 @@ pub fn evict_old_tool_result_images(messages: &mut [ChatMessage], keep_messages:
     }
 }
 
-/// Keep pixels on only the newest `keep_last_n` image blocks, evicting older
-/// ones to text stand-ins.
+/// Keep pixels on only the newest images, evicting older ones to text
+/// stand-ins. `keep_last_n` is a hard ceiling on how many keep their pixels.
 ///
-/// Bounds outbound body growth over a long chat. Newest-first because recent
-/// images are the ones a turn is usually about.
+/// Bounds outbound body growth over a long chat. The newest images keep their
+/// pixels — they are the ones a turn is usually about — which the loop below
+/// achieves by evicting an oldest-first prefix.
 ///
 /// Evicting rewrites the bytes of an already-sent message, which invalidates a
-/// provider prompt cache from that position onward. Callers should therefore
-/// keep `keep_last_n` generous enough to span a typical back-and-forth about
-/// one image and tighten it only when the context budget actually demands it.
+/// provider prompt cache from that position onward, so the eviction boundary is
+/// quantized: it advances in jumps of half `keep_last_n` rather than sliding one
+/// image at a time. Without that, every newly attached image past the cap
+/// rewrites the next message in line and re-bills the prefix.
+///
+/// The rounding direction is the opposite of
+/// [`evict_old_tool_result_images`]'s, deliberately. There the window is a
+/// promise about recency and may be overshot; here `keep_last_n` is a resource
+/// cap — the caller sizes an outbound request against it — so the boundary
+/// rounds *up* and the count kept lands in `keep_last_n - bucket + 1 ..=
+/// keep_last_n`. Never more than the cap, sometimes fewer, and stable while the
+/// transcript grows inside a bucket.
+///
+/// The boundary is derived from the transcript alone, not from prior calls:
+/// callers rebuild the fitted transcript from scratch on every model step, so
+/// any scheme carrying state between calls would slide again.
+///
+/// The standing rule this follows — a boundary never slides through
+/// already-sent bytes — is recorded in
+/// `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
 pub fn evict_images_beyond(messages: &mut [ChatMessage], keep_last_n: usize) {
+    let total = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .count();
+    // Halving trades pixels on up to half the cap's images for one
+    // invalidation per half-cap of new attachments.
+    let bucket = keep_last_n.div_ceil(2).max(1);
+    let cutoff = total.saturating_sub(keep_last_n).div_ceil(bucket) * bucket;
+    if cutoff == 0 {
+        return;
+    }
+
     let mut seen = 0usize;
-    for message in messages.iter_mut().rev() {
-        for block in message.content.iter_mut().rev() {
+    for message in messages.iter_mut() {
+        for block in message.content.iter_mut() {
             if !matches!(block, ContentBlock::Image { .. }) {
                 continue;
             }
-            if seen < keep_last_n {
-                seen += 1;
-                continue;
+            if seen >= cutoff {
+                return;
             }
+            seen += 1;
             *block = evict_image_block(block);
         }
     }
@@ -1273,40 +1327,95 @@ mod tests {
         );
     }
 
+    /// A tool-result message carrying a preview image, tagged by index.
+    fn tool_result_with_image(index: usize) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: format!("tu_{index}"),
+                    content: format!("result {index}"),
+                    is_error: false,
+                },
+                image_block(400 + index as u32, 300),
+            ],
+            reasoning: MessageReasoning::default(),
+        }
+    }
+
+    /// Indices whose preview image lost its pixels.
+    fn evicted_indices(messages: &[ChatMessage]) -> Vec<usize> {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| matches!(message.content[1], ContentBlock::Text { .. }))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The eviction boundary must not creep forward with the transcript: a
+    /// cutoff of exactly `len - window` rewrites a new mid-transcript message
+    /// on nearly every agentic step, invalidating the provider prompt cache
+    /// from an early byte each time. It must hold still inside a bucket and
+    /// jump once at the edge — while never evicting inside the promised window.
     #[test]
-    fn old_tool_result_previews_lose_pixels_by_message_recency() {
-        let mut messages = vec![ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "old".into(),
-                    content: "old result".into(),
-                    is_error: false,
-                },
-                image_block(400, 300),
-            ],
-            reasoning: MessageReasoning::default(),
-        }];
-        messages.extend((0..10).map(|index| assistant_msg(&format!("message {index}"))));
-        messages.push(ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "new".into(),
-                    content: "new result".into(),
-                    is_error: false,
-                },
-                image_block(800, 600),
-            ],
-            reasoning: MessageReasoning::default(),
-        });
+    fn tool_result_image_eviction_boundary_advances_in_window_sized_jumps() {
+        let window = TOOL_RESULT_IMAGE_MESSAGE_WINDOW;
+        let evicted_at = |len: usize| {
+            let mut messages: Vec<ChatMessage> = (0..len).map(tool_result_with_image).collect();
+            evict_old_tool_result_images(&mut messages, window);
+            evicted_indices(&messages)
+        };
 
-        evict_old_tool_result_images(&mut messages, TOOL_RESULT_IMAGE_MESSAGE_WINDOW);
+        // The newest `window` messages keep their pixels at every length —
+        // quantizing may only keep pixels longer, never shorter.
+        for len in 0..4 * window {
+            let evicted = evicted_at(len);
+            assert!(
+                evicted.len() <= len.saturating_sub(window),
+                "len {len}: evicted {evicted:?} reaches into the promised window"
+            );
+            // Monotone from the front: eviction is a stable oldest-first prefix.
+            assert!(evicted.iter().copied().eq(0..evicted.len()), "len {len}");
+        }
 
-        assert!(matches!(messages[0].content[1], ContentBlock::Text { .. }));
-        assert!(matches!(
-            messages.last().unwrap().content[1],
-            ContentBlock::Image { .. }
-        ));
+        // Stable across a whole bucket of appended messages, then one jump.
+        for len in 2 * window..3 * window {
+            assert_eq!(evicted_at(len).len(), window, "len {len} left the bucket");
+        }
+        assert_eq!(evicted_at(2 * window - 1).len(), 0, "jumped early");
+        assert_eq!(evicted_at(3 * window).len(), 2 * window, "jumped late");
+    }
+
+    /// `keep_last_n` is a resource cap the caller sizes an outbound request
+    /// against, so this boundary rounds the other way: never above the cap, but
+    /// still quantized so a newly attached image does not rewrite the next
+    /// message in line on every turn.
+    #[test]
+    fn hydration_cap_eviction_is_quantized_but_never_exceeds_the_cap() {
+        let cap = MAX_HYDRATED_IMAGES;
+        let bucket = cap.div_ceil(2);
+        let evicted_at = |count: usize| {
+            let mut messages: Vec<ChatMessage> = (0..count)
+                .map(|i| image_only_user_msg(100 + i as u32, 100))
+                .collect();
+            evict_images_beyond(&mut messages, cap);
+            messages
+                .iter()
+                .filter(|message| matches!(message.content[0], ContentBlock::Text { .. }))
+                .count()
+        };
+
+        for count in 0..4 * cap {
+            let kept = count - evicted_at(count);
+            assert!(kept <= cap, "count {count}: kept {kept} over the cap");
+        }
+        // One image past the cap evicts a whole bucket, which then absorbs the
+        // next `bucket - 1` attachments without moving the boundary again.
+        assert_eq!(evicted_at(cap), 0);
+        for count in cap + 1..=cap + bucket {
+            assert_eq!(evicted_at(count), bucket, "count {count} left the bucket");
+        }
+        assert_eq!(evicted_at(cap + bucket + 1), 2 * bucket, "jumped late");
     }
 }

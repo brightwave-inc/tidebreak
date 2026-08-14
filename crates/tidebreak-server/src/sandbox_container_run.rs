@@ -237,6 +237,10 @@ impl CapabilityResponder for HostModelProxy {
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             reasoning_effort: self.config.reasoning_effort,
+            // One prompt in, one answer read once: nothing will ever extend
+            // this prefix, so writing a cache entry for it only pays the write
+            // premium for a read that cannot happen.
+            prompt_cache: tidebreak_core::PromptCacheMode::OneShot,
             ..Default::default()
         };
         let mut stream = match provider.stream(request).await {

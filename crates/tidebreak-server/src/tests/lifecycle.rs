@@ -2742,10 +2742,13 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     ));
     {
         // The resumed segment had no steps left, so its one model call is the
-        // wrap-up: no tools advertised, tool result in the transcript.
+        // wrap-up: tool calls forbidden, tool result in the transcript.
         let exhausted_requests = exhausted_requests.lock().unwrap();
         assert_eq!(exhausted_requests.len(), 2);
-        assert!(exhausted_requests[1].tools.is_empty());
+        assert_eq!(
+            exhausted_requests[1].tool_choice,
+            Some(tidebreak_core::ToolChoice::None)
+        );
     }
     let exhausted_turn = exhausted_store
         .get_turn_run(exhausted_turn_id)

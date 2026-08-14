@@ -422,6 +422,47 @@ impl VendorWebSearch {
     pub const DEFAULT_MAX_USES: u32 = 5;
 }
 
+/// Whether this request's prompt prefix is worth writing to the provider's
+/// prompt cache.
+///
+/// Caching is priced asymmetrically: a write costs more than plain input
+/// (~1.25× on Anthropic) and a read costs far less (~0.1×). A breakpoint only
+/// pays for itself once a later call re-sends the same prefix and reads it
+/// back. A conversation does that on every step, so it caches by default.
+///
+/// A one-shot utility call — titling a chat, judging one approval — sends a
+/// prompt no later request will ever repeat: its own system prompt, its own
+/// material, no follow-up. Every entry it writes is billed at the write
+/// premium and then expires unread, so caching such a request is a pure
+/// surcharge on it with nothing on the other side of the ledger. Those callers
+/// declare [`PromptCacheMode::OneShot`] and adapters emit no cache directives
+/// at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheMode {
+    /// The prefix belongs to a conversation that will re-send it, so it is
+    /// worth caching.
+    #[default]
+    Conversation,
+    /// Nothing will re-send this prefix; write no cache entries for it.
+    OneShot,
+}
+
+impl PromptCacheMode {
+    /// Whether an adapter should place cache breakpoints for this request.
+    #[must_use]
+    pub fn writes_cache(self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+
+    /// Whether this is the default mode, elided from serialized requests like
+    /// every other defaulted `ChatRequest` field.
+    #[must_use]
+    pub fn is_conversation(&self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+}
+
 /// A request for one streamed model completion.
 ///
 /// The struct is constructed as a literal rather than through a builder, so it
@@ -487,6 +528,10 @@ pub struct ChatRequest {
     /// reaches the web only through the tools Tidebreak advertises.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor_web_search: Option<VendorWebSearch>,
+    /// Whether this request's prefix is worth caching. See
+    /// [`PromptCacheMode`]; one-shot utility calls should say so.
+    #[serde(default, skip_serializing_if = "PromptCacheMode::is_conversation")]
+    pub prompt_cache: PromptCacheMode,
     /// Pixels for the [`ContentBlock::Image`] blocks in `messages`.
     ///
     /// Hydrated from the blob store for exactly this request. Skipped by serde

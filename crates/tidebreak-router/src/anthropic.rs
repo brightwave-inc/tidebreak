@@ -363,7 +363,8 @@ fn replace_paused_assistant_message(body: &mut Value, blocks: &[Value], first_pa
 /// messages.
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
     let rename_client_web_search = req.vendor_web_search.is_some();
-    let mut messages = req
+    let caches_prompt = req.prompt_cache.writes_cache();
+    let messages = req
         .messages
         .iter()
         .map(|message| {
@@ -379,7 +380,6 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             }))
         })
         .collect::<Result<Vec<_>>>()?;
-    mark_cacheable_transcript_tail(&mut messages);
 
     let mut body = json!({
         "model": req.model,
@@ -394,12 +394,12 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
 
     if let Some(system) = &req.system {
         // Block form, not a bare string, so the prefix through the system
-        // prompt carries a cache breakpoint.
-        body["system"] = json!([{
-            "type": "text",
-            "text": system,
-            "cache_control": ephemeral_cache_control(),
-        }]);
+        // prompt can carry a cache breakpoint.
+        let mut block = json!({ "type": "text", "text": system });
+        if caches_prompt {
+            block["cache_control"] = ephemeral_cache_control();
+        }
+        body["system"] = json!([block]);
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -472,7 +472,9 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     }
     // After the whole tool array is settled, including a structured-output tool
     // appended above.
-    mark_last_tool_cacheable(&mut body);
+    if caches_prompt {
+        mark_last_tool_cacheable(&mut body);
+    }
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
     }
@@ -509,6 +511,12 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
                 json!({ "effort": wire_reasoning_effort(&req.model, effort).as_str() });
         }
         attach_reasoning_blocks(&mut body, req);
+    }
+    // Last, so the breakpoints are placed against the block layout that
+    // actually goes on the wire — `attach_reasoning_blocks` prepends thinking
+    // blocks, which count toward the lookup window.
+    if caches_prompt {
+        mark_cacheable_transcript_tail(&mut body);
     }
     Ok(body)
 }
@@ -612,32 +620,77 @@ fn mark_last_tool_cacheable(body: &mut Value) {
 /// order (see #1088) and the system prompt, which is fixed for a chat's
 /// configuration. A prefix that is under the model's minimum cacheable length
 /// is not a loss — the breakpoint is ignored rather than charged.
-fn mark_cacheable_transcript_tail(messages: &mut [Value]) {
+///
+/// This runs last in `build_request_json`, after `attach_reasoning_blocks` has
+/// prepended replayed thinking blocks: those are wire blocks and count toward
+/// the lookup window, so spacing measured before them would understate the
+/// real distance and quietly push the lagging breakpoint out of reach. Nothing
+/// may add or remove a transcript block after this point — with one known
+/// exception: a pause continuation (`replace_paused_assistant_message`) appends
+/// or rewrites the paused assistant message on the already-built body, so a
+/// continuation leg's newest blocks sit past the tail breakpoint and go
+/// uncached. That costs one leg's delta, not correctness, and re-marking there
+/// is not worth touching blocks that must replay byte-exact.
+///
+/// `cache_control` is not valid on a `thinking` or `redacted_thinking` block,
+/// so a target position landing on one moves *toward the tail* — never away.
+/// Moving away would grow the distance between the two breakpoints past the
+/// window this function exists to respect, while moving toward it only
+/// shortens it. The tail itself is the one position with nothing after it, so
+/// there it moves backwards instead and the trailing thinking blocks go
+/// uncached, which costs one step's delta and never correctness.
+fn mark_cacheable_transcript_tail(body: &mut Value) {
     /// How far Anthropic's cache lookup walks back from a breakpoint, in
     /// content blocks. The lagging breakpoint trails the tail by exactly one
     /// window, so consecutive calls keep a breakpoint within reach of one the
     /// previous call cached.
     const CACHE_LOOKUP_LOOKBACK_BLOCKS: usize = 20;
 
-    let mut blocks_from_tail = 0usize;
-    let mut marked = 0;
-    'messages: for message in messages.iter_mut().rev() {
-        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    // Flattened wire order: every content block counts for distance, but only
+    // a markable one can carry the breakpoint.
+    let mut blocks: Vec<(usize, usize, bool)> = Vec::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
             continue;
         };
-        for block in content.iter_mut().rev() {
-            if blocks_from_tail == 0 || blocks_from_tail == CACHE_LOOKUP_LOOKBACK_BLOCKS {
-                if let Some(block) = block.as_object_mut() {
-                    block.insert("cache_control".into(), ephemeral_cache_control());
-                    marked += 1;
-                    if marked == 2 {
-                        break 'messages;
-                    }
-                }
-            }
-            blocks_from_tail += 1;
+        for (block_index, block) in content.iter().enumerate() {
+            blocks.push((message_index, block_index, is_cache_markable(block)));
         }
     }
+
+    let Some(tail) = blocks.iter().rposition(|&(_, _, markable)| markable) else {
+        return;
+    };
+    let lagging = tail
+        .checked_sub(CACHE_LOOKUP_LOOKBACK_BLOCKS)
+        .and_then(|target| {
+            blocks[target..tail]
+                .iter()
+                .position(|&(_, _, markable)| markable)
+                .map(|offset| target + offset)
+        });
+
+    for position in [Some(tail), lagging].into_iter().flatten() {
+        let (message_index, block_index, _) = blocks[position];
+        if let Some(block) = messages[message_index]["content"][block_index].as_object_mut() {
+            block.insert("cache_control".into(), ephemeral_cache_control());
+        }
+    }
+}
+
+/// Whether a content block may carry a `cache_control` marker.
+///
+/// Anthropic accepts one on text, image, tool_use, tool_result and document
+/// blocks. Thinking and redacted_thinking blocks reject it, and the request
+/// fails outright rather than degrading.
+fn is_cache_markable(block: &Value) -> bool {
+    !matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    ) && block.is_object()
 }
 
 /// Whether the request obliges the model to call a specific tool or any tool.
@@ -1495,7 +1548,9 @@ fn map_stop_reason(provider_label: &str, reason: &str) -> StopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::provider::{ChatMessage, MessageReasoning, ReasoningOrigin};
+    use tidebreak_core::provider::{
+        ChatMessage, MessageReasoning, PromptCacheMode, ReasoningOrigin,
+    };
     use tidebreak_core::tool::ToolSpec;
     use tidebreak_core::ReasoningEffort;
 
@@ -1662,6 +1717,118 @@ mod tests {
             .matches("cache_control")
             .count();
         assert_eq!(all_breakpoints, 4, "{body}");
+    }
+
+    /// Flattened wire order of the transcript's content blocks: the type of
+    /// each, and the indices carrying a breakpoint.
+    fn transcript_breakpoints(body: &Value) -> (Vec<String>, Vec<usize>) {
+        let mut types = Vec::new();
+        let mut breakpoints = Vec::new();
+        for message in body["messages"].as_array().unwrap() {
+            for block in message["content"].as_array().unwrap() {
+                if block.get("cache_control").is_some() {
+                    breakpoints.push(types.len());
+                }
+                types.push(block["type"].as_str().unwrap().to_owned());
+            }
+        }
+        (types, breakpoints)
+    }
+
+    #[test]
+    fn breakpoints_are_spaced_on_the_layout_that_includes_replayed_reasoning() {
+        // Replayed thinking blocks are wire blocks and count toward the
+        // lookup window, so the spacing has to be measured after they are
+        // attached. Four steps of a four-way fan-out, each assistant message
+        // carrying three thinking blocks: measured before the replay the
+        // lagging breakpoint would land 26 blocks from the tail, outside the
+        // window it exists to stay inside.
+        let mut req = reasoning_request("claude-opus-5", None);
+        let reasoning: Vec<Value> = (0..3)
+            .map(|i| json!({"type": "thinking", "thinking": format!("step {i}"), "signature": "s"}))
+            .collect();
+        req.messages = vec![ChatMessage::text(Role::User, "hi")];
+        for step in 0..4 {
+            req.messages.push(ChatMessage {
+                role: Role::Assistant,
+                content: (0..4)
+                    .map(|i| ContentBlock::ToolUse {
+                        id: format!("call_{step}_{i}"),
+                        name: "read_file".into(),
+                        input: json!({"path": format!("f{i}.rs")}),
+                    })
+                    .collect(),
+                reasoning: MessageReasoning::captured(
+                    ReasoningOrigin {
+                        provider: Some(ProviderId::new("anthropic")),
+                        model: "claude-opus-5".into(),
+                    },
+                    reasoning.clone(),
+                ),
+            });
+            req.messages.push(ChatMessage {
+                role: Role::User,
+                content: (0..4)
+                    .map(|i| ContentBlock::ToolResult {
+                        tool_use_id: format!("call_{step}_{i}"),
+                        content: "ok".into(),
+                        is_error: false,
+                    })
+                    .collect(),
+                reasoning: MessageReasoning::default(),
+            });
+        }
+        let body = build_request_json(&req).unwrap();
+
+        let (types, breakpoints) = transcript_breakpoints(&body);
+        assert_eq!(types.len(), 45, "{body}");
+        let [lagging, tail] = breakpoints.as_slice() else {
+            panic!("expected exactly two transcript breakpoints: {body}");
+        };
+        assert_eq!(*tail, types.len() - 1);
+        assert!(
+            tail - lagging <= 20,
+            "the lagging breakpoint must stay inside the lookup window: {breakpoints:?}"
+        );
+        // One window back lands on a replayed thinking block, which cannot
+        // carry `cache_control`; the breakpoint moves toward the tail, never
+        // away, so the spacing only shrinks.
+        assert_eq!(types[tail - 20], "thinking");
+        assert_eq!(types[*lagging], "tool_use");
+        assert_eq!(tail - lagging, 18);
+    }
+
+    #[test]
+    fn a_one_shot_request_writes_no_cache_entries() {
+        // A titling or judging call sends a prompt nothing will re-send, so
+        // every breakpoint would be billed at the write premium and expire
+        // unread.
+        let req = ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-4-8".into(),
+            system: Some("be brief".into()),
+            messages: vec![
+                ChatMessage::text(Role::User, "hi"),
+                ChatMessage::text(Role::Assistant, "hello"),
+            ],
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            prompt_cache: PromptCacheMode::OneShot,
+            images: ImageAttachments::new(),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("cache_control"),
+            "{body}"
+        );
+        // The system prompt keeps its block form; only the marker is gone.
+        assert_eq!(body["system"][0]["text"], "be brief");
     }
 
     fn reasoning_request(model: &str, effort: Option<ReasoningEffort>) -> ChatRequest {

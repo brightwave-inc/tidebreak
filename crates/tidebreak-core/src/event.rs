@@ -164,7 +164,8 @@ pub enum AgentEvent {
         /// Estimated tokens after fitting to the budget.
         fitted_tokens: u32,
     },
-    /// Semantic compaction is about to run on the utility model.
+    /// Semantic compaction is about to run, on the conversation's own model and
+    /// route.
     ///
     /// Emitted only after token accounting proves work is needed, so clients
     /// do not flash a compacting state on every turn.

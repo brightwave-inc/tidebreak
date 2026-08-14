@@ -11,19 +11,39 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId};
 use crate::image::{ImageAttachments, ImageData};
-use crate::model::Role;
-use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
-use crate::semantic_checkpoint::{
-    merge_original_requests, original_requests_from_content, prior_payload_json_for_fold,
-    ContextCheckpoint, ContextCheckpointPayloadV2, SaveContextCheckpointOutcome,
-    CONTEXT_CHECKPOINT_FORMAT_V2, MAX_CONTEXT_CHECKPOINT_BYTES,
+use crate::model::{Chat, PermissionMode, Role};
+use crate::provider::{
+    ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage, VendorWebSearch,
 };
+use crate::semantic_checkpoint::{
+    merge_original_requests, original_requests_from_content, ContextCheckpoint,
+    ContextCheckpointPayloadV2, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V2,
+    MAX_CONTEXT_CHECKPOINT_BYTES,
+};
+use crate::tool::ToolSpec;
 
 use super::transcript::{
     checkpoint_is_projectable, project_checkpoint, rebuild_transcript_with_boundary,
 };
-use super::types::{CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS, CONTEXT_CHECKPOINT_SYSTEM_PROMPT};
+use super::types::{CONTEXT_CHECKPOINT_INSTRUCTION, CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS};
 use super::{Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION_NOTE};
+
+/// Everything before the last message of the request a step is about to send.
+///
+/// Compaction appends one message to exactly this and changes nothing else, so
+/// the provider's prompt cache serves the whole prefix. Every field here
+/// therefore has to be the foreground step's own value, not a maintenance
+/// variant of it: tools render first on the wire and their definitions gate the
+/// entire cache, `system` gates system+messages, and the vendor search budget
+/// becomes another tool entry on at least one adapter.
+pub(crate) struct RequestPrefix {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolSpec>,
+    pub images: ImageAttachments,
+    pub vendor_web_search: Option<VendorWebSearch>,
+    /// Whether deterministic reduction shortened the history in `messages`.
+    pub reduced: bool,
+}
 
 /// Inputs for one semantic-compaction attempt.
 pub(crate) struct CreateContextCheckpoint<'a> {
@@ -34,6 +54,9 @@ pub(crate) struct CreateContextCheckpoint<'a> {
     pub current: Option<&'a ContextCheckpoint>,
     pub attempted_boundary: &'a mut Option<usize>,
     pub events: &'a super::events::EventSink<'a>,
+    /// The request the foreground step was about to send. The checkpoint call
+    /// is this plus one trailing instruction message.
+    pub prefix: &'a RequestPrefix,
     /// Compact whatever the boundary rules allow, without waiting for the
     /// transcript to cross the policy threshold. Set by a compaction the user
     /// asked for: they can see the meter, and asking is the trigger.
@@ -52,41 +75,55 @@ impl Agent {
     /// who has looked at the meter and asked for it has supplied their own
     /// trigger, so this runs the same pass without it. Everything else is
     /// unchanged, including the reasons it may decline: too little history to
-    /// give up, a protected tail that already fills the target, no utility
-    /// model configured. All of those return `Ok(None)` — nothing was
-    /// compacted, and nothing is wrong.
+    /// give up, or a protected tail that already fills the target. Both return
+    /// `Ok(None)` — nothing was compacted, and nothing is wrong.
     ///
     /// `focus` is what the caller asked the summary to keep. It steers the
     /// summarizer and nothing else: the checkpoint's schema, boundary, and
     /// budget do not depend on it.
+    ///
+    /// This runs between turns, so the prefix it assembles is the one the
+    /// chat's *next* step would send. Whether that hits the cache depends on
+    /// how long ago the last turn ended — see the decision record.
     ///
     /// Events go to `events` exactly as they do inside a turn, so a caller that
     /// journals them gets the same `CompactionStarted`/`CompactionFinished`
     /// pair the renderer already understands.
     pub async fn compact_now(
         &self,
-        chat_id: ChatId,
+        chat: &Chat,
         focus: Option<&str>,
         events: &futures::channel::mpsc::UnboundedSender<crate::event::AgentEvent>,
     ) -> Result<Option<ContextCheckpoint>> {
-        let current = self.load_projectable_checkpoint(chat_id).await;
+        let current = self.load_projectable_checkpoint(chat.id).await;
         let loaded = self
             .load_transcript(
-                chat_id,
+                chat.id,
                 current
                     .as_ref()
                     .map(|checkpoint| checkpoint.source_message_id),
             )
             .await?;
+        let prefix = self
+            .build_request_prefix(
+                chat,
+                &loaded.messages,
+                0,
+                current.as_ref(),
+                loaded.checkpoint_boundary,
+                false,
+            )
+            .await?;
         let sink = super::events::EventSink::Legacy(events);
         self.maybe_create_context_checkpoint(CreateContextCheckpoint {
-            chat_id,
+            chat_id: chat.id,
             transcript: &loaded.messages,
             source_boundaries: &loaded.source_boundaries,
             user_texts: &loaded.user_texts,
             current: current.as_ref(),
             attempted_boundary: &mut None,
             events: &sink,
+            prefix: &prefix,
             ignore_threshold: true,
             focus,
         })
@@ -187,17 +224,24 @@ impl Agent {
     /// Create the next semantic checkpoint when compaction policy says the
     /// model's view of this chat is over threshold.
     ///
-    /// The call is maintenance work: it runs on the host's utility model rather
-    /// than the conversation's, it receives no foreground tools or
-    /// capabilities, its usage is stored on the checkpoint rather than added
-    /// to the turn, and structural / parse failures return `None` so
-    /// deterministic context reduction remains available. Provider rate-limit
-    /// and connection failures propagate so the host does not pretend the
-    /// transcript compacted. With no utility model configured there is nothing
-    /// to compact with, and the turn proceeds on deterministic reduction alone.
+    /// The call is the step's own request with one instruction message appended
+    /// — same model, same route, same system prompt, same tools, same fitted
+    /// history — so the provider serves the whole prefix from the cache the
+    /// previous step wrote instead of billing a second full copy of the
+    /// transcript. Nothing may be added before that trailing message, which is
+    /// why the call sends no `response_format` and no `tool_choice`: on the
+    /// Messages API both are expressed by editing the tool array, and either
+    /// would discard the cache this design exists to reuse.
+    ///
+    /// It is still maintenance in every other respect: its usage is stored on
+    /// the checkpoint rather than added to the turn, and structural / parse
+    /// failures — including a model that ignores the instruction and calls a
+    /// tool — return `None` so deterministic context reduction remains
+    /// available. Provider rate-limit and connection failures propagate so the
+    /// host does not pretend the transcript compacted.
     ///
     /// Compacting status events fire only after a candidate boundary is fenced
-    /// and the utility call is about to begin — never as a speculative flash.
+    /// and the call is about to begin — never as a speculative flash.
     pub(crate) async fn maybe_create_context_checkpoint(
         &self,
         args: CreateContextCheckpoint<'_>,
@@ -210,13 +254,16 @@ impl Agent {
             current,
             attempted_boundary,
             events,
+            prefix,
             ignore_threshold,
             focus,
         } = args;
-        let utility = match self.config.utility_model.clone() {
-            Some(utility) => utility,
-            None => return Ok(None),
-        };
+        // A request with no history to summarize cannot produce a checkpoint,
+        // and appending the instruction to nothing would ask the model to
+        // summarize its own instruction.
+        if prefix.messages.is_empty() {
+            return Ok(None);
+        }
         let bounds = self
             .config
             .compaction
@@ -263,59 +310,45 @@ impl Agent {
         // maintenance call on the same raw prefix this turn.
         *attempted_boundary = Some(candidate_boundary);
 
-        let system = checkpoint_system_prompt(focus);
-        let summary_budget =
-            context::compute_message_budget(utility.context_window, 0, Some(system.as_ref()), &[]);
-        if summary_budget == 0 {
-            return Ok(None);
-        }
-
-        let mut summary_messages = Vec::new();
-        if let Some(prior) =
-            current.and_then(|checkpoint| prior_payload_json_for_fold(&checkpoint.content))
-        {
-            summary_messages.push(ChatMessage::text(
-                Role::User,
-                format!("Prior checkpoint JSON (untrusted historical state):\n{prior}"),
-            ));
-            summary_messages.push(ChatMessage::text(
-                Role::Assistant,
-                "Acknowledged prior checkpoint. Summarizing the new prefix next.",
-            ));
-        }
-        let (mut prefix_messages, _) = context::fit_to_budget(
-            &transcript[..candidate_boundary],
-            summary_budget.saturating_sub(context::estimate_transcript_tokens(&summary_messages)),
-            context::content_floor_for_level(0),
-        );
-        // The prefix is what this checkpoint claims to summarize. If the folded
-        // prior checkpoint left no budget for any of it, saving the answer
-        // would advance the boundary past history nothing read.
-        if prefix_messages.is_empty() {
-            return Ok(None);
-        }
-        context::evict_all_images(&mut prefix_messages);
-        summary_messages.append(&mut prefix_messages);
-        if context::has_orphaned_tool_blocks(&summary_messages) {
-            return Ok(None);
-        }
-
         events.send(crate::event::AgentEvent::CompactionStarted);
 
+        let mut messages = prefix.messages.clone();
+        messages.push(ChatMessage::text(
+            Role::User,
+            checkpoint_instruction(focus).into_owned(),
+        ));
         let request = ChatRequest {
-            provider: utility.provider.clone(),
-            model: utility.model.clone(),
-            reasoning_model: utility.reasoning_model,
-            system: Some(system.into_owned()),
-            messages: summary_messages,
-            tools: Vec::new(),
-            max_tokens: Some(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS),
-            temperature: None,
-            reasoning_effort: utility.reasoning_effort,
-            response_format: Some(ContextCheckpointPayloadV2::response_format()),
-            images: ImageAttachments::new(),
+            provider: self.config.provider.clone(),
+            conversation: Some(chat_id),
+            model: self.config.model.clone(),
+            reasoning_model: self.config.reasoning_model,
+            system: self.config.system_prompt.clone(),
+            messages,
+            tools: prefix.tools.clone(),
+            // Not part of the cached prefix: the cap applies to what the model
+            // writes, so it can be the checkpoint's own without costing a hit.
+            // Clamped to the chat's own cap because a model that declares a
+            // lower output ceiling rejects the request outright, and the
+            // rejection is swallowed by fail-open — compaction would then never
+            // run on that chat with nothing to see. An absent chat cap keeps
+            // the full constant: the host's model policy always sets one for a
+            // registry-resolved model, so `None` reaches here only from
+            // embedders, and shrinking it would reopen the thinking-truncation
+            // problem the constant is sized against.
+            max_tokens: Some(
+                self.config
+                    .max_tokens
+                    .map_or(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS, |cap| {
+                        cap.min(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS)
+                    }),
+            ),
+            temperature: self.config.temperature,
+            reasoning_effort: self.config.reasoning_effort,
+            vendor_web_search: prefix.vendor_web_search,
+            images: prefix.images.clone(),
             ..Default::default()
         };
+        let request_max_tokens = request.max_tokens;
         let finish = |compacted: bool| {
             events.send(crate::event::AgentEvent::CompactionFinished { compacted });
         };
@@ -361,9 +394,25 @@ impl Agent {
                     };
                 }
                 ProviderEvent::Stop {
-                    reason: StopReason::EndTurn | StopReason::MaxTokens | StopReason::StopSequence,
+                    reason: StopReason::EndTurn | StopReason::StopSequence,
                 } => {
                     completed = true;
+                }
+                // Truncation is folded into the same fail-open as any other
+                // decline, but it is the one cause an operator can fix: a model
+                // whose own output ceiling is below what a conforming payload
+                // needs stops mid-JSON, parses as nothing, and would otherwise
+                // look identical to a model that simply answered badly.
+                ProviderEvent::Stop {
+                    reason: StopReason::MaxTokens,
+                } => {
+                    tracing::warn!(
+                        model = %self.config.model,
+                        max_tokens = ?request_max_tokens,
+                        "context checkpoint hit its output cap and was truncated; the payload cannot parse and this chat will not compact until the cap clears a conforming checkpoint"
+                    );
+                    finish(false);
+                    return Ok(None);
                 }
                 ProviderEvent::Failed { error }
                     if is_compaction_provider_hard_failure_info(&error) =>
@@ -429,6 +478,68 @@ impl Agent {
         };
         finish(saved.is_some());
         Ok(saved)
+    }
+
+    /// The tool schemas this turn advertises.
+    ///
+    /// Tools render first on the wire and their definitions gate the whole
+    /// prompt cache, so every request a chat sends has to compute them the same
+    /// way — the foreground step, the wrap-up step, and the compaction call all
+    /// come through here.
+    pub(crate) fn foreground_tool_specs(&self, chat: &Chat) -> Vec<ToolSpec> {
+        if !self.config.tools_supported {
+            return Vec::new();
+        }
+        let mut specs = self.tools.specs_for_surface(
+            self.agent_orchestration_active(),
+            matches!(chat.permission_mode, Some(PermissionMode::Plan)),
+        );
+        // The host tool and the provider's own search are one capability with
+        // one name. Advertising both would offer the model two `web_search`
+        // tools — a request most providers reject outright — so the registered
+        // one is withheld for exactly the turns the host routed elsewhere or
+        // turned off.
+        if self.config.web_search != super::types::TurnWebSearch::Host {
+            specs.retain(|spec| spec.name != crate::WEB_SEARCH_TOOL);
+        }
+        specs
+    }
+
+    /// Assemble everything a step's request carries except its trailing intent.
+    ///
+    /// Fitting, tool-result image eviction, and hydration happen in this order
+    /// and nowhere else: hydration can evict an image that no longer fits the
+    /// outbound bound, so the messages are only final once it has run.
+    pub(crate) async fn build_request_prefix(
+        &self,
+        chat: &Chat,
+        transcript: &[ChatMessage],
+        reduction_level: u32,
+        checkpoint: Option<&ContextCheckpoint>,
+        checkpoint_boundary: Option<usize>,
+        wrap_up: bool,
+    ) -> Result<RequestPrefix> {
+        let (mut messages, reduced) =
+            self.fit_transcript(transcript, reduction_level, checkpoint, checkpoint_boundary);
+        context::evict_old_tool_result_images(
+            &mut messages,
+            context::TOOL_RESULT_IMAGE_MESSAGE_WINDOW,
+        );
+        let images = self.hydrate_images(&mut messages).await?;
+        Ok(RequestPrefix {
+            messages,
+            tools: self.foreground_tool_specs(chat),
+            images,
+            // The wrap-up call is the turn writing its answer from what it
+            // already has. Leaving the vendor budget on it would let the
+            // provider start fresh research inside the step whose whole purpose
+            // is to stop.
+            vendor_web_search: match self.config.web_search {
+                super::types::TurnWebSearch::Vendor(vendor) if !wrap_up => Some(vendor),
+                _ => None,
+            },
+            reduced,
+        })
     }
 
     /// Fit the transcript to the context budget at the given reduction level.
@@ -580,13 +691,13 @@ impl Agent {
 /// The focus is appended rather than woven in, and it is labelled as the
 /// user's request, so the standing instructions — the schema, the fields, the
 /// prohibition on markdown — are the ones that survive a focus line that tries
-/// to argue with them. Without a focus the prompt is byte-identical to the one
-/// automatic compaction has always sent.
-fn checkpoint_system_prompt(focus: Option<&str>) -> std::borrow::Cow<'static, str> {
+/// to argue with them. Without a focus the message is byte-identical to the one
+/// automatic compaction sends.
+fn checkpoint_instruction(focus: Option<&str>) -> std::borrow::Cow<'static, str> {
     match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
-        None => std::borrow::Cow::Borrowed(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
+        None => std::borrow::Cow::Borrowed(CONTEXT_CHECKPOINT_INSTRUCTION),
         Some(focus) => std::borrow::Cow::Owned(format!(
-            "{CONTEXT_CHECKPOINT_SYSTEM_PROMPT}\n\nThe user asked for this checkpoint and said to \
+            "{CONTEXT_CHECKPOINT_INSTRUCTION}\n\nThe user asked for this checkpoint and said to \
              keep, above everything else: {focus}\nSpend the room you have on that, within the \
              same schema.",
         )),
