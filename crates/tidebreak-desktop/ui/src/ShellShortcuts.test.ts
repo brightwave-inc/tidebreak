@@ -52,6 +52,7 @@ describe("shell shortcut resolution", () => {
       [{ key: "k", code: "KeyK" }, "focus-composer"],
       [{ key: "/", code: "Slash" }, "show-shortcuts"],
       [{ key: "0", code: "Digit0" }, "zoom-reset"],
+      [{ key: "r", code: "KeyR" }, "reload-app"],
     ];
     for (const [event, id] of cases) {
       const resolved = resolveShellShortcut(keyEvent(event), context());

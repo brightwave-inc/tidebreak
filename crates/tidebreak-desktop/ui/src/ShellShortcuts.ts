@@ -17,6 +17,7 @@ export type ShellShortcutAction =
   | "zoom-in"
   | "zoom-out"
   | "zoom-reset"
+  | "reload-app"
   | "show-shortcuts";
 
 /** The heading a shortcut sits under in the help dialog. */
@@ -151,6 +152,14 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["Digit0", "Numpad0"],
     mod: true,
     description: "Reset the interface size",
+    group: "View",
+    allowInEditable: true,
+  },
+  {
+    id: "reload-app",
+    codes: ["KeyR"],
+    mod: true,
+    description: "Reload the app",
     group: "View",
     allowInEditable: true,
   },

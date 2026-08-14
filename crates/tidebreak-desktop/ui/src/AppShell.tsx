@@ -156,6 +156,7 @@ export function AppShell() {
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
     "zoom-reset": zoom.resetZoom,
+    "reload-app": () => window.location.reload(),
     "show-shortcuts": () => setShortcutsOpen(true),
   };
 
