@@ -636,7 +636,7 @@ pub fn run() {
             let handle = app.handle().clone();
             deep_link::install(&handle);
             #[cfg(target_os = "macos")]
-            updater::install_update_menu(app)?;
+            updater::install_app_menu(app)?;
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             // Before anything that can warn: the embedded server's tracing
