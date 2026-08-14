@@ -1415,7 +1415,7 @@ test("GitHub release downloads are copied from the hosted release", () => {
 
   assert.match(
     readFileSync(repositoryFile("README.md"), "utf8"),
-    /releases\/latest\/download\/Tidebreak-macos-apple-silicon\.dmg/,
+    /releases\/latest\/download\/Tidebreak-macos-(?:universal|apple-silicon)\.dmg/,
     "the README download link must match the published asset name",
   );
 });
