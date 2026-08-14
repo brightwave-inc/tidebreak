@@ -17,8 +17,8 @@ import { parseStagingVersion, stagingTag } from "./staging-version.mjs";
 // The platforms, architectures, and artifact formats a release ships. This is
 // the single source of truth for what a release contains: it drives the
 // manifest, the `latest.json` platform keys, and the immutable hosting prefix.
-// macOS is Apple Silicon only while the product is in active development; see
-// docs/releases.md.
+// macOS ships one universal artifact whose signed updater archive is advertised
+// to both native architectures; see docs/releases.md.
 //
 // Windows packaging is paused (see docs/deferred.md), so no release currently
 // carries a Windows artifact. The descriptor is retained rather than deleted:
@@ -37,7 +37,8 @@ export const RELEASE_PLATFORMS = [
   {
     platform: "macos",
     updaterPlatform: "darwin",
-    architectures: ["aarch64"],
+    architectures: ["universal"],
+    updaterArchitectures: ["aarch64", "x86_64"],
     formats: [
       { extension: ".dmg", format: "dmg" },
       { extension: ".app.zip", format: "app.zip" },
@@ -102,10 +103,9 @@ export function createLatestDocument({ version, publishedAt, artifacts }) {
           `invalid ${descriptor.platform} updater artifact in release manifest`,
         );
       }
-      updaterArtifacts.set(
-        `${descriptor.updaterPlatform}-${artifact.arch}`,
-        artifact,
-      );
+      for (const arch of descriptor.updaterArchitectures ?? [artifact.arch]) {
+        updaterArtifacts.set(`${descriptor.updaterPlatform}-${arch}`, artifact);
+      }
     }
   }
 
@@ -114,16 +114,18 @@ export function createLatestDocument({ version, publishedAt, artifacts }) {
     pub_date: publishedAt,
     platforms: Object.fromEntries(
       RELEASE_PLATFORMS.flatMap((descriptor) =>
-        descriptor.architectures.map((arch) => {
-          const key = `${descriptor.updaterPlatform}-${arch}`;
-          const artifact = updaterArtifacts.get(key);
-          if (!artifact) {
-            throw new Error(
-              `missing ${key} updater artifact in release manifest`,
-            );
-          }
-          return [key, { signature: artifact.signature, url: artifact.url }];
-        }),
+        (descriptor.updaterArchitectures ?? descriptor.architectures).map(
+          (arch) => {
+            const key = `${descriptor.updaterPlatform}-${arch}`;
+            const artifact = updaterArtifacts.get(key);
+            if (!artifact) {
+              throw new Error(
+                `missing ${key} updater artifact in release manifest`,
+              );
+            }
+            return [key, { signature: artifact.signature, url: artifact.url }];
+          },
+        ),
       ),
     ),
   };

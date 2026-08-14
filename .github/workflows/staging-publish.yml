@@ -63,17 +63,11 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   prepare_macos_staging:
-    name: prepare unsigned staging macOS · ${{ matrix.arch }}
+    name: prepare unsigned staging macOS · universal
     needs: validate_staging
     if: ${{ inputs.channel == 'staging' }}
     runs-on: macos-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -89,7 +83,7 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add "${{ matrix.target }}"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Restore unsigned Rust build cache
         id: rust-build-cache
@@ -100,19 +94,28 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: macos-staging-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-${{ needs.validate_staging.outputs.version }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+          key: macos-staging-prepared-v2-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-${{ needs.validate_staging.outputs.version }}
           restore-keys: |
-            macos-staging-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-staging-prepared-v2-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -150,7 +153,7 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/tidebreak-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
+          args: --target universal-apple-darwin --no-bundle --ci
 
       - name: Save staging-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -161,14 +164,23 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -176,19 +188,13 @@ jobs:
         run: exit 1
 
   build_macos_staging:
-    name: staging macOS · ${{ matrix.arch }}
+    name: staging macOS · universal
     needs: [validate_staging, prepare_macos_staging]
     if: ${{ inputs.channel == 'staging' }}
     runs-on: macos-latest
     environment:
       name: desktop-staging
       url: https://downloads.brightwave.io/tidebreak/staging/manifest.json
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -212,29 +218,37 @@ jobs:
             target/release/.fingerprint
             target/release/build
             target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: macos-staging-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-${{ needs.validate_staging.outputs.version }}
+            target/aarch64-apple-darwin/release/.cargo-lock
+            target/aarch64-apple-darwin/release/.fingerprint
+            target/aarch64-apple-darwin/release/build
+            target/aarch64-apple-darwin/release/deps
+            target/aarch64-apple-darwin/release/tidebreak-desktop
+            target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
+            target/x86_64-apple-darwin/release/.cargo-lock
+            target/x86_64-apple-darwin/release/.fingerprint
+            target/x86_64-apple-darwin/release/build
+            target/x86_64-apple-darwin/release/deps
+            target/x86_64-apple-darwin/release/tidebreak-desktop
+            target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+          key: macos-staging-prepared-v2-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-${{ needs.validate_staging.outputs.version }}
           restore-keys: |
-            macos-staging-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}
-            macos-release-target-v4-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-staging-prepared-v2-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}-
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate_staging.outputs.sha }}
+            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Discard restored product binaries
-        env:
-          RELEASE_TARGET: ${{ matrix.target }}
         run: |
           rm -rf \
-            "target/$RELEASE_TARGET/release/tidebreak-desktop" \
-            "target/$RELEASE_TARGET/release/tidebreak-host-broker" \
-            "target/$RELEASE_TARGET/release/"libtidebreak_desktop_lib.* \
-            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+            target/{aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin}/release/tidebreak-desktop \
+            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-host-broker \
+            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/libtidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-{aarch64-apple-darwin,x86_64-apple-darwin} \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
 
       # sccache, rust-cache, and the UI install run before any Apple or Tauri
       # material is on disk. pnpm is pinned; lifecycle scripts stay off.
@@ -343,7 +357,7 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add "${{ matrix.target }}"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Write staging Tauri configuration
         env:
@@ -374,13 +388,13 @@ jobs:
         with:
           projectPath: crates/tidebreak-desktop
           args: >-
-            --target ${{ matrix.target }}
+            --target universal-apple-darwin
             --config ${{ runner.temp }}/tidebreak-staging.json
             --bundles app,dmg
 
       - name: Notarize and staple the DMG
         env:
-          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_TARGET: universal-apple-darwin
         run: |
           target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
           dmg_paths=("$target_dir/$RELEASE_TARGET/release/bundle/dmg/"*.dmg)
@@ -415,8 +429,8 @@ jobs:
 
       - name: Verify and collect signed artifacts
         env:
-          RELEASE_ARCH: ${{ matrix.arch }}
-          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_ARCH: universal
+          RELEASE_TARGET: universal-apple-darwin
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -465,10 +479,21 @@ jobs:
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")"
           binary_arches="$(lipo -archs "$app_path/Contents/MacOS/$executable")"
           case "$RELEASE_ARCH" in
-            aarch64) [[ "$binary_arches" = *arm64* && "$binary_arches" != *x86_64* ]] ;;
+            universal) [[ "$binary_arches" = *arm64* && "$binary_arches" = *x86_64* ]] ;;
             *) echo "Unsupported staging architecture: $RELEASE_ARCH" >&2; exit 1 ;;
           esac || {
             echo "Expected $RELEASE_ARCH app, found Mach-O architectures: $binary_arches" >&2
+            exit 1
+          }
+
+          sidecar="$app_path/Contents/MacOS/tidebreak-host-broker"
+          [[ -x "$sidecar" ]] || {
+            echo "Universal staging app is missing its executable host broker: $sidecar" >&2
+            exit 1
+          }
+          sidecar_arches="$(lipo -archs "$sidecar")"
+          [[ "$sidecar_arches" = *arm64* && "$sidecar_arches" = *x86_64* ]] || {
+            echo "Expected universal staging host broker, found Mach-O architectures: $sidecar_arches" >&2
             exit 1
           }
 
@@ -494,8 +519,8 @@ jobs:
       - name: Upload verified macOS artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: tidebreak-staging-macos-${{ matrix.arch }}-${{ needs.validate_staging.outputs.version }}
-          path: dist/macos/${{ matrix.arch }}/
+          name: tidebreak-staging-macos-universal-${{ needs.validate_staging.outputs.version }}
+          path: dist/macos/universal/
           if-no-files-found: error
           retention-days: 7
 
@@ -567,11 +592,11 @@ jobs:
           role-session-name: tidebreak-staging-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Download Apple Silicon artifacts
+      - name: Download universal macOS artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: tidebreak-staging-macos-aarch64-${{ needs.validate_staging.outputs.version }}
-          path: dist/macos/aarch64
+          name: tidebreak-staging-macos-universal-${{ needs.validate_staging.outputs.version }}
+          path: dist/macos/universal
 
       - name: Create staging manifests and checksums
         run: >-

@@ -25,6 +25,7 @@ const fixturePaths = [
   "crates/tidebreak-desktop/src/lib.rs",
   "crates/tidebreak-desktop/src/updater.rs",
   "crates/tidebreak-desktop/src/broker.rs",
+  "crates/tidebreak-desktop/scripts/prepare-sidecar.mjs",
   "deploy/self-host/Dockerfile.dockerignore",
   "crates/tidebreak-sandbox-agent/Dockerfile.dockerignore",
   "scripts/stage-self-host-build-context.sh",

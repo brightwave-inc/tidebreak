@@ -18,35 +18,61 @@ const triple =
 if (!triple) {
   throw new Error("rustc did not report a host target triple");
 }
-const extension = triple.includes("windows") ? ".exe" : "";
-
-const cargoArgs = [
-  "build",
-  "-p",
-  "tidebreak-host-broker",
-  "--bin",
-  "tidebreak-host-broker",
-  "--locked",
-];
-if (release) cargoArgs.push("--release");
-if (configuredTarget) cargoArgs.push("--target", configuredTarget);
-execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
-
 const targetRoot = process.env.CARGO_TARGET_DIR
   ? resolve(workspaceDir, process.env.CARGO_TARGET_DIR)
   : join(workspaceDir, "target");
-const source = join(
-  targetRoot,
-  ...(configuredTarget ? [configuredTarget] : []),
-  profile,
-  `tidebreak-host-broker${extension}`,
-);
 const destinationDir = join(desktopDir, "binaries");
-const destination = join(
-  destinationDir,
-  `tidebreak-host-broker-${triple}${extension}`,
-);
-
 mkdirSync(destinationDir, { recursive: true });
-copyFileSync(source, destination);
-if (process.platform !== "win32") chmodSync(destination, 0o755);
+
+// Tauri's synthetic universal target builds the app once per real Rust target
+// and lipo-combines the app executable. Its bundler expects an already-combined
+// external binary under the synthetic target name, while the per-target Cargo
+// builds still need their own target-suffixed sidecars.
+const targets =
+  triple === "universal-apple-darwin"
+    ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+    : [triple];
+const stagedSidecars = [];
+
+for (const target of targets) {
+  const extension = target.includes("windows") ? ".exe" : "";
+  const cargoArgs = [
+    "build",
+    "-p",
+    "tidebreak-host-broker",
+    "--bin",
+    "tidebreak-host-broker",
+    "--locked",
+  ];
+  if (release) cargoArgs.push("--release");
+  if (configuredTarget) cargoArgs.push("--target", target);
+  execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
+
+  const source = join(
+    targetRoot,
+    ...(configuredTarget ? [target] : []),
+    profile,
+    `tidebreak-host-broker${extension}`,
+  );
+  const destination = join(
+    destinationDir,
+    `tidebreak-host-broker-${target}${extension}`,
+  );
+
+  copyFileSync(source, destination);
+  if (process.platform !== "win32") chmodSync(destination, 0o755);
+  stagedSidecars.push(destination);
+}
+
+if (triple === "universal-apple-darwin") {
+  const destination = join(
+    destinationDir,
+    "tidebreak-host-broker-universal-apple-darwin",
+  );
+  execFileSync(
+    "lipo",
+    ["-create", ...stagedSidecars, "-output", destination],
+    { stdio: "inherit" },
+  );
+  chmodSync(destination, 0o755);
+}

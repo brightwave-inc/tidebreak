@@ -70,6 +70,15 @@ broker and the default Tauri configuration includes it automatically:
 cargo tauri build
 ```
 
+For the release-shaped universal macOS bundle, install both Rust targets and
+select Tauri's synthetic universal target. The hook stages one broker per slice
+and combines those brokers with `lipo`; Tauri combines the app executable:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo tauri build --target universal-apple-darwin
+```
+
 ## Run locally (browser UI against `tidebreak serve`)
 
 Useful when iterating on the React UI without rebuilding the native shell.

@@ -52,14 +52,21 @@ test("creates a complete manifest and Tauri updater document", () => {
   const { manifest, latest } = createReleaseManifests({ dist, ...RELEASE });
 
   assert.equal(manifest.artifacts.length, EXPECTED_ARTIFACT_COUNT);
-  assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64"]);
+  assert.deepEqual(Object.keys(latest.platforms), [
+    "darwin-aarch64",
+    "darwin-x86_64",
+  ]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
-    /releases\/v0\.4\.2\/macos\/aarch64\/Tidebreak_0\.4\.2_aarch64\.app\.tar\.gz$/,
+    /releases\/v0\.4\.2\/macos\/universal\/Tidebreak_0\.4\.2_universal\.app\.tar\.gz$/,
   );
   assert.equal(
     latest.platforms["darwin-aarch64"].signature,
-    "signature-macos-aarch64",
+    "signature-macos-universal",
+  );
+  assert.deepEqual(
+    latest.platforms["darwin-x86_64"],
+    latest.platforms["darwin-aarch64"],
   );
 
   const diskManifest = JSON.parse(
@@ -81,8 +88,8 @@ test("fails closed when an architecture is incomplete", () => {
   const missing = path.join(
     dist,
     "macos",
-    "aarch64",
-    "Tidebreak_0.4.2_aarch64.app.tar.gz.sig",
+    "universal",
+    "Tidebreak_0.4.2_universal.app.tar.gz.sig",
   );
   writeFileSync(missing, "");
 
