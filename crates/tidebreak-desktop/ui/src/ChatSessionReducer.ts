@@ -34,6 +34,13 @@ export type ChatSessionState = {
   activeTurnId: string | null;
   /** Scrubbed text accumulated for the trailing assistant bubble. */
   assistantBuffer: string;
+  /**
+   * Reasoning accumulated for the open turn. The snapshot stores this on the
+   * turn's output message, so the live stream keeps one copy and paints it
+   * on the latest live assistant bubble instead of opening a new thought
+   * accordion after every tool batch.
+   */
+  reasoningBuffer: string;
   markerScrubber: AssistantSourceMarkerStreamScrubber;
   /** Tool calls streamed in the current step; discarded on interruption. */
   provisionalToolCallIds: ReadonlySet<string>;
@@ -112,6 +119,7 @@ export function initialChatSessionState(): ChatSessionState {
     busy: false,
     activeTurnId: null,
     assistantBuffer: "",
+    reasoningBuffer: "",
     markerScrubber: new AssistantSourceMarkerStreamScrubber(),
     provisionalToolCallIds: new Set(),
     hydratedMessageIds: new Set(),
@@ -169,6 +177,7 @@ export function reduceChatSessionEvent(
           compacting: false,
           contextTruncationNoted: false,
           assistantBuffer: "",
+          reasoningBuffer: "",
           markerScrubber: new AssistantSourceMarkerStreamScrubber(),
           provisionalToolCallIds: new Set(),
           messages: [
@@ -193,9 +202,13 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           assistantBuffer,
-          messages: withTrailingAssistantText(
-            state.messages,
-            assistantBuffer,
+          messages: paintTurnReasoning(
+            withTrailingAssistantText(
+              state.messages,
+              assistantBuffer,
+              deps,
+            ),
+            state.reasoningBuffer,
             deps,
           ),
         },
@@ -226,6 +239,7 @@ export function reduceChatSessionEvent(
         state: {
           ...state,
           assistantBuffer: "",
+          reasoningBuffer: "",
           provisionalToolCallIds: new Set(),
           messages,
         },
@@ -541,18 +555,12 @@ export function reduceChatSessionEvent(
     }
 
     case "reasoning_delta": {
-      // Reasoning lands on the assistant bubble it precedes, so the accordion
-      // sits where the thinking happened rather than in a fixed slot. Between
-      // tool calls there is no such bubble yet: one opens with no text, which
-      // the following text deltas then fill in.
+      const reasoningBuffer = state.reasoningBuffer + event.text;
       return {
         state: {
           ...state,
-          messages: withTrailingAssistantReasoning(
-            state.messages,
-            event.text,
-            deps,
-          ),
+          reasoningBuffer,
+          messages: paintTurnReasoning(state.messages, reasoningBuffer, deps),
         },
         effects,
       };
@@ -618,6 +626,7 @@ export function applyTerminalHydration(
     lastSeq: Math.max(state.lastSeq, hydration.lastEventSeq),
     hydratedMessageIds: hydration.messageIds,
     messages: hydration.messages,
+    reasoningBuffer: "",
     // The snapshot is authoritative when it has counts — it is rebuilt from
     // the durable turn rows. A chat with no finished turn yet leaves whatever
     // the live stream established rather than blanking the meter.
@@ -636,34 +645,56 @@ function flushMarkerTail(
   return {
     ...state,
     assistantBuffer,
-    messages: withTrailingAssistantText(state.messages, assistantBuffer, deps),
+    messages: paintTurnReasoning(
+      withTrailingAssistantText(state.messages, assistantBuffer, deps),
+      state.reasoningBuffer,
+      deps,
+    ),
   };
 }
 
-/** Extend the trailing assistant bubble's reasoning, opening one if needed. */
-function withTrailingAssistantReasoning(
+/**
+ * Keep the turn's reasoning on the latest live assistant bubble — the same
+ * place the durable snapshot attaches `ChatTerminalTurnSnapshot.reasoning`.
+ * Intermediate bubbles from earlier segments do not keep their own copy.
+ */
+function paintTurnReasoning(
   messages: ChatMessage[],
-  text: string,
+  reasoning: string,
   deps: ChatSessionDeps,
 ): ChatMessage[] {
-  const copy = [...messages];
-  const last = copy[copy.length - 1];
-  if (last?.role === "assistant" && !last.superseded) {
-    copy[copy.length - 1] = {
-      ...last,
-      reasoning: (last.reasoning ?? "") + text,
-    };
-  } else {
-    copy.push({
-      id: deps.nextId(),
-      role: "assistant",
-      text: "",
-      sources: [],
-      reasoning: text,
-      createdAt: deps.now(),
-    });
+  let lastLive = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (candidate?.role === "assistant" && !candidate.superseded) {
+      lastLive = index;
+      break;
+    }
   }
-  return copy;
+  if (lastLive < 0) {
+    if (!reasoning) return messages;
+    return [
+      ...messages,
+      {
+        id: deps.nextId(),
+        role: "assistant",
+        text: "",
+        sources: [],
+        reasoning,
+        createdAt: deps.now(),
+      },
+    ];
+  }
+  return messages.map((message, index) => {
+    if (message.role !== "assistant" || message.superseded) return message;
+    if (index === lastLive) {
+      return message.reasoning === reasoning
+        ? message
+        : { ...message, reasoning: reasoning || undefined };
+    }
+    if (message.reasoning === undefined) return message;
+    return { ...message, reasoning: undefined };
+  });
 }
 
 function withTrailingAssistantText(
