@@ -1024,6 +1024,15 @@ test("release builds freeze a draft tag from the trusted main workflow", () => {
   assert.match(validateJob, /github\.ref == 'refs\/heads\/main'/);
   assert.match(validateJob, /permissions:\n      contents: write/);
   assert.match(validateJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(
+    release,
+    /^      release_tag:\n(?:        .*\n)+?        required: false$/m,
+  );
+  assert.match(
+    validateJob,
+    /Expected exactly one draft GitHub Release when release_tag is omitted/,
+  );
+  assert.match(validateJob, /\.draft == true and \.prerelease == false/);
   assert.match(validateJob, /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/);
   assert.match(
     validateJob,

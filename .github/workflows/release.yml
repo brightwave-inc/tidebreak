@@ -1,13 +1,13 @@
 name: Publish desktop release
 
-run-name: Publish desktop ${{ github.event.inputs.release_tag }}
+run-name: Publish desktop ${{ github.event.inputs.release_tag || 'current draft' }}
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Draft or published GitHub Release tag to build
-        required: true
+        description: Leave blank to publish the current draft. Set a tag only to retry that draft or published release.
+        required: false
         type: string
 
 permissions:
@@ -43,6 +43,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.release_tag }}
         run: |
+          if [[ -z "$RELEASE_TAG" ]]; then
+            drafts_json="$(
+              gh api --paginate \
+                -H 'Accept: application/vnd.github+json' \
+                "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -cs \
+                  '[.[][] | select(.draft == true and .prerelease == false)]'
+            )"
+            draft_count="$(jq -r 'length' <<<"$drafts_json")"
+            if [[ "$draft_count" != 1 ]]; then
+              {
+                echo "Expected exactly one draft GitHub Release when release_tag is omitted; found $draft_count."
+                jq -r '.[].tag_name' <<<"$drafts_json"
+              } >&2
+              exit 1
+            fi
+            RELEASE_TAG="$(jq -er '.[0].tag_name' <<<"$drafts_json")"
+            echo "Using the current draft $RELEASE_TAG."
+          fi
+
           node scripts/check-release-tag.mjs "$RELEASE_TAG"
 
           release_json="$(
