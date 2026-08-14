@@ -2218,7 +2218,7 @@ mod tests {
         };
         server.abort();
 
-        assert!(matches!(error, AgentError::Authentication(_)));
+        assert!(matches!(error, AgentError::AccessDenied(_)));
         let visible = error.to_string();
         assert!(visible.contains("gemini returned 403"), "{visible}");
         assert!(visible.contains("permission_denied"), "{visible}");
@@ -2352,7 +2352,7 @@ mod tests {
             events,
             vec![ProviderEvent::Failed {
                 error: ProviderErrorInfo {
-                    kind: "authentication".into(),
+                    kind: "access_denied".into(),
                     message: "gemini returned 403 (permission_denied): The caller does not have permission"
                         .into(),
                 },

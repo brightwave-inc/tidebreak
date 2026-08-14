@@ -131,6 +131,7 @@ export type ChatMessage =
       id: string;
       role: "turn_failure";
       category: TurnFailureCategory;
+      detail?: string;
       model?: { id: string; provider: ModelInfo["provider"] };
       invokedSkills?: readonly string[];
       voiceInputUsed?: boolean;
@@ -1267,6 +1268,7 @@ function MessageBubbleImpl({
     return (
       <TurnFailureNotice
         category={message.category}
+        detail={message.detail}
         model={message.model}
         onRetry={onRetry}
       />

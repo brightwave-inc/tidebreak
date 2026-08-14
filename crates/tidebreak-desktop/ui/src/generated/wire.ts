@@ -605,7 +605,7 @@ origin: RootAttachmentOrigin, };
  * message-less failed and cancelled turns remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, 
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, 
 /**
  * Skills the user explicitly invoked for this turn, in submitted order.
  * Absent for the ordinary turn that invoked none.
@@ -2156,9 +2156,14 @@ action?: ToolActionPreview,
 result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed", 
 /**
  * Why the turn failed, at the only resolution a client can act on.
- * The failure's `kind` and `message` stay internal.
+ * The internal `kind` stays behind the server; allowlisted provider
+ * diagnostics may cross separately as `detail`.
  */
-category: TurnFailureCategory, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated", 
+category: TurnFailureCategory, 
+/**
+ * Bounded provider diagnostic, when the failure originated upstream.
+ */
+detail?: string, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated", 
 /**
  * Estimated transcript tokens before the reduction.
  */
@@ -2807,7 +2812,7 @@ export type TranscriptRole = "user" | "assistant" | "system" | "compaction";
  * whether a failed turn is rescheduled — so the category a client sees and the
  * category the scheduler acted on cannot drift apart.
  */
-export type TurnFailureCategory = "rate_limited" | "auth" | "transient" | "unknown";
+export type TurnFailureCategory = "rate_limited" | "auth" | "provider_access" | "transient" | "unknown";
 
 /**
  * Identifies one turn: a single user input through to the final answer.

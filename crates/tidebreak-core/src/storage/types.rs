@@ -92,6 +92,9 @@ pub struct ChatTerminalTurnSnapshot {
     /// Stable internal failure kind. Renderer projections must classify this
     /// before it crosses the server boundary.
     pub failure_kind: Option<String>,
+    /// Bounded terminal diagnostic. Renderer projections must allowlist the
+    /// provider-originated kinds that may cross the server boundary.
+    pub failure_detail: Option<String>,
     /// Provider-qualified model selection captured when the turn was accepted.
     pub model: String,
     /// Skills the user explicitly invoked when the turn was accepted, in
