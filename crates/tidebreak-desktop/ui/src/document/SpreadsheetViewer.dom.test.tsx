@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/document/PresentationViewer", () => ({
-  ConvertedOfficeViewer: () => <div>high fidelity preview</div>,
-}));
+const nativeViewerMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/document/UniverSpreadsheetViewer", () => ({
-  default: () => <div>interactive cell inspector</div>,
+vi.mock("@/document/NativeSpreadsheetViewer", () => ({
+  default: (props: unknown) => {
+    nativeViewerMock(props);
+    return <div>native workbook viewer</div>;
+  },
 }));
 
 import { SpreadsheetViewer } from "./SpreadsheetViewer";
@@ -22,39 +22,47 @@ const source: FileBytesSource = {
 };
 
 describe("SpreadsheetViewer", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => nativeViewerMock.mockClear());
   afterEach(cleanup);
 
-  it("opens on the rendered preview and lets the reader inspect cells", async () => {
-    const user = userEvent.setup();
+  it("routes XLSX directly to the native inspectable workbook surface", () => {
     render(
       <SpreadsheetViewer
         source={source}
         mediaType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="h-full"
       />,
     );
 
-    expect(screen.getByText("high fidelity preview")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Inspect cells" }));
-
-    expect(screen.getByText("interactive cell inspector")).toBeInTheDocument();
+    expect(screen.getByText("native workbook viewer")).toBeInTheDocument();
+    expect(nativeViewerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source,
+        mediaType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        className: "h-full",
+      }),
+    );
   });
 
-  it("uses the cell inspector when a citation names a workbook range", () => {
+  it("forwards a cited workbook range to the same native surface", () => {
+    const highlightRange = {
+      startCell: "B7",
+      endCell: "D9",
+      sheetName: "Revenue",
+      sheetIndex: null,
+    };
+
     render(
       <SpreadsheetViewer
         source={source}
         mediaType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        highlightRange={{
-          startCell: "B7",
-          endCell: "D9",
-          sheetName: "Revenue",
-          sheetIndex: null,
-        }}
+        highlightRange={highlightRange}
       />,
     );
 
-    expect(screen.getByText("interactive cell inspector")).toBeInTheDocument();
+    expect(nativeViewerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ highlightRange }),
+    );
   });
 });
