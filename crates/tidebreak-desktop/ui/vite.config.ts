@@ -10,6 +10,21 @@ const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss(), tidebreakDevListenPlugin()],
+  // Extend resolves parser workers relative to each package entry point. Vite's
+  // dependency optimizer rewrites the entry point into node_modules/.vite but
+  // does not copy those sibling worker modules, so keep the worker-owning
+  // viewers as source dependencies in development.
+  optimizeDeps: {
+    exclude: [
+      "@extend-ai/react-docx",
+      "@extend-ai/react-pptx",
+      "@extend-ai/react-xlsx",
+    ],
+    // The unbundled viewers import a few CommonJS leaves. Prebundle those
+    // leaves so Vite provides the ESM exports the packages expect while
+    // leaving each worker-owning viewer itself untouched.
+    include: ["react-dom/server", "regl", "utif"],
+  },
   // The spreadsheet viewer parses and calculates off the main thread. Those
   // workers are large enough to be split into chunks themselves, which the
   // default IIFE worker format cannot express.

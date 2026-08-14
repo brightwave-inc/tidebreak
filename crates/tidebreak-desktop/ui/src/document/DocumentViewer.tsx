@@ -1,7 +1,7 @@
 /**
  * `document/` is the heavy side of viewing a source: the media-type dispatcher
- * below, the viewers built on a document engine of their own (pdf.js,
- * docx-preview, Univer) with the parsing and control surfaces those need, and
+ * below, the viewers built on a document engine of their own (EmbedPDF,
+ * Extend's OOXML renderers, Univer) with the parsing and control surfaces those need, and
  * the download every viewer shares (`useFileDownload`).
  *
  * `components/document/` next to it is the reading side: the extracted text,
@@ -15,7 +15,7 @@ import { Loader2Icon } from "lucide-react";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import type { FileBytesSource } from "@/document/useFileDownload";
 
-// pdf.js is a large dependency and most sessions never open a PDF, so it is
+// The PDF engine is a large dependency and most sessions never open a PDF, so it is
 // fetched from the app bundle on first use rather than at startup.
 const PdfViewer = lazy(() =>
   import("@/document/PdfViewer").then((m) => ({ default: m.PdfViewer })),
@@ -31,8 +31,8 @@ const SpreadsheetViewer = lazy(() =>
   })),
 );
 const DocxViewer = lazy(() => import("@/document/DocxViewer"));
-// Presentations render as converted PDFs; the viewer carries the conversion
-// states (preparing, converter missing) on top of the lazy PDF engine.
+// PPTX renders directly; legacy formats and difficult decks retain the existing
+// LibreOffice conversion states as a compatibility fallback.
 const PresentationViewer = lazy(() =>
   import("@/document/PresentationViewer").then((m) => ({
     default: m.PresentationViewer,
@@ -57,9 +57,8 @@ const WORD_DOCUMENT_MEDIA_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /**
- * Presentations have no native engine here; their original view is a PDF
- * conversion drawn by the PDF viewer, produced by a LibreOffice the user has
- * installed. See `PresentationViewer` for the conversion states.
+ * PPTX has a native viewer. Legacy PowerPoint and OpenDocument presentations
+ * use the LibreOffice fallback in `PresentationViewer`.
  */
 const PRESENTATION_MEDIA_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -134,6 +133,7 @@ export function DocumentViewer({
     return (
       <ViewerBoundary>
         <PdfViewer
+          key={source.cacheKey}
           source={source}
           targetPage={targetPage}
           className={className}
@@ -173,7 +173,11 @@ export function DocumentViewer({
   if (type === WORD_DOCUMENT_MEDIA_TYPE) {
     return (
       <ViewerBoundary>
-        <DocxViewer key={source.id} source={source} className={className} />
+        <DocxViewer
+          key={source.cacheKey}
+          source={source}
+          className={className}
+        />
       </ViewerBoundary>
     );
   }
@@ -182,7 +186,7 @@ export function DocumentViewer({
     return (
       <ViewerBoundary>
         <PresentationViewer
-          key={source.id}
+          key={source.cacheKey}
           source={source}
           mediaType={type}
           className={className}
