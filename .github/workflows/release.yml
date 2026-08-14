@@ -1982,4 +1982,4 @@ jobs:
           # during the build, Release Drafter already created one while the
           # release was a prerelease; this call is idempotent and just ensures
           # a draft exists even when the build was quiet.
-          gh workflow run release-draft.yml --ref main --field update-draft=true
+          gh workflow run release-draft.yml --repo "$GITHUB_REPOSITORY" --ref main --field update-draft=true
