@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::connectors::{
     is_sign_in_required, CredentialVault, GatewayApp, GatewayAuth, GatewayAuthConfig,
     GatewayCatalogFetch, GatewayConnection, GatewayOperationSummary, MEMBER_CATALOG_V1,
-    RESOURCE_LLM,
+    RESOURCE_CONTROL, RESOURCE_LLM,
 };
 use async_trait::async_trait;
 use serde::Serialize;
@@ -54,6 +54,12 @@ pub(crate) struct GatewayRuntime {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// One connection per configured base URL; rebuilt when the URL changes.
     cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
+    /// One complete entitled-model sync at a time, from the first policy and
+    /// snapshot read through the fetch, durable write, and selection
+    /// migration. Serializing only the write tail lets an older, slower HTTP
+    /// response overwrite a newer catalog and strand deployment-local model
+    /// keys, so the network round-trip deliberately lives inside this lock.
+    model_sync: Mutex<()>,
     /// The one in-flight browser sign-in, if any.
     sign_in: Mutex<SignInProgress>,
     /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
@@ -72,6 +78,8 @@ pub(crate) struct GatewayRuntime {
     pending_pairing: Mutex<Option<PendingPairing>>,
     #[cfg(test)]
     migration_pause: Mutex<Option<Arc<MigrationPause>>>,
+    #[cfg(test)]
+    sync_commit_pause: Mutex<Option<Arc<MigrationPause>>>,
 }
 
 #[cfg(test)]
@@ -184,11 +192,14 @@ impl GatewayRuntime {
             provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
+            model_sync: Mutex::new(()),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
             #[cfg(test)]
             migration_pause: Mutex::new(None),
+            #[cfg(test)]
+            sync_commit_pause: Mutex::new(None),
         })
     }
 
@@ -788,9 +799,23 @@ impl GatewayRuntime {
     pub(crate) async fn sync_models(
         &self,
     ) -> std::result::Result<usize, crate::error::ServerError> {
+        // The lock covers the fetch, not merely the write tail. Otherwise two
+        // callers can start from the same ETag and commit in response order,
+        // allowing an older response to replace a newer catalog.
+        let _sync = self.model_sync.lock().await;
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
+        // Populate the control-token cache before taking the credential
+        // fingerprint. The catalog call then reuses that token instead of
+        // rotating this session's refresh token after we captured it.
+        connection.access_token(RESOURCE_CONTROL).await?;
+        let session = connection.stored_credentials().await?.ok_or_else(|| {
+            crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway session changed during model sync",
+            )
+        })?;
         // The stored snapshot's ETag makes an unchanged catalog a 304: the
         // background loop runs this every few minutes, and most ticks change
         // nothing. Read before the row lock — like the fetch itself, the
@@ -817,9 +842,11 @@ impl GatewayRuntime {
                     .as_ref()
                     .map(|snapshot| snapshot.models.len())
                     .unwrap_or_default();
+                self.pause_sync_commit_for_test().await;
                 let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
-                let policy = self.recheck_sync_policy(&base_url)?;
-                self.migrate_canonical_model_selections(&policy).await?;
+                let policy = self.recheck_sync_context(&base_url, &session).await?;
+                self.migrate_canonical_model_selections(&policy, &base_url, &session)
+                    .await?;
                 return Ok(count);
             }
             GatewayCatalogFetch::Fresh { catalog, etag } => {
@@ -902,16 +929,17 @@ impl GatewayRuntime {
             AgentError::config(format!("gateway model sync rejected: {error:?}"))
         })?;
         let count = models.len();
+        self.pause_sync_commit_for_test().await;
         let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
         // The fetch ran outside the lock, so the policy authority (an MDM
         // push) may have re-pointed the deployment while it was in flight.
         // Re-resolve under the lock and refuse to stamp a snapshot the new
         // policy never entitled.
-        let policy = self.recheck_sync_policy(&base_url)?;
+        let policy = self.recheck_sync_context(&base_url, &session).await?;
         providers::write_gateway_snapshot(
             &*self.store,
             &providers::GatewayModelSnapshot {
-                gateway_url: base_url,
+                gateway_url: base_url.clone(),
                 models,
                 model_protocols,
                 member_catalog,
@@ -919,7 +947,8 @@ impl GatewayRuntime {
             },
         )
         .await?;
-        self.migrate_canonical_model_selections(&policy).await?;
+        self.migrate_canonical_model_selections(&policy, &base_url, &session)
+            .await?;
         Ok(count)
     }
 
@@ -940,6 +969,29 @@ impl GatewayRuntime {
         Ok(policy)
     }
 
+    /// Revalidate both authorities that made a catalog response admissible.
+    /// The policy URL alone does not distinguish sign-out or replacement by a
+    /// different session at the same deployment.
+    async fn recheck_sync_context(
+        &self,
+        base_url: &str,
+        expected_session: &crate::connectors::GatewayCredentials,
+    ) -> std::result::Result<crate::managed_policy::ManagedPolicy, crate::error::ServerError> {
+        let policy = self.recheck_sync_policy(base_url)?;
+        let current = CredentialVault::new(self.secrets.clone()).load().await?;
+        let unchanged = current.as_ref().is_some_and(|credentials| {
+            credentials.matches_base_url(base_url)
+                && same_gateway_session(credentials, expected_session)
+        });
+        if !unchanged {
+            return Err(crate::error::ServerError::conflict_kind(
+                "gateway_changed",
+                "the model gateway session changed during model sync",
+            ));
+        }
+        Ok(policy)
+    }
+
     /// Move saved curated selections onto their unique entitled gateway
     /// equivalent after a managed catalog sync.
     ///
@@ -950,7 +1002,9 @@ impl GatewayRuntime {
     async fn migrate_canonical_model_selections(
         &self,
         policy: &crate::managed_policy::ManagedPolicy,
-    ) -> Result<()> {
+        base_url: &str,
+        session: &crate::connectors::GatewayCredentials,
+    ) -> std::result::Result<(), crate::error::ServerError> {
         if let Some(selection) =
             crate::model_roles::read_selection(&*self.store, crate::model_roles::ModelRole::Chat)
                 .await?
@@ -967,6 +1021,10 @@ impl GatewayRuntime {
                 .as_deref()
                     == Some(selection.as_str())
                 {
+                    // OS policy is external to the process lock. Check it at
+                    // the last possible edge before replacing a portable
+                    // canonical key with this deployment's local id.
+                    self.recheck_sync_context(base_url, session).await?;
                     crate::model_roles::write_selection(
                         &*self.store,
                         crate::model_roles::ModelRole::Chat,
@@ -989,6 +1047,7 @@ impl GatewayRuntime {
                 if self.store.get_setting(STICKY_MODEL_KEY).await?
                     == Some(serde_json::Value::String(selection))
                 {
+                    self.recheck_sync_context(base_url, session).await?;
                     self.store
                         .set_setting(STICKY_MODEL_KEY, &serde_json::Value::String(equivalent))
                         .await?;
@@ -1011,6 +1070,7 @@ impl GatewayRuntime {
                     .as_deref()
                     == Some(selection)
                 {
+                    self.recheck_sync_context(base_url, session).await?;
                     self.store.set_chat_model(chat.id, Some(equivalent)).await?;
                 }
             }
@@ -1029,6 +1089,18 @@ impl GatewayRuntime {
 
     #[cfg(not(test))]
     async fn pause_migration_for_test(&self) {}
+
+    #[cfg(test)]
+    async fn pause_sync_commit_for_test(&self) {
+        let pause = self.sync_commit_pause.lock().await.take();
+        if let Some(pause) = pause {
+            pause.arrived.notify_one();
+            pause.release.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn pause_sync_commit_for_test(&self) {}
 
     /// Keep the entitled-model snapshot fresh without a manual refresh: sync
     /// once immediately (the boot case) and then on a long interval, for as
@@ -1430,6 +1502,24 @@ pub(crate) async fn retire_superseded_gateway_session(
     // Unconditional: a gateway that never answered, or a stored base URL that
     // no longer parses, must not leave the credential behind.
     CredentialVault::new(secrets).clear().await
+}
+
+/// Compare the durable parts of two credentials while ignoring only cached
+/// access tokens. The refresh token is intentionally included: a replacement
+/// session for the same user and installation must still invalidate a catalog
+/// response authorized by the old session. A concurrent token rotation may
+/// conservatively reject a sync; the next background tick retries safely.
+fn same_gateway_session(
+    left: &crate::connectors::GatewayCredentials,
+    right: &crate::connectors::GatewayCredentials,
+) -> bool {
+    fn durable(credentials: &crate::connectors::GatewayCredentials) -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(credentials).ok()?;
+        value.as_object_mut()?.remove("access_tokens");
+        Some(value)
+    }
+
+    durable(left) == durable(right)
 }
 
 /// The one refusal for every managed-only gateway surface: unmanaged
@@ -1978,6 +2068,182 @@ mod tests {
         // settings panel's older-gateway note.
         let status = runtime.status().await.unwrap();
         assert_eq!(status.member_catalog.as_deref(), Some("v1"));
+    }
+
+    #[tokio::test]
+    async fn overlapping_model_syncs_serialize_before_the_second_fetch() {
+        let gateway = Arc::new(FakeGateway::default());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (arrived_tx, mut arrived_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        let catalog_route = {
+            let requests = requests.clone();
+            move |headers: HeaderMap| {
+                let requests = requests.clone();
+                let arrived = arrived_tx.clone();
+                async move {
+                    let bearer = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    assert!(bearer.starts_with("Bearer mg_at_control_"), "{bearer}");
+                    let request = requests.fetch_add(1, Ordering::SeqCst);
+                    arrived.send(request).expect("the test is listening");
+                    (
+                        [(axum::http::header::ETAG, format!("W/\"rev-{request}\""))],
+                        Json(sample_catalog()),
+                    )
+                        .into_response()
+                }
+            }
+        };
+        let app = AxumRouter::new()
+            .route("/oauth/token", post(token))
+            .route("/api/v1/me/catalog", get(catalog_route))
+            .with_state(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        let first_pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(first_pause.clone());
+
+        let first = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        assert_eq!(arrived_rx.recv().await, Some(0));
+        first_pause.arrived.notified().await;
+
+        let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                second_started_tx.send(()).unwrap();
+                runtime.sync_models().await
+            }
+        });
+        second_started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "the second sync must wait before issuing its catalog fetch"
+        );
+
+        first_pause.release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap(), 2);
+        assert_eq!(arrived_rx.recv().await, Some(1));
+        assert_eq!(second.await.unwrap().unwrap(), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            providers::read_gateway_snapshot(&*store)
+                .await
+                .unwrap()
+                .unwrap()
+                .catalog_etag
+                .as_deref(),
+            Some("W/\"rev-1\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_response_cannot_commit_after_sign_out() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        runtime.sign_out().await.unwrap();
+        pause.release.notify_one();
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("a response authorized by the signed-out session must be stale");
+        assert_eq!(error.kind(), "gateway_changed");
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_response_cannot_commit_after_same_url_session_replacement() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.sync_commit_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        let replacement: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_replacement",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(runtime.secrets.clone())
+            .save(&replacement)
+            .await
+            .unwrap();
+        pause.release.notify_one();
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("the old session's response must not commit over its replacement");
+        assert_eq!(error.kind(), "gateway_changed");
+        assert!(providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
     }
 
     #[tokio::test]
@@ -2854,6 +3120,127 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "gateway A's models must not be stamped into the snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_repoint_after_snapshot_write_refuses_every_selection_migration() {
+        struct SwappableOs(std::sync::Mutex<String>);
+
+        impl crate::managed_policy::OsPolicySource for SwappableOs {
+            fn gateway_url(&self) -> Result<Option<String>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+        }
+
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base_a = format!("http://{address}");
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base_a,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "account_hint": "abaas@example.test",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let os = Arc::new(SwappableOs(std::sync::Mutex::new(base_a.clone())));
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("anthropic::claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        store
+            .set_setting(
+                STICKY_MODEL_KEY,
+                &serde_json::Value::String("anthropic::claude-opus-5".into()),
+            )
+            .await
+            .unwrap();
+        let chat = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("anthropic::claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let pause = Arc::new(MigrationPause::default());
+        *runtime.migration_pause.lock().await = Some(pause.clone());
+
+        let sync = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        pause.arrived.notified().await;
+        assert!(
+            crate::connectors::GatewayCredentials::matches_base_url(
+                &credentials,
+                &providers::read_gateway_snapshot(&*store)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .gateway_url,
+            ),
+            "the pause is after the old deployment's snapshot write"
+        );
+        *os.0.lock().unwrap() = "https://gateway-b.test".to_owned();
+        pause.release.notify_one();
+
+        let error = sync
+            .await
+            .unwrap()
+            .expect_err("a repoint at the migration edge must refuse local-id writes");
+        assert_eq!(error.kind(), "gateway_changed");
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+        assert_eq!(
+            store.get_setting(STICKY_MODEL_KEY).await.unwrap(),
+            Some(serde_json::Value::String("anthropic::claude-opus-5".into()))
+        );
+        assert_eq!(
+            store
+                .get_chat(chat.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("anthropic::claude-opus-5")
         );
     }
 

@@ -819,9 +819,16 @@ pub(crate) async fn unique_gateway_equivalent(
         model_registry::find_for(provider, id)
     } else {
         // Pre-provider-selection builds persisted bare curated ids. Only the
-        // registry's unique direct-provider owner is safe to migrate: hosted
-        // mirrors and genuinely ambiguous names must not make us guess.
-        model_registry::find(selection)
+        // unique owner accepted by normal selection resolution is safe to
+        // migrate. Configured models participate in that ownership check, so
+        // a custom endpoint shadowing a curated id leaves the old selection
+        // unresolved instead of silently choosing the curated gateway route.
+        let mut owners = bare_model_owners(store, selection).await?;
+        if owners.len() != 1 {
+            return Ok(None);
+        }
+        let owner = owners.pop().expect("one owner was checked above");
+        model_registry::find_for(owner.provider, &owner.id)
     };
     let Some(spec) = spec else { return Ok(None) };
     let mut matches = gateway_models(store, policy)
@@ -834,6 +841,35 @@ pub(crate) async fn unique_gateway_equivalent(
         (Some(key), None) => Some(key),
         _ => None,
     })
+}
+
+/// Resolve one bare model id under the same ownership rule used by the public
+/// selection resolver.
+///
+/// Curated direct-provider rows and configured model providers are all owners.
+/// Unknown ids and ids claimed by more than one owner remain unresolved; a
+/// caller must not infer a route for either case.
+async fn bare_model_owners(store: &dyn Store, value: &str) -> Result<Vec<ResolvedModelPolicy>> {
+    let mut owners = model_registry::find(value)
+        .map(ResolvedModelPolicy::curated)
+        .into_iter()
+        .collect::<Vec<_>>();
+    for provider in [
+        ProviderKind::Xai,
+        ProviderKind::Openrouter,
+        ProviderKind::Ollama,
+        ProviderKind::OpenaiCompatible,
+    ] {
+        let config = read_config(store, provider).await?;
+        owners.extend(
+            config
+                .models
+                .iter()
+                .filter(|model| model.id == value)
+                .map(|model| ResolvedModelPolicy::custom_for(provider, model)),
+        );
+    }
+    Ok(owners)
 }
 
 /// Drop a trailing `-v<digits>` or `-v<digits>:<digits>` — the revision marker
@@ -1744,25 +1780,7 @@ pub async fn resolve_model_policy(
             }));
     }
 
-    let mut owners = model_registry::find(value)
-        .map(ResolvedModelPolicy::curated)
-        .into_iter()
-        .collect::<Vec<_>>();
-    for provider in [
-        ProviderKind::Xai,
-        ProviderKind::Openrouter,
-        ProviderKind::Ollama,
-        ProviderKind::OpenaiCompatible,
-    ] {
-        let config = read_config(store, provider).await?;
-        owners.extend(
-            config
-                .models
-                .iter()
-                .filter(|model| model.id == value)
-                .map(|model| ResolvedModelPolicy::custom_for(provider, model)),
-        );
-    }
+    let mut owners = bare_model_owners(store, value).await?;
     match owners.len() {
         1 => return Ok(owners.pop()),
         count if count > 1 => return Ok(None),
@@ -1888,6 +1906,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use tidebreak_core::DbStore;
 
     #[derive(Default)]
     struct TestSecrets(Mutex<HashMap<String, String>>);
@@ -1910,6 +1929,94 @@ mod tests {
             self.0.lock().unwrap().remove(key);
             Ok(())
         }
+    }
+
+    async fn gateway_migration_test_store() -> (
+        DbStore,
+        tempfile::TempDir,
+        crate::managed_policy::ManagedPolicy,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("providers.db").display()
+        ))
+        .await
+        .unwrap();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, "https://gateway.example").unwrap();
+        let policy =
+            crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy)
+                .unwrap();
+        write_gateway_snapshot(
+            &store,
+            &GatewayModelSnapshot {
+                gateway_url: policy.gateway_url.clone().unwrap(),
+                models: vec![CustomModelConfig {
+                    id: "sample-claude".into(),
+                    upstream_id: Some("claude-opus-5".into()),
+                    context_window: 200_000,
+                    max_output_tokens: 32_000,
+                    ..Default::default()
+                }],
+                model_protocols: BTreeMap::new(),
+                member_catalog: Some("v1".into()),
+                catalog_etag: None,
+            },
+        )
+        .await
+        .unwrap();
+        (store, directory, policy)
+    }
+
+    #[tokio::test]
+    async fn a_unique_bare_curated_id_migrates_to_its_gateway_equivalent() {
+        let (store, _directory, policy) = gateway_migration_test_store().await;
+
+        let resolved = resolve_model_policy(&store, "claude-opus-5", false)
+            .await
+            .unwrap()
+            .expect("the unique bare id resolves to Anthropic");
+        assert_eq!(resolved.provider, ProviderKind::Anthropic);
+        assert_eq!(
+            unique_gateway_equivalent(&store, &policy, "claude-opus-5")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_curated_id_shadowed_by_a_configured_model_does_not_migrate() {
+        let (store, _directory, policy) = gateway_migration_test_store().await;
+        write_config(
+            &store,
+            ProviderKind::OpenaiCompatible,
+            &ProviderConfig {
+                enabled: true,
+                base_url: Some("https://custom.example/v1".into()),
+                models: vec![CustomModelConfig {
+                    id: "claude-opus-5".into(),
+                    context_window: 32_768,
+                    max_output_tokens: 4_096,
+                    ..Default::default()
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(resolve_model_policy(&store, "claude-opus-5", false)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            unique_gateway_equivalent(&store, &policy, "claude-opus-5")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
