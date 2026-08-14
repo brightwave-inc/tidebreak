@@ -449,6 +449,13 @@ impl ScopedStore {
         self.store.list_message_attachments(chat_id).await
     }
 
+    /// Durably authorize this principal's chat to attach `image`.
+    pub async fn publish_chat_image(&self, chat_id: ChatId, image: &ImageRef) -> Result<bool> {
+        self.store
+            .publish_chat_image_scoped(&self.owner, chat_id, image)
+            .await
+    }
+
     /// [`Store::list_tool_calls`].
     pub async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         self.store.list_tool_calls(chat_id).await

@@ -157,6 +157,126 @@ async fn park_wait_set_for_test<S: Store + ?Sized>(
 }
 
 #[tokio::test]
+async fn postgres_completion_persists_authoritative_totals_with_and_without_checkpoint() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+
+    for (checkpoint, total_steps, total_usage) in [
+        (
+            None,
+            2,
+            Usage {
+                input_tokens: 23,
+                output_tokens: 13,
+                cache_read_input_tokens: 7,
+                cache_creation_input_tokens: 5,
+            },
+        ),
+        (
+            Some((
+                1,
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 2,
+                    cache_creation_input_tokens: 1,
+                },
+            )),
+            4,
+            Usage {
+                input_tokens: 37,
+                output_tokens: 19,
+                cache_read_input_tokens: 12,
+                cache_creation_input_tokens: 8,
+            },
+        ),
+    ] {
+        let chat = sample_chat();
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        let accepted = match store
+            .accept_turn(turn_id, chat.id, "gpt-5", "persist terminal totals")
+            .await
+            .unwrap()
+        {
+            AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+        };
+        let claimed_at = utc_now_at_postgres_precision().max(accepted.available_at);
+        let lease_token = uuid::Uuid::new_v4();
+        store
+            .claim_turn_run(lease_token, claimed_at, claimed_at + Duration::minutes(1))
+            .await
+            .unwrap()
+            .turn
+            .expect("accepted turn is claimable");
+
+        if let Some((model_steps, usage)) = checkpoint {
+            let connection = Database::connect(&url).await.unwrap();
+            let updated = connection
+                .execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "UPDATE turn_run SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
+                    [
+                        model_steps.into(),
+                        i64::from(usage.input_tokens).into(),
+                        i64::from(usage.output_tokens).into(),
+                        i64::from(usage.cache_read_input_tokens).into(),
+                        i64::from(usage.cache_creation_input_tokens).into(),
+                        turn_id.0.into(),
+                    ],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(updated.rows_affected(), 1);
+        }
+
+        let completed_at = utc_now_at_postgres_precision().max(claimed_at);
+        let output = Message {
+            id: MessageId::new(),
+            chat_id: chat.id,
+            turn_id,
+            role: Role::Assistant,
+            reasoning: MessageReasoning::default(),
+            content: "postgres completion".into(),
+            llm_content: None,
+            created_at: completed_at,
+        };
+        let completed = store
+            .complete_turn_run_and_append_event(
+                turn_id,
+                lease_token,
+                0,
+                completed_at,
+                &output,
+                total_steps,
+                total_usage,
+                StopReason::EndTurn,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            completed.outcome,
+            CompleteTurnRunOutcome::Completed(ref turn)
+                if turn.model_steps == total_steps && turn.usage == total_usage
+        ));
+        let stored = store.get_turn_run(turn_id).await.unwrap().unwrap();
+        assert_eq!(
+            (stored.model_steps, stored.usage),
+            (total_steps, total_usage)
+        );
+    }
+}
+
+#[tokio::test]
 async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;
     let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
@@ -241,6 +361,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
                 completed_at,
                 &output,
                 std::slice::from_ref(&citation),
+                0,
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -259,6 +380,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
                 utc_now_at_postgres_precision(),
                 &output,
                 std::slice::from_ref(&citation),
+                0,
                 Usage::default(),
                 StopReason::EndTurn,
             )
@@ -276,6 +398,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
             utc_now_at_postgres_precision(),
             &output,
             &[],
+            0,
             Usage::default(),
             StopReason::EndTurn,
         )
@@ -291,6 +414,187 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn postgres_cancellation_retry_requires_exact_partial_output() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "cancel with partial output")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = utc_now_at_postgres_precision().max(accepted.available_at);
+    let lease = uuid::Uuid::new_v4();
+    store
+        .claim_turn_run(lease, claimed_at, claimed_at + Duration::minutes(1))
+        .await
+        .unwrap()
+        .turn
+        .expect("accepted turn is claimable");
+    let requested_at = claimed_at + Duration::seconds(1);
+    store
+        .request_turn_cancellation(turn_id, requested_at)
+        .await
+        .unwrap()
+        .expect("running cancellation is accepted");
+
+    let document_id = DocumentId::new();
+    store
+        .upsert_document(&DocumentUpsert {
+            id: document_id,
+            project_id: None,
+            chat_id: Some(chat.id),
+            origin_uri: None,
+            media_type: "text/plain".into(),
+            title: None,
+            canonical_text: "postgres cancellation evidence".into(),
+            updated_at: requested_at,
+        })
+        .await
+        .unwrap();
+    let citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 1 },
+    };
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        reasoning: MessageReasoning::default(),
+        content: tidebreak_core::format_citation_directive(
+            "postgres partial answer",
+            document_id,
+            &citation.locator,
+        ),
+        llm_content: None,
+        created_at: requested_at,
+    };
+    let acknowledged_at = requested_at + Duration::seconds(1);
+    assert!(matches!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                acknowledged_at,
+                0,
+                Usage::default(),
+                Some(&output),
+                std::slice::from_ref(&citation),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        FinishTurnCancellationOutcome::Cancelled(_)
+    ));
+    assert!(matches!(
+        store
+            .finish_turn_cancellation_and_append_event(
+                turn_id,
+                lease,
+                acknowledged_at + Duration::seconds(1),
+                0,
+                Usage::default(),
+                Some(&output),
+                std::slice::from_ref(&citation),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        FinishTurnCancellationOutcome::Existing(_)
+    ));
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            acknowledged_at + Duration::seconds(2),
+            0,
+            Usage::default(),
+            None,
+            &[],
+        )
+        .await
+        .is_err());
+
+    let changed_id = Message {
+        id: MessageId::new(),
+        ..output.clone()
+    };
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            acknowledged_at + Duration::seconds(3),
+            0,
+            Usage::default(),
+            Some(&changed_id),
+            std::slice::from_ref(&citation),
+        )
+        .await
+        .is_err());
+
+    let changed_content = Message {
+        content: tidebreak_core::format_citation_directive(
+            "different postgres partial answer",
+            document_id,
+            &citation.locator,
+        ),
+        ..output.clone()
+    };
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            acknowledged_at + Duration::seconds(4),
+            0,
+            Usage::default(),
+            Some(&changed_content),
+            std::slice::from_ref(&citation),
+        )
+        .await
+        .is_err());
+
+    let changed_citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 2 },
+    };
+    let changed_citations = Message {
+        content: tidebreak_core::format_citation_directive(
+            "postgres partial answer",
+            document_id,
+            &changed_citation.locator,
+        ),
+        ..output
+    };
+    assert!(store
+        .finish_turn_cancellation_and_append_event(
+            turn_id,
+            lease,
+            acknowledged_at + Duration::seconds(5),
+            0,
+            Usage::default(),
+            Some(&changed_citations),
+            std::slice::from_ref(&changed_citation),
+        )
+        .await
+        .is_err());
 }
 
 fn utc_now_at_postgres_precision() -> chrono::DateTime<Utc> {
@@ -2475,6 +2779,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
                     0,
                     output.created_at,
                     &output,
+                    0,
                     Usage::default(),
                     StopReason::EndTurn,
                 )
@@ -2655,6 +2960,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             cancellation_turn.id,
             cancellation_token,
             acknowledged_at,
+            0,
             usage,
             None,
             &[],
@@ -2673,6 +2979,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             cancellation_turn.id,
             cancellation_token,
             acknowledged_at + Duration::hours(1),
+            0,
             usage,
             None,
             &[],

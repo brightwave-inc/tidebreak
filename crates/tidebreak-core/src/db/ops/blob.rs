@@ -55,6 +55,18 @@ where
     if by_tool_preview {
         return Ok(true);
     }
+    let by_chat_publication = entities::chat_image_publication::Entity::find()
+        .select_only()
+        .column(entities::chat_image_publication::Column::ChatId)
+        .filter(entities::chat_image_publication::Column::BlobId.eq(blob_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if by_chat_publication {
+        return Ok(true);
+    }
     let by_attachment = entities::message_attachment::Entity::find()
         .select_only()
         .column(entities::message_attachment::Column::MessageId)

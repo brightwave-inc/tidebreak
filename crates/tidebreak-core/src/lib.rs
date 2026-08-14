@@ -94,9 +94,9 @@ pub use agent::{
     SandboxAgentSpawnRequest, ToolRegistry, TurnWebSearch, UtilityModel,
 };
 pub use agent_tools::{
-    sandbox_call_is_parallel_eligible, sandbox_done_tool_spec, sandbox_exec_tool_spec,
-    sandbox_read_delegated_file_tool_spec, sandbox_web_search_tool_spec,
-    spawn_sandbox_agent_tool_spec, validate_sandbox_done_arguments,
+    provider_web_search_receipt_is_canonical, sandbox_call_is_parallel_eligible,
+    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_read_delegated_file_tool_spec,
+    sandbox_web_search_tool_spec, spawn_sandbox_agent_tool_spec, validate_sandbox_done_arguments,
     validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments,
     validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
     wait_for_agents_tool_spec, web_extract_tool_spec, web_search_tool_spec,

@@ -16,9 +16,9 @@ use crate::model::{
 };
 use crate::storage::{
     AcceptAgentRunOutcome, AdmitSandboxAgentRunOutcome, FailAgentRunOutcome,
-    SubmitAgentRunResultOutcome,
+    RecordAgentRunModelStepOutcome, SubmitAgentRunResultOutcome,
 };
-use crate::{RequestFolderAccessArgs, RequestedFolderHint};
+use crate::{RequestFolderAccessArgs, RequestedFolderHint, Usage};
 
 use super::super::{entities, store_err, DbStore};
 use super::{acquire_chat_write_lock, acquire_turn_write_lock, turn::canonical_db_timestamp};
@@ -26,8 +26,8 @@ use super::{acquire_chat_write_lock, acquire_turn_write_lock, turn::canonical_db
 mod cancellation;
 pub(in crate::db) use cancellation::{
     cancel_sandbox_children_for_origin_turn_on, finish_agent_run_cancellation,
-    get_agent_run_cancellation_signal, request_agent_run_cancellation,
-    unsettled_sandbox_children_for_origin_turn_on,
+    get_agent_run_cancellation_signal, renew_agent_run_cancellation_finalization,
+    request_agent_run_cancellation, unsettled_sandbox_children_for_origin_turn_on,
 };
 
 pub(in crate::db) mod progress;
@@ -61,6 +61,11 @@ where
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(created_at),
         deadline_at: Set(None),
         lease_token: Set(None),
@@ -196,6 +201,11 @@ pub(in crate::db) async fn accept_agent_run(
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         deadline_at: Set(match tier {
             AgentRunTier::Foreground => None,
@@ -547,6 +557,11 @@ where
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(created_at),
         deadline_at: Set(Some(created_at + AgentRun::DEFAULT_MAX_DURATION)),
         lease_token: Set(None),
@@ -1085,9 +1100,12 @@ pub(in crate::db) async fn list_container_agent_run_candidates(
 }
 
 /// List container-located runs whose driver died: `running` under an expired
-/// lease with the deadline still open. The in-process lease reaper deliberately
-/// exempts container runs (lease expiry there means "the driving host died",
-/// not "the work died"), so this scan feeds the recovery pass that replaces it.
+/// lease with the deadline still open. The ordinary lease reaper deliberately
+/// exempts `running` container runs (lease expiry there means "the driving host
+/// died", not "the work died"), so this scan feeds the recovery pass that
+/// replaces it. Expired `cancelling` containers are different: their frozen
+/// cancellation receipt makes terminalization recoverable, so the reaper owns
+/// them instead of this scan.
 pub(in crate::db) async fn list_reclaimable_container_agent_runs(
     store: &DbStore,
     now: chrono::DateTime<Utc>,
@@ -1466,6 +1484,11 @@ pub(in crate::db) async fn fail_agent_run(
         payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
         payload_json: Set(agent_run_result_payload_json(&payload)?),
         text: Set(text),
+        model_steps: Set(run.model_steps),
+        input_tokens: Set(run.input_tokens),
+        output_tokens: Set(run.output_tokens),
+        cache_read_input_tokens: Set(run.cache_read_input_tokens),
+        cache_creation_input_tokens: Set(run.cache_creation_input_tokens),
         submitted_at: Set(now),
     }
     .insert(&transaction)
@@ -1658,6 +1681,11 @@ async fn submit_agent_run_result_payload(
         payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
         payload_json: Set(agent_run_result_payload_json(&payload)?),
         text: Set(text),
+        model_steps: Set(run.model_steps),
+        input_tokens: Set(run.input_tokens),
+        output_tokens: Set(run.output_tokens),
+        cache_read_input_tokens: Set(run.cache_read_input_tokens),
+        cache_creation_input_tokens: Set(run.cache_creation_input_tokens),
         submitted_at: Set(now),
     }
     .insert(&transaction)
@@ -2086,23 +2114,23 @@ where
 {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
-        // Lease expiry means "the in-process worker that held this run died".
-        // A sandbox-resident run holds no in-process worker: its driver keeps
-        // the lease live by heartbeat while the container works, and a driver
-        // that dies is recovered by reconciling the existing container, not by
-        // reaping the run out from under a container that is still spending.
-        // Its absolute deadline (checked by the deadline scan above, which has
-        // no such exemption) remains the backstop.
-        .filter(
-            entities::agent_run::Column::ExecutionLocation
-                .eq(AgentRunExecutionLocation::InProcess.as_str()),
-        )
+        // An expired `running` container still belongs to container recovery:
+        // its driver may have died while the container kept working, so it must
+        // not be reaped into a second outcome. Once cancellation has committed,
+        // however, the immutable receipt freezes the exact claim and outcome.
+        // If that driver's lease expires before it acknowledges quiescence, the
+        // reaper can safely settle cancellation and enqueue teardown. The
+        // deadline scan above remains the backstop for every location.
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
         .filter(
             sea_orm::Condition::any()
                 .add(entities::agent_run::Column::Status.eq(AgentRunStatus::Cancelling.as_str()))
                 .add(
                     sea_orm::Condition::all()
+                        .add(
+                            entities::agent_run::Column::ExecutionLocation
+                                .eq(AgentRunExecutionLocation::InProcess.as_str()),
+                        )
                         .add(
                             entities::agent_run::Column::Status
                                 .eq(AgentRunStatus::Running.as_str()),
@@ -2302,6 +2330,11 @@ where
         payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
         payload_json: Set(agent_run_result_payload_json(&payload)?),
         text: Set(text),
+        model_steps: Set(candidate.model_steps),
+        input_tokens: Set(candidate.input_tokens),
+        output_tokens: Set(candidate.output_tokens),
+        cache_read_input_tokens: Set(candidate.cache_read_input_tokens),
+        cache_creation_input_tokens: Set(candidate.cache_creation_input_tokens),
         submitted_at: Set(now),
     }
     .insert(conn)
@@ -2335,6 +2368,7 @@ pub(in crate::db) async fn list_agent_runs(
 ) -> Result<Vec<AgentRun>> {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
         .order_by_asc(entities::agent_run::Column::CreatedAt)
         .order_by_asc(entities::agent_run::Column::Id)
         .all(&store.conn)
@@ -2343,6 +2377,134 @@ pub(in crate::db) async fn list_agent_runs(
         .into_iter()
         .map(agent_run_from_model)
         .collect()
+}
+
+/// Persist one completed provider step before the worker advances the run.
+///
+/// The caller supplies the cumulative state it observed before egress. That
+/// state is the step's durable identity: exactly one increment may follow it.
+/// If the transaction committed but its response was lost, replaying the same
+/// baseline and delta recovers the already-updated row. A later real provider
+/// call starts from the returned cumulative state and therefore gets a new
+/// identity even when it happens in the same worker attempt.
+pub(in crate::db) async fn record_agent_run_model_step(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    expected_model_steps: i32,
+    expected_usage: Usage,
+    usage: Usage,
+) -> Result<RecordAgentRunModelStepOutcome> {
+    if lease_token.is_nil() || expected_model_steps < 0 {
+        return Err(AgentError::Store(
+            "invalid sandbox model-step accounting identity".into(),
+        ));
+    }
+    let next_model_steps = expected_model_steps
+        .checked_add(1)
+        .ok_or_else(|| AgentError::Store("sandbox model-step total overflowed".into()))?;
+    let next_usage = expected_usage
+        .checked_add(usage)
+        .ok_or_else(|| AgentError::Store("sandbox usage total overflowed".into()))?;
+
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RecordAgentRunModelStepOutcome::LeaseLost);
+    };
+    let claim_matches = entities::agent_run_claim::Entity::find_by_id(lease_token)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some_and(|claim| {
+            claim.agent_run_id == Some(id.0)
+                && claim.attempt_count == Some(run.attempt_count)
+                && claim.claim_count == Some(run.claim_count)
+        });
+    let current_usage = usage_from_agent_run_model(&run)?;
+    if claim_matches && run.model_steps == next_model_steps && current_usage == next_usage {
+        let run = agent_run_from_model(run)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RecordAgentRunModelStepOutcome::Existing(run));
+    }
+    if run.model_steps != expected_model_steps || current_usage != expected_usage {
+        let run = agent_run_from_model(run)?;
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RecordAgentRunModelStepOutcome::IdentityConflict(run));
+    }
+    let live = claim_matches
+        && run.tier == AgentRunTier::Background.as_str()
+        && matches!(
+            agent_run_status_from_db(&run.status)?,
+            AgentRunStatus::Running | AgentRunStatus::Cancelling
+        )
+        && run.lease_token == Some(lease_token)
+        && run.lease_expires_at.is_some_and(|expiry| expiry > now)
+        && run.deadline_at.is_some_and(|deadline| deadline > now)
+        && run.updated_at <= now;
+    if !live {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(RecordAgentRunModelStepOutcome::LeaseLost);
+    }
+
+    let updated = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(next_model_steps),
+        )
+        .col_expr(
+            entities::agent_run::Column::InputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(next_usage.input_tokens)),
+        )
+        .col_expr(
+            entities::agent_run::Column::OutputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(next_usage.output_tokens)),
+        )
+        .col_expr(
+            entities::agent_run::Column::CacheReadInputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(next_usage.cache_read_input_tokens)),
+        )
+        .col_expr(
+            entities::agent_run::Column::CacheCreationInputTokens,
+            sea_orm::sea_query::Expr::value(i64::from(next_usage.cache_creation_input_tokens)),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run::Column::AttemptCount.eq(run.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(run.claim_count))
+        .filter(entities::agent_run::Column::ModelSteps.eq(expected_model_steps))
+        .filter(entities::agent_run::Column::InputTokens.eq(i64::from(expected_usage.input_tokens)))
+        .filter(
+            entities::agent_run::Column::OutputTokens.eq(i64::from(expected_usage.output_tokens)),
+        )
+        .filter(
+            entities::agent_run::Column::CacheReadInputTokens
+                .eq(i64::from(expected_usage.cache_read_input_tokens)),
+        )
+        .filter(
+            entities::agent_run::Column::CacheCreationInputTokens
+                .eq(i64::from(expected_usage.cache_creation_input_tokens)),
+        )
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(RecordAgentRunModelStepOutcome::LeaseLost);
+    }
+    let run = find_by_id_on(&transaction, id)
+        .await?
+        .expect("accounted agent run exists");
+    let run = agent_run_from_model(run)?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(RecordAgentRunModelStepOutcome::Recorded(run))
 }
 
 pub(in crate::db) async fn get_agent_run_result(
@@ -2448,10 +2610,11 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
         value => {
             return Err(AgentError::Store(format!(
                 "invalid agent-run execution location {value}"
-            )))
+            )));
         }
     };
     let status = agent_run_status_from_db(&model.status)?;
+    let usage = usage_from_agent_run_model(&model)?;
     validate_stored_shape(&model, tier, status)?;
     Ok(AgentRun {
         id: AgentRunId(model.id),
@@ -2478,8 +2641,29 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
         finished_at: model.finished_at,
         last_error_code: model.last_error_code,
         last_error_detail: model.last_error_detail,
+        model_steps: model.model_steps,
+        usage,
         created_at: model.created_at,
         updated_at: model.updated_at,
+    })
+}
+
+fn usage_from_agent_run_model(model: &entities::agent_run::Model) -> Result<Usage> {
+    if model.model_steps < 0 {
+        return Err(AgentError::Store(
+            "invalid negative agent-run model-step total".into(),
+        ));
+    }
+    Ok(Usage {
+        input_tokens: u32::try_from(model.input_tokens)
+            .map_err(|_| AgentError::Store("invalid agent-run input-token total".into()))?,
+        output_tokens: u32::try_from(model.output_tokens)
+            .map_err(|_| AgentError::Store("invalid agent-run output-token total".into()))?,
+        cache_read_input_tokens: u32::try_from(model.cache_read_input_tokens)
+            .map_err(|_| AgentError::Store("invalid agent-run cache-read token total".into()))?,
+        cache_creation_input_tokens: u32::try_from(model.cache_creation_input_tokens).map_err(
+            |_| AgentError::Store("invalid agent-run cache-creation token total".into()),
+        )?,
     })
 }
 
@@ -2548,7 +2732,7 @@ fn agent_run_status_from_db(value: &str) -> Result<AgentRunStatus> {
         value => {
             return Err(AgentError::Store(format!(
                 "invalid agent-run status {value}"
-            )))
+            )));
         }
     };
     Ok(status)
@@ -2576,6 +2760,21 @@ fn agent_run_result_from_model(model: entities::agent_run_result::Model) -> Resu
         claim_count: model.claim_count,
         payload,
         text: model.text,
+        model_steps: model.model_steps,
+        usage: Usage {
+            input_tokens: u32::try_from(model.input_tokens).map_err(|_| {
+                AgentError::Store("invalid agent-run result input-token total".into())
+            })?,
+            output_tokens: u32::try_from(model.output_tokens).map_err(|_| {
+                AgentError::Store("invalid agent-run result output-token total".into())
+            })?,
+            cache_read_input_tokens: u32::try_from(model.cache_read_input_tokens).map_err(
+                |_| AgentError::Store("invalid agent-run result cache-read token total".into()),
+            )?,
+            cache_creation_input_tokens: u32::try_from(model.cache_creation_input_tokens).map_err(
+                |_| AgentError::Store("invalid agent-run result cache-creation token total".into()),
+            )?,
+        },
         submitted_at: model.submitted_at,
     })
 }
@@ -2750,7 +2949,7 @@ fn agent_run_result_payload_from_columns(kind: &str, json: &str) -> Result<Agent
         _ => {
             return Err(AgentError::Store(
                 "invalid stored agent-run result payload kind".into(),
-            ))
+            ));
         }
     };
     validate_agent_run_result_payload(&payload)?;

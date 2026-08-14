@@ -113,6 +113,8 @@ pub(crate) struct TurnWorker {
     exec_folder_context: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
     private_scratch_root: Option<PathBuf>,
     config: TurnWorkerConfig,
+    #[cfg(test)]
+    post_drive_pause: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 enum EventAppend {
@@ -184,7 +186,13 @@ fn freeze_foreground_turn_surface_with_folders(
     // request layer later withholds, and would still leave those tools
     // executable if the model emitted an unadvertised call.
     let tools = if agent_config.tools_supported {
-        tools
+        let mut tools = (*tools).clone();
+        tools.register_validated_foreground_client(
+            tidebreak_core::agent_tools::report_blocked_tool_spec(),
+            tidebreak_core::ApprovalClass::ReadOnly,
+            tidebreak_core::agent_tools::validate_report_blocked_arguments,
+        );
+        Arc::new(tools)
     } else {
         Arc::new(ToolRegistry::new())
     };
@@ -411,6 +419,8 @@ impl TurnWorker {
             exec_folder_context: None,
             private_scratch_root,
             config,
+            #[cfg(test)]
+            post_drive_pause: None,
         }
     }
 
@@ -470,6 +480,19 @@ impl TurnWorker {
         provider: Arc<crate::code_execution::ConfiguredCodeExecutionProvider>,
     ) -> Self {
         self.exec_folder_context = Some(provider);
+        self
+    }
+
+    /// Pause after a foreground drive has returned but before its outcome is
+    /// interpreted. Tests use this exact seam to make terminal-state races
+    /// deterministic instead of relying on scheduler timing.
+    #[cfg(test)]
+    pub(crate) fn with_post_drive_pause(
+        mut self,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> Self {
+        self.post_drive_pause = Some((entered, release));
         self
     }
 
@@ -833,7 +856,12 @@ impl TurnWorker {
                         LeaseState::Running => {}
                         LeaseState::Cancelling => {
                             return self
-                                .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                .acknowledge_cancellation(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                )
                                 .await;
                         }
                         LeaseState::Lost => {
@@ -849,7 +877,7 @@ impl TurnWorker {
             LeaseState::Cancelling => {
                 drop(active);
                 return self
-                    .acknowledge_cancellation(&turn, lease_token, total_usage)
+                    .acknowledge_cancellation(&turn, lease_token, total_model_steps, total_usage)
                     .await;
             }
             LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
@@ -860,7 +888,7 @@ impl TurnWorker {
             EventAppend::Cancelling => {
                 drop(active);
                 return self
-                    .acknowledge_cancellation(&turn, lease_token, total_usage)
+                    .acknowledge_cancellation(&turn, lease_token, total_model_steps, total_usage)
                     .await;
             }
             EventAppend::LeaseLost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
@@ -878,6 +906,13 @@ impl TurnWorker {
             let mut config = surface.agent_config.clone();
             config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
             config.max_steps = remaining_steps;
+            // A parked segment belongs to the same Tidebreak turn. The first
+            // segment may already have offered the provider its complete
+            // request-scoped search allowance, so a resumed segment must not
+            // recreate it even when no accepted search receipt was durable.
+            if total_model_steps > 0 {
+                config.web_search = tidebreak_core::TurnWebSearch::Off;
+            }
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
                     Ok(scratch) => Some(self.with_scratch_write_journal(
@@ -1044,6 +1079,11 @@ impl TurnWorker {
                     Ok(result) => result,
                     Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
                 };
+            #[cfg(test)]
+            if let Some((entered, release)) = self.post_drive_pause.as_ref() {
+                entered.notify_one();
+                release.notified().await;
+            }
             // The attempt consumed the whole queue: every requeued spawn either
             // passed the approval gate — and comes back as the outcome's
             // remaining requests — or was refused and answered durably. Holding
@@ -1054,15 +1094,17 @@ impl TurnWorker {
             match self.renew_lease(&turn, lease_token).await {
                 LeaseState::Running => {}
                 LeaseState::Cancelling => {
-                    let usage = match &drive_result {
-                        Ok(AgentTurnOutcome::Completed { usage, .. })
-                        | Ok(AgentTurnOutcome::Cancelled { usage, .. })
-                        | Ok(AgentTurnOutcome::ClientToolCall { usage, .. })
-                        | Ok(AgentTurnOutcome::SandboxAgentSpawn { usage, .. })
-                        | Ok(AgentTurnOutcome::WaitForAgents { usage, .. })
-                        | Ok(AgentTurnOutcome::Failed { usage, .. }) => *usage,
-                        Err(_) => tidebreak_core::Usage::default(),
-                    };
+                    let (model_steps, usage) = cancellation_race_accounting(
+                        turn.id,
+                        &drive_result,
+                        remaining_steps,
+                        had_pending_spawns,
+                    )?;
+                    // Invalid or overflowing model-step accounting remains a
+                    // worker failure, exactly as it is in normal outcome
+                    // handling. Unlike usage, an exact terminal step total
+                    // cannot be safely clamped to the durable baseline.
+                    total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total_usage = total,
                         Err(error) => eprintln!(
@@ -1083,6 +1125,7 @@ impl TurnWorker {
                         .acknowledge_cancellation_with_output(
                             &turn,
                             lease_token,
+                            total_model_steps,
                             total_usage,
                             partial,
                         )
@@ -1236,6 +1279,7 @@ impl TurnWorker {
                                     Utc::now(),
                                     &output,
                                     &citations,
+                                    total_model_steps,
                                     total_usage,
                                     refusal,
                                 )
@@ -1249,6 +1293,7 @@ impl TurnWorker {
                                     Utc::now(),
                                     &output,
                                     &citations,
+                                    total_model_steps,
                                     total_usage,
                                     stop_reason,
                                 )
@@ -1379,7 +1424,12 @@ impl TurnWorker {
                                 cancel.cancel();
                                 drop(active);
                                 return self
-                                    .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                    .acknowledge_cancellation(
+                                        &turn,
+                                        lease_token,
+                                        total_model_steps,
+                                        total_usage,
+                                    )
                                     .await;
                             }
                             EventAppend::LeaseLost => {
@@ -1391,7 +1441,12 @@ impl TurnWorker {
                     }
                     drop(active);
                     return self
-                        .acknowledge_cancellation(&turn, lease_token, total_usage)
+                        .acknowledge_cancellation(
+                            &turn,
+                            lease_token,
+                            total_model_steps,
+                            total_usage,
+                        )
                         .await;
                 }
                 Ok(AgentTurnOutcome::ClientToolCall {
@@ -1497,6 +1552,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -1549,6 +1605,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -1595,7 +1652,12 @@ impl TurnWorker {
                             cancel.cancel();
                             drop(active);
                             return self
-                                .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                .acknowledge_cancellation(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                )
                                 .await;
                         }
                         EventAppend::LeaseLost => {
@@ -1717,6 +1779,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -1805,6 +1868,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -1825,6 +1889,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -1872,7 +1937,12 @@ impl TurnWorker {
                             cancel.cancel();
                             drop(active);
                             return self
-                                .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                .acknowledge_cancellation(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                )
                                 .await;
                         }
                         EventAppend::LeaseLost => {
@@ -1985,6 +2055,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -2025,6 +2096,7 @@ impl TurnWorker {
                                             .acknowledge_cancellation(
                                                 &turn,
                                                 lease_token,
+                                                total_model_steps,
                                                 total_usage,
                                             )
                                             .await;
@@ -2063,7 +2135,12 @@ impl TurnWorker {
                             cancel.cancel();
                             drop(active);
                             return self
-                                .acknowledge_cancellation(&turn, lease_token, total_usage)
+                                .acknowledge_cancellation(
+                                    &turn,
+                                    lease_token,
+                                    total_model_steps,
+                                    total_usage,
+                                )
                                 .await;
                         }
                         EventAppend::LeaseLost => {
@@ -2077,8 +2154,18 @@ impl TurnWorker {
                     output,
                     citations,
                     usage,
-                    ..
+                    model_steps,
                 }) => {
+                    // Cooperative cancellation may happen before a provider
+                    // call, so zero is valid; it may not report work beyond
+                    // the live budget.
+                    if model_steps > remaining_steps {
+                        return Err(AgentError::msg(format!(
+                            "turn {} returned an invalid cancelled model-step count {model_steps}",
+                            turn.id
+                        )));
+                    }
+                    total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total_usage = total,
                         Err(error) => eprintln!(
@@ -2091,6 +2178,7 @@ impl TurnWorker {
                         .acknowledge_cancellation_with_output(
                             &turn,
                             lease_token,
+                            total_model_steps,
                             total_usage,
                             output.map(|message| (message, citations)),
                         )
@@ -2143,7 +2231,12 @@ impl TurnWorker {
                     if self.is_cancelling_retry(&turn, lease_token).await {
                         drop(active);
                         return self
-                            .acknowledge_cancellation(&turn, lease_token, total_usage)
+                            .acknowledge_cancellation(
+                                &turn,
+                                lease_token,
+                                total_model_steps,
+                                total_usage,
+                            )
                             .await;
                     }
                     return self
@@ -2390,9 +2483,10 @@ impl TurnWorker {
         &self,
         turn: &TurnRun,
         lease_token: uuid::Uuid,
+        model_steps: i32,
         usage: tidebreak_core::Usage,
     ) -> Result<TurnWorkerOutcome> {
-        self.acknowledge_cancellation_with_output(turn, lease_token, usage, None)
+        self.acknowledge_cancellation_with_output(turn, lease_token, model_steps, usage, None)
             .await
     }
 
@@ -2402,6 +2496,7 @@ impl TurnWorker {
         &self,
         turn: &TurnRun,
         lease_token: uuid::Uuid,
+        model_steps: i32,
         usage: tidebreak_core::Usage,
         output: Option<(
             tidebreak_core::Message,
@@ -2416,6 +2511,7 @@ impl TurnWorker {
                     turn.id,
                     lease_token,
                     Utc::now(),
+                    model_steps,
                     usage,
                     output.as_ref().map(|(message, _)| message),
                     output
@@ -2565,7 +2661,7 @@ impl TurnWorker {
                     LiveTurnState::Running => tokio::task::yield_now().await,
                     LiveTurnState::Cancelling => {
                         return self
-                            .acknowledge_cancellation(turn, lease_token, usage)
+                            .acknowledge_cancellation(turn, lease_token, model_steps, usage)
                             .await;
                     }
                     LiveTurnState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
@@ -2598,7 +2694,7 @@ impl TurnWorker {
                         }
                         ResolutionState::Cancelling => {
                             return self
-                                .acknowledge_cancellation(turn, lease_token, usage)
+                                .acknowledge_cancellation(turn, lease_token, model_steps, usage)
                                 .await;
                         }
                         ResolutionState::Lost => {
@@ -2699,6 +2795,70 @@ fn checked_usage_sum(
         .ok_or_else(|| AgentError::msg("provider usage exceeded the supported turn total"))
 }
 
+fn cancellation_race_accounting(
+    turn_id: TurnId,
+    drive_result: &Result<AgentTurnOutcome>,
+    remaining_steps: usize,
+    had_pending_spawns: bool,
+) -> Result<(usize, tidebreak_core::Usage)> {
+    let Ok(outcome) = drive_result else {
+        return Ok((0, tidebreak_core::Usage::default()));
+    };
+    let (model_steps, usage) = match outcome {
+        AgentTurnOutcome::Completed {
+            model_steps, usage, ..
+        }
+        | AgentTurnOutcome::Failed {
+            model_steps, usage, ..
+        } => {
+            // A wrap-up-only attempt is the one valid zero-step completion or
+            // failure, matching the normal outcome branches below.
+            if *model_steps > remaining_steps || (*model_steps == 0 && remaining_steps != 0) {
+                return Err(AgentError::msg(format!(
+                    "turn {turn_id} returned an invalid model-step count {model_steps}"
+                )));
+            }
+            (*model_steps, *usage)
+        }
+        AgentTurnOutcome::Cancelled {
+            model_steps, usage, ..
+        } => {
+            // Cooperative cancellation may happen before a provider call, so
+            // zero is valid here; it may not claim work beyond the live budget.
+            if *model_steps > remaining_steps {
+                return Err(AgentError::msg(format!(
+                    "turn {turn_id} returned an invalid cancelled model-step count {model_steps}"
+                )));
+            }
+            (*model_steps, *usage)
+        }
+        AgentTurnOutcome::ClientToolCall {
+            model_steps, usage, ..
+        }
+        | AgentTurnOutcome::WaitForAgents {
+            model_steps, usage, ..
+        } => {
+            if *model_steps == 0 || *model_steps > remaining_steps {
+                return Err(AgentError::msg(format!(
+                    "turn {turn_id} returned an invalid model-step count {model_steps}"
+                )));
+            }
+            (*model_steps, *usage)
+        }
+        AgentTurnOutcome::SandboxAgentSpawn {
+            model_steps, usage, ..
+        } => {
+            if (*model_steps == 0 && !had_pending_spawns) || *model_steps > remaining_steps {
+                return Err(AgentError::msg(format!(
+                    "turn {turn_id} returned an invalid model-step count {model_steps}"
+                )));
+            }
+            (*model_steps, *usage)
+        }
+    };
+    Ok((model_steps, usage))
+}
+
 fn checked_model_step_sum(total: i32, delta: usize) -> Result<i32> {
     let delta = i32::try_from(delta)
         .map_err(|_| AgentError::msg("model-step delta exceeds the durable range"))?;
@@ -2770,8 +2930,8 @@ mod committed_event_drain_tests {
         );
         let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
         assert_eq!(prompt, crate::foreground_prompt::compose(&[]));
+        assert!(prompt.contains("execution is unavailable in this reply"));
         for unavailable in [
-            "exec",
             "search",
             "delegat",
             "done",

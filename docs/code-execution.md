@@ -297,6 +297,13 @@ tools. Local execution reports a
 concise command error when the host lacks Python or an underlying renderer; it
 does not download tooling or use an unconfined fallback.
 
+The local backend warms its verified wheel cache one exact requirement set at
+a time. A successful set, or one pip proves has no compatible distribution for
+the fixed interpreter, is remembered for the process lifetime so later execs
+do not repeat the same deterministic resolution and warning. Network, timeout,
+and process-launch failures remain retryable, and any changed exact pin set
+receives one fresh attempt.
+
 Beyond the helpers, the sandbox image carries the runtimes a document run may
 reach for directly: LibreOffice Writer, Calc, and Impress with the `uno` Python
 bridge for driving a running LibreOffice from a script, and Node.js with
@@ -352,6 +359,19 @@ The initial adapter is deliberately fail-closed and macOS-first:
 - timeout terminates and then kills the process group;
 - unsupported platforms return unavailable and never fall back to an
   unconfined process.
+
+An absolute path beneath a host area that the local profile denies is reported
+as `sandbox_path_denied`, not as a missing workspace file. Direct path
+arguments are rejected before the process starts. When a shell or interpreter
+embeds the path in a script, a failed Seatbelt access is annotated in the
+bounded stderr result while preserving the original diagnostic. The message
+names the path, identifies the permitted model-visible roots (the private chat
+workspace plus any currently connected folders), and tells the caller to
+attach or copy the file into scratch or connect its containing folder before
+retrying. A relative path that is absent inside scratch, or an absent path
+beneath a connected folder, remains an ordinary `ENOENT`; callers can therefore
+recover from the two cases without blindly retrying the same inaccessible host
+path.
 
 This is a defense-in-depth boundary for Tidebreak's single-user local runtime,
 not a VM-grade multi-tenant boundary. Hostile or remotely supplied workloads

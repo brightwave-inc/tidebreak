@@ -90,9 +90,12 @@ pub struct ConfiguredCodeExecutionProvider {
     /// The shared package cache's runtime key, probed from the sandbox
     /// interpreter once per process. `None` disables the cache.
     package_cache_runtime: tokio::sync::OnceCell<Option<String>>,
-    /// Whether a host-side cache population pass is running or has succeeded;
-    /// cleared again on failure so a later exec can retry.
-    package_cache_population: Arc<std::sync::atomic::AtomicBool>,
+    /// Population state per canonical requirement set. Successful and
+    /// deterministically unresolvable sets stay settled; transient acquisition
+    /// failures leave their set retryable. Tracking sets independently avoids
+    /// an enabled user skill making the built-in baseline look "changed" on
+    /// every alternating trigger.
+    package_cache_population: Arc<Mutex<PackageCachePopulationState>>,
     /// Serializes cache population itself, so the exec-time pass and a
     /// provisioning pass triggered by boot or a plugin enable cannot drive pip
     /// against the same cache at once.
@@ -231,7 +234,7 @@ impl ConfiguredCodeExecutionProvider {
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
             package_cache_runtime: tokio::sync::OnceCell::new(),
-            package_cache_population: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            package_cache_population: Arc::new(Mutex::new(PackageCachePopulationState::default())),
             package_cache_lock: Arc::new(tokio::sync::Mutex::new(())),
             events: OnceLock::new(),
             degradation_reported: Mutex::new(HashSet::new()),
@@ -793,27 +796,26 @@ impl ConfiguredCodeExecutionProvider {
     }
 
     /// Best-effort host-side acquisition of the baseline set and the built-in
-    /// skills' pinned dependencies, spawned once per process when a networked
-    /// local exec shows the cache could be used. Failure clears the latch so a
-    /// later exec retries; conversations keep their network install path
-    /// either way. User-authored skills are deliberately excluded: the pass
-    /// runs once, user pins change under it, and their installs use the
-    /// ordinary networked path like any other package.
+    /// skills' pinned dependencies, spawned once per distinct pin set when a
+    /// networked local exec shows the cache could be used. Deterministic
+    /// failures stay latched for those inputs instead of rerunning and logging
+    /// on every exec; changed pins create a new key and retry. Conversations
+    /// keep their network install path either way. User-authored skills are
+    /// deliberately excluded: their pins change outside this built-in set and
+    /// their installs use the ordinary networked path like any other package.
     fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
-        use std::sync::atomic::Ordering;
         let pin_sets = package_cache_pin_sets(self.skills.iter());
         if pin_sets.is_empty() {
             return;
         }
-        if self.package_cache_population.swap(true, Ordering::SeqCst) {
+        let pin_sets = claim_package_cache_population(&self.package_cache_population, &pin_sets);
+        if pin_sets.is_empty() {
             return;
         }
-        let latch = self.package_cache_population.clone();
         let lock = self.package_cache_lock.clone();
+        let population = self.package_cache_population.clone();
         tokio::spawn(async move {
-            if !populate_package_cache(&lock, &cache, pin_sets).await {
-                latch.store(false, Ordering::SeqCst);
-            }
+            populate_package_cache(&lock, &population, &cache, pin_sets).await;
         });
     }
 
@@ -861,7 +863,17 @@ impl ConfiguredCodeExecutionProvider {
         if pin_sets.is_empty() {
             return;
         }
-        populate_package_cache(&self.package_cache_lock, &cache, pin_sets).await;
+        let pin_sets = claim_package_cache_population(&self.package_cache_population, &pin_sets);
+        if pin_sets.is_empty() {
+            return;
+        }
+        populate_package_cache(
+            &self.package_cache_lock,
+            &self.package_cache_population,
+            &cache,
+            pin_sets,
+        )
+        .await;
     }
 
     /// The skills this install would run right now under `state`: installed,
@@ -1585,40 +1597,93 @@ fn package_cache_pin_sets<'a>(
     pin_sets
 }
 
-/// Acquire `pin_sets` into `cache`, one set at a time, and report whether
-/// every set succeeded.
+#[derive(Default)]
+pub(super) struct PackageCachePopulationState {
+    in_flight: HashSet<Vec<String>>,
+    settled: HashSet<Vec<String>>,
+}
+
+/// Claim the requirement sets that have neither settled nor already started.
+/// Ordering within one set is normalized because pip resolves it as one exact
+/// conjunction; the sets stay independent so one bad skill cannot sink the
+/// baseline or make alternating triggers retry each other forever.
+pub(super) fn claim_package_cache_population(
+    population: &Mutex<PackageCachePopulationState>,
+    pin_sets: &[Vec<String>],
+) -> Vec<Vec<String>> {
+    let mut population = population.lock().unwrap();
+    let mut claimed = Vec::new();
+    for pins in pin_sets {
+        let mut key = pins.clone();
+        key.sort();
+        key.dedup();
+        if key.is_empty()
+            || population.settled.contains(&key)
+            || !population.in_flight.insert(key.clone())
+        {
+            continue;
+        }
+        claimed.push(key);
+    }
+    claimed
+}
+
+pub(super) fn finish_package_cache_population(
+    population: &Mutex<PackageCachePopulationState>,
+    pins: &[String],
+    settled: bool,
+) {
+    let mut population = population.lock().unwrap();
+    population.in_flight.remove(pins);
+    if settled {
+        population.settled.insert(pins.to_vec());
+    }
+}
+
+pub(super) fn deterministic_package_cache_failure(error: &CodeExecutionError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("could not find a version that satisfies the requirement")
+        || message.contains("no matching distribution found")
+        || message.contains("package cache pins must be exact")
+}
+
+/// Acquire `pin_sets` into `cache`, one set at a time.
 ///
 /// The lock is what keeps two triggers — a boot or plugin-enable provisioning
 /// pass and the exec-time one — from running pip against the same cache
-/// concurrently. Failures are logged and not propagated: a later exec or a
-/// later enable retries, and conversations keep their networked install path
-/// meanwhile.
+/// concurrently. Failures are logged and not propagated: the exact attempted
+/// inputs stay latched, while changed pins receive a fresh pass. Conversations
+/// keep their networked install path meanwhile.
 async fn populate_package_cache(
     lock: &tokio::sync::Mutex<()>,
+    population: &Mutex<PackageCachePopulationState>,
     cache: &SharedPackageCache,
     pin_sets: Vec<Vec<String>>,
-) -> bool {
+) {
     let _guard = lock.lock().await;
-    let mut succeeded = true;
     for pins in pin_sets {
-        match cache
+        let settled = match cache
             .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
             .await
         {
-            Ok(report) => tracing::info!(
-                promoted = report.promoted,
-                refused = report.refused,
-                invalidated = report.invalidated,
-                evicted = report.evicted,
-                "shared package cache population pass finished"
-            ),
-            Err(error) => {
-                succeeded = false;
-                tracing::warn!(%error, "shared package cache population failed");
+            Ok(report) => {
+                tracing::info!(
+                    promoted = report.promoted,
+                    refused = report.refused,
+                    invalidated = report.invalidated,
+                    evicted = report.evicted,
+                    "shared package cache population pass finished"
+                );
+                true
             }
-        }
+            Err(error) => {
+                let deterministic = deterministic_package_cache_failure(&error);
+                tracing::warn!(%error, deterministic, "shared package cache population failed");
+                deterministic
+            }
+        };
+        finish_package_cache_population(population, &pins, settled);
     }
-    succeeded
 }
 
 pub(super) fn exec_folder_grant_for_turn(

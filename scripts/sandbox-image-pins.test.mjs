@@ -29,6 +29,10 @@ const baselineDeps = readFileSync(
   ),
   "utf8",
 );
+const requirementsGenerator = readFileSync(
+  new URL("./generate-documents-requirements.py", import.meta.url),
+  "utf8",
+);
 
 function skillPins() {
   const pins = new Map();
@@ -117,6 +121,39 @@ test("the baseline python set is preinstalled at the same versions", () => {
 
   // The bundled render helpers' own dependency is part of the baseline set.
   assert.ok(declared.some((pin) => pin.startsWith("pypdfium2==")));
+});
+
+test("the generator validates every supported local Python runtime", () => {
+  const targetBlock = requirementsGenerator.match(
+    /LOCAL_SANDBOX_TARGETS\s*=\s*\(([\s\S]*?)\n\)/,
+  );
+  assert.ok(targetBlock, "generator must declare its supported local targets");
+
+  const targets = [
+    ...targetBlock[1].matchAll(
+      /\("([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\)/g,
+    ),
+  ].map((match) => match.slice(1));
+  assert.deepEqual(targets, [
+    ["macosx_11_0_arm64", "3.9", "cp39"],
+    ["macosx_11_0_arm64", "3.10", "cp310"],
+  ]);
+
+  assert.match(
+    requirementsGenerator,
+    /for platform, python_version, abi in LOCAL_SANDBOX_TARGETS:/,
+    "local validation must iterate every declared runtime target",
+  );
+  for (const argument of [
+    '"--platform", platform',
+    '"--python-version", python_version',
+    '"--abi", abi',
+  ]) {
+    assert.ok(
+      requirementsGenerator.includes(argument),
+      `local validation must pass ${argument} to pip`,
+    );
+  }
 });
 
 test("the documents closure is hash-checked and installed that way", () => {

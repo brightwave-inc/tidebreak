@@ -5,11 +5,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use tidebreak_code_execution::{
-    CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionUnavailableReason,
-    DaytonaCredential, DaytonaExecutionProvider, DockerExecutionProvider, E2BCredential,
-    E2BExecutionProvider, ExecFolderAccess, ExecutionId, ExecutionWorkspaceId,
-    LocalExecutionProvider, OutputArtifactStatus, RemoteSessionPool, DOCUMENT_SCRIPTS_DIR,
-    DOCUMENT_SCRIPT_FILES, PACKAGE_MANAGER_DOMAINS,
+    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
+    CodeExecutionUnavailableReason, DaytonaCredential, DaytonaExecutionProvider,
+    DockerExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess, ExecutionId,
+    ExecutionWorkspaceId, LocalExecutionProvider, OutputArtifactStatus, RemoteSessionPool,
+    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, PACKAGE_MANAGER_DOMAINS,
 };
 use tidebreak_core::{
     exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, NetworkPolicy, Result,
@@ -19,7 +19,10 @@ use tidebreak_egress::EgressPolicy;
 
 use super::*;
 
-use super::provider::exec_folder_grant_for_turn;
+use super::provider::{
+    claim_package_cache_population, deterministic_package_cache_failure,
+    exec_folder_grant_for_turn, finish_package_cache_population, PackageCachePopulationState,
+};
 use super::staging::{materialize_chat_attachments, prepare_execution_directories};
 
 use tidebreak_core::{
@@ -70,6 +73,57 @@ async fn test_store() -> (DbStore, tempfile::TempDir) {
     .await
     .unwrap();
     (store, dir)
+}
+
+#[test]
+fn package_cache_failure_inputs_stay_latched_until_pins_change() {
+    let population = Mutex::new(PackageCachePopulationState::default());
+    let original = vec![
+        vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
+        vec!["pypdf==6.0.0".to_owned()],
+    ];
+    let claimed = claim_package_cache_population(&population, &original);
+    assert_eq!(claimed.len(), 2);
+    assert!(claim_package_cache_population(&population, &original).is_empty());
+
+    finish_package_cache_population(&population, &claimed[0], true);
+    finish_package_cache_population(&population, &claimed[1], false);
+
+    // A later trigger retries only the transient set. The settled set remains
+    // suppressed even when the trigger presents equivalent pins reordered.
+    let reordered = vec![
+        vec!["pypdf==6.0.0".to_owned()],
+        vec!["numpy==2.0.2".to_owned(), "pillow==11.3.0".to_owned()],
+    ];
+    assert_eq!(
+        claim_package_cache_population(&population, &reordered),
+        vec![vec!["pypdf==6.0.0".to_owned()]]
+    );
+
+    // Changing an exact pin is a new population input and legitimately gets
+    // one fresh attempt.
+    let changed = vec![
+        vec!["numpy==2.0.2".to_owned(), "pillow==11.3.1".to_owned()],
+        vec!["pypdf==6.0.0".to_owned()],
+    ];
+    assert_eq!(
+        claim_package_cache_population(&population, &changed).len(),
+        1
+    );
+    assert!(claim_package_cache_population(&population, &changed).is_empty());
+}
+
+#[test]
+fn only_unresolvable_pip_failures_are_deterministic() {
+    let unavailable = CodeExecutionError::Sandbox(
+        "package cache acquisition failed: No matching distribution found for pillow==12.3.0"
+            .into(),
+    );
+    let network = CodeExecutionError::Sandbox(
+        "package cache acquisition failed: connection reset by peer".into(),
+    );
+    assert!(deterministic_package_cache_failure(&unavailable));
+    assert!(!deterministic_package_cache_failure(&network));
 }
 
 #[tokio::test]

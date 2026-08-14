@@ -165,11 +165,6 @@ pub fn app(state: AppState) -> Router {
             post(routes::ingest_chat_document).get(routes::list_chat_documents),
         )
         .route(
-            "/chats/{chat_id}/documents/raw",
-            post(routes::ingest_raw_chat_document)
-                .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
-        )
-        .route(
             "/chats/{chat_id}/documents/raw-stream",
             // `DefaultBodyLimit` only binds extractors that buffer the body,
             // and this handler takes the raw `Body` so it can write straight
@@ -220,10 +215,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/documents/{id}/file-content",
             get(routes::get_document_file_content),
+        );
+
+    // Caller-held bytes are narrower than native client execution. On a
+    // desktop embedding they require the scoped capability published through
+    // listen.json (or the native executor credential); on a headless embed the
+    // primary bearer remains sufficient for CLI/API compatibility.
+    let chat_publication_api = Router::new()
+        .route(
+            "/chats/{chat_id}/documents/raw",
+            post(routes::ingest_raw_chat_document)
+                .layer(DefaultBodyLimit::max(MAX_RAW_DOCUMENT_BYTES)),
         )
-        // Image attachments sit on the same trust boundary as raw document
-        // ingest — both take bytes off the user's disk for one conversation —
-        // so they follow it into whichever router that boundary lands on.
         .route(
             "/chats/{chat_id}/attachments/images",
             post(routes::publish_chat_image_attachment)
@@ -282,25 +285,35 @@ pub fn app(state: AppState) -> Router {
     // full-fidelity document surface joins the native-only router. A headless
     // embedding has no separate renderer trust boundary and deliberately keeps
     // the same API on its primary bearer for CLI/API compatibility.
-    let (client_executor_api, public_document_api) = if state.root_attachment_routes_enabled {
-        let client_executor_api = client_executor_api
-            .route(
-                "/chats/{chat_id}/root-attachment-changes/{change_id}/begin",
-                post(routes::begin_root_attachment_change),
+    let (client_executor_api, public_document_api, scoped_publication_api) =
+        if state.root_attachment_routes_enabled {
+            let client_executor_api = client_executor_api
+                .route(
+                    "/chats/{chat_id}/root-attachment-changes/{change_id}/begin",
+                    post(routes::begin_root_attachment_change),
+                )
+                .route(
+                    "/root-attachment-changes/pending",
+                    get(routes::list_pending_root_attachment_changes),
+                )
+                .route(
+                    "/root-attachment-changes/{change_id}/finish",
+                    post(routes::finish_root_attachment_change),
+                )
+                .merge(document_api);
+            let scoped_publication_api =
+                chat_publication_api.route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    auth::require_local_import_capability,
+                ));
+            (client_executor_api, Router::new(), scoped_publication_api)
+        } else {
+            (
+                client_executor_api,
+                document_api.merge(chat_publication_api),
+                Router::new(),
             )
-            .route(
-                "/root-attachment-changes/pending",
-                get(routes::list_pending_root_attachment_changes),
-            )
-            .route(
-                "/root-attachment-changes/{change_id}/finish",
-                post(routes::finish_root_attachment_change),
-            )
-            .merge(document_api);
-        (client_executor_api, Router::new())
-    } else {
-        (client_executor_api, document_api)
-    };
+        };
     let client_executor_api = client_executor_api.route_layer(
         axum::middleware::from_fn_with_state(state.clone(), auth::require_client_executor_token),
     );
@@ -513,6 +526,7 @@ pub fn app(state: AppState) -> Router {
             get(routes::get_openai_chatgpt_status),
         )
         .merge(public_document_api)
+        .merge(scoped_publication_api)
         .merge(renderer_document_api)
         // The transcript must fetch pixels with its bearer rather than putting
         // a token in an image URL. Unlike image publication, this is renderer
@@ -1170,7 +1184,20 @@ async fn bind_inner(
         .unwrap_or(true);
     let computer_use =
         computer_use_enabled && config.profile == Profile::Desktop && cfg!(target_os = "macos");
-    let (tools, agent_config) = agent_deps(
+    // Tool execution and every sandbox worker must share the same local
+    // cancellation handles. The tool registry is assembled before AppState,
+    // so create those handles here and install the same Arcs into state after
+    // its durable dependencies have been assembled.
+    let agent_run_wake = Arc::new(tokio::sync::Notify::new());
+    let sandbox_attempts = Arc::new(state::SandboxAttemptGuard::default());
+    let sandbox_steering = Arc::new(state::SandboxSteerGuard::default());
+    let cancellation_acceleration = agent_control_tools::SandboxCancellationAcceleration::new(
+        store.clone(),
+        sandbox_attempts.clone(),
+        sandbox_steering.clone(),
+        agent_run_wake.clone(),
+    );
+    let (tools, agent_config) = agent_deps_with_cancellation_acceleration(
         code_execution.clone(),
         foreground_web_search,
         web_extract,
@@ -1179,6 +1206,7 @@ async fn bind_inner(
         host_folders.clone(),
         gateway.clone(),
         computer_use,
+        cancellation_acceleration,
     );
     let tools = Arc::new(tools);
     // The resolver, the /gateway routes, and MCP dispatch must share ONE
@@ -1203,6 +1231,9 @@ async fn bind_inner(
         provisioned_policy,
         os_policy,
     )?;
+    state.agent_run_wake = agent_run_wake;
+    state.sandbox_attempts = sandbox_attempts;
+    state.sandbox_steering = sandbox_steering;
     // Without a restart-stable native executor identity, durable
     // root-attachment mutations stay off — matching `AppState::new`.
     state.root_attachment_routes_enabled = client_executor_id.is_some();
@@ -1246,6 +1277,7 @@ async fn bind_inner(
     code_execution.spawn_dependency_provisioning();
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
+    let local_import_token = state.local_import_token.clone();
     let blob_retirement_worker = blob_retirement_worker::BlobRetirementWorker::new(
         state.store.clone(),
         state.blobs.clone(),
@@ -1376,12 +1408,14 @@ async fn bind_inner(
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
     // Publish before workers start answering so an attach racing boot sees a
-    // file that matches the bound address. Bearer only — never the executor
-    // credential. See docs/decisions/0009-data-dir-listen-endpoint.md.
+    // file that matches the bound address. It carries the primary bearer and
+    // the narrow local-import capability, never the executor credential. See
+    // decisions 0009 and 0016.
     let listen_endpoint = listen_endpoint::ListenEndpointGuard::publish(
         data_dir,
         &format!("http://{local_addr}"),
         token.as_ref(),
+        local_import_token.as_ref(),
     )?;
 
     let turn_worker = tokio::spawn(turn_worker.run());
@@ -1436,6 +1470,7 @@ async fn bind_inner(
 /// [`resolver`]), so configuring a provider at runtime takes effect without a
 /// restart. The model *name* comes from `TIDEBREAK_MODEL` (or the built-in
 /// default) and can be overridden at runtime via `PUT /settings` or per-chat.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn agent_deps(
     code_execution: Arc<dyn tidebreak_code_execution::CodeExecutionProvider>,
@@ -1449,6 +1484,37 @@ fn agent_deps(
     // macOS, decided by the caller. When false the contracts stay
     // unregistered, so no turn surface can advertise or checkpoint them.
     computer_use: bool,
+) -> (ToolRegistry, AgentConfig) {
+    let cancellation_acceleration = agent_control_tools::SandboxCancellationAcceleration::new(
+        source_store.clone(),
+        Arc::new(state::SandboxAttemptGuard::default()),
+        Arc::new(state::SandboxSteerGuard::default()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    agent_deps_with_cancellation_acceleration(
+        code_execution,
+        web_search,
+        web_extract,
+        source_store,
+        profile_data_dir,
+        host_folders,
+        gateway,
+        computer_use,
+        cancellation_acceleration,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_deps_with_cancellation_acceleration(
+    code_execution: Arc<dyn tidebreak_code_execution::CodeExecutionProvider>,
+    web_search: Box<dyn Tool>,
+    web_extract: Box<dyn Tool>,
+    source_store: Arc<dyn Store>,
+    profile_data_dir: std::path::PathBuf,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    gateway: Arc<gateway_runtime::GatewayRuntime>,
+    computer_use: bool,
+    cancellation_acceleration: agent_control_tools::SandboxCancellationAcceleration,
 ) -> (ToolRegistry, AgentConfig) {
     /// The host-folder seam folded into `create_app`'s authoring-time folder
     /// lookup: approved roots as (id, name) pairs, empty on any error —
@@ -1524,9 +1590,10 @@ fn agent_deps(
         .with(Box::new(agent_control_tools::ResumeAgentTool::new(
             source_store.clone(),
         )))
-        .with(Box::new(agent_control_tools::CancelAgentTool::new(
-            source_store.clone(),
-        )))
+        .with(Box::new(
+            agent_control_tools::CancelAgentTool::new(source_store.clone())
+                .with_cancellation_acceleration(cancellation_acceleration),
+        ))
         .with(Box::new(task_plan_tool::UpdateTaskPlanTool::new(
             source_store.clone(),
         )))

@@ -12,9 +12,7 @@ use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId};
 use crate::image::{ImageAttachments, ImageData};
 use crate::model::{Chat, PermissionMode, Role};
-use crate::provider::{
-    ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage, VendorWebSearch,
-};
+use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
 use crate::semantic_checkpoint::{
     merge_original_requests, original_requests_from_content, ContextCheckpoint,
     ContextCheckpointPayloadV2, SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V2,
@@ -34,13 +32,11 @@ use super::{Agent, LoadedTranscript, TranscriptSourceBoundary, USER_INTERRUPTION
 /// the provider's prompt cache serves the whole prefix. Every field here
 /// therefore has to be the foreground step's own value, not a maintenance
 /// variant of it: tools render first on the wire and their definitions gate the
-/// entire cache, `system` gates system+messages, and the vendor search budget
-/// becomes another tool entry on at least one adapter.
+/// entire cache, and `system` gates system+messages.
 pub(crate) struct RequestPrefix {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
     pub images: ImageAttachments,
-    pub vendor_web_search: Option<VendorWebSearch>,
     /// Whether deterministic reduction shortened the history in `messages`.
     pub reduced: bool,
 }
@@ -111,7 +107,6 @@ impl Agent {
                 0,
                 current.as_ref(),
                 loaded.checkpoint_boundary,
-                false,
             )
             .await?;
         let sink = super::events::EventSink::Legacy(events);
@@ -344,7 +339,11 @@ impl Agent {
             ),
             temperature: self.config.temperature,
             reasoning_effort: self.config.reasoning_effort,
-            vendor_web_search: prefix.vendor_web_search,
+            // Compaction is maintenance inside the same Tidebreak turn, not a
+            // second search budget. Provider limits are request-scoped, so
+            // forwarding the turn's allowance here would let maintenance
+            // spend it once and the foreground request spend it again.
+            vendor_web_search: None,
             images: prefix.images.clone(),
             ..Default::default()
         };
@@ -517,7 +516,6 @@ impl Agent {
         reduction_level: u32,
         checkpoint: Option<&ContextCheckpoint>,
         checkpoint_boundary: Option<usize>,
-        wrap_up: bool,
     ) -> Result<RequestPrefix> {
         let (mut messages, reduced) =
             self.fit_transcript(transcript, reduction_level, checkpoint, checkpoint_boundary);
@@ -530,14 +528,6 @@ impl Agent {
             messages,
             tools: self.foreground_tool_specs(chat),
             images,
-            // The wrap-up call is the turn writing its answer from what it
-            // already has. Leaving the vendor budget on it would let the
-            // provider start fresh research inside the step whose whole purpose
-            // is to stop.
-            vendor_web_search: match self.config.web_search {
-                super::types::TurnWebSearch::Vendor(vendor) if !wrap_up => Some(vendor),
-                _ => None,
-            },
             reduced,
         })
     }

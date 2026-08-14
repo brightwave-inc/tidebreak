@@ -15,10 +15,10 @@ use crate::local_app::{
     AppGatewayDraft, AppGrant, AppRecord, AppRevision, CreateApp, NewAppRevision,
 };
 use crate::model::{
-    AgentRun, AgentRunInboxEntry, AgentRunProgressEntry, AgentRunResult, AgentRunTier,
-    AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
-    Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
+    AgentRun, AgentRunExecutionLocation, AgentRunInboxEntry, AgentRunProgressEntry, AgentRunResult,
+    AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
     MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
     ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
@@ -84,6 +84,13 @@ fn operation_log_storage_unavailable<T>() -> Result<T> {
         "durable operation-log storage is not implemented by this Store".into(),
     ))
 }
+
+fn image_publication_storage_unavailable<T>() -> Result<T> {
+    Err(AgentError::Store(
+        "chat image publication storage is not implemented by this Store".into(),
+    ))
+}
+
 /// Durable metadata and conversation state.
 ///
 /// Implementations must be safe to share across threads (`Send + Sync`) and are
@@ -255,7 +262,7 @@ pub trait Store: Send + Sync {
 
     /// Revalidate one exact live retirement lease immediately before deletion.
     ///
-    /// This atomically cancels the retirement if an authoritative document
+    /// This atomically cancels the retirement if any authoritative live
     /// reference exists. Callers must hold the same cross-process blob guard
     /// used by source publishers until deletion and resolution finish.
     async fn validate_blob_retirement_lease(
@@ -447,6 +454,17 @@ pub trait Store: Send + Sync {
     async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
         let _ = owner;
         self.get_chat(id).await
+    }
+
+    /// [`Store::publish_chat_image`] restricted to `owner`'s chat.
+    async fn publish_chat_image_scoped(
+        &self,
+        owner: &OwnerId,
+        chat_id: ChatId,
+        image: &ImageRef,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.publish_chat_image(chat_id, image).await
     }
 
     /// List `owner`'s chats, most-recently-created first.
@@ -1115,6 +1133,43 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Commit one provisioning intent only while `lease_token` still owns the
+    /// exact live `running` container claim for `run_id`.
+    ///
+    /// Implementations must serialize this check with agent-run claim,
+    /// cancellation, and terminal resolution. `None` means the durable
+    /// execution authority was already gone, so the caller must not invoke the
+    /// external provisioning backend. An existing record is returned only
+    /// after the same exact-claim validation succeeds.
+    async fn begin_sandbox_provision_for_agent_run(
+        &self,
+        _run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _tag: &str,
+        _window_expires_at: chrono::DateTime<chrono::Utc>,
+        _admission: SandboxAdmissionMode,
+    ) -> Result<Option<BeginSandboxProvisionOutcome>> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Revalidate one exact live `running` sandbox execution claim without
+    /// extending it.
+    ///
+    /// This read is serialized with claim, cancellation, and terminal
+    /// resolution, and validates the immutable attempt/claim receipt as well as
+    /// status, execution location, lease token, expiry, and deadline. It is
+    /// intended for admission boundaries that may run concurrently with the
+    /// single lease-maintenance heartbeat, such as container attachment and
+    /// either worker's provider egress.
+    async fn validate_agent_run_execution(
+        &self,
+        _run_id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _execution_location: AgentRunExecutionLocation,
+    ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
     /// Commit the backend's handle onto the run's `Intended` record. Returns
     /// `false` if the record is no longer `Intended` — the window lapsed and the
     /// sweep claimed it first — in which case the caller owns a sandbox the
@@ -1245,6 +1300,23 @@ pub trait Store: Send + Sync {
         agent_run_storage_unavailable()
     }
 
+    /// Atomically add one completed provider model step to a background run.
+    ///
+    /// `expected_model_steps` and `expected_usage` are the cumulative durable
+    /// baseline the caller observed before issuing the provider request. An
+    /// exact retry recovers the already-applied increment; a different next
+    /// step cannot reuse that identity.
+    async fn record_agent_run_model_step(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _expected_model_steps: i32,
+        _expected_usage: Usage,
+        _usage: Usage,
+    ) -> Result<RecordAgentRunModelStepOutcome> {
+        agent_run_storage_unavailable()
+    }
+
     /// Fetch the immutable terminal receipt for one agent run, if it exists.
     async fn get_agent_run_result(&self, _id: AgentRunId) -> Result<Option<AgentRunResult>> {
         agent_run_storage_unavailable()
@@ -1307,6 +1379,23 @@ pub trait Store: Send + Sync {
     /// Monotonically extend one exact live sandbox lease without resurrecting
     /// expiry or crossing the run's absolute deadline.
     async fn heartbeat_agent_run(
+        &self,
+        _id: AgentRunId,
+        _lease_token: uuid::Uuid,
+        _lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        agent_run_storage_unavailable()
+    }
+
+    /// Renew the finalization authority retained by one exact durable sandbox
+    /// cancellation request.
+    ///
+    /// Unlike [`Store::heartbeat_agent_run`], this does not authorize further
+    /// execution and may reopen an expired execution lease. It succeeds only
+    /// while the run is still `cancelling`, the immutable cancellation receipt
+    /// and claim provenance match `lease_token`, and the absolute deadline is
+    /// still open. The renewed expiry never crosses that deadline.
+    async fn renew_agent_run_cancellation_finalization(
         &self,
         _id: AgentRunId,
         _lease_token: uuid::Uuid,
@@ -2012,6 +2101,7 @@ pub trait Store: Send + Sync {
         _expected_steer_revision: i64,
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
+        _model_steps: i32,
         _usage: Usage,
         _stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2031,6 +2121,7 @@ pub trait Store: Send + Sync {
         now: chrono::DateTime<chrono::Utc>,
         output: &Message,
         citations: &[crate::AssistantCitationInput],
+        model_steps: i32,
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2041,6 +2132,7 @@ pub trait Store: Send + Sync {
                 expected_steer_revision,
                 now,
                 output,
+                model_steps,
                 usage,
                 stop_reason,
             )
@@ -2061,6 +2153,7 @@ pub trait Store: Send + Sync {
         _now: chrono::DateTime<chrono::Utc>,
         _output: &Message,
         _citations: &[crate::AssistantCitationInput],
+        _model_steps: i32,
         _usage: Usage,
         _refusal: RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -2166,11 +2259,13 @@ pub trait Store: Send + Sync {
     /// non-empty output commits as the turn's durable assistant message in the
     /// same transaction, so reload and the next model turn keep what the user
     /// was reading when they stopped the run (#1182).
+    #[allow(clippy::too_many_arguments)]
     async fn finish_turn_cancellation_and_append_event(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
+        _model_steps: i32,
         _usage: Usage,
         _output: Option<&Message>,
         _citations: &[crate::AssistantCitationInput],
@@ -2275,6 +2370,25 @@ pub trait Store: Send + Sync {
     /// text rather than failing the load.
     async fn list_message_attachments(&self, _chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
         Ok(Vec::new())
+    }
+
+    /// Durably authorize `chat_id` to attach one validated image blob.
+    ///
+    /// Returns `false` when the chat does not exist. Exact retries with the
+    /// same descriptor are idempotent; implementations must reject conflicting
+    /// metadata for the same `(chat_id, blob_id)` reservation.
+    async fn publish_chat_image(&self, _chat_id: ChatId, _image: &ImageRef) -> Result<bool> {
+        image_publication_storage_unavailable()
+    }
+
+    /// Resolve one image blob only when it was explicitly published to
+    /// `chat_id`.
+    async fn get_published_chat_image(
+        &self,
+        _chat_id: ChatId,
+        _blob_id: uuid::Uuid,
+    ) -> Result<Option<ImageRef>> {
+        image_publication_storage_unavailable()
     }
 
     /// List a chat's file attachments, ordered by message then position.

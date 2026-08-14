@@ -10,6 +10,7 @@ pub(in crate::db) mod agent_run;
 pub(in crate::db) mod app;
 pub(in crate::db) mod approval;
 pub(in crate::db) mod blob;
+pub(in crate::db) mod chat_image_publication;
 pub(in crate::db) mod chat_prompt;
 pub(in crate::db) mod citation;
 pub(in crate::db) mod client_execution;

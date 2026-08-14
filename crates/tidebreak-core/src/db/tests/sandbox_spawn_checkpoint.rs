@@ -227,8 +227,9 @@ async fn a_gated_spawn_admits_its_child_only_once_the_approval_has_committed() {
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
     ));
-    // Only the parent run exists: no child was created beside the open card.
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    // The background-run listing stays empty: no child was created beside the
+    // foreground coordinator's open card.
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     let parked = store.list_tool_calls(chat.id).await.unwrap();
     assert_eq!(parked.len(), 1);
     assert_eq!(parked[0].status, ToolCallStatus::Pending);
@@ -270,7 +271,7 @@ async fn a_gated_spawn_admits_its_child_only_once_the_approval_has_committed() {
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::Existing { .. })
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -306,7 +307,7 @@ async fn spawn_completion_requires_a_preceding_event_in_the_exact_claim() {
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     assert!(store.list_events(chat.id, 0).await.unwrap().is_empty());
 }
@@ -387,7 +388,7 @@ async fn nonblocking_spawn_commits_one_atomic_yield_and_exact_retry_survives_rec
         Some(reclaimed),
         "an old exact retry must neither leak nor clear the new claim"
     );
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_tool_calls(chat.id).await.unwrap(), vec![call]);
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 2);
     assert_eq!(
@@ -526,7 +527,7 @@ async fn exact_file_delegation_commits_with_admission_and_fences_retries() {
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
 }
 
@@ -569,7 +570,7 @@ async fn unattached_file_delegation_rejects_without_partial_writes() {
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable)
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
     assert_eq!(
@@ -667,11 +668,11 @@ async fn concurrent_detach_and_file_delegation_serialize_to_one_coherent_snapsho
                     .resource,
                 Some(resource)
             );
-            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
             assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
         }
         CheckpointSandboxSpawnOutcome::DelegatedResourceUnavailable => {
-            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+            assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
             assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
         }
         outcome => panic!("unexpected concurrent delegation outcome: {outcome:?}"),
@@ -762,7 +763,7 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::SteerPending(_))
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
 
@@ -803,10 +804,10 @@ async fn stale_lease_pending_steer_and_capacity_leave_no_checkpoint_fragments() 
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::AtCapacity)
     ));
-    // One foreground coordinator plus the admitted children at the shared cap.
+    // Only background children are listed; the foreground coordinator is not.
     assert_eq!(
         store.list_agent_runs(cap_chat.id).await.unwrap().len(),
-        1 + AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS as usize
+        AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS as usize
     );
     assert!(store.list_tool_calls(cap_chat.id).await.unwrap().is_empty());
 }
@@ -825,7 +826,7 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     let collision_ordinal = 2;
     store
         .append_turn_event(
@@ -855,7 +856,7 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
             .unwrap(),
         Some(CheckpointSandboxSpawnOutcome::IdentityConflict)
     ));
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
     crate::db::entities::turn_run::Entity::update_many()
@@ -872,7 +873,7 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
         .checkpoint_sandbox_spawn(&overflow, Utc::now())
         .await
         .is_err());
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
     crate::db::entities::turn_run::Entity::update_many()
@@ -893,7 +894,7 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
         .checkpoint_sandbox_spawn(&usage_overflow, Utc::now())
         .await
         .is_err());
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 }
 

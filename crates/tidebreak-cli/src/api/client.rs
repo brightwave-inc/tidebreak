@@ -29,6 +29,7 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     token: String,
+    local_import_token: Option<String>,
 }
 
 /// The error body every route answers with on failure.
@@ -65,6 +66,17 @@ impl Client {
     /// [`crate::connect`], which is the only thing that builds one from user
     /// input.
     pub fn attach(base: String, token: &str) -> Result<Self> {
+        Self::attach_with_local_import(base, token, None)
+    }
+
+    /// Attach with the data-directory capability for publishing caller-held
+    /// bytes. The token is stored separately and sent only on document/image
+    /// publication requests, never as a default header.
+    pub fn attach_with_local_import(
+        base: String,
+        token: &str,
+        local_import_token: Option<&str>,
+    ) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
@@ -80,7 +92,20 @@ impl Client {
             http,
             base,
             token: token.to_owned(),
+            local_import_token: local_import_token.map(str::to_owned),
         })
+    }
+
+    fn with_local_import(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.local_import_token {
+            Some(token) => request.header("x-tidebreak-local-import", token),
+            None => request,
+        }
+    }
+
+    /// Whether this client discovered the scoped local publication capability.
+    pub fn has_local_import_capability(&self) -> bool {
+        self.local_import_token.is_some()
     }
 
     /// Create a fresh chat (server-side defaults seed the rest).
@@ -727,8 +752,7 @@ impl Client {
             }
         }
         let response = self
-            .http
-            .post(url)
+            .with_local_import(self.http.post(url))
             .header(reqwest::header::CONTENT_TYPE, media_type)
             .body(bytes)
             .send()
@@ -750,8 +774,10 @@ impl Client {
         bytes: Vec<u8>,
     ) -> Result<String> {
         let response = self
-            .http
-            .post(format!("{}/chats/{chat}/attachments/images", self.base))
+            .with_local_import(
+                self.http
+                    .post(format!("{}/chats/{chat}/attachments/images", self.base)),
+            )
             // The route re-derives the format from the bytes and refuses a
             // declaration that disagrees, so this must be the sniffed type.
             .header(reqwest::header::CONTENT_TYPE, media_type)

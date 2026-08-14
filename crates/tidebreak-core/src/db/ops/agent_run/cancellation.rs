@@ -47,6 +47,109 @@ pub(in crate::db) async fn get_agent_run_cancellation_signal(
     }))
 }
 
+/// Renew the bounded authority used only to persist final accounting and
+/// acknowledge one exact durable cancellation.
+///
+/// Cancellation deliberately makes the ordinary execution heartbeat fail so
+/// a container stops doing work. Finalization is different: after execution
+/// has quiesced, transient storage failures must not strand observed usage just
+/// because that old execution lease expires. The immutable cancellation row is
+/// the authority here, and the absolute run deadline remains the hard bound.
+pub(in crate::db) async fn renew_agent_run_cancellation_finalization(
+    store: &DbStore,
+    id: AgentRunId,
+    lease_token: uuid::Uuid,
+    lease_duration: chrono::Duration,
+) -> Result<bool> {
+    if lease_token.is_nil() || lease_duration <= chrono::Duration::zero() {
+        return Err(AgentError::Store(
+            "agent-run cancellation finalization renewal requires a non-nil token and positive duration"
+                .into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    acquire_agent_run_claim_lock(&transaction).await?;
+    let now = database_now(&transaction).await?;
+    let Some(run) = find_by_id_on(&transaction, id).await? else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    };
+    if run.tier != AgentRunTier::Background.as_str()
+        || run.status != AgentRunStatus::Cancelling.as_str()
+        || run.lease_token != Some(lease_token)
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    if validate_cancellation_request_on(&transaction, &run, Some(lease_token))
+        .await?
+        .is_none()
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let Some(deadline_at) = run.deadline_at else {
+        return Err(AgentError::Store(format!(
+            "cancelling sandbox run {id} is missing its absolute deadline"
+        )));
+    };
+    let Some(current_expiry) = run.lease_expires_at else {
+        return Err(AgentError::Store(format!(
+            "cancelling sandbox run {id} is missing its finalization expiry"
+        )));
+    };
+    if current_expiry > deadline_at {
+        return Err(AgentError::Store(format!(
+            "cancelling sandbox run {id} has a lease beyond its absolute deadline"
+        )));
+    }
+    if deadline_at <= now || run.updated_at > now {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let requested_expiry = now.checked_add_signed(lease_duration).ok_or_else(|| {
+        AgentError::Store(
+            "agent-run cancellation finalization duration overflows the database timestamp range"
+                .into(),
+        )
+    })?;
+    let renewed_expiry = requested_expiry.min(deadline_at);
+    if current_expiry >= renewed_expiry {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(true);
+    }
+
+    let updated = entities::agent_run::Entity::update_many()
+        .col_expr(
+            entities::agent_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(renewed_expiry)),
+        )
+        .col_expr(
+            entities::agent_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::agent_run::Column::Id.eq(id.0))
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        .filter(entities::agent_run::Column::Status.eq(AgentRunStatus::Cancelling.as_str()))
+        .filter(entities::agent_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::agent_run::Column::AttemptCount.eq(run.attempt_count))
+        .filter(entities::agent_run::Column::ClaimCount.eq(run.claim_count))
+        .filter(entities::agent_run::Column::LeaseExpiresAt.eq(Some(current_expiry)))
+        .filter(entities::agent_run::Column::DeadlineAt.eq(Some(deadline_at)))
+        .filter(entities::agent_run::Column::DeadlineAt.gt(now))
+        .filter(entities::agent_run::Column::UpdatedAt.eq(run.updated_at))
+        .filter(entities::agent_run::Column::UpdatedAt.lte(now))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
 pub(in crate::db) async fn request_agent_run_cancellation(
     store: &DbStore,
     id: AgentRunId,
@@ -666,6 +769,11 @@ where
         payload_kind: Set(agent_run_result_payload_kind(&payload).into()),
         payload_json: Set(agent_run_result_payload_json(&payload)?),
         text: Set(text),
+        model_steps: Set(run.model_steps),
+        input_tokens: Set(run.input_tokens),
+        output_tokens: Set(run.output_tokens),
+        cache_read_input_tokens: Set(run.cache_read_input_tokens),
+        cache_creation_input_tokens: Set(run.cache_creation_input_tokens),
         submitted_at: Set(now),
     }
     .insert(conn)

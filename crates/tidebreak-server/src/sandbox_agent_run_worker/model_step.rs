@@ -1,17 +1,20 @@
 //! Model-step request assembly and completion for sandbox agent runs.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
+use serde_json::Value;
 use tidebreak_core::{
-    parse_update_task_plan_arguments, sandbox_done_tool_spec, sandbox_exec_tool_spec,
-    sandbox_folder_access_proposal_tool_spec, sandbox_read_delegated_file_tool_spec,
-    sandbox_update_task_plan_tool_spec, sandbox_web_search_tool_spec,
-    validate_sandbox_exec_arguments, validate_sandbox_read_delegated_file_arguments, AgentConfig,
-    AgentError, AgentRun, ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider,
-    ProviderEvent, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
-    StopReason, Store, ToolCallRecord, TurnWebSearch, SANDBOX_EXEC_TOOL, UPDATE_TASK_PLAN_TOOL,
+    parse_update_task_plan_arguments, provider_web_search_receipt_is_canonical,
+    sandbox_done_tool_spec, sandbox_exec_tool_spec, sandbox_folder_access_proposal_tool_spec,
+    sandbox_read_delegated_file_tool_spec, sandbox_update_task_plan_tool_spec,
+    sandbox_web_search_tool_spec, validate_sandbox_exec_arguments,
+    validate_sandbox_read_delegated_file_arguments, AgentConfig, AgentError, AgentRun, ChatMessage,
+    ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent, ProviderToolReplay,
+    ReasoningOrigin, RequestFolderAccessArgs, Result, Role, SandboxToolCall, SandboxToolCallStatus,
+    StopReason, Store, ToolCallRecord, TurnWebSearch, Usage, SANDBOX_EXEC_TOOL,
+    UPDATE_TASK_PLAN_TOOL, WEB_SEARCH_TOOL,
 };
 
 use super::config::*;
@@ -142,13 +145,19 @@ pub(super) async fn sandbox_request(
             last.content.push(ContentBlock::Text { text: notice });
         }
     }
+    let can_use_work_tools = can_use_work_tools(config, steps.len());
+    let request_web_search = if can_use_work_tools {
+        config.web_search
+    } else {
+        TurnWebSearch::Off
+    };
     Ok(ChatRequest {
         provider: config.provider.clone(),
         model: config.model.clone(),
         reasoning_model: config.reasoning_model,
         system: Some(sandbox_system_prompt(
             delegated_file_available,
-            config.web_search,
+            request_web_search,
             config.tools_supported,
             skills,
             plugins,
@@ -158,23 +167,35 @@ pub(super) async fn sandbox_request(
         // its receipt, so anything that parks is advertised only while the
         // remaining cadence can pay for both — never advertise work the run
         // cannot consume.
-        tools: sandbox_tools(config, steps.len(), delegated_file_available),
+        tools: sandbox_tools(
+            config,
+            steps.len(),
+            delegated_file_available,
+            can_use_work_tools,
+        ),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         reasoning_effort: config.reasoning_effort,
         // Set for exactly the runs the host routed to the provider's own
         // search. The budget is per request, and every claim replays the whole
         // chain, so a resumed run gets the same allowance its earlier steps had.
-        vendor_web_search: match config.web_search {
-            TurnWebSearch::Vendor(vendor) if config.tools_supported => Some(vendor),
+        vendor_web_search: match request_web_search {
+            TurnWebSearch::Vendor(vendor) => Some(vendor),
             TurnWebSearch::Host | TurnWebSearch::Off => None,
-            TurnWebSearch::Vendor(_) => None,
         },
         // Sandbox runs replay text and tool blocks from checkpoints; no path
         // puts an image block in this transcript.
         images: tidebreak_core::ImageAttachments::new(),
         ..Default::default()
     })
+}
+
+/// Whether this completion may still perform work that needs another model
+/// step to consume. Host tools and provider-side search share this cadence:
+/// withdrawing one while leaving the other executable would let the request
+/// spend work after its own prompt says that capability is gone.
+fn can_use_work_tools(config: &AgentConfig, steps: usize) -> bool {
+    config.tools_supported && steps.saturating_add(2) <= config.max_steps
 }
 
 /// What to tell a run whose tools have started disappearing under it.
@@ -207,6 +228,7 @@ fn sandbox_tools(
     config: &AgentConfig,
     steps: usize,
     delegated_file_available: bool,
+    can_use_work_tools: bool,
 ) -> Vec<tidebreak_core::ToolSpec> {
     if !config.tools_supported {
         return Vec::new();
@@ -214,9 +236,8 @@ fn sandbox_tools(
     if steps.saturating_add(1) > config.max_steps {
         return Vec::new();
     }
-    let can_checkpoint = steps.saturating_add(2) <= config.max_steps;
     let mut tools = Vec::new();
-    if can_checkpoint {
+    if can_use_work_tools {
         tools.push(sandbox_exec_tool_spec());
         // The host tool and the provider's own search are one capability with
         // one name, so the host one is advertised for exactly the runs the host
@@ -233,7 +254,7 @@ fn sandbox_tools(
     // to hand them over.
     tools.push(sandbox_done_tool_spec());
     tools.push(sandbox_folder_access_proposal_tool_spec());
-    if can_checkpoint && delegated_file_available {
+    if can_use_work_tools && delegated_file_available {
         tools.push(sandbox_read_delegated_file_tool_spec());
     }
     tools
@@ -258,6 +279,54 @@ pub(super) struct SandboxStep {
     /// them — a later claim replays only durable checkpoints, and a provider
     /// that needs the same information again simply searches again.
     pub(super) provider_executed: Vec<ProviderExecutedCall>,
+}
+
+/// The provider-side outcome of one requested model step.
+///
+/// Usage is retained even when parsing or transport fails after the provider
+/// reported spend. `account` distinguishes a request that never reached a
+/// billable/completed provider step from a refusal, malformed completion, or
+/// other outcome that still consumed one.
+#[derive(Debug)]
+pub(super) struct SandboxStepAttempt {
+    pub(super) outcome: Result<SandboxStep>,
+    pub(super) usage: Usage,
+    pub(super) account: bool,
+}
+
+/// Accounting observed while one provider stream is still in flight.
+///
+/// The worker owns a clone so cancellation can quiesce the stream, snapshot
+/// spend already reported by the provider, and persist that step before the
+/// terminal cancellation receipt is committed.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SandboxStepAccounting {
+    inner: Arc<Mutex<SandboxStepAccountingSnapshot>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SandboxStepAccountingSnapshot {
+    pub(super) usage: Usage,
+    pub(super) account: bool,
+}
+
+impl SandboxStepAccounting {
+    fn mark_accounted(&self) {
+        self.inner.lock().unwrap().account = true;
+    }
+
+    fn add_usage(&self, reported: Usage) -> Result<()> {
+        let mut snapshot = self.inner.lock().unwrap();
+        snapshot.account = true;
+        snapshot.usage = snapshot.usage.checked_add(reported).ok_or_else(|| {
+            AgentError::msg("sandbox provider usage exceeded the supported total")
+        })?;
+        Ok(())
+    }
+
+    pub(super) fn snapshot(&self) -> SandboxStepAccountingSnapshot {
+        *self.inner.lock().unwrap()
+    }
 }
 
 /// One tool call the model provider ran itself, as this run records it.
@@ -452,217 +521,290 @@ pub(super) fn classify_sandbox_tool_call(
     })
 }
 
+fn sandbox_provider_web_search_receipt_is_admissible(
+    request_origin: &ReasoningOrigin,
+    vendor_search_enabled: bool,
+    name: &str,
+    input: &Value,
+    output: &Value,
+    is_error: bool,
+    replay: Option<&ProviderToolReplay>,
+) -> bool {
+    vendor_search_enabled
+        && name == WEB_SEARCH_TOOL
+        && replay.is_none_or(|replay| replay.origin() == Some(request_origin))
+        && provider_web_search_receipt_is_canonical(input, output, is_error, replay)
+}
+
+#[cfg(test)]
 pub(super) async fn complete_sandbox_task(
     provider: Arc<dyn ModelProvider>,
     request: ChatRequest,
-) -> Result<SandboxStep> {
+) -> SandboxStepAttempt {
+    complete_sandbox_task_with_accounting(provider, request, SandboxStepAccounting::default()).await
+}
+
+pub(super) async fn complete_sandbox_task_with_accounting(
+    provider: Arc<dyn ModelProvider>,
+    request: ChatRequest,
+    accounting: SandboxStepAccounting,
+) -> SandboxStepAttempt {
     let advertised_tools: Vec<String> =
         request.tools.iter().map(|tool| tool.name.clone()).collect();
-    let mut stream = provider.stream(request).await?;
+    let vendor_search_enabled = request.vendor_web_search.is_some();
+    let request_origin = ReasoningOrigin {
+        provider: request.provider.clone(),
+        model: request.model.clone(),
+    };
+    let mut stream = match provider.stream(request).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            return SandboxStepAttempt {
+                outcome: Err(error),
+                usage: Usage::default(),
+                account: false,
+            };
+        }
+    };
     let mut text = String::new();
     let mut calls = std::collections::BTreeMap::<u32, (String, String, String)>::new();
     let mut provider_executed = Vec::<ProviderExecutedCall>::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            ProviderEvent::TextDelta { text: delta } => {
-                text.push_str(&delta);
-                if text.chars().count() > AgentRun::MAX_RESULT_LEN {
-                    return Err(AgentError::msg(format!(
-                        "sandbox agent output exceeds {} characters",
-                        AgentRun::MAX_RESULT_LEN
-                    )));
+    let outcome = async {
+        while let Some(event) = stream.next().await {
+            match event {
+                ProviderEvent::TextDelta { text: delta } => {
+                    accounting.mark_accounted();
+                    text.push_str(&delta);
+                    if text.chars().count() > AgentRun::MAX_RESULT_LEN {
+                        return Err(AgentError::msg(format!(
+                            "sandbox agent output exceeds {} characters",
+                            AgentRun::MAX_RESULT_LEN
+                        )));
+                    }
                 }
-            }
-            ProviderEvent::ToolCallStarted { index, id, name } => {
-                if calls.insert(index, (id, name, String::new())).is_some() {
-                    return Err(AgentError::msg(
-                        "sandbox agent emitted duplicate tool-call index",
-                    ));
-                }
-            }
-            ProviderEvent::ToolCallArgsDelta { index, fragment } => {
-                let Some((_, _, arguments)) = calls.get_mut(&index) else {
-                    return Err(AgentError::msg(
-                        "sandbox agent emitted tool arguments before its call",
-                    ));
-                };
-                if arguments.len().saturating_add(fragment.len())
-                    > ToolCallRecord::MAX_ARGUMENT_BYTES
-                {
-                    return Err(AgentError::msg(
-                        "sandbox agent tool arguments exceed the durable checkpoint limit",
-                    ));
-                }
-                arguments.push_str(&fragment);
-            }
-            ProviderEvent::Stop { reason } => {
-                if matches!(reason, StopReason::Cancelled) {
-                    return Err(AgentError::msg(
-                        "sandbox agent did not produce a final result",
-                    ));
-                }
-                if matches!(reason, StopReason::Refusal) {
-                    return Err(AgentError::Refusal(
-                        "sandbox agent model declined the request (category: unspecified)".into(),
-                    ));
-                }
-                if reason == StopReason::ToolUse {
-                    if calls.is_empty() {
+                ProviderEvent::ToolCallStarted { index, id, name } => {
+                    accounting.mark_accounted();
+                    if calls.insert(index, (id, name, String::new())).is_some() {
                         return Err(AgentError::msg(
-                            "sandbox agent stopped for tool use without a tool call",
+                            "sandbox agent emitted duplicate tool-call index",
                         ));
                     }
-                    // The map is keyed by the provider's own call index, so
-                    // draining it in order is the order the model emitted them
-                    // — which becomes the batch's durable order.
-                    let mut intents = Vec::with_capacity(calls.len());
-                    for (_, (provider_id, name, arguments)) in calls {
-                        intents.push(classify_sandbox_tool_call(
-                            provider_id,
-                            name,
-                            &arguments,
-                            &advertised_tools,
-                        )?);
-                    }
-                    // These two end the run in place rather than parking work,
-                    // so they are consumed here and their narration is dropped
-                    // — the result they carry already speaks for the run. That
-                    // only works when the step asked for nothing else: a run
-                    // cannot both finish and still have work outstanding.
-                    if intents.len() == 1
-                        && matches!(intents[0].disposition, SandboxToolCallDisposition::Execute)
+                }
+                ProviderEvent::ToolCallArgsDelta { index, fragment } => {
+                    accounting.mark_accounted();
+                    let Some((_, _, arguments)) = calls.get_mut(&index) else {
+                        return Err(AgentError::msg(
+                            "sandbox agent emitted tool arguments before its call",
+                        ));
+                    };
+                    if arguments.len().saturating_add(fragment.len())
+                        > ToolCallRecord::MAX_ARGUMENT_BYTES
                     {
-                        let intent = intents.remove(0);
-                        if intent.name == tidebreak_core::SANDBOX_DONE_TOOL {
-                            let arguments =
-                                serde_json::from_value::<tidebreak_core::SandboxDoneArgs>(
-                                    intent.arguments.clone(),
+                        return Err(AgentError::msg(
+                            "sandbox agent tool arguments exceed the durable checkpoint limit",
+                        ));
+                    }
+                    arguments.push_str(&fragment);
+                }
+                ProviderEvent::Stop { reason } => {
+                    accounting.mark_accounted();
+                    if matches!(reason, StopReason::Cancelled) {
+                        return Err(AgentError::msg(
+                            "sandbox agent did not produce a final result",
+                        ));
+                    }
+                    if matches!(reason, StopReason::Refusal) {
+                        return Err(AgentError::Refusal(
+                            "sandbox agent model declined the request (category: unspecified)"
+                                .into(),
+                        ));
+                    }
+                    if reason == StopReason::ToolUse {
+                        if calls.is_empty() {
+                            return Err(AgentError::msg(
+                                "sandbox agent stopped for tool use without a tool call",
+                            ));
+                        }
+                        // The map is keyed by the provider's own call index, so
+                        // draining it in order is the order the model emitted them
+                        // — which becomes the batch's durable order.
+                        let mut intents = Vec::with_capacity(calls.len());
+                        for (_, (provider_id, name, arguments)) in calls {
+                            intents.push(classify_sandbox_tool_call(
+                                provider_id,
+                                name,
+                                &arguments,
+                                &advertised_tools,
+                            )?);
+                        }
+                        // These two end the run in place rather than parking work,
+                        // so they are consumed here and their narration is dropped
+                        // — the result they carry already speaks for the run. That
+                        // only works when the step asked for nothing else: a run
+                        // cannot both finish and still have work outstanding.
+                        if intents.len() == 1
+                            && matches!(intents[0].disposition, SandboxToolCallDisposition::Execute)
+                        {
+                            let intent = intents.remove(0);
+                            if intent.name == tidebreak_core::SANDBOX_DONE_TOOL {
+                                let arguments = serde_json::from_value::<
+                                    tidebreak_core::SandboxDoneArgs,
+                                >(
+                                    intent.arguments.clone()
                                 )
                                 .map_err(|_| {
                                     AgentError::msg("sandbox agent emitted invalid done arguments")
                                 })?;
-                            return Ok(SandboxStep {
-                                narration: String::new(),
-                                completion: SandboxCompletion::Done {
-                                    provider_id: intent.provider_id,
-                                    arguments: intent.arguments,
-                                    outputs: arguments.outputs,
-                                    summary: arguments.summary,
-                                },
-                                provider_executed,
-                            });
-                        }
-                        if intent.name == tidebreak_core::REQUEST_FOLDER_ACCESS_TOOL {
-                            let request =
-                                serde_json::from_value::<RequestFolderAccessArgs>(intent.arguments)
-                                    .map_err(|_| {
-                                        AgentError::msg(
-                                            "sandbox agent emitted invalid folder-access proposal",
-                                        )
-                                    })?;
-                            return Ok(SandboxStep {
-                                narration: String::new(),
-                                completion: SandboxCompletion::FolderAccessProposal { request },
-                                provider_executed,
-                            });
-                        }
-                        intents.push(intent);
-                    } else {
-                        // A terminal tool that arrived with company is answered
-                        // rather than obeyed. Its siblings are real work the
-                        // model asked for and still get run; only the attempt to
-                        // finish in the same breath is refused.
-                        for intent in &mut intents {
-                            if !matches!(intent.disposition, SandboxToolCallDisposition::Execute) {
-                                continue;
+                                return Ok(SandboxStep {
+                                    narration: String::new(),
+                                    completion: SandboxCompletion::Done {
+                                        provider_id: intent.provider_id,
+                                        arguments: intent.arguments,
+                                        outputs: arguments.outputs,
+                                        summary: arguments.summary,
+                                    },
+                                    provider_executed,
+                                });
                             }
-                            let terminal = intent.name == tidebreak_core::SANDBOX_DONE_TOOL
-                                || intent.name == tidebreak_core::REQUEST_FOLDER_ACCESS_TOOL;
-                            if terminal {
-                                let name = &intent.name;
-                                let message = format!(
+                            if intent.name == tidebreak_core::REQUEST_FOLDER_ACCESS_TOOL {
+                                let request = serde_json::from_value::<RequestFolderAccessArgs>(
+                                    intent.arguments,
+                                )
+                                .map_err(|_| {
+                                    AgentError::msg(
+                                        "sandbox agent emitted invalid folder-access proposal",
+                                    )
+                                })?;
+                                return Ok(SandboxStep {
+                                    narration: String::new(),
+                                    completion: SandboxCompletion::FolderAccessProposal { request },
+                                    provider_executed,
+                                });
+                            }
+                            intents.push(intent);
+                        } else {
+                            // A terminal tool that arrived with company is answered
+                            // rather than obeyed. Its siblings are real work the
+                            // model asked for and still get run; only the attempt to
+                            // finish in the same breath is refused.
+                            for intent in &mut intents {
+                                if !matches!(
+                                    intent.disposition,
+                                    SandboxToolCallDisposition::Execute
+                                ) {
+                                    continue;
+                                }
+                                let terminal = intent.name == tidebreak_core::SANDBOX_DONE_TOOL
+                                    || intent.name == tidebreak_core::REQUEST_FOLDER_ACCESS_TOOL;
+                                if terminal {
+                                    let name = &intent.name;
+                                    let message = format!(
                                     "{name} must be the only tool call in a step. The other calls \
                                      in this step were run; call {name} alone once you have their \
                                      results."
                                 );
-                                intent.disposition = SandboxToolCallDisposition::Rejected {
-                                    error_code: "must_be_alone",
-                                    message,
-                                };
+                                    intent.disposition = SandboxToolCallDisposition::Rejected {
+                                        error_code: "must_be_alone",
+                                        message,
+                                    };
+                                }
                             }
                         }
+                        return Ok(SandboxStep {
+                            narration: text,
+                            completion: SandboxCompletion::ToolCalls(intents),
+                            provider_executed,
+                        });
+                    }
+                    if !calls.is_empty() {
+                        return Err(AgentError::msg(
+                            "sandbox agent stopped with an incomplete tool call",
+                        ));
+                    }
+                    if text.trim().is_empty() {
+                        return Err(AgentError::msg(
+                            "sandbox agent produced an empty final result",
+                        ));
                     }
                     return Ok(SandboxStep {
-                        narration: text,
-                        completion: SandboxCompletion::ToolCalls(intents),
+                        narration: String::new(),
+                        completion: SandboxCompletion::Final(text),
                         provider_executed,
                     });
                 }
-                if !calls.is_empty() {
+                ProviderEvent::Refusal { details } => {
+                    accounting.mark_accounted();
+                    let category = details
+                        .category()
+                        .map_or_else(|| "unspecified".to_owned(), str::to_owned);
+                    return Err(AgentError::Refusal(format!(
+                        "sandbox agent model declined the request (category: {category})"
+                    )));
+                }
+                // A search the provider already ran. There is nothing to dispatch
+                // and nothing to answer — the results are inside the completion
+                // being written — so the step records it and keeps reading. It is
+                // not a tool call this loop can consume, so it never competes with
+                // the one checkpoint a step may park.
+                ProviderEvent::ProviderExecutedToolCall {
+                    name,
+                    input,
+                    output,
+                    is_error,
+                    replay,
+                } => {
+                    accounting.mark_accounted();
+                    if provider_executed.len() < MAX_PROVIDER_EXECUTED_RECORDS
+                        && sandbox_provider_web_search_receipt_is_admissible(
+                            &request_origin,
+                            vendor_search_enabled,
+                            &name,
+                            &input,
+                            &output,
+                            is_error,
+                            replay.as_ref(),
+                        )
+                    {
+                        provider_executed.push(ProviderExecutedCall {
+                            name,
+                            query: input
+                                .get("query")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                            is_error,
+                        });
+                    }
+                }
+                // Reasoning blocks exist for in-turn replay, which this minimal
+                // loop does not do; dropping them degrades to pre-replay behavior.
+                ProviderEvent::Usage(reported) => {
+                    accounting.add_usage(reported)?;
+                }
+                ProviderEvent::ReasoningDelta { .. } | ProviderEvent::ReasoningBlock { .. } => {
+                    accounting.mark_accounted();
+                }
+                // The stream broke mid-flight, so `text` and `arguments` are both
+                // possibly truncated. Fail under the classified provider error
+                // instead of treating the fragment as a result.
+                ProviderEvent::Failed { error } => return Err(error.into_agent_error()),
+                _ => {
                     return Err(AgentError::msg(
-                        "sandbox agent stopped with an incomplete tool call",
-                    ));
+                        "sandbox agent provider emitted an unsupported event",
+                    ))
                 }
-                if text.trim().is_empty() {
-                    return Err(AgentError::msg(
-                        "sandbox agent produced an empty final result",
-                    ));
-                }
-                return Ok(SandboxStep {
-                    narration: String::new(),
-                    completion: SandboxCompletion::Final(text),
-                    provider_executed,
-                });
-            }
-            ProviderEvent::Refusal { details } => {
-                let category = details
-                    .category()
-                    .map_or_else(|| "unspecified".to_owned(), str::to_owned);
-                return Err(AgentError::Refusal(format!(
-                    "sandbox agent model declined the request (category: {category})"
-                )));
-            }
-            // A search the provider already ran. There is nothing to dispatch
-            // and nothing to answer — the results are inside the completion
-            // being written — so the step records it and keeps reading. It is
-            // not a tool call this loop can consume, so it never competes with
-            // the one checkpoint a step may park.
-            ProviderEvent::ProviderExecutedToolCall {
-                name,
-                input,
-                is_error,
-                ..
-            } => {
-                if provider_executed.len() < MAX_PROVIDER_EXECUTED_RECORDS {
-                    provider_executed.push(ProviderExecutedCall {
-                        name,
-                        query: input
-                            .get("query")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned),
-                        is_error,
-                    });
-                }
-            }
-            // Reasoning blocks exist for in-turn replay, which this minimal
-            // loop does not do; dropping them degrades to pre-replay behavior.
-            ProviderEvent::ReasoningDelta { .. }
-            | ProviderEvent::ReasoningBlock { .. }
-            | ProviderEvent::Usage(_) => {}
-            // The stream broke mid-flight, so `text` and `arguments` are both
-            // possibly truncated. Fail under the classified provider error
-            // instead of treating the fragment as a result.
-            ProviderEvent::Failed { error } => return Err(error.into_agent_error()),
-            _ => {
-                return Err(AgentError::msg(
-                    "sandbox agent provider emitted an unsupported event",
-                ))
             }
         }
+        Err(AgentError::msg(
+            "sandbox agent provider stream ended without a stop event",
+        ))
     }
-    Err(AgentError::msg(
-        "sandbox agent provider stream ended without a stop event",
-    ))
+    .await;
+    let accounting = accounting.snapshot();
+    SandboxStepAttempt {
+        outcome,
+        usage: accounting.usage,
+        account: accounting.account,
+    }
 }
 
 pub(super) fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {

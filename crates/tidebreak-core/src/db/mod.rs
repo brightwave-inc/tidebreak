@@ -34,14 +34,15 @@ use crate::local_app::{
 #[cfg(test)]
 use crate::model::Role;
 use crate::model::{
-    validate_project_root_projection, AgentRun, AgentRunInboxEntry, AgentRunTier,
-    AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement, BlobRetirementStatus,
-    Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment, MessageDocumentAttachment,
-    NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn, ReasoningEffort,
-    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
-    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnAdmissionLease,
-    TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
+    validate_project_root_projection, AgentRun, AgentRunExecutionLocation, AgentRunInboxEntry,
+    AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
+    BlobRetirementStatus, Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
+    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall,
+    SandboxToolCallParkEntry, SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution,
+    TurnAdmissionLease, TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
+    MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(test)]
 use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
@@ -59,10 +60,11 @@ use crate::storage::{
     JournaledTurnOutcome, JournaledTurnSteerOutcome, MoveChatOutcome, OperationClaimOutcome,
     OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PromoteQueuedTurnOutcome,
-    RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome,
-    RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome,
-    ResolveSandboxToolCallOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
-    RetrySandboxToolCallOutcome, Store, SubmitAgentRunResultOutcome, TurnLeaseFence,
+    RecordAgentRunModelStepOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
+    ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveToolCallOutcome,
+    ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, Store,
+    SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
 
 mod ops;
@@ -1067,6 +1069,40 @@ impl Store for DbStore {
         ops::sandbox_provision::begin(self, run_id, tag, window_expires_at, admission).await
     }
 
+    async fn begin_sandbox_provision_for_agent_run(
+        &self,
+        run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+        tag: &str,
+        window_expires_at: chrono::DateTime<Utc>,
+        admission: crate::storage::SandboxAdmissionMode,
+    ) -> Result<Option<crate::storage::BeginSandboxProvisionOutcome>> {
+        ops::sandbox_provision::begin_for_agent_run(
+            self,
+            run_id,
+            lease_token,
+            tag,
+            window_expires_at,
+            admission,
+        )
+        .await
+    }
+
+    async fn validate_agent_run_execution(
+        &self,
+        run_id: AgentRunId,
+        lease_token: uuid::Uuid,
+        execution_location: AgentRunExecutionLocation,
+    ) -> Result<bool> {
+        ops::sandbox_provision::validate_agent_run_execution(
+            self,
+            run_id,
+            lease_token,
+            execution_location,
+        )
+        .await
+    }
+
     async fn commit_sandbox_provision_handle(
         &self,
         run_id: uuid::Uuid,
@@ -1148,6 +1184,25 @@ impl Store for DbStore {
         ops::agent_run::list_agent_runs(self, chat_id).await
     }
 
+    async fn record_agent_run_model_step(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        expected_model_steps: i32,
+        expected_usage: crate::Usage,
+        usage: crate::Usage,
+    ) -> Result<RecordAgentRunModelStepOutcome> {
+        ops::agent_run::record_agent_run_model_step(
+            self,
+            id,
+            lease_token,
+            expected_model_steps,
+            expected_usage,
+            usage,
+        )
+        .await
+    }
+
     async fn get_agent_run_result(&self, id: AgentRunId) -> Result<Option<crate::AgentRunResult>> {
         ops::agent_run::get_agent_run_result(self, id).await
     }
@@ -1194,6 +1249,21 @@ impl Store for DbStore {
         lease_duration: chrono::Duration,
     ) -> Result<bool> {
         ops::agent_run::heartbeat_agent_run(self, id, lease_token, lease_duration).await
+    }
+
+    async fn renew_agent_run_cancellation_finalization(
+        &self,
+        id: AgentRunId,
+        lease_token: uuid::Uuid,
+        lease_duration: chrono::Duration,
+    ) -> Result<bool> {
+        ops::agent_run::renew_agent_run_cancellation_finalization(
+            self,
+            id,
+            lease_token,
+            lease_duration,
+        )
+        .await
     }
 
     async fn park_agent_run_for_sandbox_tool_calls(
@@ -1708,6 +1778,7 @@ impl Store for DbStore {
         expected_steer_revision: i64,
         now: chrono::DateTime<Utc>,
         output: &Message,
+        model_steps: i32,
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -1718,6 +1789,7 @@ impl Store for DbStore {
             expected_steer_revision,
             now,
             output,
+            model_steps,
             usage,
             stop_reason,
         )
@@ -1732,6 +1804,7 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         output: &Message,
         citations: &[crate::AssistantCitationInput],
+        model_steps: i32,
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -1743,6 +1816,7 @@ impl Store for DbStore {
             now,
             output,
             citations,
+            model_steps,
             usage,
             stop_reason,
         )
@@ -1757,6 +1831,7 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         output: &Message,
         citations: &[crate::AssistantCitationInput],
+        model_steps: i32,
         usage: Usage,
         refusal: crate::RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
@@ -1768,6 +1843,7 @@ impl Store for DbStore {
             now,
             output,
             citations,
+            model_steps,
             usage,
             refusal,
         )
@@ -1854,6 +1930,7 @@ impl Store for DbStore {
         id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
+        model_steps: i32,
         usage: Usage,
         output: Option<&Message>,
         citations: &[crate::AssistantCitationInput],
@@ -1863,6 +1940,7 @@ impl Store for DbStore {
             id,
             lease_token,
             now,
+            model_steps,
             usage,
             output,
             citations,
@@ -1943,6 +2021,27 @@ impl Store for DbStore {
 
     async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
         ops::message_attachment::list_for_chat(self, chat_id).await
+    }
+
+    async fn publish_chat_image(&self, chat_id: ChatId, image: &ImageRef) -> Result<bool> {
+        ops::chat_image_publication::publish(self, chat_id, image, None).await
+    }
+
+    async fn publish_chat_image_scoped(
+        &self,
+        owner: &OwnerId,
+        chat_id: ChatId,
+        image: &ImageRef,
+    ) -> Result<bool> {
+        ops::chat_image_publication::publish(self, chat_id, image, Some(owner)).await
+    }
+
+    async fn get_published_chat_image(
+        &self,
+        chat_id: ChatId,
+        blob_id: uuid::Uuid,
+    ) -> Result<Option<ImageRef>> {
+        ops::chat_image_publication::get(self, chat_id, blob_id).await
     }
 
     async fn list_message_document_attachments(

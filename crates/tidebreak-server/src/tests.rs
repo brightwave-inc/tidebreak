@@ -1243,6 +1243,7 @@ impl Store for PauseTerminalStore {
         expected_steer_revision: i64,
         now: chrono::DateTime<chrono::Utc>,
         output: &Message,
+        model_steps: i32,
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<tidebreak_core::JournaledTurnOutcome<tidebreak_core::CompleteTurnRunOutcome>>>
@@ -1264,6 +1265,7 @@ impl Store for PauseTerminalStore {
                 expected_steer_revision,
                 now,
                 output,
+                model_steps,
                 usage,
                 stop_reason,
             )
@@ -1380,6 +1382,7 @@ impl Store for PauseTerminalStore {
         id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
+        model_steps: i32,
         usage: Usage,
         output: Option<&tidebreak_core::Message>,
         citations: &[tidebreak_core::AssistantCitationInput],
@@ -1397,6 +1400,7 @@ impl Store for PauseTerminalStore {
                 id,
                 lease_token,
                 now,
+                model_steps,
                 usage,
                 output,
                 citations,

@@ -152,6 +152,15 @@ export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, t
  */
 code_execution_provider: CodeExecutionProviderSnapshot, status: AgentRunStatus, 
 /**
+ * Completed provider calls accumulated across every attempt.
+ */
+model_steps: number, 
+/**
+ * Disjoint provider usage accumulated across every attempt. Providers
+ * without cache telemetry leave both cache fields at zero.
+ */
+usage: AgentRunUsageSnapshot, 
+/**
  * The exact bounded task delegated by the visible spawn step.
  */
 task: string | null, started_at: string | null, finished_at: string | null, 
@@ -241,6 +250,11 @@ current: string | null, updated_at: string, };
  * location could exist.
  */
 export type AgentRunTier = "foreground" | "background";
+
+/**
+ * Renderer-safe disjoint token accounting for one background run.
+ */
+export type AgentRunUsageSnapshot = { input_tokens: number, output_tokens: number, cache_read_input_tokens: number, cache_creation_input_tokens: number, };
 
 /**
  * One question as it was asked, with what the reader chose.
@@ -2142,6 +2156,11 @@ grant_rungs: Array<ApprovalGrantRung>,
  */
 preview?: ToolActionPreview, } | { "type": "approval_decided", call_id: CallId, approved: boolean, } | { "type": "tool_call_completed", call_id: CallId, status: RendererToolStatus, 
 /**
+ * A bounded, server-authored reason the renderer can act on without
+ * receiving model-facing output or executor diagnostics.
+ */
+failure?: RendererToolFailure, 
+/**
  * What the call did, when its tool projects it. Approval is not the
  * only moment a person needs to see the action.
  */
@@ -2203,6 +2222,12 @@ export type RendererModelIdentity = { id: string, provider: ProviderKind, };
 export type RendererRefusal = { category: string | null, partial_output: boolean, };
 
 export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, replayed?: boolean, };
+
+export type RendererToolFailure = { code: RendererToolFailureCode, reason: RendererToolFailureReason, };
+
+export type RendererToolFailureCode = "executor_unavailable";
+
+export type RendererToolFailureReason = "lease_expired";
 
 /**
  * A tool name the renderer is allowed to present.

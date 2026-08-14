@@ -130,6 +130,36 @@ pub(super) fn agent_run_table() -> TableCreateStatement {
                 .default(0),
         )
         .col(
+            ColumnDef::new(AgentRun::ModelSteps)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRun::InputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRun::OutputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRun::CacheReadInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRun::CacheCreationInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
             ColumnDef::new(AgentRun::AvailableAt)
                 .timestamp_with_time_zone()
                 .not_null(),
@@ -218,6 +248,11 @@ pub(super) fn agent_run_table() -> TableCreateStatement {
         .check(agent_run_lease_check())
         .check(agent_run_finished_check())
         .check(agent_run_error_check())
+        .check(Expr::col(AgentRun::ModelSteps).between(0, i32::MAX))
+        .check(Expr::col(AgentRun::InputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRun::OutputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRun::CacheReadInputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRun::CacheCreationInputTokens).between(0, i64::from(u32::MAX)))
         .check(
             Expr::col(AgentRun::LastErrorDetail)
                 .is_null()
@@ -463,6 +498,36 @@ pub(super) fn agent_run_result_table() -> TableCreateStatement {
         )
         .col(ColumnDef::new(AgentRunResult::Text).text().not_null())
         .col(
+            ColumnDef::new(AgentRunResult::ModelSteps)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRunResult::InputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRunResult::OutputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRunResult::CacheReadInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(AgentRunResult::CacheCreationInputTokens)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
             ColumnDef::new(AgentRunResult::SubmittedAt)
                 .timestamp_with_time_zone()
                 .not_null(),
@@ -503,6 +568,11 @@ pub(super) fn agent_run_result_table() -> TableCreateStatement {
         )
         .check(Expr::col(AgentRunResult::AttemptCount).gte(1))
         .check(Expr::col(AgentRunResult::ClaimCount).gte(Expr::col(AgentRunResult::AttemptCount)))
+        .check(Expr::col(AgentRunResult::ModelSteps).between(0, i32::MAX))
+        .check(Expr::col(AgentRunResult::InputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRunResult::OutputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRunResult::CacheReadInputTokens).between(0, i64::from(u32::MAX)))
+        .check(Expr::col(AgentRunResult::CacheCreationInputTokens).between(0, i64::from(u32::MAX)))
         .check(
             Func::char_length(Expr::col(AgentRunResult::Text))
                 .between(1, crate::model::AgentRun::MAX_RESULT_LEN as i32),

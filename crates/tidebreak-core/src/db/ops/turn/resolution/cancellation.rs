@@ -165,7 +165,10 @@ async fn request_turn_cancellation_inner(
                 "waiting turn {id} has an invalid client call"
             )));
         }
-        if call.client_executor_id.is_none() {
+        let executor_lease_expired = call
+            .client_lease_expires_at
+            .is_some_and(|expires_at| expires_at <= now);
+        if call.client_executor_id.is_none() || executor_lease_expired {
             cancel_unclaimed_call = Some((wait, call));
         }
     }
@@ -233,12 +236,15 @@ async fn request_turn_cancellation_inner(
                 entities::tool_call::Column::ResolvedAt,
                 sea_orm::sea_query::Expr::value(Some(now)),
             )
+            .col_expr(
+                entities::tool_call::Column::ClientLeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
             .filter(entities::tool_call::Column::Id.eq(call.id))
             .filter(
                 entities::tool_call::Column::Status
                     .eq(crate::model::ToolCallStatus::Pending.as_str()),
             )
-            .filter(entities::tool_call::Column::ClientExecutorId.is_null())
             .exec(&transaction)
             .await
             .map_err(store_err)?;
@@ -360,7 +366,7 @@ pub(in crate::db) async fn finish_turn_cancellation(
     now: chrono::DateTime<Utc>,
 ) -> Result<Option<FinishTurnCancellationOutcome>> {
     Ok(
-        finish_turn_cancellation_inner(store, id, lease_token, now, None, None, &[])
+        finish_turn_cancellation_inner(store, id, lease_token, now, None, None, None, &[])
             .await?
             .map(|resolution| resolution.outcome),
     )
@@ -372,13 +378,23 @@ pub(in crate::db) async fn finish_turn_cancellation_and_append_event(
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
+    model_steps: i32,
     usage: Usage,
     output: Option<&Message>,
     citations: &[crate::AssistantCitationInput],
 ) -> Result<Option<JournaledTurnOutcome<FinishTurnCancellationOutcome>>> {
     let event = AgentEvent::TurnCancelled { usage };
-    finish_turn_cancellation_inner(store, id, lease_token, now, Some(&event), output, citations)
-        .await
+    finish_turn_cancellation_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        Some(model_steps),
+        Some(&event),
+        output,
+        citations,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -387,6 +403,7 @@ async fn finish_turn_cancellation_inner(
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
+    terminal_model_steps: Option<i32>,
     terminal_event: Option<&AgentEvent>,
     output: Option<&Message>,
     citations: &[crate::AssistantCitationInput],
@@ -401,7 +418,7 @@ async fn finish_turn_cancellation_inner(
         validate_turn_output(id, lease_token, output)?;
         super::super::super::citation::validate_assistant_message(output, citations)?;
     }
-    let now = canonical_db_timestamp(now)?;
+    let requested_at = canonical_db_timestamp(now)?;
     let journal_chat_id = journal_chat_id(store, id, terminal_event.is_some()).await?;
     if terminal_event.is_some() && journal_chat_id.is_none() {
         return Ok(None);
@@ -418,6 +435,17 @@ async fn finish_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
+    // The cancellation request may have stamped `updated_at` from the
+    // database clock. In SQLite that clock is deliberately rounded to the end
+    // of the current millisecond, so a caller's `Utc::now()` from the same
+    // millisecond can compare earlier even though this acknowledgement happens
+    // afterwards. Resolve operational time after the locks, just as the
+    // request path does, so the exact owning worker cannot lose to clock-source
+    // granularity.
+    let now = std::cmp::max(
+        requested_at,
+        super::super::super::agent_run::database_now(&transaction).await?,
+    );
     let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
@@ -439,6 +467,16 @@ async fn finish_turn_cancellation_inner(
         && turn.attempt_count == claim.attempt_count
         && turn.claim_count == claim.claim_count
     {
+        if terminal_model_steps.is_some_and(|model_steps| model_steps != turn.model_steps) {
+            return Err(AgentError::Store(
+                "exact cancellation retry changed terminal model steps".into(),
+            ));
+        }
+        if !exact_cancellation_output_on(&transaction, &turn, output, citations).await? {
+            return Err(AgentError::Store(format!(
+                "turn {id} was already cancelled with different output"
+            )));
+        }
         let sequenced_event =
             exact_terminal_event_on(&transaction, id, Some(lease_token), terminal_event).await?;
         let turn = turn_run_from_model(turn)?;
@@ -459,6 +497,9 @@ async fn finish_turn_cancellation_inner(
     }
     if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
         validate_terminal_usage(*usage, super::super::usage_from_turn_model(&turn)?)?;
+    }
+    if let Some(model_steps) = terminal_model_steps {
+        validate_terminal_model_steps(model_steps, turn.model_steps)?;
     }
 
     super::super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now)
@@ -563,6 +604,12 @@ async fn finish_turn_cancellation_inner(
                 sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
             );
     }
+    if let Some(model_steps) = terminal_model_steps {
+        cancelled = cancelled.col_expr(
+            entities::turn_run::Column::ModelSteps,
+            sea_orm::sea_query::Expr::value(model_steps),
+        );
+    }
     let cancelled = cancelled
         .filter(entities::turn_run::Column::Id.eq(id.0))
         .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
@@ -599,6 +646,25 @@ async fn finish_turn_cancellation_inner(
         outcome: FinishTurnCancellationOutcome::Cancelled(cancelled),
         terminal_event: sequenced_event,
     }))
+}
+
+async fn exact_cancellation_output_on<C>(
+    conn: &C,
+    turn: &entities::turn_run::Model,
+    output: Option<&Message>,
+    citations: &[crate::AssistantCitationInput],
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    match (turn.output_message_id, output) {
+        (None, None) => Ok(citations.is_empty()),
+        (Some(message_id), Some(output)) if message_id == output.id.0 => {
+            Ok(exact_completed_output_on(conn, output).await?
+                && exact_completed_citations_on(conn, output, citations).await?)
+        }
+        _ => Ok(false),
+    }
 }
 
 async fn existing_cancellation_event_on<C>(

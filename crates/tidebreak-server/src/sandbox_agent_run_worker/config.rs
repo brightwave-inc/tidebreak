@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -214,6 +214,15 @@ pub(crate) struct SandboxAgentRunWorker {
     pub(crate) attempts: Arc<SandboxAttemptGuard>,
     #[cfg(test)]
     pub(crate) fail_wait_set_resume_responses: Arc<AtomicUsize>,
+    /// Deterministic fault seam for cancellation-finalization accounting.
+    /// Production builds do not carry it; worker tests use it to hold the
+    /// exact post-quiescence CAS unavailable across the execution lease.
+    #[cfg(test)]
+    pub(crate) fail_cancellation_accounting: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) cancellation_accounting_failure_observed: Arc<Notify>,
+    #[cfg(test)]
+    pub(crate) cancellation_accounting_calls: Arc<AtomicUsize>,
     pub(crate) agent_config: AgentConfig,
     /// Each run receives a directory under this private root. The initial
     /// no-tools executor does not open it; retaining the boundary now means a

@@ -44,6 +44,106 @@ async fn get_native(router: &Router, bearer: &str, uri: &str) -> axum::response:
         .unwrap()
 }
 
+#[tokio::test]
+async fn scoped_local_import_publishes_chat_bytes_without_granting_bearer_only_access() {
+    let (router, token, _store, _dir) = test_app_with_executor_id(uuid::Uuid::new_v4()).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    for local_import in [None, Some("wrong-local-import")] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("/chats/{}/documents/raw?title=notes.md", chat.id))
+            .header(header::AUTHORIZATION, &bearer)
+            .header(header::CONTENT_TYPE, "text/markdown");
+        if let Some(token) = local_import {
+            request = request.header(crate::auth::LOCAL_IMPORT_HEADER, token);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from("hello")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let document = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/documents/raw?title=notes.md", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::LOCAL_IMPORT_HEADER,
+                    crate::state::TEST_LOCAL_IMPORT_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "text/markdown")
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(document.status(), StatusCode::CREATED);
+
+    let image = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/attachments/images", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::LOCAL_IMPORT_HEADER,
+                    crate::state::TEST_LOCAL_IMPORT_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(crate::routes::image_attachment::png_header(
+                    8, 8,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image.status(), StatusCode::CREATED);
+
+    let native = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/documents/raw?title=native.md", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "text/markdown")
+                .body(Body::from("native"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(native.status(), StatusCode::CREATED);
+
+    let client_execution = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/chats/{}/client-executions/pending/raw", chat.id))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(
+                    crate::auth::LOCAL_IMPORT_HEADER,
+                    crate::state::TEST_LOCAL_IMPORT_TOKEN,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(client_execution.status(), StatusCode::UNAUTHORIZED);
+}
+
 async fn assert_conflict_kind(response: axum::response::Response, expected: &str) {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = json_body(response).await;

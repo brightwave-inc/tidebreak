@@ -38,7 +38,11 @@ pub enum Server {
     /// Bind one in-process over the configured data directory (the default).
     Embed,
     /// Talk to one that is already running.
-    Attach { base: String, token: String },
+    Attach {
+        base: String,
+        token: String,
+        local_import_token: Option<String>,
+    },
 }
 
 impl Server {
@@ -72,6 +76,7 @@ impl Server {
             return Ok(Self::Attach {
                 base,
                 token: endpoint.token,
+                local_import_token: Some(endpoint.local_import_token),
             });
         }
         let url = match url_flag {
@@ -101,7 +106,11 @@ impl Server {
                      server printed at startup (or use --attach to read listen.json)"
                 ))
             })?;
-        Ok(Self::Attach { base, token })
+        Ok(Self::Attach {
+            base,
+            token,
+            local_import_token: None,
+        })
     }
 }
 
@@ -164,8 +173,16 @@ impl Session {
             // Nothing local is touched in attach mode beyond the optional
             // listen.json read that produced this choice: no log file, no
             // keychain. This process is only a client.
-            Server::Attach { base, token } => Ok(Self {
-                client: Client::attach(base.clone(), token)?,
+            Server::Attach {
+                base,
+                token,
+                local_import_token,
+            } => Ok(Self {
+                client: Client::attach_with_local_import(
+                    base.clone(),
+                    token,
+                    local_import_token.as_deref(),
+                )?,
                 serve: None,
                 client_executor_token: None,
             }),

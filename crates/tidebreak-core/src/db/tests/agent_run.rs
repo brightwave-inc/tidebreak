@@ -5,8 +5,9 @@ use crate::{
     MessageId, ParkSandboxToolCallOutcome, ParkTurnForAgentRunWaitSetOutcome,
     RequestAgentRunCancellationOutcome, RequestFolderAccessArgs, RequestedFolderCapability,
     RequestedFolderHint, ResolveSandboxToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Role,
-    SandboxToolCallRequest, Store, SubmitAgentRunResultOutcome, ToolCallResolution,
-    TurnCheckpointProgress, TurnId, TurnRunStatus, Usage,
+    SandboxAdmissionMode, SandboxProvisionState, SandboxToolCallRequest, Store,
+    SubmitAgentRunResultOutcome, ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus,
+    Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -82,6 +83,32 @@ pub(super) async fn admit_sandbox_call_for_test(
 
 async fn admit_sandbox_for_test(store: &DbStore, chat_id: ChatId, input: &str) -> AgentRun {
     admit_sandbox_call_for_test(store, chat_id, CallId::new(), input).await
+}
+
+async fn admit_sandbox_container_for_test(
+    store: &DbStore,
+    chat_id: ChatId,
+    input: &str,
+) -> AgentRun {
+    let (turn, lease) = live_turn_for_sandbox_test(store, chat_id).await;
+    match store
+        .admit_sandbox_container_agent_run(
+            turn.id,
+            CallId::new(),
+            input,
+            lease,
+            turn.steer_revision,
+            AgentRun::MAX_CONCURRENCY_LIMIT,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .expect("sandbox container test admission should resolve")
+    {
+        crate::AdmitSandboxAgentRunOutcome::Accepted { child, .. }
+        | crate::AdmitSandboxAgentRunOutcome::Existing { child, .. } => child,
+        outcome => panic!("unexpected sandbox container test admission: {outcome:?}"),
+    }
 }
 
 async fn force_expired_agent_lease(store: &DbStore, id: AgentRunId) {
@@ -774,9 +801,78 @@ async fn foreground_and_sandbox_runs_roundtrip_with_exact_idempotency() {
         Some(sandbox.clone())
     );
     let listed = store.list_agent_runs(chat.id).await.unwrap();
-    assert_eq!(listed.len(), 2);
-    assert!(listed.contains(&foreground));
+    assert_eq!(listed.len(), 1);
+    assert!(!listed.contains(&foreground));
     assert!(listed.contains(&sandbox));
+}
+
+#[tokio::test]
+async fn background_model_step_accounting_is_cumulative_and_retry_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child = admit_sandbox_for_test(&store, chat.id, "account this work").await;
+    assert_eq!(child.model_steps, 0);
+    assert_eq!(child.usage, Usage::default());
+
+    let lease = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_agent_run(lease, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("child should claim");
+    let usage = Usage {
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 3,
+    };
+    let recorded = store
+        .record_agent_run_model_step(child.id, lease, 0, Usage::default(), usage)
+        .await
+        .unwrap();
+    let crate::storage::RecordAgentRunModelStepOutcome::Recorded(recorded) = recorded else {
+        panic!("first accounting call should record");
+    };
+    assert_eq!(recorded.model_steps, 1);
+    assert_eq!(recorded.usage, usage);
+
+    assert!(matches!(
+        store
+            .record_agent_run_model_step(child.id, lease, 0, Usage::default(), usage)
+            .await
+            .unwrap(),
+        crate::storage::RecordAgentRunModelStepOutcome::Existing(ref run)
+            if run.model_steps == 1 && run.usage == usage
+    ));
+    assert!(matches!(
+        store
+            .record_agent_run_model_step(
+                child.id,
+                lease,
+                0,
+                Usage::default(),
+                Usage {
+                    output_tokens: 8,
+                    ..usage
+                },
+            )
+            .await
+            .unwrap(),
+        crate::storage::RecordAgentRunModelStepOutcome::IdentityConflict(_)
+    ));
+
+    let result = store
+        .submit_agent_run_result(child.id, lease, "done")
+        .await
+        .unwrap()
+        .expect("accounted child should complete");
+    let crate::SubmitAgentRunResultOutcome::Completed(result) = result else {
+        panic!("result should be newly committed");
+    };
+    assert_eq!(result.model_steps, 1);
+    assert_eq!(result.usage, usage);
+    assert_eq!(claimed.id, child.id);
 }
 
 #[tokio::test]
@@ -933,6 +1029,11 @@ async fn agent_run_schema_rejects_cross_chat_parentage() {
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         deadline_at: Set(Some(now + crate::model::AgentRun::DEFAULT_MAX_DURATION)),
         lease_token: Set(None),
@@ -989,6 +1090,11 @@ async fn scheduler_never_claims_a_sandbox_row_without_an_admission_receipt() {
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         deadline_at: Set(Some(now + AgentRun::DEFAULT_MAX_DURATION)),
         lease_token: Set(None),
@@ -1606,6 +1712,98 @@ async fn sandbox_cancellation_fences_running_work_and_recovers_exact_acknowledge
 }
 
 #[tokio::test]
+async fn cancellation_finalization_authority_reopens_an_expired_execution_lease() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let child = admit_sandbox_for_test(&store, chat.id, "finish after lease expiry").await;
+    let lease_token = uuid::Uuid::new_v4();
+    store
+        .claim_agent_run(lease_token, Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .expect("sandbox run should claim");
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(child.id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Requested(run))
+            if run.status == AgentRunStatus::Cancelling
+    ));
+
+    force_expired_agent_lease(&store, child.id).await;
+    assert!(!store
+        .heartbeat_agent_run(child.id, lease_token, Duration::minutes(1))
+        .await
+        .unwrap());
+    assert!(!store
+        .renew_agent_run_cancellation_finalization(
+            child.id,
+            uuid::Uuid::new_v4(),
+            Duration::minutes(1),
+        )
+        .await
+        .unwrap());
+
+    let usage = Usage {
+        input_tokens: 23,
+        output_tokens: 13,
+        cache_read_input_tokens: 7,
+        cache_creation_input_tokens: 5,
+    };
+    assert!(matches!(
+        store
+            .record_agent_run_model_step(child.id, lease_token, 0, Usage::default(), usage)
+            .await
+            .unwrap(),
+        crate::storage::RecordAgentRunModelStepOutcome::LeaseLost
+    ));
+    assert!(store
+        .renew_agent_run_cancellation_finalization(child.id, lease_token, Duration::minutes(1))
+        .await
+        .unwrap());
+    let renewed = store.get_agent_run(child.id).await.unwrap().unwrap();
+    assert_eq!(renewed.status, AgentRunStatus::Cancelling);
+    assert_eq!(renewed.lease_token, Some(lease_token));
+    assert!(renewed
+        .lease_expires_at
+        .is_some_and(|expiry| expiry > Utc::now()));
+
+    assert!(matches!(
+        store
+            .record_agent_run_model_step(child.id, lease_token, 0, Usage::default(), usage)
+            .await
+            .unwrap(),
+        crate::storage::RecordAgentRunModelStepOutcome::Recorded(run)
+            if run.model_steps == 1 && run.usage == usage
+    ));
+    let cancelled = match store
+        .finish_agent_run_cancellation(child.id, lease_token)
+        .await
+        .unwrap()
+        .expect("the exact cancellation authority should finish")
+    {
+        FinishAgentRunCancellationOutcome::Cancelled(run) => run,
+        outcome => panic!("unexpected cancellation outcome: {outcome:?}"),
+    };
+    assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
+    assert_eq!(cancelled.model_steps, 1);
+    assert_eq!(cancelled.usage, usage);
+    let result = store
+        .get_agent_run_result(child.id)
+        .await
+        .unwrap()
+        .expect("cancellation should snapshot final accounting");
+    assert_eq!(result.model_steps, 1);
+    assert_eq!(result.usage, usage);
+    assert!(!store
+        .renew_agent_run_cancellation_finalization(child.id, lease_token, Duration::minutes(1))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn operational_claim_count_cannot_use_cancellation_provenance_sentinel() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -2046,6 +2244,184 @@ async fn expired_cancelling_sandbox_run_is_reaped_and_releases_capacity() {
     assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
     assert!(cancelled.finished_at.is_some());
     assert_eq!(cancelled.lease_token, None);
+}
+
+#[tokio::test]
+async fn expired_cancelling_container_run_is_reaped_once_while_running_peer_remains_recoverable() {
+    let (_dir, store) = temp_store().await;
+    let cancelled_chat = sample_chat();
+    let recoverable_chat = sample_chat();
+    store.create_chat(&cancelled_chat).await.unwrap();
+    store.create_chat(&recoverable_chat).await.unwrap();
+
+    let cancelled = admit_sandbox_container_for_test(
+        &store,
+        cancelled_chat.id,
+        "cancel before the container driver crashes",
+    )
+    .await;
+    let cancelled_lease = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_container_agent_run(cancelled.id, cancelled_lease, Duration::minutes(5), 2)
+        .await
+        .unwrap()
+        .expect("container run should claim");
+    assert_eq!(claimed.id, cancelled.id);
+    assert!(matches!(
+        store
+            .begin_sandbox_provision(
+                cancelled.id.0,
+                "cancelled-container",
+                Utc::now() + Duration::minutes(5),
+                SandboxAdmissionMode::AttachedOnly,
+            )
+            .await
+            .unwrap(),
+        crate::BeginSandboxProvisionOutcome::Started
+    ));
+    assert!(store
+        .commit_sandbox_provision_handle(cancelled.id.0, "cancelled-handle")
+        .await
+        .unwrap());
+
+    let recoverable = admit_sandbox_container_for_test(
+        &store,
+        recoverable_chat.id,
+        "keep the ordinary expired container recoverable",
+    )
+    .await;
+    let recoverable_lease = uuid::Uuid::new_v4();
+    let recoverable_claim = store
+        .claim_container_agent_run(recoverable.id, recoverable_lease, Duration::minutes(5), 2)
+        .await
+        .unwrap()
+        .expect("peer container run should claim");
+    assert_eq!(recoverable_claim.id, recoverable.id);
+    assert!(matches!(
+        store
+            .begin_sandbox_provision(
+                recoverable.id.0,
+                "recoverable-container",
+                Utc::now() + Duration::minutes(5),
+                SandboxAdmissionMode::AttachedOnly,
+            )
+            .await
+            .unwrap(),
+        crate::BeginSandboxProvisionOutcome::Started
+    ));
+    assert!(store
+        .commit_sandbox_provision_handle(recoverable.id.0, "recoverable-handle")
+        .await
+        .unwrap());
+
+    assert!(matches!(
+        store
+            .request_agent_run_cancellation(cancelled.id)
+            .await
+            .unwrap(),
+        Some(RequestAgentRunCancellationOutcome::Requested(ref run))
+            if run.status == AgentRunStatus::Cancelling
+                && run.lease_token == Some(cancelled_lease)
+    ));
+    let receipt = crate::db::entities::agent_run_cancellation::Entity::find_by_id(cancelled.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .expect("live cancellation should freeze its receipt");
+    force_expired_agent_lease(&store, cancelled.id).await;
+    force_expired_agent_lease(&store, recoverable.id).await;
+
+    // One scheduler pass owns the expired cancellation even though it has no
+    // in-process work to claim. The ordinary expired container stays `running`
+    // for the container recovery pass.
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+
+    let terminal = store.get_agent_run(cancelled.id).await.unwrap().unwrap();
+    assert_eq!(terminal.status, AgentRunStatus::Cancelled);
+    assert!(terminal
+        .finished_at
+        .is_some_and(|finished_at| finished_at < terminal.deadline_at.unwrap()));
+    let result = store
+        .get_agent_run_result(cancelled.id)
+        .await
+        .unwrap()
+        .expect("reaper should write one cancellation result");
+    assert_eq!(result.lease_token, receipt.lease_token);
+    assert_eq!(result.attempt_count, receipt.attempt_count);
+    assert_eq!(result.claim_count, receipt.claim_count);
+    assert!(matches!(
+        result.payload,
+        crate::AgentRunResultPayload::Cancelled {
+            reason: crate::AgentRunCancellationReason::Requested
+        }
+    ));
+    let inbox = store
+        .list_agent_run_inbox(AgentRunId::foreground_for_chat(cancelled_chat.id))
+        .await
+        .unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].result, result);
+    assert_eq!(inbox[0].status, AgentRunInboxStatus::Pending);
+
+    let teardowns = store.list_sandbox_teardowns().await.unwrap();
+    assert_eq!(teardowns.len(), 1);
+    assert_eq!(teardowns[0].run_id, cancelled.id.0);
+    assert_eq!(teardowns[0].state, SandboxProvisionState::Teardown);
+    assert_eq!(
+        store
+            .get_sandbox_provision(recoverable.id.0)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        SandboxProvisionState::Committed
+    );
+
+    let reclaimable = store
+        .list_reclaimable_container_agent_runs(Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimable.iter().map(|run| run.id).collect::<Vec<_>>(),
+        vec![recoverable.id]
+    );
+    let recovered = store
+        .reclaim_container_agent_run(recoverable.id, uuid::Uuid::new_v4(), Duration::minutes(5))
+        .await
+        .unwrap()
+        .expect("ordinary expired container should remain recoverable");
+    assert_eq!(recovered.status, AgentRunStatus::Running);
+    assert_eq!(recovered.attempt_count, recoverable_claim.attempt_count);
+    assert_eq!(recovered.claim_count, recoverable_claim.claim_count + 1);
+
+    // Retrying the scheduler pass cannot duplicate the cancellation settlement
+    // or enqueue another teardown record.
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .list_agent_run_inbox(AgentRunId::foreground_for_chat(cancelled_chat.id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.list_sandbox_teardowns().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::db::entities::agent_run_result::Entity::find_by_id(cancelled.id.0)
+            .all(&store.conn)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2546,6 +2922,11 @@ async fn active_work_counts_gate_host_quiescence() {
         claim_count: Set(0),
         checkin_grants: Set(0),
         checkin_watermark: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
         available_at: Set(now),
         deadline_at: Set(Some(now + AgentRun::DEFAULT_MAX_DURATION)),
         lease_token: Set(None),

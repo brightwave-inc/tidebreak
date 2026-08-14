@@ -241,7 +241,7 @@ pub fn validate_ask_user_questions_arguments(arguments: &Value) -> bool {
 pub fn ask_user_questions_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<AskUserQuestionsArgs>(
         ASK_USER_QUESTIONS_TOOL,
-        "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Set question_type to single_select only when options are mutually exclusive; otherwise use multi_select. Enable allow_free_form when a custom answer is useful. The user may skip any or all questions, so proceed with reasonable defaults for omissions. Call this tool alone, with no assistant text or sibling tools.",
+        "Pause the current foreground turn and ask the user up to three short structured questions. Use stable question and option IDs. Set question_type to single_select only when options are mutually exclusive; otherwise use multi_select. Enable allow_free_form when a custom answer is useful. The user may skip any or all questions, so proceed with reasonable defaults for omissions. Call this tool alone, with no assistant text or sibling tools. If the question call is reported as not run, correct the reported violation and issue a fresh standalone ask_user_questions call.",
     )
 }
 
@@ -302,6 +302,9 @@ mod tests {
         let mut unknown = sample();
         unknown["questions"][0]["secret"] = Value::String("no".into());
         assert!(!validate_ask_user_questions_arguments(&unknown));
+        let description = ask_user_questions_tool_spec().description;
+        assert!(description.contains("reported as not run"));
+        assert!(description.contains("fresh standalone ask_user_questions call"));
     }
 
     #[test]

@@ -19,6 +19,11 @@ use super::{
     next_tool_history_order_on,
 };
 
+const CLIENT_EXECUTOR_UNAVAILABLE_RESULT: &str =
+    "The client executor became unavailable before the operation completed.";
+const CLIENT_EXECUTOR_LEASE_EXPIRED_CODE: &str = "client_executor_lease_expired";
+const CLIENT_EXECUTOR_LEASE_EXPIRED_DETAIL: &str = "The client execution lease expired.";
+
 pub(in crate::db) async fn accept_tool_call(
     store: &DbStore,
     call: &ToolCallRecord,
@@ -462,6 +467,7 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
     store: &DbStore,
     chat_id: ChatId,
 ) -> Result<Vec<ToolCallRecord>> {
+    expire_claimed_client_tool_calls(store, chat_id, Utc::now()).await?;
     let models = entities::tool_call::Entity::find()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
         .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
@@ -471,6 +477,54 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
         .await
         .map_err(store_err)?;
     models.into_iter().map(tool_call_from_model).collect()
+}
+
+async fn expire_claimed_client_tool_calls(
+    store: &DbStore,
+    chat_id: ChatId,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let now = canonical_db_timestamp(now)?;
+    let expired = entities::tool_call::Entity::find()
+        .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
+        .filter(entities::tool_call::Column::Execution.eq(ToolCallExecution::Client.as_str()))
+        .filter(entities::tool_call::Column::Status.eq(ToolCallStatus::Pending.as_str()))
+        .filter(entities::tool_call::Column::ClientLeaseToken.is_not_null())
+        .filter(entities::tool_call::Column::ClientLeaseExpiresAt.lte(now))
+        .order_by_asc(entities::tool_call::Column::HistoryOrder)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let resolution = ToolCallResolution::Failed {
+        result: CLIENT_EXECUTOR_UNAVAILABLE_RESULT.into(),
+        error_code: CLIENT_EXECUTOR_LEASE_EXPIRED_CODE.into(),
+        error_detail: Some(CLIENT_EXECUTOR_LEASE_EXPIRED_DETAIL.into()),
+    };
+    for call in expired {
+        let Some(lease_token) = call.client_lease_token else {
+            continue;
+        };
+        resolve_tool_call(
+            store,
+            CallId(call.id),
+            ResolutionAuthority::ExpiredClient {
+                chat_id,
+                lease_token,
+                now,
+            },
+            now,
+            &resolution,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        // A heartbeat or an independent resolution may win after the scan and
+        // before this call acquires its write lock. The resolution transaction
+        // rechecks the lease and terminal identity, so every non-error outcome
+        // is a benign race rather than a reason to fail authoritative polling.
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,21 +774,31 @@ fn client_completion_event(
     resolution: &ToolCallResolution,
     preview: Option<&crate::ToolResultPreview>,
 ) -> crate::AgentEvent {
+    let executor_lease_expired = matches!(
+        resolution,
+        ToolCallResolution::Failed { error_code, .. }
+            if error_code == CLIENT_EXECUTOR_LEASE_EXPIRED_CODE
+    );
+    let mut output = crate::ToolOutput {
+        content: resolution.result().to_owned(),
+        data: None,
+        // The renderer reads only this from the output, and it is what
+        // separates a finished call from a failed one.
+        is_error: resolution.status() != ToolCallStatus::Completed,
+        error_category: executor_lease_expired.then_some(crate::ToolErrorCategory::TransportFailed),
+        ui_view: None,
+        images: Vec::new(),
+        image_data: crate::ImageAttachments::new(),
+    };
+    if executor_lease_expired {
+        output = output.with_data(serde_json::json!({
+            "failure": "executor_unavailable",
+            "reason": "lease_expired",
+        }));
+    }
     crate::AgentEvent::ToolCallCompleted {
         call_id: CallId(resolved.id),
-        output: crate::ToolOutput {
-            content: resolution.result().to_owned(),
-            data: None,
-            // The renderer reads only this from the output, and it is what
-            // separates a finished call from a failed one.
-            is_error: resolution.status() != ToolCallStatus::Completed,
-            // Already recorded on the row; re-deriving one here would be a
-            // guess about a category the resolution never named.
-            error_category: None,
-            ui_view: None,
-            images: Vec::new(),
-            image_data: crate::ImageAttachments::new(),
-        },
+        output,
         action: crate::ToolActionPreview::build(&resolved.name, &resolved.arguments),
         result: preview.cloned(),
     }

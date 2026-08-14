@@ -21,6 +21,9 @@ async fn accept_turn_with_images(
     content: &str,
     images: &[ImageRef],
 ) -> TurnRun {
+    for image in images {
+        assert!(store.publish_chat_image(chat_id, image).await.unwrap());
+    }
     match store
         .accept_turn_with_attachments(TurnId::new(), chat_id, "gpt-5", content, images, &[], &[])
         .await
@@ -50,6 +53,64 @@ async fn accept_quiesced_turn_with_images(
         .await
         .unwrap();
     turn
+}
+
+#[tokio::test]
+async fn published_image_authority_is_chat_scoped_and_retry_idempotent() {
+    let (_dir, store) = temp_store().await;
+    let first_chat = sample_chat();
+    let second_chat = sample_chat();
+    store.create_chat(&first_chat).await.unwrap();
+    store.create_chat(&second_chat).await.unwrap();
+    let image = image_for(b"same published image bytes", 480, 320);
+
+    assert!(store
+        .publish_chat_image(first_chat.id, &image)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_published_chat_image(first_chat.id, image.blob_id)
+            .await
+            .unwrap(),
+        Some(image)
+    );
+    assert_eq!(
+        store
+            .get_published_chat_image(second_chat.id, image.blob_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Retrying the same publication recovers one reservation rather than
+    // creating another row or changing its descriptor.
+    assert!(store
+        .publish_chat_image(first_chat.id, &image)
+        .await
+        .unwrap());
+    assert_eq!(
+        entities::chat_image_publication::Entity::find()
+            .all(&store.conn)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The same content id can be published independently to another chat.
+    assert!(store
+        .publish_chat_image(second_chat.id, &image)
+        .await
+        .unwrap());
+    assert_eq!(
+        entities::chat_image_publication::Entity::find()
+            .all(&store.conn)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -104,6 +165,7 @@ async fn message_context_is_persisted_for_the_model_without_changing_visible_con
     store.create_chat(&chat).await.unwrap();
 
     let image = image_for(b"voice image", 640, 480);
+    assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
     let mut document = sample_document(None);
     document.chat_id = Some(chat.id);
     document.title = Some("meeting-notes.pdf".into());
@@ -288,6 +350,8 @@ async fn attachments_join_the_turn_idempotency_proof() {
     let turn_id = TurnId::new();
     let image = image_for(b"idempotent attachment bytes", 640, 480);
     let other = image_for(b"a different attachment", 640, 480);
+    assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
+    assert!(store.publish_chat_image(chat.id, &other).await.unwrap());
 
     let accepted = match store
         .accept_turn_with_attachments(turn_id, chat.id, "gpt-5", "describe", &[image], &[], &[])
@@ -348,6 +412,98 @@ async fn attachments_join_the_turn_idempotency_proof() {
     let attachments = store.list_message_attachments(chat.id).await.unwrap();
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].image, image);
+}
+
+async fn assert_rejected_attachment_left_no_turn_rows(store: &DbStore, chat_id: ChatId) {
+    assert!(store.list_messages(chat_id).await.unwrap().is_empty());
+    assert!(store
+        .list_message_attachments(chat_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store.list_turn_runs(chat_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_never_published_image_cannot_be_accepted() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let published = image_for(b"published first", 640, 480);
+    let unpublished = image_for(b"never published", 320, 240);
+    assert!(store.publish_chat_image(chat.id, &published).await.unwrap());
+
+    let error = store
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "describe",
+            &[published, unpublished],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("is not published for chat"));
+    assert_rejected_attachment_left_no_turn_rows(&store, chat.id).await;
+}
+
+#[tokio::test]
+async fn another_chats_publication_cannot_be_accepted() {
+    let (_dir, store) = temp_store().await;
+    let source = sample_chat();
+    let target = sample_chat();
+    store.create_chat(&source).await.unwrap();
+    store.create_chat(&target).await.unwrap();
+    let image = image_for(b"published elsewhere", 640, 480);
+    assert!(store.publish_chat_image(source.id, &image).await.unwrap());
+
+    let error = store
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            target.id,
+            "gpt-5",
+            "describe",
+            &[image],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("is not published for chat"));
+    assert_rejected_attachment_left_no_turn_rows(&store, target.id).await;
+}
+
+#[tokio::test]
+async fn a_conflicting_published_descriptor_cannot_be_accepted() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let published = image_for(b"descriptor conflict", 640, 480);
+    assert!(store.publish_chat_image(chat.id, &published).await.unwrap());
+    let conflicting = ImageRef {
+        width: published.width + 1,
+        ..published
+    };
+
+    let error = store
+        .accept_turn_with_attachments(
+            TurnId::new(),
+            chat.id,
+            "gpt-5",
+            "describe",
+            &[conflicting],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("conflicting metadata"));
+    assert_rejected_attachment_left_no_turn_rows(&store, chat.id).await;
 }
 
 #[tokio::test]
@@ -495,11 +651,16 @@ async fn drain_blob_retirement_claims(
 #[derive(Clone, Copy, Debug)]
 enum ReferenceClass {
     Document,
+    ChatImagePublication,
     MessageAttachment,
 }
 
 impl ReferenceClass {
-    const ALL: [Self; 2] = [Self::Document, Self::MessageAttachment];
+    const ALL: [Self; 3] = [
+        Self::Document,
+        Self::ChatImagePublication,
+        Self::MessageAttachment,
+    ];
 
     /// Create one live reference of this class to `blob`.
     async fn establish(self, store: &DbStore, blob: &DocumentBlob) {
@@ -511,6 +672,18 @@ impl ReferenceClass {
                     blob.clone(),
                 );
                 store.accept_document_source(&source).await.unwrap();
+            }
+            Self::ChatImagePublication => {
+                let chat = sample_chat();
+                store.create_chat(&chat).await.unwrap();
+                let image = ImageRef {
+                    blob_id: blob.id,
+                    media_type: ImageMediaType::Png,
+                    width: 800,
+                    height: 600,
+                    byte_len: blob.byte_len,
+                };
+                assert!(store.publish_chat_image(chat.id, &image).await.unwrap());
             }
             Self::MessageAttachment => {
                 let chat = sample_chat();
@@ -730,6 +903,66 @@ async fn deleting_a_chat_retires_only_the_attachment_blobs_it_still_owns() {
         drain_blob_retirement_claims(&store, later).await,
         vec![shared.blob_id],
         "the last reference dropping must free the shared blob"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_chat_releases_only_its_published_image_reservations() {
+    let (_dir, store) = temp_store().await;
+    let shared = image_for(b"published by two conversations", 800, 600);
+    let private = image_for(b"published by one conversation", 640, 480);
+
+    let kept = sample_chat();
+    store.create_chat(&kept).await.unwrap();
+    assert!(store.publish_chat_image(kept.id, &shared).await.unwrap());
+
+    let doomed = sample_chat();
+    store.create_chat(&doomed).await.unwrap();
+    assert!(store.publish_chat_image(doomed.id, &shared).await.unwrap());
+    assert!(store.publish_chat_image(doomed.id, &private).await.unwrap());
+
+    assert!(matches!(
+        store.delete_chat(doomed.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
+    assert_eq!(
+        store
+            .get_published_chat_image(doomed.id, shared.blob_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_published_chat_image(kept.id, shared.blob_id)
+            .await
+            .unwrap(),
+        Some(shared)
+    );
+
+    let now = Utc::now() + chrono::Duration::seconds(1);
+    assert_eq!(
+        drain_blob_retirement_claims(&store, now).await,
+        vec![private.blob_id],
+        "the surviving chat's reservation must keep the shared blob live"
+    );
+    assert_eq!(
+        store
+            .get_blob_retirement(shared.blob_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        BlobRetirementStatus::Cancelled
+    );
+
+    assert!(matches!(
+        store.delete_chat(kept.id).await.unwrap(),
+        DeleteChatOutcome::Deleted { .. }
+    ));
+    assert_eq!(
+        drain_blob_retirement_claims(&store, now + chrono::Duration::seconds(1)).await,
+        vec![shared.blob_id]
     );
 }
 
