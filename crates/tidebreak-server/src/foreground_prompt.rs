@@ -490,6 +490,9 @@ pub(crate) fn compose_for_surface(
         );
         if acting {
             lines.push(
+                "- Computer use is primarily for observing the user's apps. GUI control uses their real cursor, keyboard, and focus, so it is slower, more brittle, and more disruptive than reading or a dedicated tool; use it sparingly and only when a non-GUI path will not complete the request.",
+            );
+            lines.push(
                 "- Read before acting: confirm the target with `computer_read_app_content` or `computer_capture_screen` before `computer_click`, `computer_type_text`, or `computer_key_press`, and look again afterward to confirm the effect.",
             );
             lines.push(
@@ -500,6 +503,9 @@ pub(crate) fn compose_for_surface(
             );
             lines.push(
                 "- Acting may ask the user's approval once per app, and the user can stop control at any time; a refusal or a stop is a decision to respect, not an error to retry.",
+            );
+            lines.push(
+                "- When work in another app is finished, use `computer_return_to_tidebreak` so the user can see completion and continue the conversation.",
             );
         }
         push_section(&mut prompt, COMPUTER_USE_HEADING, &lines);

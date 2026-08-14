@@ -43,7 +43,7 @@ use tidebreak_host_broker::{
     extract_marks, is_blocked_control_bundle, Capability, ConsentMethod, ControlRequest,
     ControlResult, CuConfirmControlActionRequest, CuGrantAppRequest, CuResolveHandoffRequest,
     CuRevokeAppRequest, ElementTargetWire, ErrorCode, GrantSubject, Mark, OperationEnvelope,
-    OperationRequest, OperationResult, PROTOCOL_VERSION,
+    OperationRequest, OperationResult, SubjectKind, PROTOCOL_VERSION,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -112,6 +112,15 @@ pub(crate) struct ConsentPromptView {
     bundle_id: String,
     app_name: Option<String>,
     capability: ConsentCapability,
+    grant_scope: ConsentGrantScope,
+}
+
+/// The widest durable scope the consent prompt may offer truthfully.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsentGrantScope {
+    Chat,
+    Project,
 }
 
 /// One parked consequential-action confirmation, as the renderer needs it.
@@ -1023,6 +1032,10 @@ async fn dispatch_consent(
             .as_deref()
             .and_then(|bundle_id| cu.app_name(bundle_id)),
         capability,
+        grant_scope: match context.subject.kind() {
+            SubjectKind::Project => ConsentGrantScope::Project,
+            SubjectKind::Conversation => ConsentGrantScope::Chat,
+        },
     };
     let (sender, receiver) = oneshot::channel();
     {

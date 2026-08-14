@@ -18,6 +18,7 @@ export type ComputerUseConsentPrompt = {
   bundleId: string;
   appName: string | null;
   capability: ComputerUseCapability;
+  grantScope: "chat" | "project";
 };
 
 /** A consequential action the host broker is holding for confirmation. */
