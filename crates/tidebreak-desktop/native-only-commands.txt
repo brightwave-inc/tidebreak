@@ -51,7 +51,7 @@ stop_computer_use_control: sets the native halt latch that short-circuits contro
 resume_computer_use_control: clears that latch on an explicit user gesture.
 
 # Office converter and Node runtime installers
-convert_presentation_to_pdf: drives the user's locally installed LibreOffice.
+convert_office_to_pdf: drives the user's locally installed LibreOffice inside the desktop sandbox.
 install_presentation_converter: installs the local office converter onto this machine.
 cancel_presentation_converter_install: cancels that local installation.
 warm_presentation_converter: warms the locally installed converter process.
