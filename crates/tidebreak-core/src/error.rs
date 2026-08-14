@@ -113,6 +113,10 @@ pub enum AgentError {
     #[error("provider authentication failed: {0}")]
     Authentication(String),
 
+    /// The provider account or organization is not allowed to make the request.
+    #[error("provider account access denied: {0}")]
+    AccessDenied(String),
+
     /// The provider is rate limiting requests.
     #[error("provider rate limited the request: {0}")]
     RateLimited(ProviderFailure),
@@ -168,6 +172,7 @@ impl AgentError {
             Self::Secret(_) => "secret",
             Self::Provider(_) => "provider",
             Self::Authentication(_) => "authentication",
+            Self::AccessDenied(_) => "access_denied",
             Self::RateLimited(_) => "rate_limited",
             Self::Overloaded(_) => "overloaded",
             Self::InvalidRequest(_) => "invalid_request",
@@ -223,6 +228,7 @@ impl ProviderErrorInfo {
         let message = match error {
             AgentError::Provider(message)
             | AgentError::Authentication(message)
+            | AgentError::AccessDenied(message)
             | AgentError::InvalidRequest(message)
             | AgentError::Refusal(message)
             | AgentError::PromptTooLong(message) => message.clone(),
@@ -253,6 +259,7 @@ impl ProviderErrorInfo {
     pub fn into_agent_error(self) -> AgentError {
         match self.kind.as_str() {
             "authentication" => AgentError::Authentication(self.message),
+            "access_denied" => AgentError::AccessDenied(self.message),
             "rate_limited" => AgentError::RateLimited(self.message.into()),
             "overloaded" => AgentError::Overloaded(self.message.into()),
             "invalid_request" => AgentError::InvalidRequest(self.message),
@@ -306,6 +313,7 @@ mod tests {
         for (error, kind) in [
             (AgentError::Provider("p".into()), "provider"),
             (AgentError::Authentication("a".into()), "authentication"),
+            (AgentError::AccessDenied("d".into()), "access_denied"),
             (AgentError::RateLimited("r".into()), "rate_limited"),
             (AgentError::Overloaded("o".into()), "overloaded"),
             (AgentError::InvalidRequest("i".into()), "invalid_request"),

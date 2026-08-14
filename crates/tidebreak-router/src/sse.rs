@@ -597,8 +597,11 @@ pub fn classify_provider_error(
     {
         return AgentError::PromptTooLong(safe());
     }
-    if matches!(status, 401 | 403) || matches!(code, "authentication_error" | "invalid_api_key") {
+    if status == 401 || matches!(code, "authentication_error" | "invalid_api_key") {
         return AgentError::Authentication(safe());
+    }
+    if status == 403 {
+        return AgentError::AccessDenied(safe());
     }
     if status == 429 || code == "rate_limit_error" {
         return AgentError::RateLimited(ProviderFailure::new(safe(), retry_after));
@@ -923,6 +926,33 @@ mod tests {
                 r#"{"error":"invalid_request","error_description":"The requested model is unavailable"}"#,
             ),
             "openai returned 400 (invalid_request): The requested model is unavailable"
+        );
+    }
+
+    #[test]
+    fn bare_403_is_account_access_not_invalid_credentials() {
+        let error = classify_provider_error("xai", 403, "", None);
+        assert!(
+            matches!(error, tidebreak_core::error::AgentError::AccessDenied(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "provider account access denied: xai returned 403"
+        );
+
+        let explicit_bad_key = classify_provider_error(
+            "xai",
+            403,
+            r#"{"error":{"code":"invalid_api_key","message":"Incorrect API key"}}"#,
+            None,
+        );
+        assert!(
+            matches!(
+                explicit_bad_key,
+                tidebreak_core::error::AgentError::Authentication(_)
+            ),
+            "{explicit_bad_key:?}"
         );
     }
 

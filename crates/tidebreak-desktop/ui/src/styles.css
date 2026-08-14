@@ -897,20 +897,80 @@ body {
   text-align: left;
 }
 
-/* A failure carries its recovery, so the notice becomes a row: explanation on
-   the left, the one action it offers pinned to the right. */
 .message-turn-failure {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
   gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.5rem 0.5rem 0.5rem 0.7rem;
+  padding: 0.875rem;
+  border: 1px solid color-mix(in srgb, var(--destructive) 24%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--critical-background) 48%, var(--background));
+  color: var(--foreground);
+  text-align: left;
+}
+
+.message-turn-failure-icon {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.15rem;
+  color: var(--destructive);
 }
 
 .message-turn-failure-text {
   min-width: 0;
-  flex: 1 1 16rem;
+  max-width: 44rem;
+}
+
+.message-turn-failure-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.message-turn-failure-body {
+  margin-top: 0.25rem;
+  color: var(--muted-foreground);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.message-turn-failure-detail {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 0.55rem;
+  padding: 0.2rem 0.4rem;
+  overflow-wrap: anywhere;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 76%, transparent);
+  color: var(--foreground);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.message-turn-failure-model {
+  margin-top: 0.5rem;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+}
+
+.message-turn-failure-action {
+  align-self: center;
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .message-turn-failure {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .message-turn-failure-action {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 .message-notice.is-refusal {

@@ -579,9 +579,9 @@ describe("retryableTurn", () => {
     { id: "f1", role: "turn_failure", category },
   ];
 
-  // `auth` is the case worth pinning: a retry would present the same credential
-  // the provider just rejected, so offering the button lies about recovery.
-  it("offers a retry for every terminal category except auth", () => {
+  // Account access and authentication failures are stable until the provider
+  // account changes, so replaying the same turn would only repeat the refusal.
+  it("withholds retry for authentication and provider access failures", () => {
     expect(retryableTurn(failed("rate_limited"))).toMatchObject({
       failureId: "f1",
       text: "summarize this",
@@ -589,6 +589,7 @@ describe("retryableTurn", () => {
     expect(retryableTurn(failed("transient"))).not.toBeNull();
     expect(retryableTurn(failed("unknown"))).not.toBeNull();
     expect(retryableTurn(failed("auth"))).toBeNull();
+    expect(retryableTurn(failed("provider_access"))).toBeNull();
   });
 
   it("offers nothing once the failure is no longer the newest message", () => {

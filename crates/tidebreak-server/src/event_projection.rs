@@ -250,8 +250,13 @@ pub(crate) enum RendererAgentEvent {
     },
     TurnFailed {
         /// Why the turn failed, at the only resolution a client can act on.
-        /// The failure's `kind` and `message` stay internal.
+        /// The internal `kind` stays behind the server; allowlisted provider
+        /// diagnostics may cross separately as `detail`.
         category: TurnFailureCategory,
+        /// Bounded provider diagnostic, when the failure originated upstream.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         model: Option<RendererModelIdentity>,
@@ -306,6 +311,10 @@ pub(crate) enum TurnFailureCategory {
     /// The provider rejected our credentials. Retrying replays the same
     /// rejection; only fixing the key changes the outcome.
     Auth,
+    /// The provider account or organization denied access. This includes bare
+    /// 403 responses that may represent credits, billing, policy, entitlement,
+    /// or key-permission failures.
+    ProviderAccess,
     /// A transient fault below the turn — an upstream error, a storage or
     /// secret-store failure. Retrying is reasonable.
     Transient,
@@ -324,6 +333,7 @@ impl TurnFailureCategory {
         match kind {
             "rate_limited" | "overloaded" => Self::RateLimited,
             "authentication" | "missing_credential" => Self::Auth,
+            "access_denied" => Self::ProviderAccess,
             "provider" | "store" | "secret" | "empty_model_response" => Self::Transient,
             _ => Self::Unknown,
         }
@@ -333,6 +343,25 @@ impl TurnFailureCategory {
     pub(crate) const fn retries_may_succeed(self) -> bool {
         matches!(self, Self::RateLimited | Self::Transient)
     }
+}
+
+/// Only provider-originated diagnostics cross to the renderer. These strings
+/// have already passed the router's bounded message extraction and credential
+/// redaction; internal failures can carry host paths and stay server-side.
+pub(crate) fn renderer_provider_failure_detail(kind: &str, detail: &str) -> Option<String> {
+    matches!(
+        kind,
+        "authentication"
+            | "access_denied"
+            | "rate_limited"
+            | "overloaded"
+            | "invalid_request"
+            | "refusal"
+            | "prompt_too_long"
+            | "provider"
+    )
+    .then(|| detail.trim().to_owned())
+    .filter(|detail| !detail.is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -422,10 +451,14 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
                 refusal: refusal.into(),
                 usage: (*usage).into(),
             },
-            AgentEvent::TurnFailed { error } => RendererAgentEvent::TurnFailed {
-                category: TurnFailureCategory::from_kind(&error.kind),
-                model: None,
-            },
+            AgentEvent::TurnFailed { error } => {
+                let category = TurnFailureCategory::from_kind(&error.kind);
+                RendererAgentEvent::TurnFailed {
+                    category,
+                    detail: renderer_provider_failure_detail(&error.kind, &error.message),
+                    model: None,
+                }
+            }
             AgentEvent::TurnCancelled { usage } => RendererAgentEvent::TurnCancelled {
                 usage: (*usage).into(),
             },
@@ -673,34 +706,44 @@ mod tests {
         );
     }
 
-    /// A failure carries only the category and, when attached later from the
-    /// turn receipt, its safe model identity. Provider diagnostics stay behind.
+    /// A failure carries its category and a bounded provider diagnostic. Host
+    /// and internal failures still keep their detail behind the server.
     #[test]
-    fn failure_projection_carries_a_category_and_nothing_else() {
+    fn failure_projection_carries_category_and_provider_detail_only() {
         let cases = [
             (
                 AgentError::RateLimited("upstream said 429 for key sk-live".into()),
                 TurnFailureCategory::RateLimited,
+                true,
             ),
             (
                 AgentError::Authentication("invalid x-api-key sk-live".into()),
                 TurnFailureCategory::Auth,
+                true,
+            ),
+            (
+                AgentError::AccessDenied("xai returned 403".into()),
+                TurnFailureCategory::ProviderAccess,
+                true,
             ),
             (
                 AgentError::MissingCredential("no model provider is configured".into()),
                 TurnFailureCategory::Auth,
+                false,
             ),
             (
                 AgentError::Provider("upstream 503 from api.example".into()),
                 TurnFailureCategory::Transient,
+                true,
             ),
             (
                 AgentError::msg("max steps per turn were consumed"),
                 TurnFailureCategory::Unknown,
+                false,
             ),
         ];
 
-        for (error, expected) in cases {
+        for (error, expected, exposes_detail) in cases {
             let projected = RendererSequencedEvent::from(&SequencedEvent {
                 seq: 1,
                 event: AgentEvent::TurnFailed {
@@ -711,12 +754,17 @@ mod tests {
                 projected.event,
                 RendererAgentEvent::TurnFailed {
                     category: expected,
+                    detail: exposes_detail.then(|| error.to_string()),
                     model: None,
                 },
                 "{error}"
             );
             let encoded = serde_json::to_value(&projected).unwrap();
-            assert_eq!(encoded["event"].as_object().unwrap().len(), 2, "{encoded}");
+            assert_eq!(
+                encoded["event"].get("detail").is_some(),
+                exposes_detail,
+                "{encoded}"
+            );
         }
     }
 

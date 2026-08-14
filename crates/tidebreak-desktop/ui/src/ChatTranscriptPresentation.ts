@@ -60,6 +60,7 @@ export function presentChatTranscript(
                 id: `failure:${entry.id}`,
                 role: "turn_failure",
                 category: entry.failureCategory ?? "unknown",
+                detail: entry.failureDetail,
                 model: entry.failureModel,
                 invokedSkills:
                   entry.invokedSkills.length > 0

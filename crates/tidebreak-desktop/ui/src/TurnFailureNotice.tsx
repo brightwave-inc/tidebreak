@@ -1,4 +1,4 @@
-import { RefreshCw, Settings } from "lucide-react";
+import { AlertCircle, RefreshCw, Settings } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,7 @@ import { providerLabel } from "./ModelSelection";
  * rejection. That case points at settings instead.
  */
 export function turnFailureOffersRetry(category: TurnFailureCategory): boolean {
-  return category !== "auth";
+  return category !== "auth" && category !== "provider_access";
 }
 
 /**
@@ -28,16 +28,36 @@ export function turnFailureOffersRetry(category: TurnFailureCategory): boolean {
  * those retries were already spent — copy that asks the reader to be patient
  * would be describing something that has already finished happening.
  */
-export function turnFailureCopy(category: TurnFailureCategory): string {
+export function turnFailureCopy(
+  category: TurnFailureCategory,
+  provider = "The model provider",
+): { title: string; body: string } {
   switch (category) {
     case "rate_limited":
-      return "The model provider rate-limited this turn, and the automatic retries behind it are already spent. Sending it again may work once demand eases.";
+      return {
+        title: `${provider} is rate-limiting requests`,
+        body: "Automatic retries are already spent. Retry after demand or your provider quota resets.",
+      };
     case "auth":
-      return "The model provider rejected the credentials for this model. Sending the turn again would be rejected the same way — check the provider's API key in Settings.";
+      return {
+        title: `${provider} could not authenticate this request`,
+        body: "Check that the API key is present, active, and belongs to the account or organization you intended to use.",
+      };
+    case "provider_access":
+      return {
+        title: `${provider} denied access to this request`,
+        body: `This came from ${provider}, not Tidebreak. Common causes include exhausted credits or quota, billing or organization restrictions, missing model access, and key permissions.`,
+      };
     case "transient":
-      return "The connection to the model provider broke before the turn finished. Sending it again should pick up where this left off.";
+      return {
+        title: `The connection to ${provider} failed`,
+        body: "The turn ended before the provider finished responding. Retrying may succeed.",
+      };
     case "unknown":
-      return "The turn could not be completed, and the provider gave no reason we can act on. Sending it again may not help; if it keeps failing, check the provider's API key in Settings.";
+      return {
+        title: "This turn could not be completed",
+        body: "Tidebreak does not have a specific recovery for this failure. Retry once; if it repeats, use the detail below when troubleshooting.",
+      };
   }
 }
 
@@ -50,10 +70,12 @@ export function turnFailureCopy(category: TurnFailureCategory): string {
  */
 export function TurnFailureNotice({
   category,
+  detail,
   model,
   onRetry,
 }: {
   category: TurnFailureCategory;
+  detail?: string;
   model?: { id: string; provider: ProviderKind };
   onRetry?: () => void;
 }) {
@@ -61,16 +83,21 @@ export function TurnFailureNotice({
   // Settings sections are registered from a runtime table, so TanStack's
   // generated route union contains `/settings` but not each literal child.
   const providerSettingsPath: string = "/settings/providers";
+  const provider = model ? providerLabel(model.provider) : "The model provider";
+  const copy = turnFailureCopy(category, provider);
 
   return (
-    <div className="message-notice is-error message-turn-failure" role="alert">
+    <aside className="message-turn-failure" role="alert">
+      <AlertCircle className="message-turn-failure-icon" aria-hidden="true" />
       <div className="message-turn-failure-text">
+        <p className="message-turn-failure-title">{copy.title}</p>
+        <p className="message-turn-failure-body">{copy.body}</p>
+        {detail && <code className="message-turn-failure-detail">{detail}</code>}
         {model && (
-          <p className="text-muted-foreground mb-1 text-xs font-medium">
-            {model.id} · {providerLabel(model.provider)}
+          <p className="message-turn-failure-model">
+            {model.id} · {provider}
           </p>
         )}
-        <p>{turnFailureCopy(category)}</p>
       </div>
       {turnFailureOffersRetry(category) ? (
         onRetry && (
@@ -78,7 +105,7 @@ export function TurnFailureNotice({
             type="button"
             variant="outline"
             size="sm"
-            className="shrink-0"
+            className="message-turn-failure-action"
             onClick={onRetry}
           >
             <RefreshCw aria-hidden="true" />
@@ -90,13 +117,13 @@ export function TurnFailureNotice({
           type="button"
           variant="outline"
           size="sm"
-          className="shrink-0"
+          className="message-turn-failure-action"
           onClick={() => void navigate({ to: providerSettingsPath })}
         >
           <Settings aria-hidden="true" />
           Open provider settings
         </Button>
       )}
-    </div>
+    </aside>
   );
 }

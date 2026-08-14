@@ -521,6 +521,9 @@ pub struct ChatTerminalTurnSnapshot {
     pub failure_category: Option<crate::event_projection::TurnFailureCategory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub failure_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub failure_model: Option<crate::event_projection::RendererModelIdentity>,
     pub file_changes: Vec<ExecFileChangeSummary>,
     /// Skills the user explicitly invoked for this turn, in submitted order.
@@ -557,6 +560,12 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
         });
         let failure_model =
             failure_category.and_then(|_| crate::event_projection::model_identity(&snapshot.model));
+        let failure_detail = snapshot.failure_kind.as_deref().and_then(|kind| {
+            crate::event_projection::renderer_provider_failure_detail(
+                kind,
+                snapshot.failure_detail.as_deref().unwrap_or_default(),
+            )
+        });
         Self {
             turn_id: snapshot.turn_id,
             message_id: snapshot.message_id,
@@ -565,6 +574,7 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             reasoning: (!snapshot.reasoning.trim().is_empty()).then_some(snapshot.reasoning),
             refusal: snapshot.refusal.as_ref().map(Into::into),
             failure_category,
+            failure_detail,
             failure_model,
             file_changes: Vec::new(),
             invoked_skills: (!snapshot.invoked_skills.is_empty())
