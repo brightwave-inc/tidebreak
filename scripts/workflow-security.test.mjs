@@ -1072,6 +1072,7 @@ test("release caches restore only credential-free compiler products", () => {
   assert.ok(releaseBuildCache);
   assert.ok(warmBuildCache);
   assert.ok(warmBuildCacheSave);
+  const universalMacos = /--target universal-apple-darwin/.test(prepareJob);
 
   assert.match(prepareJob, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
@@ -1122,15 +1123,40 @@ test("release caches restore only credential-free compiler products", () => {
     warmBuildCacheSave,
   ]) {
     assert.match(cacheStep, /target\/release\/\.fingerprint/);
-    assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
-    assert.match(
-      cacheStep,
-      /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-desktop/,
-    );
-    assert.match(
-      cacheStep,
-      /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-host-broker/,
-    );
+    if (universalMacos) {
+      for (const target of [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+      ]) {
+        assert.match(cacheStep, new RegExp(`target/${target}/release/deps`));
+        assert.match(
+          cacheStep,
+          new RegExp(`target/${target}/release/tidebreak-desktop`),
+        );
+        assert.match(
+          cacheStep,
+          new RegExp(`target/${target}/release/tidebreak-host-broker`),
+        );
+        assert.match(
+          cacheStep,
+          new RegExp(`binaries/tidebreak-host-broker-${target}`),
+        );
+      }
+      assert.match(
+        cacheStep,
+        /binaries\/tidebreak-host-broker-universal-apple-darwin/,
+      );
+    } else {
+      assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
+      assert.match(
+        cacheStep,
+        /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-desktop/,
+      );
+      assert.match(
+        cacheStep,
+        /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-host-broker/,
+      );
+    }
     assert.doesNotMatch(cacheStep, /pdfium/i);
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
@@ -1155,12 +1181,16 @@ test("release caches restore only credential-free compiler products", () => {
   ]) {
     assert.match(
       restoreStep,
-      /macos-release-target-v4-\$\{\{ matrix\.arch \}\}-/,
+      universalMacos
+        ? /macos-release-target-v5-universal-/
+        : /macos-release-target-v4-\$\{\{ matrix\.arch \}\}-/,
       "unsigned product caches should be preferred when available",
     );
     assert.doesNotMatch(
       restoreStep,
-      /macos-release-(?:target|prepared)-v[123]-/,
+      universalMacos
+        ? /macos-release-(?:target|prepared)-v[1-4]-/
+        : /macos-release-(?:target|prepared)-v[123]-/,
       "older cache generations bake in runner-absolute checkout paths and must not be restored",
     );
   }
@@ -1171,8 +1201,12 @@ test("release caches restore only credential-free compiler products", () => {
   for (const restoreStep of [releasePrepareCache, warmBuildCache]) {
     assert.match(
       restoreStep,
-      /^\s*macos-release-target-v4-\$\{\{ matrix\.arch \}\}-$/m,
-      "credential-free jobs may fall back to any warmed cache for this arch",
+      universalMacos
+        ? /^\s*macos-release-target-v5-universal-$/m
+        : /^\s*macos-release-target-v4-\$\{\{ matrix\.arch \}\}-$/m,
+      universalMacos
+        ? "credential-free jobs may fall back to any warmed universal cache"
+        : "credential-free jobs may fall back to any warmed cache for this arch",
     );
   }
 
@@ -1199,12 +1233,21 @@ test("release caches restore only credential-free compiler products", () => {
     /- name: Discard restored product binaries[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
   assert.ok(discardProducts);
-  for (const product of [
-    /release\/tidebreak-desktop/,
-    /release\/tidebreak-host-broker/,
-    /libtidebreak_desktop_lib\./,
-    /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
-  ]) {
+  const discardedProducts = universalMacos
+    ? [
+        /aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin.*release\/tidebreak-desktop/,
+        /aarch64-apple-darwin,x86_64-apple-darwin.*release\/tidebreak-host-broker/,
+        /libtidebreak_desktop_lib\./,
+        /binaries\/tidebreak-host-broker-\{aarch64-apple-darwin,x86_64-apple-darwin\}/,
+        /binaries\/tidebreak-host-broker-universal-apple-darwin/,
+      ]
+    : [
+        /release\/tidebreak-desktop/,
+        /release\/tidebreak-host-broker/,
+        /libtidebreak_desktop_lib\./,
+        /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
+      ];
+  for (const product of discardedProducts) {
     assert.match(discardProducts, product);
   }
   assert.ok(
@@ -1363,6 +1406,9 @@ test("GitHub release downloads are copied from the hosted release", () => {
   // manifest, rather than a second copy built alongside the hosted release.
   assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
+  if (/Tidebreak-macos-universal\.dmg/.test(attachJob)) {
+    assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
+  }
   assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
   assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
@@ -1467,6 +1513,46 @@ test("macOS disk images are explicitly notarized and stapled", () => {
     release.indexOf("Notarize and staple the DMG") <
       release.indexOf("Verify and collect signed artifacts"),
   );
+});
+
+test("universal macOS release and staging packages contain both slices", () => {
+  const releaseBuild = workflowJob(workflows["release.yml"], "build_macos");
+  if (!/--target universal-apple-darwin/.test(releaseBuild)) {
+    return;
+  }
+
+  const stagingBuild = workflowJob(
+    workflows["staging-publish.yml"],
+    "build_macos_staging",
+  );
+  const warm = workflows["cache-macos.yml"];
+  const sidecarPreparation = readFileSync(
+    repositoryFile("crates/tidebreak-desktop/scripts/prepare-sidecar.mjs"),
+    "utf8",
+  );
+
+  assert.match(sidecarPreparation, /triple === "universal-apple-darwin"/);
+  assert.match(
+    sidecarPreparation,
+    /\["aarch64-apple-darwin", "x86_64-apple-darwin"\]/,
+  );
+  assert.match(
+    sidecarPreparation,
+    /"lipo",\s*\["-create", \.\.\.stagedSidecars, "-output", destination\]/,
+  );
+
+  for (const job of [releaseBuild, stagingBuild, warm]) {
+    assert.match(job, /rustup target add aarch64-apple-darwin x86_64-apple-darwin/);
+    assert.match(job, /--target universal-apple-darwin/);
+  }
+
+  for (const job of [releaseBuild, stagingBuild]) {
+    assert.match(job, /lipo -archs "\$app_path\/Contents\/MacOS\/\$executable"/);
+    assert.match(job, /\$binary_arches" = \*arm64\*/);
+    assert.match(job, /\$binary_arches" = \*x86_64\*/);
+    assert.match(job, /Contents\/MacOS\/tidebreak-host-broker/);
+    assert.match(job, /sidecar_arches="\$\(lipo -archs "\$sidecar"\)"/);
+  }
 });
 
 test("the packaged updater trusts the production signing key and endpoint", () => {
