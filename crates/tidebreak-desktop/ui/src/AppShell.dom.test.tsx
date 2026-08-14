@@ -305,8 +305,8 @@ describe("app shell", () => {
   });
 
   it("marks a parked conversation other than the one that is open", async () => {
-    listInbox.mockResolvedValue([parked("chat-2", "call-parked")]);
     const user = userEvent.setup();
+    listInbox.mockResolvedValue([parked("chat-2", "call-parked")]);
     await mountApp({ at: "/c/chat-1" });
 
     // The row itself carries the marker while the list is showing…
@@ -401,8 +401,8 @@ describe("app shell", () => {
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
 
-    // Chat-scoped places open from the chat's own chip, not the rail.
-    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
+    // Chat-scoped places are open by default while the conversation owns the
+    // canvas, rather than being hidden in the rail.
     await user.click(await screen.findByRole("button", { name: /Folders/ }));
 
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
@@ -494,20 +494,17 @@ describe("app shell", () => {
     expect(await screen.findByText("No chat title contains that.")).toBeInTheDocument();
   });
 
-  it("keeps chat-scoped places behind the chat's own chip", async () => {
+  it("keeps chat-scoped places with the conversation", async () => {
     await mountApp();
     await screen.findByText("How can I help?");
     // Not disabled — absent. Home has no conversation for the chip to
     // describe, and the rail itself carries nothing chat-scoped anymore.
-    expect(
-      screen.queryByRole("button", { name: /^Chat activity/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Chat activity")).not.toBeInTheDocument();
     cleanup();
 
-    const user = userEvent.setup();
     await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
+    expect(screen.getByLabelText("Chat activity")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /Outputs/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /Folders/ })).toBeEnabled();
   });

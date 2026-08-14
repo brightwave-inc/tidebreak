@@ -854,39 +854,40 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   return (
     <RouteFrame sidebar={<AppSidebar chat={chat} />}>
-    <div className="mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
-        <ChatHeaderTitle chat={chat} />
-        <div className="flex shrink-0 items-center gap-2">
-          <ChatStatusChip
-            outputCount={deliverables.length}
-            folders={folders.items}
-            runs={chatAgentRuns}
-            onOpenOutputs={() => openPanel({ type: "outputs" })}
-            onOpenFolders={() => openPanel({ type: "folders" })}
-            onOpenPermissions={() => openPanel({ type: "permissions" })}
-            onOpenAgents={() => openPanel({ type: "agents" })}
-          />
-        </div>
-      </header>
-      <PinnedOutputsStrip
-        chatId={chatId}
-        outputs={deliverables}
-        panelOpen={layout.tabs.length > 0}
-        onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
-        onOpenOutputs={() => openPanel({ type: "outputs" })}
-      />
-      {/* Citations live in the transcript but open into the panel beside it,
-          so the way there is provided above both slots. */}
-      <SourceNavProvider value={sourceNav}>
-        <PanelLayout
-          layout={layout}
-          tabLabel={tabLabel}
-          renderChat={renderChat}
-          renderPanel={renderPanel}
+      <div className="relative mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
+        <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
+          <ChatHeaderTitle chat={chat} />
+          <div className="relative z-20 flex shrink-0 items-center gap-2 self-start">
+            <ChatStatusChip
+              compact={layout.tabs.length > 0}
+              outputCount={deliverables.length}
+              folders={folders.items}
+              runs={chatAgentRuns}
+              onOpenOutputs={() => openPanel({ type: "outputs" })}
+              onOpenFolders={() => openPanel({ type: "folders" })}
+              onOpenPermissions={() => openPanel({ type: "permissions" })}
+              onOpenAgents={() => openPanel({ type: "agents" })}
+            />
+          </div>
+        </header>
+        <PinnedOutputsStrip
+          chatId={chatId}
+          outputs={deliverables}
+          panelOpen={layout.tabs.length > 0}
+          onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
+          onOpenOutputs={() => openPanel({ type: "outputs" })}
         />
-      </SourceNavProvider>
-    </div>
+        {/* Citations live in the transcript but open into the panel beside it,
+            so the way there is provided above both slots. */}
+        <SourceNavProvider value={sourceNav}>
+          <PanelLayout
+            layout={layout}
+            tabLabel={tabLabel}
+            renderChat={renderChat}
+            renderPanel={renderPanel}
+          />
+        </SourceNavProvider>
+      </div>
     </RouteFrame>
   );
 }
