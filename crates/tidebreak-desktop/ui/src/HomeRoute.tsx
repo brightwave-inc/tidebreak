@@ -32,6 +32,10 @@ import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
+import {
+  FirstTaskWalkthrough,
+  shouldOfferFirstTaskWalkthrough,
+} from "./FirstTaskWalkthrough";
 
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
@@ -139,6 +143,10 @@ export function HomeRoute() {
     },
   );
   const [error, setError] = useState<string | null>(null);
+  const [walkthroughAvailable, setWalkthroughAvailable] = useState(
+    shouldOfferFirstTaskWalkthrough,
+  );
+  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
   const newChat = useNewChatSettings();
   // What the pickers show and the created chat will get: this visit's picks
   // over the server's sticky defaults. Only the explicit picks are sent; the
@@ -379,6 +387,17 @@ export function HomeRoute() {
             }}
             executionConfigClient={client}
             promptLibrary={promptLibrary}
+            heading={walkthroughAvailable ? "Welcome to Tidebreak" : undefined}
+            description={
+              walkthroughAvailable
+                ? "Choose how the agent works, add what it needs, and start with a real task."
+                : undefined
+            }
+            onStartWalkthrough={
+              walkthroughAvailable
+                ? () => setWalkthroughOpen(true)
+                : undefined
+            }
           />
         </div>
 
@@ -482,6 +501,13 @@ export function HomeRoute() {
         </div>
         </div>
       </div>
+      <FirstTaskWalkthrough
+        open={walkthroughOpen}
+        onClose={() => {
+          setWalkthroughOpen(false);
+          setWalkthroughAvailable(false);
+        }}
+      />
     </RouteFrame>
   );
 }

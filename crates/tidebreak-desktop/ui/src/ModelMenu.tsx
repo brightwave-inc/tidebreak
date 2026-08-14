@@ -420,6 +420,7 @@ export function ModelMenu({
           className="h-8 max-w-56 gap-2"
           disabled={disabled}
           aria-label={triggerLabel}
+          data-first-task-target="model"
           title={triggerLabel}
         >
           {pillModel ? (

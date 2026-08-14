@@ -290,7 +290,7 @@ describe("app shell", () => {
   it("opens on home rather than on a conversation", { timeout: 15000 }, async () => {
     const { router } = await mountApp();
 
-    expect(await screen.findByText("How can I help?")).toBeInTheDocument();
+    expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/");
     // Home used to create a chat on every cold start, leaving an empty one
     // behind whenever the reader did not use it.
@@ -335,7 +335,7 @@ describe("app shell", () => {
     // fine, so the shell stands and the failure is reported where the list
     // would be. The settled load also frees the deep link to redirect home
     // rather than wait on a fetch that already failed.
-    expect(await screen.findByText("How can I help?")).toBeInTheDocument();
+    expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.pathname).toBe("/"));
     expect(
       await screen.findByText(/Could not load chats/),
@@ -353,7 +353,7 @@ describe("app shell", () => {
   it("starts a conversation from the home composer and sends what was written", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp();
-    await screen.findByText("How can I help?");
+    await screen.findByText("Welcome to Tidebreak");
 
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
@@ -384,7 +384,7 @@ describe("app shell", () => {
   it("opens a conversation from the sidebar", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp();
-    await screen.findByText("How can I help?");
+    await screen.findByText("Welcome to Tidebreak");
 
     const chatList = screen.getByLabelText("Chats");
     const [row] = screen
@@ -496,7 +496,7 @@ describe("app shell", () => {
 
   it("keeps chat-scoped places with the conversation", async () => {
     await mountApp();
-    await screen.findByText("How can I help?");
+    await screen.findByText("Welcome to Tidebreak");
     // Not disabled — absent. Home has no conversation for the chip to
     // describe, and the rail itself carries nothing chat-scoped anymore.
     expect(screen.queryByLabelText("Chat activity")).not.toBeInTheDocument();
@@ -529,7 +529,7 @@ describe("app shell", () => {
   it("remembers the collapsed rail across a restart", async () => {
     const user = userEvent.setup();
     await mountApp();
-    await screen.findByText("How can I help?");
+    await screen.findByText("Welcome to Tidebreak");
 
     await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
 
@@ -618,7 +618,7 @@ describe("app shell", () => {
   it("creates a project from the dialog and opens a chat inside it", async () => {
     const user = userEvent.setup();
     const { router } = await mountApp();
-    await screen.findByText("How can I help?");
+    await screen.findByText("Welcome to Tidebreak");
 
     await user.click(screen.getByRole("button", { name: "New project" }));
     const name = await screen.findByRole("textbox", { name: "Project name" });

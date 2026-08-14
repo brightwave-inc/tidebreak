@@ -17,6 +17,7 @@ import {
 } from "./CodeExecutionDisclosure";
 import { Logomark } from "./Logomark";
 import type { PluginsApis } from "./plugins/pluginsApis";
+import { Button } from "@/components/ui/button";
 
 /**
  * What the welcome screen calls on the prompt library.
@@ -89,9 +90,15 @@ export function WelcomeState({
   onSelectPrompt,
   executionConfigClient,
   promptLibrary,
+  heading = "How can I help?",
+  description = "Ask a question, work through your files, or start a task.",
+  onStartWalkthrough,
 }: {
   onSelectPrompt?: (prompt: string) => void;
   executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
+  heading?: string;
+  description?: string;
+  onStartWalkthrough?: () => void;
   /**
    * The installed prompt library, when this surface offers it. Absent — or
    * empty, or still loading — the hardcoded starters stand, so an install with
@@ -172,12 +179,15 @@ export function WelcomeState({
         <Logomark />
       </span>
       <div className="welcome-copy">
-        <h2>How can I help?</h2>
-        <p>
-          Ask a question, work through your files, or start a task.
-        </p>
+        <h2>{heading}</h2>
+        <p>{description}</p>
         {managedExecutionOnly && <p>{MANAGED_EXECUTION_DISCLOSURE}</p>}
       </div>
+      {onStartWalkthrough && (
+        <Button type="button" size="sm" onClick={onStartWalkthrough}>
+          Set up your first task
+        </Button>
+      )}
       {onSelectPrompt && libraryPrompts.length > 0 && (
         <div className="welcome-prompts">
           {libraryPrompts.map((prompt) => (
