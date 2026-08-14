@@ -128,13 +128,15 @@ automatic.
    and curate the full-history result as described above.
 3. Complete the release-readiness review, but do **not** publish the draft in
    GitHub. Immutable releases cannot accept assets after publication.
-4. Open **Actions → Publish desktop release → Run workflow**, select `main`,
-   and enter the draft's exact tag. The workflow queries that draft from the
-   trusted `main` workflow, rejects malformed tags or prereleases, creates the
-   tag at the current `main` commit when it does not already exist, and retains
-   the same tag on a retry. It snapshots the draft metadata so a later merge
-   cannot change the notes or proposed version while the build is running, and
-   pins every later job to the frozen commit SHA.
+4. Open **Actions → Publish desktop release → Run workflow** and select
+   `main`. Leave the tag blank to publish the current draft. Enter a tag only
+   to retry that draft or an already-published release. The workflow resolves
+   a blank tag to the single non-prerelease draft, rejects a missing or
+   ambiguous draft, malformed tags, or prereleases, creates the tag at the
+   current `main` commit when it does not already exist, and retains the same
+   tag on a retry. It snapshots the draft metadata so a later merge cannot
+   change the notes or proposed version while the build is running, and pins
+   every later job to the frozen commit SHA.
 5. In parallel with the desktop build, the documentation builder checks out
    that validated SHA and builds `docs-site/` as a static export under `/docs`.
    Publication waits until the GitHub Release itself has been published. It
