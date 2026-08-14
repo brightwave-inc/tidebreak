@@ -5,7 +5,8 @@ description: The unit of work in Tidebreak — the composer, panels, the inbox, 
 
 A chat is the unit of work. It owns its own model, permission mode, network
 policy, attached files, connected folders, and the outputs it produced.
-Nothing is global except your credentials and defaults.
+Projects, credentials, connected apps, plugins, and reusable local apps live
+outside any one chat.
 
 Start one with **New chat** in the sidebar, or ⌘N.
 
@@ -34,9 +35,14 @@ Two typed triggers:
 
 ## While a turn is running
 
-The composer stays usable. Typing and sending mid-turn **redirects** the
-active response rather than queueing a new one — the send button becomes
-**Redirect**. A separate stop button cancels the turn.
+The composer stays usable. A message sent mid-turn either joins the durable
+queue as its own follow-up or **steers** the active response at the next safe
+model boundary. Choose the default under **Settings → Agents → While an agent
+is responding**; the send button reads **Queue** or **Steer** to match.
+
+Queued messages appear above the composer. You can edit, reorder, delete,
+pause, or send one immediately. A separate stop button cancels the active
+turn.
 
 The chat header carries a context meter and an activity chip that opens the
 per-chat panels.
@@ -88,6 +94,14 @@ when reporting a problem.
 
 ## Projects
 
-The data model has an optional project that can own several chats and hold
-approvals that apply across them. It is not surfaced in the desktop app yet.
-Everything you do today lives in a chat.
+Projects organize related chats in the sidebar. Use the `+` beside
+**Projects** to create one, or move an existing chat from its row menu.
+
+A project can also hold files that every chat in it reads. Attach a file to a
+chat first, open it, then choose **Add to project**. The project's row menu
+opens **Project files**, where you can see or remove shared files. Moving a
+chat does not move its own attachments; project files are added alongside
+them.
+
+Standing approvals may be saved for one chat or for every chat in its project.
+The approval card names that scope before you confirm it.

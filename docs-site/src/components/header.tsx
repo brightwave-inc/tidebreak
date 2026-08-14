@@ -5,8 +5,7 @@ import { TidebreakLogo } from './logo';
 import { ThemeToggle } from './theme-toggle';
 import { SearchTrigger } from './search-trigger';
 import { Button } from '@/components/ui/button';
-import { Menu, X } from 'lucide-react';
-import { useState } from 'react';
+import { Menu } from 'lucide-react';
 
 const PRODUCT_URL = 'https://www.tidebreak.sh';
 const REPO_URL = 'https://github.com/brightwave-inc/tidebreak';
@@ -21,9 +20,13 @@ function GitHubIcon(props: React.ComponentPropsWithoutRef<'svg'>) {
   );
 }
 
-export function Header({ onOpenSearch }: { onOpenSearch: () => void }) {
-  const [mobileOpen, setMobileOpen] = useState(false);
-
+export function Header({
+  onOpenSearch,
+  onOpenSidebar,
+}: {
+  onOpenSearch: () => void;
+  onOpenSidebar: () => void;
+}) {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-lg">
       <div className="mx-auto flex h-14 max-w-screen-2xl items-center gap-4 px-4 lg:px-6">
@@ -58,36 +61,13 @@ export function Header({ onOpenSearch }: { onOpenSearch: () => void }) {
             variant="ghost"
             size="icon-sm"
             className="md:hidden"
-            onClick={() => setMobileOpen(!mobileOpen)}
-            aria-label="Toggle menu"
+            onClick={onOpenSidebar}
+            aria-label="Browse documentation"
           >
-            {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            <Menu className="h-5 w-5" />
           </Button>
         </div>
       </div>
-
-      {mobileOpen && (
-        <div className="border-t border-border bg-background px-4 py-4 md:hidden">
-          <nav className="flex flex-col gap-2">
-            {navLinks.map((link) => (
-              <a
-                key={link.href}
-                href={link.href}
-                className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
-              >
-                {link.text}
-              </a>
-            ))}
-            <hr className="my-2 border-border" />
-            <Button variant="outline" size="sm" asChild className="justify-start">
-              <a href={REPO_URL} target="_blank" rel="noopener noreferrer">
-                <GitHubIcon className="h-4 w-4" />
-                GitHub
-              </a>
-            </Button>
-          </nav>
-        </div>
-      )}
     </header>
   );
 }

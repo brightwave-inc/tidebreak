@@ -4,6 +4,12 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import type { SidebarSection } from '@/lib/content';
+import { X } from 'lucide-react';
+import { useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+
+const PRODUCT_URL = 'https://www.tidebreak.sh';
+const REPO_URL = 'https://github.com/brightwave-inc/tidebreak';
 
 function SidebarNav({ sections, onNavigate }: { sections: SidebarSection[]; onNavigate?: () => void }) {
   const pathname = usePathname();
@@ -66,6 +72,15 @@ export function MobileSidebar({
   open: boolean;
   onClose: () => void;
 }) {
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   return (
@@ -74,11 +89,27 @@ export function MobileSidebar({
         className="fixed inset-0 z-40 bg-black/50 lg:hidden"
         onClick={onClose}
       />
-      <div className="fixed inset-y-0 left-0 z-50 w-72 overflow-y-auto bg-page-background p-6 shadow-lg lg:hidden" data-sidebar>
+      <aside
+        className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col overflow-y-auto border-r border-border bg-page-background p-5 shadow-lg lg:hidden"
+        data-sidebar
+        role="dialog"
+        aria-modal="true"
+        aria-label="Documentation navigation"
+      >
+        <div className="mb-5 flex items-center justify-between">
+          <p className="text-sm font-semibold">Tidebreak Docs</p>
+          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close navigation">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
         <div className="font-[550]">
           <SidebarNav sections={sections} onNavigate={onClose} />
         </div>
-      </div>
+        <nav className="mt-8 flex gap-4 border-t border-border pt-4 text-sm text-muted-foreground" aria-label="More links">
+          <a href={PRODUCT_URL} className="hover:text-foreground">Product</a>
+          <a href={REPO_URL} className="hover:text-foreground">GitHub</a>
+        </nav>
+      </aside>
     </>
   );
 }

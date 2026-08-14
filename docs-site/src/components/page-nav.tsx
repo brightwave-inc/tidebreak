@@ -22,7 +22,7 @@ export function PageNavigation({ prev, next }: PageNavProps) {
             {prev.title}
           </span>
           {prev.description && (
-            <span className="mt-1 truncate text-sm text-muted-foreground">
+            <span className="mt-1 line-clamp-2 text-sm text-muted-foreground">
               {prev.description}
             </span>
           )}
@@ -43,7 +43,7 @@ export function PageNavigation({ prev, next }: PageNavProps) {
             <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </span>
           {next.description && (
-            <span className="mt-1 truncate text-sm text-muted-foreground">
+            <span className="mt-1 line-clamp-2 text-sm text-muted-foreground">
               {next.description}
             </span>
           )}

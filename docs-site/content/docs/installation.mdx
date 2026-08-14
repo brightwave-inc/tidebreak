@@ -7,17 +7,18 @@ description: Download Tidebreak for macOS, or build it from source.
 
 Download the disk image and drag Tidebreak to Applications.
 
-[Download for macOS (Apple Silicon)](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-apple-silicon.dmg)
+[Download for macOS](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg)
 
-Releases ship an Apple Silicon (`aarch64`) build only. There is no Intel
-build; on an Intel Mac, build from source.
+Releases ship one universal build for Apple Silicon and Intel Macs. An
+Apple-Silicon-only compatibility asset is also attached to the GitHub release,
+but the universal disk image is the normal download.
 
 The macOS app is signed and notarized, so it opens without a Gatekeeper
 override. Each download has a `.sha256` sidecar on the same release if you want
 to check it:
 
 ```sh
-shasum -a 256 -c Tidebreak-macos-apple-silicon.dmg.sha256
+shasum -a 256 -c Tidebreak-macos-universal.dmg.sha256
 ```
 
 An installed macOS build keeps itself current. It checks for a newer signed

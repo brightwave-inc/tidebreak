@@ -1,6 +1,6 @@
 ---
 title: What Tidebreak is
-description: A local-first AI agent desktop app that runs on your machine with your own model keys.
+description: A local-first AI agent desktop app that runs on your machine with the models and tools you choose.
 ---
 
 Tidebreak is a desktop app for handing real work to an AI agent. You start a
@@ -25,13 +25,22 @@ formats, and behavior change frequently. Expect rough edges.
   or connect a folder on your machine that the agent can list and read.
 - **Run code in a sandbox.** The agent writes and executes scripts to analyze
   spreadsheets, render PDFs, build charts, and generate documents. Commands run
-  confined, with network access off unless you grant it.
+  inside the code-execution backend you choose. Network access is a separate
+  per-chat policy that starts open and can be narrowed to package registries,
+  exact hosts, or fully offline.
 - **Produce files, not just answers.** Anything the agent saves to its
   `output/` directory becomes a versioned output you can preview and export
   with a native save dialog.
-- **Use any model.** Anthropic, OpenAI, Google, xAI, OpenRouter, a local
-  Ollama daemon, and any OpenAI-compatible endpoint. You can switch models
-  mid-conversation without losing the thread.
+- **Build reusable local apps.** Ask for a triage view or other small tool once,
+  then reopen it from the Apps library. Its access is pinned to the exact
+  folders and connected-app operations you approve.
+- **Connect outside tools.** Add MCP servers for chat tools, or a REST API from
+  an OpenAPI document for local apps to call through Tidebreak's governed
+  executor.
+- **Use the model routes you prefer.** Anthropic, OpenAI, Google, xAI,
+  Fireworks, Together, OpenRouter, a local Ollama daemon, and any
+  OpenAI-compatible endpoint. You can switch models mid-conversation without
+  losing the thread.
 - **Decide how much rope to give it.** Every chat has a permission mode, from
   read-only planning up to full autonomy.
 
@@ -39,15 +48,15 @@ formats, and behavior change frequently. Expect rough edges.
 
 People who want an agent that can touch real data and produce real artifacts,
 and who would rather that happen on their own machine than in someone else's
-cloud. It assumes you are comfortable obtaining a model-provider credential
-and entering it in settings.
+cloud. You can sign in with a ChatGPT subscription, provide an API key, or use
+a local Ollama model.
 
 ## What it is not
 
-It is not a hosted service, and there is no account to create. It is not a
-coding assistant bound to a repository — the unit of work is a conversation
-with files attached, not a checkout. And it is not finished: several
-subsystems exist in the runtime before they have any UI.
+It is not a hosted service, and there is no Tidebreak account to create. It is
+not primarily a repository-bound coding assistant — the unit of work is a chat
+with files, folders, tools, and outputs. And it is not finished: the product is
+still pre-1.0 and its local data model can change between releases.
 
 ## Start here
 
