@@ -29,6 +29,10 @@ const releaseDrafterConfig = readFileSync(
   repositoryFile(".github", "release-drafter.yml"),
   "utf8",
 );
+const codeOwners = readFileSync(
+  repositoryFile(".github", "CODEOWNERS"),
+  "utf8",
+);
 const tauriConfig = JSON.parse(
   readFileSync(
     repositoryFile("crates", "tidebreak-desktop", "tauri.conf.json"),
@@ -80,6 +84,10 @@ function workflowJob(source, name) {
     next === -1 ? source.length : start + marker.length + next;
   return source.slice(start, end);
 }
+
+test("the Brightwave engineering team owns repository changes", () => {
+  assert.equal(codeOwners.trim(), "* @brightwave-inc/engineering");
+});
 
 const DESKTOP_SIGNING_JOBS = [
   {
@@ -512,7 +520,12 @@ test("production secrets remain isolated to the release workflow", () => {
   assert.ok(secretConsumers.includes("release.yml"));
 
   const release = workflows["release.yml"];
-  assert.match(release, /^on:\n  release:\n    types: \[published\]/m);
+  const hasPublishedReleaseTrigger =
+    /^on:\n  release:\n    types: \[published\]/m.test(release);
+  assert.ok(
+    hasPublishedReleaseTrigger || !/^  release:/m.test(release),
+    "release workflows may use only the legacy published trigger or no release trigger",
+  );
   assert.match(release, /^  workflow_dispatch:\n/m);
   assert.doesNotMatch(release, /^\s*pull_request(?:_target)?:/m);
   assert.match(release, /^permissions:\n  contents: read$/m);
@@ -1008,30 +1021,48 @@ test("sandbox images are scanned in a read-only job before the version tag is pu
   assert.equal(publish.match(/contents: write/g)?.length, 1);
 });
 
-test("release builds use the trusted shared main cache scope", () => {
+test("release builds enter through the trusted main workflow", () => {
   const release = workflows["release.yml"];
-  const dispatchJob = workflowJob(release, "dispatch");
-  assert.match(release, /gh workflow run release\.yml/);
-  assert.match(release, /--ref main/);
-  assert.match(release, /actions: write/);
-  assert.match(dispatchJob, /contents: read/);
-  assert.match(
-    dispatchJob,
-    /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/,
-  );
-  assert.ok(
-    dispatchJob.indexOf("Reject an invalid published release tag") <
-      dispatchJob.indexOf("gh workflow run release.yml"),
-    "published release tags must be validated before dispatching a production build",
-  );
-  assert.match(
-    release,
-    /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
-  );
-  assert.match(
-    release,
-    /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
-  );
+  const validateJob = workflowJob(release, "validate");
+  if (/^  release:/m.test(release)) {
+    const dispatchJob = workflowJob(release, "dispatch");
+    assert.match(release, /gh workflow run release\.yml/);
+    assert.match(release, /--ref main/);
+    assert.match(release, /actions: write/);
+    assert.match(dispatchJob, /contents: read/);
+    assert.match(
+      dispatchJob,
+      /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/,
+    );
+    assert.ok(
+      dispatchJob.indexOf("Reject an invalid published release tag") <
+        dispatchJob.indexOf("gh workflow run release.yml"),
+      "published release tags must be validated before dispatching a production build",
+    );
+    assert.match(
+      release,
+      /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
+    );
+    assert.match(
+      release,
+      /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
+    );
+  } else {
+    assert.match(release, /^  workflow_dispatch:\n/m);
+    assert.match(validateJob, /github\.ref == 'refs\/heads\/main'/);
+    assert.match(validateJob, /permissions:\n      contents: write/);
+    assert.match(validateJob, /ref: \$\{\{ github\.sha \}\}/);
+    assert.match(validateJob, /node scripts\/check-release-tag\.mjs "\$RELEASE_TAG"/);
+    assert.match(
+      validateJob,
+      /repos\/\$GITHUB_REPOSITORY\/releases\?per_page=100/,
+    );
+    assert.match(validateJob, /select\(\.tag_name == \$tag\)/);
+    assert.match(validateJob, /refs\/tags\/\$RELEASE_TAG/);
+    assert.match(validateJob, /repos\/\$GITHUB_REPOSITORY\/git\/refs/);
+    assert.match(validateJob, /git merge-base --is-ancestor "\$RELEASE_SHA" origin\/main/);
+    assert.match(validateJob, /release-snapshot\.json/);
+  }
   assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
 });
 
@@ -1041,7 +1072,10 @@ test("release documentation is built from the validated tag and promoted only af
 
   assert.match(build, /^    needs: validate$/m);
   assert.doesNotMatch(build, /^    environment:/m);
-  assert.match(publish, /^    needs: \[validate, build_docs\]$/m);
+  assert.match(
+    publish,
+    /^    needs: \[validate, build_docs(?:, finalize_release)?\]$/m,
+  );
   assert.match(publish, /^    environment:\n      name: docs-production$/m);
   assert.match(build, /^    permissions:\n      contents: read$/m);
   assert.match(publish, /^    permissions:\n      contents: read$/m);
@@ -1551,7 +1585,10 @@ test("source SBOM generation is isolated from production credentials", () => {
   assert.match(sbomJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
   assert.doesNotMatch(publishJob, /anchore\/sbom-action/);
 
-  assert.match(publishJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom\]/);
+  assert.match(
+    publishJob,
+    /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom(?:, finalize_release)?\]/,
+  );
   assert.match(publishJob, /needs\.source_sbom\.result == 'success'/);
   assert.match(
     publishJob,
@@ -1582,24 +1619,57 @@ test("public releases attest provenance without treating the source SBOM as an i
   assert.ok(provenanceIndex < awsIndex);
 });
 
-test("GitHub release downloads are copied from the hosted release", () => {
+test("GitHub release publication preserves verified asset provenance", () => {
   const release = workflows["release.yml"];
   const attachJob = workflowJob(release, "attach_downloads");
 
-  assert.match(attachJob, /needs: \[validate, publish\]/);
   assert.match(attachJob, /contents: write/);
   assert.doesNotMatch(attachJob, /^    environment:/m);
   assert.doesNotMatch(attachJob, /secrets\./);
   assert.doesNotMatch(attachJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_S3/);
 
-  // Assets must be the CDN's own bytes, verified against the immutable
-  // manifest, rather than a second copy built alongside the hosted release.
-  assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
-  assert.match(attachJob, /sha256sum --check --strict/);
-  assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
-  assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
-  assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
-  assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
+  if (/^  finalize_release:/m.test(release)) {
+    const finalizeJob = workflowJob(release, "finalize_release");
+    const publishJob = workflowJob(release, "publish");
+    assert.match(attachJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom\]/);
+    assert.match(attachJob, /name: tidebreak-macos-universal-/);
+    assert.match(attachJob, /name: tidebreak-source-sbom-/);
+    assert.match(attachJob, /gh release download "\$RELEASE_TAG"/);
+    assert.match(attachJob, /sha256sum --check --strict/);
+    assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
+    assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
+    assert.match(attachJob, /\.app\.zip/);
+    assert.match(attachJob, /\.app\.tar\.gz/);
+    assert.match(attachJob, /\.app\.tar\.gz\.sig/);
+    assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
+    assert.match(attachJob, /if \[\[ "\$RELEASE_DRAFT" = true \]\]/);
+    assert.match(attachJob, /releases\/\$RELEASE_ID\/assets/);
+    assert.match(attachJob, /expected-release-assets/);
+    assert.match(attachJob, /actual-release-assets/);
+    assert.match(attachJob, /diff -u/);
+    assert.match(finalizeJob, /needs: \[validate, attach_downloads\]/);
+    assert.match(finalizeJob, /contents: write/);
+    assert.match(finalizeJob, /commits\/\$RELEASE_TAG/);
+    assert.match(finalizeJob, /Release tag \$RELEASE_TAG moved after validation/);
+    assert.match(finalizeJob, /draft: false/);
+    assert.match(finalizeJob, /make_latest: "true"/);
+    assert.match(finalizeJob, /published_at=\$published_at/);
+    assert.match(publishJob, /needs\.finalize_release\.result == 'success'/);
+    assert.match(
+      publishJob,
+      /RELEASE_PUBLISHED_AT: \$\{\{ needs\.finalize_release\.outputs\.published_at \}\}/,
+    );
+    assert.match(publishJob, /Recover build inputs from the immutable GitHub Release/);
+    assert.match(publishJob, /recovery\/Tidebreak-macos-universal\.dmg/);
+  } else {
+    assert.match(attachJob, /needs: \[validate, publish\]/);
+    assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
+    assert.match(attachJob, /sha256sum --check --strict/);
+    assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
+    assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
+    assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
+    assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
+  }
 
   const macDownloadLink = readFileSync(repositoryFile("README.md"), "utf8")
     .match(

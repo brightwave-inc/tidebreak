@@ -17,6 +17,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const policyTest = join(repositoryRoot, "scripts", "workflow-security.test.mjs");
 const fixturePaths = [
   ".github/workflows",
+  ".github/CODEOWNERS",
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
   ".github/vercel-cli/package.json",
@@ -507,7 +508,7 @@ const mutations = [
   {
     name: "README macOS download matches an uploaded asset",
     file: "README.md",
-    expected: "GitHub release downloads are copied from the hosted release",
+    expected: "GitHub release publication preserves verified asset provenance",
     mutate: (source) =>
       source.replace(
         /Tidebreak-macos-[\w-]+\.dmg/,
