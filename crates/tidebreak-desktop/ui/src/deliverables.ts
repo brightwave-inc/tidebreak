@@ -142,9 +142,10 @@ export function isTextDeliverableMediaType(
  * Whether an output's content can be edited in place, mirroring the native
  * `media_type_is_editable_text`.
  *
- * Prose formats only. A plain text box is a faithful editor for Markdown and
- * plain text and a hazard for the structured types, where a free-hand edit is
- * as likely to break the document as to fix it.
+ * A plain text box is a faithful editor for Markdown and plain text, including
+ * source-code filenames classified as plain text. It is a hazard for the
+ * structured document types, where a free-hand edit is as likely to break the
+ * document as to fix it.
  */
 export function isEditableTextMediaType(value: string): boolean {
   return value === "text/markdown" || value === "text/plain";

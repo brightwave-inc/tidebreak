@@ -93,7 +93,11 @@ export function OutputContent({
         {type === "text/markdown" ? (
           <MessageMarkdown>{preview.content}</MessageMarkdown>
         ) : (
-          <CodeViewer content={preview.content} mediaType={type} />
+          <CodeViewer
+            content={preview.content}
+            mediaType={type}
+            filename={preview.filename}
+          />
         )}
         {preview.truncated && (
           <p className="mt-6 text-xs text-muted-foreground">

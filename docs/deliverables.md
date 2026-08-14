@@ -8,7 +8,8 @@ destination through the native **Save As…** dialog.
 
 ## Product flow
 
-1. The user asks for a report, plan, table, data file, or simple web page.
+1. The user asks for a report, plan, table, data file, source-code file, or
+   simple web page.
 2. The foreground agent produces the file with code execution, saving it under
    the workspace's `output/` directory.
 3. After each command, Tidebreak scans `output/` and publishes what it finds as
@@ -26,9 +27,10 @@ symlinks rather than following them.
 
 ## Closed first-slice contract
 
-- Curated text formats — Markdown, plain text, CSV, JSON, and HTML — publish as
-  text outputs; any other extension publishes as a binary artifact with a
-  media type derived from its extension, bounded at 16 MiB.
+- Curated text formats — Markdown, plain text, CSV, JSON, HTML, and recognized
+  source-code or text-configuration filenames — publish as text outputs; any
+  other extension publishes as a binary artifact with a media type derived from
+  its extension, bounded at 16 MiB.
 - Filenames are one portable ASCII component, at most 120 characters.
 - Content is valid UTF-8, non-empty, and at most 512 KiB.
 - The catalog returns the newest 100 valid output files.
@@ -39,9 +41,10 @@ symlinks rather than following them.
   reuse the same engines as source documents.
 - Markdown previews use the same safe renderer as assistant messages: raw HTML,
   local-file links, executable URL schemes, and remote image loads are not
-  rendered. Plain text, JSON, and HTML outputs use a syntax-highlighted source
-  view (HTML is never executed). Unsupported binary types (for example ZIP)
-  remain export-only.
+  rendered. Plain text, source code, JSON, and HTML outputs use a
+  syntax-highlighted source view selected from the filename where possible
+  (HTML and source are never executed). Unsupported binary types (for example
+  ZIP) remain export-only.
 
 The output directory is a capability-confined child of private per-chat
 scratch. Native reads reject symlinks and non-regular or oversized files.
@@ -163,9 +166,10 @@ is a durable, append-only version history the user can always walk back:
   turn or background run published a newer version while the editor was open,
   nothing is written and the reader is offered the version that won. Content
   obeys the same bounds as an agent-written text output — non-empty, UTF-8, no
-  NUL, at most 512 KiB — and the structured text types (CSV, JSON, charts,
-  HTML) and binary artifacts are not editable, because a free-text edit of
-  those is as likely to break the document as to fix it.
+  NUL, at most 512 KiB. Source-code filenames use the plain-text path and are
+  editable; the structured document types (CSV, JSON, charts, HTML) and binary
+  artifacts are not, because a free-text edit of those is as likely to break
+  the document as to fix it.
 - **Delete is explicit and soft.** Deleting an output hides it from the catalog
   while retaining every revision; the catalog offers an inline Undo that
   restores it exactly.

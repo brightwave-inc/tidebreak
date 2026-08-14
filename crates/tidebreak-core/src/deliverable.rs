@@ -166,10 +166,11 @@ impl RevisionProducer {
 ///
 /// Editing publishes a new user-authored revision through the same append-only
 /// path everything else uses, so the only question is whether a plain text box
-/// can faithfully represent the bytes. Markdown and plain text qualify; the
-/// structured text types (CSV, JSON, chart figures, HTML) and every binary
-/// artifact do not, because a free-text edit of those is as likely to break the
-/// document as to fix it.
+/// can faithfully represent the bytes. Markdown and plain text qualify,
+/// including source-code filenames classified as plain text; the structured
+/// document types (CSV, JSON, chart figures, HTML) and every binary artifact do
+/// not, because a free-text edit of those is as likely to break the document as
+/// to fix it.
 #[must_use]
 pub fn media_type_is_editable_text(media_type: &str) -> bool {
     matches!(media_type, "text/markdown" | "text/plain")
@@ -264,7 +265,7 @@ pub struct CreateOutput {
 pub fn validate_deliverable_name(name: &str) -> Result<(), &'static str> {
     validate_portable_filename(name)?;
     if deliverable_media_type(name).is_none() {
-        return Err("filename must end in .md, .txt, .csv, .json, or .html");
+        return Err("filename must use a supported text or source-code name");
     }
     Ok(())
 }
@@ -378,12 +379,21 @@ pub fn deliverable_media_type(name: &str) -> Option<&'static str> {
     if lowercased.ends_with(CHART_FILENAME_SUFFIX) {
         return Some(CHART_MEDIA_TYPE);
     }
+    if matches!(lowercased.as_str(), "dockerfile" | "makefile" | "justfile") {
+        return Some("text/plain");
+    }
     match lowercased.rsplit_once('.')?.1 {
         "md" => Some("text/markdown"),
         "txt" => Some("text/plain"),
         "csv" => Some("text/csv"),
         "json" => Some("application/json"),
         "html" => Some("text/html"),
+        "py" | "pyw" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "rs"
+        | "go" | "java" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hxx" | "cs" | "rb"
+        | "php" | "swift" | "kt" | "kts" | "scala" | "sh" | "bash" | "zsh" | "fish" | "sql"
+        | "css" | "scss" | "sass" | "less" | "vue" | "svelte" | "toml" | "yaml" | "yml" | "xml"
+        | "graphql" | "gql" | "proto" | "dart" | "lua" | "r" | "ex" | "exs" | "erl" | "hrl"
+        | "fs" | "fsx" | "clj" | "cljs" | "cljc" | "hs" | "pl" | "pm" | "ps1" => Some("text/plain"),
         _ => None,
     }
 }
@@ -428,6 +438,10 @@ mod tests {
             "forecast.csv",
             "data.json",
             "report.html",
+            "example.py",
+            "component.tsx",
+            "Cargo.toml",
+            "Dockerfile",
         ] {
             assert!(validate_deliverable_name(valid).is_ok(), "{valid}");
         }
@@ -478,6 +492,10 @@ mod tests {
     fn media_types_are_derived_only_from_supported_extensions() {
         assert_eq!(deliverable_media_type("brief.MD"), Some("text/markdown"));
         assert_eq!(deliverable_media_type("table.csv"), Some("text/csv"));
+        assert_eq!(deliverable_media_type("example.PY"), Some("text/plain"));
+        assert_eq!(deliverable_media_type("component.tsx"), Some("text/plain"));
+        assert_eq!(deliverable_media_type("Cargo.toml"), Some("text/plain"));
+        assert_eq!(deliverable_media_type("Dockerfile"), Some("text/plain"));
         assert_eq!(deliverable_media_type("archive.zip"), None);
         // The chart suffix is compound, and only the full suffix qualifies.
         assert_eq!(

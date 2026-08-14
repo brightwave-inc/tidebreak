@@ -269,6 +269,24 @@ describe("OutputDetailRoot", () => {
     ).toBeVisible();
   });
 
+  it("draws a source-code output in the syntax-highlighted viewer", async () => {
+    const apis = detailApis({
+      read: vi.fn().mockResolvedValue(
+        preview({
+          filename: "solution.py",
+          mediaType: "text/plain",
+          content: "def greet():\n    return 'hello'",
+        }),
+      ),
+    });
+    await openOutput(apis);
+
+    await waitFor(() =>
+      expect(document.querySelector(".language-python")).not.toBeNull(),
+    );
+    expect(screen.queryByText(/No preview for this file type/)).toBeNull();
+  });
+
   // Formats with no viewer still arrive with empty content; the panel offers
   // export rather than an inline rendering it cannot produce.
   it("offers export instead of a preview for an unsupported binary artifact", async () => {
