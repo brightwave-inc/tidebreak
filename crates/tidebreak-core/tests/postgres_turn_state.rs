@@ -10,8 +10,8 @@ use tidebreak_core::{
     AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationInput, BeginRootAttachmentChange,
-    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId, ChatRootAttachment,
-    CheckpointSandboxSpawnOutcome, CitationLocator, ClaimClientToolCallOutcome,
+    BeginRootAttachmentChangeOutcome, BeginTurnAdmissionOutcome, CallId, Chat, ChatId,
+    ChatRootAttachment, CheckpointSandboxSpawnOutcome, CitationLocator, ClaimClientToolCallOutcome,
     ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome,
     DeleteProjectOutcome, DocumentBlob, DocumentId, DocumentSourceUpsert, DocumentUpsert,
     FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
@@ -22,11 +22,81 @@ use tidebreak_core::{
     Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
     RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason,
     Store, SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
-    TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
+    ToolCallStatus, TurnAdmissionLease, TurnAdmissionRequest, TurnCheckpointProgress,
+    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
+    UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn postgres_turn_admission_serializes_processes_and_recovers_expiry() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let first = DbStore::connect(&url).await.unwrap();
+    let second = DbStore::connect(&url).await.unwrap();
+    let chat = sample_chat();
+    let other_chat = sample_chat();
+    first.create_chat(&chat).await.unwrap();
+    first.create_chat(&other_chat).await.unwrap();
+    let request = TurnAdmissionRequest {
+        id: TurnId::new(),
+        chat_id: chat.id,
+        content: "postgres durable admission".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: vec!["presentations".into()],
+        voice_input_used: false,
+    };
+    let first_token = uuid::Uuid::new_v4();
+    let first_lease = match first
+        .begin_turn_admission(&request, first_token, chrono::Duration::milliseconds(50))
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) => lease,
+        outcome => panic!("unexpected first reservation: {outcome:?}"),
+    };
+    assert!(matches!(
+        second
+            .begin_turn_admission(&request, uuid::Uuid::new_v4(), chrono::Duration::seconds(1),)
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::Pending { .. }
+    ));
+    let mut cross_chat = request.clone();
+    cross_chat.chat_id = other_chat.id;
+    assert_eq!(
+        second
+            .begin_turn_admission(
+                &cross_chat,
+                uuid::Uuid::new_v4(),
+                chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap(),
+        BeginTurnAdmissionOutcome::IdentityConflict
+    );
+
+    tokio::time::sleep(StdDuration::from_millis(75)).await;
+    let takeover_token = uuid::Uuid::new_v4();
+    let takeover_lease = match second
+        .begin_turn_admission(&request, takeover_token, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+    {
+        BeginTurnAdmissionOutcome::Acquired(lease) if lease.lease_token == takeover_token => lease,
+        outcome => panic!("unexpected takeover reservation: {outcome:?}"),
+    };
+    assert!(!first.release_turn_admission(first_lease).await.unwrap());
+    assert!(second.release_turn_admission(takeover_lease).await.unwrap());
+}
 
 async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts: i32) {
     assert!(max_attempts > 0);

@@ -1513,18 +1513,15 @@ struct GatewayTokenSource {
     model_sync: Arc<RwLock<()>>,
 }
 
-#[async_trait]
-impl BearerTokenSource for GatewayTokenSource {
-    fn binding_id(&self) -> Option<&str> {
-        Some(&self.installation_id)
-    }
-
-    fn requires_model_route_lease(&self) -> bool {
-        true
-    }
-
-    async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
-        let guard = self.model_sync.clone().read_owned().await;
+impl GatewayTokenSource {
+    /// Resolve one frozen selector against live policy/session/catalog state.
+    /// Callers decide which authority guard they retain; this helper never
+    /// acquires `model_sync`, so post-mint validation cannot recursively take
+    /// a fair read lock while a writer waits.
+    async fn resolve_model_route(
+        &self,
+        route_model: &str,
+    ) -> Result<Option<providers::ResolvedModelPolicy>> {
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let Some(snapshot) = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?
         else {
@@ -1546,10 +1543,59 @@ impl BearerTokenSource for GatewayTokenSource {
         let Some(resolved) = providers::gateway_execution_policy(&snapshot, &selection) else {
             return Ok(None);
         };
-        if resolved.route_model != route_model {
-            return Ok(None);
+        Ok((resolved.route_model == route_model).then_some(resolved))
+    }
+
+    fn route_lease(
+        resolved: providers::ResolvedModelPolicy,
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> ModelRouteLease {
+        ModelRouteLease::with_request_shaping_model(
+            resolved.id,
+            resolved.request_shaping_model,
+            guard,
+        )
+    }
+}
+
+#[async_trait]
+impl BearerTokenSource for GatewayTokenSource {
+    fn binding_id(&self) -> Option<&str> {
+        Some(&self.installation_id)
+    }
+
+    fn requires_model_route_lease(&self) -> bool {
+        true
+    }
+
+    async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
+        let guard = self.model_sync.clone().read_owned().await;
+        Ok(self
+            .resolve_model_route(route_model)
+            .await?
+            .map(|resolved| Self::route_lease(resolved, guard)))
+    }
+
+    async fn authorize_model_route(
+        &self,
+        route_model: &str,
+        conversation: Option<tidebreak_core::id::ChatId>,
+    ) -> Result<(String, Option<ModelRouteLease>)> {
+        let guard = self.model_sync.clone().read_owned().await;
+        if self.resolve_model_route(route_model).await?.is_none() {
+            return Ok((String::new(), None));
         }
-        Ok(Some(ModelRouteLease::new(resolved.id, guard)))
+        let token = self.bearer_token_for(conversation).await?;
+        // OS/MDM policy does not participate in the process-local lock and may
+        // repoint while the network mint is delayed. Re-read every live input
+        // after that slow operation, using the guard already held so local
+        // sign-out/re-pair/deprovision remains fenced without recursive read
+        // acquisition.
+        let lease = self
+            .resolve_model_route(route_model)
+            .await?
+            .map(|resolved| Self::route_lease(resolved, guard));
+        Ok((token, lease))
     }
 
     async fn bearer_token(&self) -> Result<String> {
@@ -1592,8 +1638,9 @@ mod tests {
     use axum::response::{IntoResponse, Json, Response};
     use axum::routing::{get, post};
     use axum::Router as AxumRouter;
+    use futures::StreamExt;
     use serde_json::{json, Value};
-    use tidebreak_core::DbStore;
+    use tidebreak_core::{ChatMessage, ChatRequest, DbStore, ModelProvider, ProviderId, Role};
 
     use super::*;
 
@@ -1671,6 +1718,290 @@ mod tests {
         /// How many catalog fetches arrived with a matching `If-None-Match`
         /// and were answered 304.
         catalog_not_modified: AtomicUsize,
+    }
+
+    struct RepointableOs(std::sync::Mutex<String>);
+
+    impl RepointableOs {
+        fn new(base_url: String) -> Self {
+            Self(std::sync::Mutex::new(base_url))
+        }
+
+        fn repoint(&self, base_url: &str) {
+            *self.0.lock().unwrap() = base_url.to_owned();
+        }
+    }
+
+    impl crate::managed_policy::OsPolicySource for RepointableOs {
+        fn gateway_url(&self) -> Result<Option<String>> {
+            Ok(Some(self.0.lock().unwrap().clone()))
+        }
+    }
+
+    struct DelayedInferenceGateway {
+        delay_mint: usize,
+        mint_arrived: tokio::sync::Notify,
+        release_mint: tokio::sync::Notify,
+        llm_mints: AtomicUsize,
+        anthropic_requests: AtomicUsize,
+        responses_requests: AtomicUsize,
+        pause_first_anthropic_request: bool,
+    }
+
+    impl DelayedInferenceGateway {
+        fn new(delay_mint: usize, pause_first_anthropic_request: bool) -> Self {
+            Self {
+                delay_mint,
+                mint_arrived: tokio::sync::Notify::new(),
+                release_mint: tokio::sync::Notify::new(),
+                llm_mints: AtomicUsize::new(0),
+                anthropic_requests: AtomicUsize::new(0),
+                responses_requests: AtomicUsize::new(0),
+                pause_first_anthropic_request,
+            }
+        }
+    }
+
+    async fn delayed_inference_token(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Json<Value> {
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        let resource = form.get("resource").cloned().unwrap_or_default();
+        let mint = gateway.llm_mints.fetch_add(1, Ordering::SeqCst);
+        if mint == gateway.delay_mint {
+            gateway.mint_arrived.notify_one();
+            gateway.release_mint.notified().await;
+        }
+        Json(json!({
+            "access_token": format!("mg_at_{resource}_{mint}"),
+            "token_type": "Bearer",
+            // Below the refresh leeway so every continuation performs the
+            // network-backed mint that the race is about.
+            "expires_in": 1,
+            "refresh_token": format!("mg_rt_{mint}"),
+            "scope": "inference:invoke",
+            "resource": resource,
+            "installation_id": "install-1",
+        }))
+    }
+
+    async fn delayed_anthropic_inference(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+    ) -> Response {
+        let request = gateway.anthropic_requests.fetch_add(1, Ordering::SeqCst);
+        let stop_reason = if gateway.pause_first_anthropic_request && request == 0 {
+            "pause_turn"
+        } else {
+            "end_turn"
+        };
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            format!(
+                "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop_reason}\"}}}}\n\n"
+            ),
+        )
+            .into_response()
+    }
+
+    async fn delayed_responses_inference(
+        State(gateway): State<Arc<DelayedInferenceGateway>>,
+    ) -> Response {
+        gateway.responses_requests.fetch_add(1, Ordering::SeqCst);
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        )
+            .into_response()
+    }
+
+    async fn managed_router_with_delayed_inference(
+        protocol: providers::GatewayModelProtocol,
+        gateway: Arc<DelayedInferenceGateway>,
+    ) -> (
+        tidebreak_router::Router,
+        String,
+        Arc<RepointableOs>,
+        tempfile::TempDir,
+    ) {
+        let app = AxumRouter::new()
+            .route("/oauth/token", post(delayed_inference_token))
+            .route(
+                "/compat/anthropic/v1/messages",
+                post(delayed_anthropic_inference),
+            )
+            .route(
+                "/compat/openai/v1/responses",
+                post(delayed_responses_inference),
+            )
+            .with_state(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("gateway.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let credentials: crate::connectors::GatewayCredentials = serde_json::from_value(json!({
+            "base_url": base,
+            "installation_id": "install-1",
+            "user_id": "user-1",
+            "refresh_token": "mg_rt_seed",
+            "access_tokens": {}
+        }))
+        .unwrap();
+        CredentialVault::new(secrets.clone())
+            .save(&credentials)
+            .await
+            .unwrap();
+        let os = Arc::new(RepointableOs::new(base.clone()));
+        let runtime = GatewayRuntime::new(
+            store.clone(),
+            secrets,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            os.clone(),
+        );
+        let policy = runtime.policy().unwrap();
+        let (model, upstream) = match protocol {
+            providers::GatewayModelProtocol::AnthropicMessages => {
+                ("anthropic-us-claude-opus-5", "us.anthropic.claude-opus-5")
+            }
+            providers::GatewayModelProtocol::OpenaiResponses => {
+                ("gateway-gpt-5-6-sol", "gpt-5.6-sol")
+            }
+        };
+        let snapshot = providers::GatewayModelSnapshot {
+            gateway_url: policy.gateway_url.clone().unwrap(),
+            installation_id: Some("install-1".into()),
+            models: vec![CustomModelConfig {
+                id: model.into(),
+                upstream_id: Some(upstream.into()),
+                ..Default::default()
+            }],
+            model_protocols: std::collections::BTreeMap::from([(model.into(), protocol)]),
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        };
+        providers::write_gateway_snapshot(&*store, &snapshot)
+            .await
+            .unwrap();
+        let frozen = providers::gateway_execution_policy(
+            &snapshot,
+            &crate::model_registry::selection_key(providers::ProviderKind::ModelGateway, model),
+        )
+        .unwrap()
+        .route_model;
+        let routes = providers::collect_routes(
+            &*store,
+            &*runtime.secrets,
+            runtime.route_token_source().await,
+            None,
+            &policy,
+        )
+        .await;
+        (
+            tidebreak_router::Router::build(routes),
+            frozen,
+            os,
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn external_policy_repoint_during_bearer_mint_blocks_gateway_initial_egress() {
+        for protocol in [
+            providers::GatewayModelProtocol::AnthropicMessages,
+            providers::GatewayModelProtocol::OpenaiResponses,
+        ] {
+            let gateway = Arc::new(DelayedInferenceGateway::new(0, false));
+            let (router, frozen, os, _directory) =
+                managed_router_with_delayed_inference(protocol, gateway.clone()).await;
+            let request = ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen,
+                messages: vec![ChatMessage::text(Role::User, "hi")],
+                ..Default::default()
+            };
+            let dispatch = tokio::spawn(async move { router.stream(request).await });
+
+            tokio::time::timeout(Duration::from_secs(2), gateway.mint_arrived.notified())
+                .await
+                .expect("the inference token mint reaches gateway A");
+            os.repoint("https://gateway-b.example.test");
+            gateway.release_mint.notify_one();
+
+            let result = tokio::time::timeout(Duration::from_secs(2), dispatch)
+                .await
+                .expect("authorization finishes after the delayed mint")
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "a token minted by a gateway retired during refresh must not authorize egress"
+            );
+            assert_eq!(
+                gateway.anthropic_requests.load(Ordering::SeqCst),
+                0,
+                "Anthropic request data must not reach retired gateway A"
+            );
+            assert_eq!(
+                gateway.responses_requests.load(Ordering::SeqCst),
+                0,
+                "Responses request data must not reach retired gateway A"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_policy_repoint_during_continuation_mint_blocks_anthropic_egress() {
+        let gateway = Arc::new(DelayedInferenceGateway::new(1, true));
+        let (router, frozen, os, _directory) = managed_router_with_delayed_inference(
+            providers::GatewayModelProtocol::AnthropicMessages,
+            gateway.clone(),
+        )
+        .await;
+        let stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen,
+                vendor_web_search: Some(tidebreak_core::provider::VendorWebSearch { max_uses: 1 }),
+                messages: vec![ChatMessage::text(Role::User, "search")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(gateway.anthropic_requests.load(Ordering::SeqCst), 1);
+
+        let continuation = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
+        tokio::time::timeout(Duration::from_secs(2), gateway.mint_arrived.notified())
+            .await
+            .expect("the continuation starts its fresh token mint");
+        os.repoint("https://gateway-b.example.test");
+        gateway.release_mint.notify_one();
+
+        let events = tokio::time::timeout(Duration::from_secs(2), continuation)
+            .await
+            .expect("the continuation refuses the retired route")
+            .unwrap();
+        assert_eq!(
+            gateway.anthropic_requests.load(Ordering::SeqCst),
+            1,
+            "only the leg dispatched before the MDM repoint may reach gateway A"
+        );
+        assert_eq!(gateway.llm_mints.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            events.last(),
+            Some(tidebreak_core::ProviderEvent::Failed { .. })
+        ));
     }
 
     const CATALOG_ETAG: &str = "W/\"catalog-rev-1\"";
@@ -2659,6 +2990,10 @@ mod tests {
             "the gateway's own id is what the request carries"
         );
         assert_eq!(
+            aliased.request_shaping_model, "claude-opus-5",
+            "the unambiguous canonical upstream identity shapes the request"
+        );
+        assert_eq!(
             aliased.vendor,
             Some(crate::providers::ProviderKind::Anthropic)
         );
@@ -2840,6 +3175,7 @@ mod tests {
             .unwrap()
             .expect("the current frozen selector receives a live route lease");
         assert_eq!(lease.wire_model(), "sample-claude");
+        assert_eq!(lease.request_shaping_model(), "sample-claude");
         drop(lease);
 
         let mut retargeted = providers::gateway_snapshot_for_policy(&*store, &policy)

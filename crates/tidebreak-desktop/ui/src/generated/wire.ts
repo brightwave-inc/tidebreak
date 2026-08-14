@@ -2057,8 +2057,6 @@ models: Array<CustomModelConfig>, };
 export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openrouter" | "ollama" | "openai_compatible" | "model_gateway";
 
 /**
- * One message accepted while its chat had a live turn, waiting its turn.
- *
  * The id is the client-generated turn id promotion will accept under, so an
  * ambiguous promotion retry resolves to `Existing` rather than a duplicate
  * turn. Rows are FIFO by `position` within a chat and fully durable: a queue

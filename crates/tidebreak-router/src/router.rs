@@ -60,6 +60,23 @@ pub trait BearerTokenSource: Send + Sync {
         Ok(None)
     }
 
+    /// Mint a bearer and return the final live route lease for one HTTP leg.
+    ///
+    /// The default is suitable for ordinary rotating credentials and sources
+    /// whose route authority has no local mutation fence. Managed sources
+    /// override this to hold one authority read guard across mint, final live
+    /// validation, and dispatch — avoiding both a local mutation gap and a
+    /// recursive fair-lock read when a writer is queued.
+    async fn authorize_model_route(
+        &self,
+        route_model: &str,
+        conversation: Option<tidebreak_core::id::ChatId>,
+    ) -> Result<(String, Option<ModelRouteLease>)> {
+        let token = self.bearer_token_for(conversation).await?;
+        let lease = self.lease_model_route(route_model).await?;
+        Ok((token, lease))
+    }
+
     /// A currently valid token, refreshing if the cached one is near expiry.
     async fn bearer_token(&self) -> Result<String>;
 
@@ -80,19 +97,38 @@ pub trait BearerTokenSource: Send + Sync {
 /// A live claim that one host execution selector still maps to one wire model.
 pub struct ModelRouteLease {
     wire_model: String,
+    request_shaping_model: String,
     _guard: Box<dyn Send>,
 }
 
 impl ModelRouteLease {
     pub fn new(wire_model: impl Into<String>, guard: impl Send + 'static) -> Self {
+        let wire_model = wire_model.into();
+        Self {
+            request_shaping_model: wire_model.clone(),
+            wire_model,
+            _guard: Box::new(guard),
+        }
+    }
+
+    pub fn with_request_shaping_model(
+        wire_model: impl Into<String>,
+        request_shaping_model: impl Into<String>,
+        guard: impl Send + 'static,
+    ) -> Self {
         Self {
             wire_model: wire_model.into(),
+            request_shaping_model: request_shaping_model.into(),
             _guard: Box::new(guard),
         }
     }
 
     pub fn wire_model(&self) -> &str {
         &self.wire_model
+    }
+
+    pub fn request_shaping_model(&self) -> &str {
+        &self.request_shaping_model
     }
 }
 
@@ -108,7 +144,13 @@ pub(crate) async fn authorize_bearer_request(
     wire_model: &str,
     conversation: Option<tidebreak_core::id::ChatId>,
 ) -> Result<(String, Option<ModelRouteLease>)> {
-    let lease = source.lease_model_route(route_model).await?;
+    // Managed sources perform the final validation after their network-backed
+    // mint while retaining the same local authority guard through dispatch.
+    // The source owns that ordering because only it can reuse one fair-lock
+    // read guard rather than deadlocking on a recursive acquisition.
+    let (token, lease) = source
+        .authorize_model_route(route_model, conversation)
+        .await?;
     if source.requires_model_route_lease() && lease.is_none() {
         return Err(AgentError::config(format!(
             "provider no longer serves model `{route_model}`"
@@ -121,7 +163,6 @@ pub(crate) async fn authorize_bearer_request(
             )));
         }
     }
-    let token = source.bearer_token_for(conversation).await?;
     Ok((token, lease))
 }
 
@@ -414,6 +455,7 @@ impl ModelProvider for Router {
                 )));
             }
             req.wire_model = Some(lease.wire_model().to_owned());
+            req.request_shaping_model = Some(lease.request_shaping_model().to_owned());
             Some(lease)
         } else {
             None
@@ -797,6 +839,7 @@ mod tests {
     #[derive(Default)]
     struct LiveRouteSource {
         routes: std::sync::Mutex<HashMap<String, String>>,
+        request_shaping_models: std::sync::Mutex<HashMap<String, String>>,
         active_leases: Arc<std::sync::atomic::AtomicUsize>,
         lease_calls: std::sync::atomic::AtomicUsize,
         token_calls: std::sync::atomic::AtomicUsize,
@@ -828,7 +871,18 @@ mod tests {
                 .map(|wire| {
                     self.active_leases
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    ModelRouteLease::new(wire, ActiveLease(self.active_leases.clone()))
+                    let request_shaping_model = self
+                        .request_shaping_models
+                        .lock()
+                        .unwrap()
+                        .get(route_model)
+                        .cloned()
+                        .unwrap_or_else(|| wire.clone());
+                    ModelRouteLease::with_request_shaping_model(
+                        wire,
+                        request_shaping_model,
+                        ActiveLease(self.active_leases.clone()),
+                    )
                 }))
         }
 
@@ -1230,7 +1284,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frozen_gateway_selector_preserves_native_reasoning_replay() {
+    async fn frozen_gateway_alias_uses_canonical_anthropic_shaping_and_preserves_replay() {
         use axum::body::Body;
         use axum::extract::{Request, State};
         use axum::response::IntoResponse;
@@ -1264,7 +1318,8 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let frozen = "__tidebreak_gateway_v1.deployment.installation.route";
-        let wire = "claude-opus-5";
+        let wire = "anthropic-us-claude-opus-5";
+        let request_shaping_model = "claude-opus-5";
         let gateway = ProviderId::new("model_gateway");
         let authority = Arc::new(LiveRouteSource::default());
         authority
@@ -1272,6 +1327,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert(frozen.into(), wire.into());
+        authority
+            .request_shaping_models
+            .lock()
+            .unwrap()
+            .insert(frozen.into(), request_shaping_model.into());
         let mut route = route(
             RouteKind::ModelGateway,
             "",
@@ -1287,6 +1347,8 @@ mod tests {
                 provider: Some(gateway.clone()),
                 model: frozen.into(),
                 reasoning_model: true,
+                reasoning_effort: Some(tidebreak_core::model::ReasoningEffort::XHigh),
+                vendor_web_search: Some(VendorWebSearch { max_uses: 2 }),
                 messages: vec![ChatMessage {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text {
@@ -1312,6 +1374,9 @@ mod tests {
 
         let body = rx.await.unwrap();
         assert_eq!(body["model"], wire);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(body["tools"][0]["type"], "web_search_20260209");
         assert_eq!(body["messages"][0]["content"][0]["type"], "thinking");
     }
 
@@ -1586,8 +1651,8 @@ mod tests {
             authority
                 .token_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "a rejected continuation must not mint another bearer"
+            2,
+            "each continuation mints first, then performs the final live route validation"
         );
     }
 }

@@ -555,6 +555,31 @@ pub mod agent_run {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod turn_admission {
+    use sea_orm::entity::prelude::*;
+
+    /// Global owner and immutable request fingerprint for one client turn id.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "turn_admission")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub chat_id: Uuid,
+        pub fingerprint: Vec<u8>,
+        /// `pending` | `queued` | `accepted`.
+        pub state: String,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod queued_turn {
     use sea_orm::entity::prelude::*;
 

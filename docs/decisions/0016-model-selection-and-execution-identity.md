@@ -73,8 +73,14 @@ setup. Adapters repeat that authorization for every provider-managed
 continuation request.
 The host execution selector remains on the normalized request for native replay
 gating, while a separate non-serialized wire-model field carries the
-deployment-local id into the provider body. The internal selector is never sent
-to the gateway, and the local wire id never replaces the replay origin.
+deployment-local id into the provider body. A third immutable request-shaping
+identity carries the canonical upstream model family and version into provider
+adapters. This lets a gateway-local alias retain provider-version behavior such
+as Anthropic adaptive thinking, effort mapping, versioned web-search tools, and
+signed reasoning replay without sending the canonical id on the wire or
+weakening exact-route replay gating. The internal selector is never sent to the
+gateway, and neither the local wire id nor the shaping identity replaces the
+replay origin.
 
 The execution record is produced from one cloned, policy-matched gateway
 snapshot. Equivalence selection, capability derivation, validation, and the
@@ -86,8 +92,12 @@ capability policy. The router is the final enforcement boundary: before sending
 a gateway request, the route set must claim the exact frozen selector and its
 live route authority must revalidate that selector against the current snapshot.
 Each request-scoped lease is held until that HTTP leg is dispatched, so a sync
-cannot replace the catalog between validation and dispatch. Anthropic
-`pause_turn` continuations revalidate the frozen selector and mint a fresh
+cannot replace the catalog between validation and dispatch. Because external
+OS/MDM policy can change outside the process-local route lock, managed request
+authorization validates the route, performs the potentially slow bearer mint,
+then revalidates every policy, installation, snapshot, wire, canonical, and
+shaping identity while retaining the same request lease through dispatch.
+Anthropic `pause_turn` continuations repeat this sequence and mint a fresh
 installation-pinned bearer before every leg. Managed policy must
 therefore still point to the recorded deployment and the current policy-matched
 catalog must contain the recorded local id with the same upstream identity,
@@ -119,6 +129,31 @@ Native provider reasoning and provider-tool replay remain exact-route artifacts.
 Canonical equivalence is used to honor selection intent, not to translate or
 re-sign provider-native blocks across routes.
 
+Client-supplied turn ids also have one durable global owner before mutable
+admission begins. A `turn_admission` row binds each id to the owning chat and a
+versioned fingerprint of the exact caller request: byte-exact content, ordered
+image ids, ordered document ids, ordered invoked skills, and the voice-input
+flag. Model selection, catalog state, skill availability, blob metadata,
+document ownership, and capabilities are intentionally excluded because they
+are mutable admission prerequisites rather than caller identity.
+
+Admission ownership moves through `pending`, `queued`, and `accepted`. A
+`pending` row carries a bounded lease token and expiry so another process can
+wait for the first decision and recover ownership after a crash. Queueing and
+turn acceptance consume the exact lease generation—id, token, and expiry—and
+check expiry against the database's statement-time clock before transitioning
+ownership in the same transaction that creates the queued row or accepted
+turn. Queue promotion re-reads the unchanged FIFO head beneath the chat write
+lock and atomically moves `queued` ownership to `accepted`, creates the message
+and turn, and removes the queue row. Editing a queued message updates its
+fingerprint under that same lock, while deleting it removes only queued
+ownership. A stale promoter snapshot can therefore neither execute a retracted
+or reordered message nor delete an edited one. The process-local per-turn mutex
+remains a latency optimization. The database row is the cross-process
+authority, so an exact retry can return the committed result without re-reading
+mutable policy, catalog, skill, image, or document state, and a changed payload
+or another chat fails with an identity conflict.
+
 ## Alternatives Considered
 
 **Persist gateway-local keys and resolve them at execution.** This is the
@@ -148,14 +183,36 @@ the observed failure is not limited to a clean refusal: mutable resolution can
 silently run a different model, and compaction can use a different provider
 identity than the chat's turns.
 
+**Use only a process-local admission lock.** Rejected because desktop and
+server processes can share the same database without sharing memory. A retry in
+another process could revalidate mutable policy and fail even while the first
+process was about to commit the exact request.
+
+**Look up queued ids only inside the requested chat.** Rejected because a
+client-supplied id is a global turn identity. A row queued in one chat could
+otherwise be accepted live in another chat and later discarded during
+promotion.
+
+**Reserve every turn id permanently before validation.** Rejected because a
+crash or ordinary validation failure would strand the id forever. Bounded
+pending leases permit exact recovery while queued and accepted ownership remain
+durable.
+
+**Infer ownership by checking the queue and turn tables pairwise.** Rejected
+because cross-table negative checks are awkward to serialize portably and
+leave crash windows between the checks and writes. One admission row is the
+authoritative state machine for the id.
+
 ## Consequences
 
 Admission becomes the single owner of executable identity. The existing model
 column remains sufficient because the frozen key is bounded by the column's
-model-id limit; no schema or epoch change is needed. Workers may recover display
-and capability data from the matching current row, but cannot turn the frozen
-key into a different route. The router's selector-to-wire-id rewrite becomes a
-security boundary and must remain covered independently of higher-level tests.
+model-id limit. The new global turn-admission ownership table is a baseline
+schema change and therefore advances the pre-1.0 desktop schema epoch. Workers
+may recover display and capability data from the matching current row, but
+cannot turn the frozen key into a different route. The router's
+selector-to-wire-id-and-shaping-id rewrite becomes a security boundary and must
+remain covered independently of higher-level tests.
 
 A gateway administrator can make an accepted turn temporarily unrunnable by
 removing or changing its exact route. That is preferable to silently retargeting
@@ -171,7 +228,12 @@ Catalog sync and gateway HTTP request setup share a route-lease lock. A slow
 catalog fetch may briefly delay a new gateway request, and request setup may
 briefly delay snapshot commit; long-lived response streams do not serialize
 other inference. No provider-managed continuation may dispatch without a fresh
-route lease and bearer.
+route lease, bearer, and post-mint live-route validation.
+
+Turn submission adds one short-lived admission row before mutable validation.
+Concurrent exact retries may briefly wait for its lease holder, but once the
+request is queued or accepted they return from durable identity alone. A
+process crash delays takeover only until the bounded pending lease expires.
 
 Revisit this decision if the gateway protocol itself provides a globally stable,
 cryptographically bound deployment/model revision that can replace Tidebreak's
@@ -198,7 +260,19 @@ The implementation must cover these cases:
 - same-route native reasoning and provider-tool replay survive, while a route
   change still drops or flattens those artifacts; and
 - registry-enforced workers reject a missing or malformed frozen execution
-  record rather than falling back to mutable re-resolution.
+  record rather than falling back to mutable re-resolution;
+- a gateway-local Anthropic alias uses its local id on the wire while canonical
+  upstream identity preserves adaptive thinking, effort, versioned web search,
+  and exact-route signed replay;
+- an OS/MDM gateway repoint during bearer mint blocks the initial request and
+  every provider-managed continuation before request data reaches the retired
+  gateway;
+- two store processes serialize the same exact turn id, recover an expired
+  pending lease, and reject changed payloads or a different owning chat;
+- queue creation, edit, deletion, and promotion preserve exactly one global
+  owner and never leave the id simultaneously queued and accepted; and
+- an exact retry of queued or accepted work succeeds without consulting mutable
+  model, skill, blob, or document state.
 
 A plausible wrong implementation can pass happy-path routing tests by storing
 only `model_gateway::<local-id>` and resolving it immediately. Tests must pause

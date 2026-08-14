@@ -499,6 +499,19 @@ pub struct ChatRequest {
     /// part of Tidebreak's normalized request contract.
     #[serde(skip)]
     pub wire_model: Option<String>,
+    /// Provider model identity used only to shape version-sensitive requests.
+    ///
+    /// A composite route may send a deployment-local [`Self::wire_model`]
+    /// whose spelling carries no provider family or version information. The
+    /// router binds this internal identity from the same immutable route
+    /// metadata as the wire rewrite, so adapters can retain the canonical
+    /// provider request contract without changing either durable replay
+    /// identity ([`Self::model`]) or the model id sent on the wire.
+    ///
+    /// Internal routing state only: direct and custom routes leave it absent
+    /// and keep shaping requests from the wire model exactly as before.
+    #[serde(skip)]
+    pub request_shaping_model: Option<String>,
     /// Whether the resolved model uses a reasoning-model request shape.
     ///
     /// This is host-owned registry policy, rather than an adapter guess based
@@ -558,6 +571,14 @@ impl ChatRequest {
     /// Model id the adapter sends to the provider.
     pub fn wire_model(&self) -> &str {
         self.wire_model.as_deref().unwrap_or(&self.model)
+    }
+
+    /// Immutable provider model identity used for version-sensitive request
+    /// shaping, falling back to the actual wire id for direct/custom routes.
+    pub fn request_shaping_model(&self) -> &str {
+        self.request_shaping_model
+            .as_deref()
+            .unwrap_or_else(|| self.wire_model())
     }
 }
 

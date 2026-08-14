@@ -1023,6 +1023,69 @@ pub(super) fn context_checkpoint_indexes() -> Vec<IndexCreateStatement> {
     vec![]
 }
 
+/// Global ownership and bounded recovery for one client-supplied turn id.
+pub(super) fn turn_admission_table() -> TableCreateStatement {
+    Table::create()
+        .table(TurnAdmission::Table)
+        .col(
+            ColumnDef::new(TurnAdmission::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(TurnAdmission::ChatId).uuid().not_null())
+        .col(
+            ColumnDef::new(TurnAdmission::Fingerprint)
+                .binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(TurnAdmission::State)
+                .string_len(16)
+                .not_null(),
+        )
+        .col(ColumnDef::new(TurnAdmission::LeaseToken).uuid())
+        .col(ColumnDef::new(TurnAdmission::LeaseExpiresAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(TurnAdmission::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(TurnAdmission::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_turn_admission_chat")
+                .from(TurnAdmission::Table, TurnAdmission::ChatId)
+                .to(Chat::Table, Chat::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Expr::col(TurnAdmission::State).is_in(["pending", "queued", "accepted"]))
+        .check(
+            Expr::col(TurnAdmission::State)
+                .eq("pending")
+                .and(Expr::col(TurnAdmission::LeaseToken).is_not_null())
+                .and(Expr::col(TurnAdmission::LeaseExpiresAt).is_not_null())
+                .or(Expr::col(TurnAdmission::State)
+                    .ne("pending")
+                    .and(Expr::col(TurnAdmission::LeaseToken).is_null())
+                    .and(Expr::col(TurnAdmission::LeaseExpiresAt).is_null())),
+        )
+        .to_owned()
+}
+
+pub(super) fn turn_admission_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("ix_turn_admission_pending_expiry")
+        .table(TurnAdmission::Table)
+        .col(TurnAdmission::State)
+        .col(TurnAdmission::LeaseExpiresAt)
+        .to_owned()]
+}
+
 /// Messages waiting to become turns, FIFO per chat.
 pub(super) fn queued_turn_table() -> TableCreateStatement {
     Table::create()

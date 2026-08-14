@@ -74,6 +74,32 @@ async fn test_app_with_skills(
     (app(state), token, store, dir)
 }
 
+fn test_router_with_skills_from_store(
+    store: Arc<dyn Store>,
+    secrets: Arc<MemSecrets>,
+    profile_dir: &std::path::Path,
+    scratch_dir: &std::path::Path,
+) -> (Router, Arc<str>) {
+    let mut state = AppState::new(
+        Config::desktop(profile_dir),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    state.code_execution = Some(Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(store, secrets, scratch_dir)
+            .with_skills(Some(root.join("skills"))),
+    ));
+    let token = state.token.clone();
+    (app(state), token)
+}
+
 async fn post_message_body(
     router: &Router,
     bearer: &str,
@@ -978,6 +1004,106 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cross_process_exact_retry_waits_for_durable_admission_without_revalidation() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("cross-process.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let injected = Arc::new(PauseTerminalStore::new(
+        inner,
+        entered.clone(),
+        release.clone(),
+    ));
+    injected.do_not_pause_terminal();
+    injected.pause_next_acceptance();
+    let store: Arc<dyn Store> = injected;
+    store
+        .set_setting("model", &serde_json::json!("fake"))
+        .await
+        .unwrap();
+    let secrets = Arc::new(MemSecrets::default());
+    let (router_a, token_a) = test_router_with_skills_from_store(
+        store.clone(),
+        secrets.clone(),
+        dir.path(),
+        &dir.path().join("scratch-a"),
+    );
+    let (router_b, token_b) = test_router_with_skills_from_store(
+        store.clone(),
+        secrets,
+        dir.path(),
+        &dir.path().join("scratch-b"),
+    );
+    let bearer_a = format!("Bearer {token_a}");
+    let bearer_b = format!("Bearer {token_b}");
+    let chat = make_chat(&router_a, &bearer_a).await;
+    let turn_id = TurnId::new();
+    let request = serde_json::json!({
+        "turn_id": turn_id,
+        "content": "build the deck",
+        "invoked_skills": ["presentations"],
+    });
+
+    let first_router = router_a.clone();
+    let first_bearer = bearer_a.clone();
+    let first_request = request.clone();
+    let first = tokio::spawn(async move {
+        post_message_body(&first_router, &first_bearer, chat.id, first_request)
+            .await
+            .status()
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first server reserved admission before its commit");
+
+    store
+        .set_setting(
+            crate::plugin_state::PLUGIN_ENABLE_STATE_SETTING,
+            &serde_json::json!({"skills": {"presentations": false}}),
+        )
+        .await
+        .unwrap();
+    let retry_router = router_b.clone();
+    let retry_bearer = bearer_b.clone();
+    let mut retry = tokio::spawn(async move {
+        post_message_body(&retry_router, &retry_bearer, chat.id, request)
+            .await
+            .status()
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut retry)
+            .await
+            .is_err(),
+        "the second process must wait on durable pending ownership, not revalidate the disabled skill"
+    );
+
+    release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first process completed")
+            .unwrap(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), retry)
+            .await
+            .expect("second process converged on the durable decision")
+            .unwrap(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn exact_accepted_retry_survives_invoked_skill_becoming_unavailable() {
     let gate = Arc::new(Notify::new());
     let (router, token, store, _dir) =
@@ -1220,6 +1346,66 @@ async fn queued_retry_compares_attachment_identity_before_blob_resolution() {
         StatusCode::CONFLICT,
         "a queued id cannot silently change image identity"
     );
+}
+
+#[tokio::test]
+async fn queued_turn_id_cannot_be_accepted_by_another_chat() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let first_chat = make_chat(&router, &bearer).await;
+    let second_chat = make_chat(&router, &bearer).await;
+    let queued_id = TurnId::new();
+    let queued = tidebreak_core::QueuedTurn {
+        id: queued_id,
+        chat_id: first_chat.id,
+        content: "owned by the first chat".into(),
+        attachments: Vec::new(),
+        file_attachments: Vec::new(),
+        invoked_skills: Vec::new(),
+        voice_input_used: false,
+        position: 0,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    store.enqueue_queued_turn(&queued).await.unwrap();
+
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            second_chat.id,
+            serde_json::json!({
+                "turn_id": queued_id,
+                "content": "owned by the first chat",
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            first_chat.id,
+            serde_json::json!({
+                "turn_id": queued_id,
+                "content": "owned by the first chat",
+                "queue": true,
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert!(store
+        .list_turn_runs(second_chat.id)
+        .await
+        .unwrap()
+        .is_empty());
+    let remaining = store.list_queued_turns(first_chat.id).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].same_request(&queued));
 }
 
 #[tokio::test(flavor = "multi_thread")]

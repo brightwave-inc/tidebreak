@@ -634,6 +634,10 @@ pub struct ResolvedModelPolicy {
     /// selector here so the router can prove the current catalog still names
     /// the admitted route before rewriting it to `id` for the wire.
     pub route_model: String,
+    /// Canonical provider model identity used for version-sensitive request
+    /// shaping. Gateway-local aliases keep their own [`Self::id`] on the wire
+    /// while inheriting this identity only from an unambiguous curated match.
+    pub request_shaping_model: String,
     /// Human-readable label.
     pub display_name: String,
     /// Exact provider route.
@@ -690,6 +694,7 @@ impl ResolvedModelPolicy {
             key: model_registry::selection_key(spec.provider, spec.id),
             id: spec.id.to_owned(),
             route_model: spec.id.to_owned(),
+            request_shaping_model: spec.id.to_owned(),
             display_name: spec.display_name.to_owned(),
             provider: spec.provider,
             vendor: spec.vendor(),
@@ -731,6 +736,7 @@ impl ResolvedModelPolicy {
             return policy;
         };
         policy.display_name = spec.display_name.to_owned();
+        policy.request_shaping_model = spec.id.to_owned();
         policy.vendor = Some(spec.provider);
         policy.verification = spec.verification;
         policy.input_modalities = spec.input_modalities.to_vec();
@@ -747,6 +753,7 @@ impl ResolvedModelPolicy {
             key: model_registry::selection_key(provider, &model.id),
             id: model.id.clone(),
             route_model: model.id.clone(),
+            request_shaping_model: model.id.clone(),
             display_name: model
                 .display_name
                 .clone()

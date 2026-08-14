@@ -449,7 +449,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // advertised in the same turn.
     if let Some(search) = req.vendor_web_search {
         let vendor_tool = json!({
-            "type": web_search_tool_type(req.wire_model()),
+            "type": web_search_tool_type(req.request_shaping_model()),
             "name": VENDOR_WEB_SEARCH_TOOL,
             "max_uses": search.max_uses,
         });
@@ -511,7 +511,10 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // API: with thinking on, `tool_choice` may only be `auto` or `none`. The
     // forcing is the caller's explicit ask and reasoning is a quality
     // preference, so the ask wins and this request does not think.
-    if req.reasoning_model && !forces_a_tool(req) && takes_adaptive_thinking(req.wire_model()) {
+    if req.reasoning_model
+        && !forces_a_tool(req)
+        && takes_adaptive_thinking(req.request_shaping_model())
+    {
         // An omitted `thinking` means thinking is *off* on Opus 4.7 and later,
         // so a reasoning model only reasons when the request says so.
         //
@@ -536,8 +539,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
         if let Some(effort) = req.reasoning_effort {
-            body["output_config"] =
-                json!({ "effort": wire_reasoning_effort(req.wire_model(), effort).as_str() });
+            body["output_config"] = json!({ "effort": wire_reasoning_effort(req.request_shaping_model(), effort).as_str() });
         }
         attach_reasoning_blocks(&mut body, req);
     }

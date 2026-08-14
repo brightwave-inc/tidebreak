@@ -991,6 +991,22 @@ impl Store for PauseTerminalStore {
     async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::TurnRun>> {
         self.inner.list_turn_runs(chat_id).await
     }
+    async fn begin_turn_admission(
+        &self,
+        request: &tidebreak_core::TurnAdmissionRequest,
+        lease_token: uuid::Uuid,
+        lease_ttl: chrono::Duration,
+    ) -> Result<tidebreak_core::BeginTurnAdmissionOutcome> {
+        self.inner
+            .begin_turn_admission(request, lease_token, lease_ttl)
+            .await
+    }
+    async fn release_turn_admission(
+        &self,
+        lease: tidebreak_core::TurnAdmissionLease,
+    ) -> Result<bool> {
+        self.inner.release_turn_admission(lease).await
+    }
     async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::QueuedTurn>> {
         self.inner.list_queued_turns(chat_id).await
     }
@@ -1022,6 +1038,41 @@ impl Store for PauseTerminalStore {
                 invoked_skills,
             )
             .await
+    }
+    async fn accept_reserved_turn_with_message_context(
+        &self,
+        lease: tidebreak_core::TurnAdmissionLease,
+        chat_id: ChatId,
+        model: &str,
+        content: &str,
+        images: &[tidebreak_core::ImageRef],
+        documents: &[tidebreak_core::DocumentId],
+        invoked_skills: &[String],
+        voice_input_used: bool,
+    ) -> Result<tidebreak_core::ReservedTurnAcceptanceOutcome> {
+        if self.pause_accept.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner
+            .accept_reserved_turn_with_message_context(
+                lease,
+                chat_id,
+                model,
+                content,
+                images,
+                documents,
+                invoked_skills,
+                voice_input_used,
+            )
+            .await
+    }
+    async fn enqueue_reserved_turn(
+        &self,
+        lease: tidebreak_core::TurnAdmissionLease,
+        queued: &tidebreak_core::QueuedTurn,
+    ) -> Result<tidebreak_core::ReservedQueuedTurnOutcome> {
+        self.inner.enqueue_reserved_turn(lease, queued).await
     }
     async fn accept_turn_steer(
         &self,

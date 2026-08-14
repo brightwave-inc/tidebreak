@@ -28,15 +28,15 @@ use serde_json::Value;
 
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult,
-    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, CallId, Chat, ChatId,
-    ChatTranscriptSnapshot, ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome,
-    DeleteProjectOutcome, DocumentId, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
-    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
-    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
-    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
+    AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot,
+    ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome,
+    DocumentId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
+    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
+    JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
+    PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
+    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
     TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
 };
 
@@ -229,33 +229,6 @@ impl ScopedStore {
         self.store.get_turn_run(id).await
     }
 
-    /// [`Store::accept_turn_with_message_context`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn accept_turn_with_message_context(
-        &self,
-        id: TurnId,
-        chat_id: ChatId,
-        model: &str,
-        content: &str,
-        images: &[ImageRef],
-        documents: &[DocumentId],
-        invoked_skills: &[String],
-        voice_input_used: bool,
-    ) -> Result<AcceptTurnOutcome> {
-        self.store
-            .accept_turn_with_message_context(
-                id,
-                chat_id,
-                model,
-                content,
-                images,
-                documents,
-                invoked_skills,
-                voice_input_used,
-            )
-            .await
-    }
-
     /// [`Store::accept_turn_steer_with_message_context`].
     #[allow(clippy::too_many_arguments)]
     pub async fn accept_turn_steer_with_message_context(
@@ -313,14 +286,6 @@ impl ScopedStore {
     /// [`Store::get_agent_run_result`].
     pub async fn get_agent_run_result(&self, id: AgentRunId) -> Result<Option<AgentRunResult>> {
         self.store.get_agent_run_result(id).await
-    }
-
-    /// [`Store::enqueue_queued_turn`].
-    pub async fn enqueue_queued_turn(
-        &self,
-        queued: &tidebreak_core::QueuedTurn,
-    ) -> Result<tidebreak_core::QueuedTurn> {
-        self.store.enqueue_queued_turn(queued).await
     }
 
     /// [`Store::resume_agent_run_from_checkin`].
