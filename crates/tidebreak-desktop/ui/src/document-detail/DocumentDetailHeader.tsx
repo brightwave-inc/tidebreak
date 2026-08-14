@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 
 /**
  * The panel's header, in the two slots {@link PanelFrame} exposes: the trail
- * back to the list on the left, the view switch and actions on the right.
+ * back to the list on the left, the document actions on the right.
  */
 
 export function DocumentDetailBreadcrumb({
