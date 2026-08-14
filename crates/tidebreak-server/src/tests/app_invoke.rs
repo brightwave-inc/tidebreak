@@ -584,6 +584,7 @@ impl FakeGatewayDispatch {
 impl GatewayInvokeDispatcher for FakeGatewayDispatch {
     async fn dispatch(
         &self,
+        _owner: &tidebreak_core::OwnerId,
         app: AppId,
         request: &GatewayOperationRequest,
     ) -> Result<GatewayInvokeOutcome, GatewayDispatchError> {

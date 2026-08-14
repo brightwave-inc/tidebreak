@@ -26,6 +26,7 @@ const fixturePaths = [
   "crates/tidebreak-desktop/src/updater.rs",
   "crates/tidebreak-desktop/src/broker.rs",
   "crates/tidebreak-desktop/scripts/prepare-sidecar.mjs",
+  "deploy/self-host/Dockerfile",
   "deploy/self-host/Dockerfile.dockerignore",
   "crates/tidebreak-sandbox-agent/Dockerfile.dockerignore",
   "scripts/stage-self-host-build-context.sh",
@@ -93,6 +94,19 @@ test("the mirrored workflow-security fixture passes before mutation", () => {
 });
 
 const mutations = [
+  {
+    name: "self-host mutable runtime packages",
+    file: "deploy/self-host/Dockerfile",
+    expected: "self-host runtime installs packages from an immutable Debian snapshot",
+    mutate: (source) =>
+      source
+        .replace(
+          /RUN rm -f \/etc\/apt\/sources\.list\.d\/debian\.sources[\s\S]*?&& apt-get -o Acquire::Check-Valid-Until=false update \\\n/,
+          "RUN apt-get update \\\n",
+        )
+        .replace(/ca-certificates=[^\s\\]+/, "ca-certificates")
+        .replace(/curl=[^\s\\]+/, "curl"),
+  },
   {
     name: "sandbox image default-branch publication guard",
     file: ".github/workflows/publish-sandbox-image.yml",
@@ -237,6 +251,90 @@ const mutations = [
     file: "deploy/self-host/Dockerfile.dockerignore",
     expected: "Docker context is allowlisted",
     mutate: (source) => source.replace("**/id_*\n", ""),
+  },
+  {
+    name: "source SBOM OIDC isolation",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "source_sbom", (job) =>
+        job.replace(
+          "    permissions:\n      contents: read\n",
+          "    permissions:\n      contents: read\n      id-token: write\n",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM production-environment isolation",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "source_sbom", (job) =>
+        job.replace(
+          "    runs-on: ubuntu-latest\n",
+          "    runs-on: ubuntu-latest\n    environment: desktop-production\n",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM deployment-variable isolation",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "source_sbom", (job) =>
+        job.replace(
+          "    steps:\n",
+          "    env:\n      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}\n    steps:\n",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM exact release checkout",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "source_sbom", (job) =>
+        job.replace(
+          "          ref: ${{ needs.validate.outputs.sha }}\n",
+          "          ref: ${{ github.sha }}\n",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM pinned artifact transfer",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "source_sbom", (job) =>
+        job.replace(
+          /uses: actions\/upload-artifact@[0-9a-f]{40} # v7/,
+          "uses: actions/upload-artifact@v7",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM pinned artifact download",
+    file: ".github/workflows/release.yml",
+    expected: "source SBOM generation is isolated from production credentials",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish", (job) =>
+        job.replace(
+          /uses: actions\/download-artifact@[0-9a-f]{40} # v8\n        with:\n          name: tidebreak-source-sbom-/,
+          "uses: actions/download-artifact@v8\n        with:\n          name: tidebreak-source-sbom-",
+        ),
+      ),
+  },
+  {
+    name: "source SBOM is not an installer attestation",
+    file: ".github/workflows/release.yml",
+    expected: "public releases attest provenance without treating the source SBOM as an installer SBOM",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish", (job) =>
+        job.replace(
+          "          subject-checksums: ${{ runner.temp }}/immutable-release-files.sha256\n",
+          "          subject-checksums: ${{ runner.temp }}/immutable-release-files.sha256\n          sbom-path: dist/Tidebreak_${{ needs.validate.outputs.version }}_source.spdx.json\n",
+        ),
+      ),
   },
   {
     name: "signing job pnpm pin",

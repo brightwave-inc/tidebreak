@@ -1103,9 +1103,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  source_sbom:
+    name: generate source SBOM
+    needs: [validate, inspect_hosted]
+    if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          path: release-source
+          persist-credentials: false
+
+      - name: Generate the source-scoped release SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: release-source
+          format: spdx-json
+          output-file: source-sbom/Tidebreak_${{ needs.validate.outputs.version }}_source.spdx.json
+          syft-version: v1.51.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Checksum the source-scoped release SBOM
+        env:
+          TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          sbom="source-sbom/Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          sbom_name="${sbom#source-sbom/}"
+          sbom_digest="$(sha256sum "$sbom" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "$sbom_digest" "$sbom_name" > "$sbom.sha256"
+
+      - name: Upload the checksummed source SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
+          path: source-sbom/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: publish downloads.brightwave.io
-    needs: [validate, inspect_hosted, build_macos, build_windows]
+    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom]
     # `build_windows` is parked (see docs/deferred.md), so a skipped result is
     # the expected steady state; only an outright failure may block publishing.
     if: >-
@@ -1119,6 +1161,7 @@ jobs:
             needs.build_macos.result == 'success'
             && needs.build_windows.result != 'failure'
             && needs.build_windows.result != 'cancelled'
+            && needs.source_sbom.result == 'success'
           )
         )
       }}
@@ -1129,6 +1172,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write
     env:
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
@@ -1192,6 +1236,44 @@ jobs:
           --sha "$RELEASE_SHA"
           --published-at "$RELEASE_PUBLISHED_AT"
           --base-url "$RELEASE_BASE_URL"
+
+      - name: Download the checksummed source SBOM
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
+          path: dist
+
+      - name: Prepare provenance attestation subjects
+        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+        run: |
+          sbom="dist/Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          (cd dist && sha256sum --check --strict "${sbom#dist/}.sha256")
+          find dist -type f ! -name latest.json -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > "$RUNNER_TEMP/immutable-release-files.sha256"
+
+      # GitHub artifact attestations are available to every public repository,
+      # but private repositories require Enterprise Cloud. The release remains
+      # usable while this repository is private; public releases fail closed if
+      # its independently signed provenance cannot be recorded.
+      - name: Attest immutable release provenance
+        if: >-
+          ${{
+            needs.inspect_hosted.outputs.exists != 'true'
+            && github.event.repository.visibility == 'public'
+          }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/immutable-release-files.sha256
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: tidebreak-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Resume from the hosted immutable release
         if: ${{ needs.inspect_hosted.outputs.exists == 'true' }}
@@ -1320,6 +1402,13 @@ jobs:
             [[ -n "$url" ]] || continue
             curl --fail --silent --show-error --head "$url" >/dev/null
           done
+          sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          if [[ -f "dist/$sbom" ]]; then
+            curl --fail --silent --show-error --head \
+              "$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/$sbom" >/dev/null
+            curl --fail --silent --show-error --head \
+              "$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/$sbom.sha256" >/dev/null
+          fi
 
   attach_downloads:
     name: attach GitHub release downloads
@@ -1388,6 +1477,16 @@ jobs:
           cp "$universal_dmg" "$compatibility_dmg"
           (cd downloads && sha256sum "$(basename "$compatibility_dmg")" \
             > "$(basename "$compatibility_dmg").sha256")
+
+          sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          sbom_url="$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/$sbom"
+          if curl --fail --silent --show-error --head "$sbom_url" >/dev/null; then
+            curl --fail --silent --show-error "$sbom_url" \
+              --output "downloads/$sbom"
+            curl --fail --silent --show-error "$sbom_url.sha256" \
+              --output "downloads/$sbom.sha256"
+            (cd downloads && sha256sum --check --strict "$sbom.sha256")
+          fi
 
       # Version-free asset names give the README permanent one-click download
       # links through GitHub's /releases/latest/download/ redirect.

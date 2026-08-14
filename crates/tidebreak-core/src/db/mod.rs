@@ -845,7 +845,15 @@ impl Store for DbStore {
     }
 
     async fn create_app(&self, request: &CreateApp) -> Result<AppRecord> {
-        ops::app::create_app(self, request).await
+        ops::app::create_app(self, None, None, request).await
+    }
+
+    async fn create_app_for_chat(&self, chat_id: ChatId, request: &CreateApp) -> Result<AppRecord> {
+        ops::app::create_app(self, None, Some(chat_id), request).await
+    }
+
+    async fn create_app_scoped(&self, owner: &OwnerId, request: &CreateApp) -> Result<AppRecord> {
+        ops::app::create_app(self, Some(owner), None, request).await
     }
 
     async fn append_app_revision(
@@ -853,43 +861,135 @@ impl Store for DbStore {
         app_id: AppId,
         revision: &NewAppRevision,
     ) -> Result<AppRecord> {
-        ops::app::append_app_revision(self, app_id, revision).await
+        ops::app::append_app_revision(self, None, None, app_id, revision).await
+    }
+
+    async fn append_app_revision_for_chat(
+        &self,
+        chat_id: ChatId,
+        app_id: AppId,
+        revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        ops::app::append_app_revision(self, None, Some(chat_id), app_id, revision).await
+    }
+
+    async fn append_app_revision_scoped(
+        &self,
+        owner: &OwnerId,
+        app_id: AppId,
+        revision: &NewAppRevision,
+    ) -> Result<AppRecord> {
+        ops::app::append_app_revision(self, Some(owner), None, app_id, revision).await
     }
 
     async fn get_app(&self, id: AppId) -> Result<Option<AppRecord>> {
-        ops::app::get_app(self, id).await
+        ops::app::get_app(self, None, id).await
+    }
+
+    async fn get_app_scoped(&self, owner: &OwnerId, id: AppId) -> Result<Option<AppRecord>> {
+        ops::app::get_app(self, Some(owner), id).await
+    }
+
+    async fn get_app_for_chat(&self, chat_id: ChatId, id: AppId) -> Result<Option<AppRecord>> {
+        ops::app::get_app_for_chat(self, chat_id, id).await
     }
 
     async fn list_apps(&self, limit: u64) -> Result<Vec<AppRecord>> {
-        ops::app::list_apps(self, limit).await
+        ops::app::list_apps(self, None, limit).await
+    }
+
+    async fn list_apps_scoped(&self, owner: &OwnerId, limit: u64) -> Result<Vec<AppRecord>> {
+        ops::app::list_apps(self, Some(owner), limit).await
     }
 
     async fn list_app_revisions(&self, app_id: AppId) -> Result<Vec<AppRevision>> {
-        ops::app::list_app_revisions(self, app_id).await
+        ops::app::list_app_revisions(self, None, app_id).await
+    }
+
+    async fn list_app_revisions_scoped(
+        &self,
+        owner: &OwnerId,
+        app_id: AppId,
+    ) -> Result<Vec<AppRevision>> {
+        ops::app::list_app_revisions(self, Some(owner), app_id).await
     }
 
     async fn get_app_revision(&self, id: AppRevisionId) -> Result<Option<AppRevision>> {
-        ops::app::get_app_revision(self, id).await
+        ops::app::get_app_revision(self, None, id).await
+    }
+
+    async fn get_app_revision_scoped(
+        &self,
+        owner: &OwnerId,
+        id: AppRevisionId,
+    ) -> Result<Option<AppRevision>> {
+        ops::app::get_app_revision(self, Some(owner), id).await
+    }
+
+    async fn get_app_revision_for_chat(
+        &self,
+        chat_id: ChatId,
+        id: AppRevisionId,
+    ) -> Result<Option<AppRevision>> {
+        ops::app::get_app_revision_for_chat(self, chat_id, id).await
     }
 
     async fn delete_app(&self, id: AppId, deleted_at: chrono::DateTime<Utc>) -> Result<bool> {
-        ops::app::delete_app(self, id, deleted_at).await
+        ops::app::delete_app(self, None, id, deleted_at).await
+    }
+
+    async fn delete_app_scoped(
+        &self,
+        owner: &OwnerId,
+        id: AppId,
+        deleted_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::app::delete_app(self, Some(owner), id, deleted_at).await
     }
 
     async fn restore_app(&self, id: AppId, restored_at: chrono::DateTime<Utc>) -> Result<bool> {
-        ops::app::restore_app(self, id, restored_at).await
+        ops::app::restore_app(self, None, id, restored_at).await
+    }
+
+    async fn restore_app_scoped(
+        &self,
+        owner: &OwnerId,
+        id: AppId,
+        restored_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::app::restore_app(self, Some(owner), id, restored_at).await
     }
 
     async fn put_app_grant(&self, grant: &AppGrant) -> Result<()> {
-        ops::app::put_app_grant(self, grant).await
+        ops::app::put_app_grant(self, None, grant).await
+    }
+
+    async fn put_app_grant_scoped(&self, owner: &OwnerId, grant: &AppGrant) -> Result<()> {
+        ops::app::put_app_grant(self, Some(owner), grant).await
     }
 
     async fn get_app_grant(&self, app_id: AppId) -> Result<Option<AppGrant>> {
-        ops::app::get_app_grant(self, app_id).await
+        ops::app::get_app_grant(self, None, app_id).await
+    }
+
+    async fn get_app_grant_scoped(
+        &self,
+        owner: &OwnerId,
+        app_id: AppId,
+    ) -> Result<Option<AppGrant>> {
+        ops::app::get_app_grant(self, Some(owner), app_id).await
     }
 
     async fn put_app_gateway_draft(&self, draft: &AppGatewayDraft) -> Result<()> {
-        ops::app::put_app_gateway_draft(self, draft).await
+        ops::app::put_app_gateway_draft(self, None, draft).await
+    }
+
+    async fn put_app_gateway_draft_scoped(
+        &self,
+        owner: &OwnerId,
+        draft: &AppGatewayDraft,
+    ) -> Result<()> {
+        ops::app::put_app_gateway_draft(self, Some(owner), draft).await
     }
 
     async fn get_app_gateway_draft(
@@ -897,15 +997,32 @@ impl Store for DbStore {
         app_id: AppId,
         gateway_base_url: &str,
     ) -> Result<Option<AppGatewayDraft>> {
-        ops::app::get_app_gateway_draft(self, app_id, gateway_base_url).await
+        ops::app::get_app_gateway_draft(self, None, app_id, gateway_base_url).await
+    }
+
+    async fn get_app_gateway_draft_scoped(
+        &self,
+        owner: &OwnerId,
+        app_id: AppId,
+        gateway_base_url: &str,
+    ) -> Result<Option<AppGatewayDraft>> {
+        ops::app::get_app_gateway_draft(self, Some(owner), app_id, gateway_base_url).await
     }
 
     async fn delete_app_grant(&self, app_id: AppId) -> Result<bool> {
-        ops::app::delete_app_grant(self, app_id).await
+        ops::app::delete_app_grant(self, None, app_id).await
+    }
+
+    async fn delete_app_grant_scoped(&self, owner: &OwnerId, app_id: AppId) -> Result<bool> {
+        ops::app::delete_app_grant(self, Some(owner), app_id).await
     }
 
     async fn list_live_app_grants(&self) -> Result<Vec<AppGrant>> {
-        ops::app::list_live_app_grants(self).await
+        ops::app::list_live_app_grants(self, None).await
+    }
+
+    async fn list_live_app_grants_scoped(&self, owner: &OwnerId) -> Result<Vec<AppGrant>> {
+        ops::app::list_live_app_grants(self, Some(owner)).await
     }
 
     async fn list_connected_apps(&self) -> Result<Vec<ConnectedApp>> {

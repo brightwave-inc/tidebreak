@@ -6,8 +6,6 @@ import type { ComputerUseSnapshot } from "./computerUse";
 const EMPTY_SNAPSHOT: ComputerUseSnapshot = {
   active: null,
   halted: false,
-  pendingConsents: [],
-  pendingConfirmations: [],
 };
 
 const mocks = vi.hoisted(() => ({

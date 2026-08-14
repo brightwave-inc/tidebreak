@@ -95,12 +95,14 @@ action passes are:
 
 1. OS TCC grants (Screen Recording + Accessibility), requested together on
    first use with a status checklist in settings.
-2. A per-app grant, asked once per app through the normal in-chat approval
-   card ("Allow Tidebreak to control Mail — once / always for this chat /
-   always"). The card decision is written into the broker's grant store; the
-   broker enforces, the card is the only place the question is asked. Grants
-   are listed and revocable in settings. Whole-screen capture gets the same
-   treatment as one standing grant. **Once is not a standing grant that the
+2. A per-app grant, asked once per app through an OS-native dialog owned by the
+   Tauri host ("Allow Tidebreak to control Mail — once / always for this chat /
+   always"). The renderer may show that computer use is waiting, but it never
+   receives the pending call identifier and exposes no command that can resolve
+   the decision. The native answer is written into the broker's grant store;
+   the broker enforces. Grants are listed and revocable in settings.
+   Whole-screen capture gets the same treatment as one standing grant.
+   **Once is not a standing grant that the
    desktop later revokes.** It is a broker-native `single_use` grant:
    session-only (never written to the durable grant table), hidden from the
    grants listing, and consumed when the operation it authorized reaches a
@@ -108,11 +110,13 @@ action passes are:
    covers the confirm. A crash or a failed revoke therefore cannot promote
    once into a durable per-conversation grant. Chat and Always remain
    persisted standing grants.
-3. An act-time confirmation only for consequential actions: before clicking,
-   the broker re-reads the target element and classifies it; labels that
+3. An act-time OS-native confirmation only for consequential actions: before
+   clicking, the broker re-reads the target element and classifies it; labels that
    commit an external effect (send, pay, buy, delete, submit, sign,
    transfer, post) or credential fields force a single non-activating
    confirmation, honored only if the label still matches at act time. The
+   renderer receives neither the confirmation identity nor an API that can
+   redeem it. The
    classifier's word list is deliberately short and **English-only** —
    navigation-shaped words (cancel, back, close, decline) do not trip it.
    Localized commit verbs ("Envoyer", "Senden") are an accepted miss of the
@@ -176,12 +180,11 @@ content redaction, and any auto-approval of control actions.
   judge adds a second policy brain whose failure modes are hard to audit, and
   the calibrated consent layers should make it unnecessary. Revisit if per-app
   grants prove too coarse in practice.
-- **Routing consent through a separate desktop HUD instead of the in-chat
-  card.** Rejected as the primary surface: two grant systems asking the same
-  question on different surfaces is exactly the over-asking failure. The
-  broker still enforces; the chat card is the single asking surface. The only
-  HUD prompt is the act-time consequential confirmation, which must not steal
-  focus from the target app and so cannot live in the chat window.
+- **Renderer-hosted consent and confirmation cards.** Rejected: a renderer
+  compromise could enumerate pending call identifiers and resolve its own
+  approval. The native host owns the only asking surface. There is still one
+  grant system and one prompt per decision; moving it outside the renderer does
+  not add a second policy brain.
 - **Do nothing / wait for the managed browser surface.** Rejected: most of the
   value (seeing the screen, operating native apps) is orthogonal to the
   browser plan and blocked on nothing.
@@ -233,7 +236,9 @@ content redaction, and any auto-approval of control actions.
 - Image-input gating: with a text-only model selected, capture tools refuse
   with the typed error; nothing silently drops the image.
 - Grant-store test: a card decision at each scope produces exactly one broker
-  grant, revocation removes it, and no control op proceeds without one.
+  grant, revocation removes it, and no control op proceeds without one. The
+  renderer snapshot contains no pending call identifiers, and command-parity
+  coverage proves no renderer command can resolve consent or confirmation.
 - Once-grant test: a `single_use` grant authorizes exactly one terminal
   operation (including a held confirm), does not appear in the grants
   listing, and is absent after a broker reload. A standing grant at the

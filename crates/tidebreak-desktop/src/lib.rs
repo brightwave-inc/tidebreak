@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde_json::Value;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::Config;
 
@@ -77,6 +80,151 @@ struct AppState {
 #[tauri::command]
 async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInfo, String> {
     Ok(wait_server_info(state.inner()).await?.renderer_info())
+}
+
+/// Save MCP configuration through the native-only server surface. Command
+/// transports receive an OS-native confirmation before the host credential is
+/// attached; renderer JavaScript can request the prompt but cannot approve it.
+#[tauri::command]
+async fn put_native_mcp_servers(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    config: Value,
+) -> Result<Value, String> {
+    let commands = native_command_previews(&config)?;
+    if !commands.is_empty() {
+        let preview = commands.join("\n");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut dialog = app
+            .dialog()
+            .message(format!(
+                "Allow these MCP servers to run local programs as your macOS user?\n\n{preview}"
+            ))
+            .title("Allow local MCP commands?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Allow and save".to_owned(),
+                "Cancel".to_owned(),
+            ));
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.parent(&window);
+        }
+        dialog.show(move |approved| {
+            let _ = sender.send(approved);
+        });
+        if !receiver.await.unwrap_or(false) {
+            return Err("local MCP command configuration was not approved".to_owned());
+        }
+    }
+
+    let info = wait_server_info(state.inner()).await?;
+    let response = documents::native_auth(
+        documents::local_client()
+            .put(format!("{}/native/mcp/servers", info.base_url))
+            .json(&config),
+        &info,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("save MCP servers: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("read MCP server response: {error}"))?;
+    if !status.is_success() {
+        let message = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|body| {
+                body.get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("MCP server returned {status}"));
+        return Err(message);
+    }
+    serde_json::from_slice(&body).map_err(|error| format!("decode MCP server response: {error}"))
+}
+
+fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
+    let servers = config
+        .get("servers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MCP configuration must contain a servers array".to_owned())?;
+    let mut previews = Vec::new();
+    for server in servers {
+        if !server
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(command) = server.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = server
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unnamed");
+        let mut argv = vec![native_command_token(command)?];
+        if let Some(args) = server.get("args") {
+            let args = args
+                .as_array()
+                .ok_or_else(|| "MCP command args must be an array".to_owned())?;
+            for argument in args {
+                let argument = argument
+                    .as_str()
+                    .ok_or_else(|| "every MCP command argument must be a string".to_owned())?;
+                argv.push(native_command_token(argument)?);
+            }
+        }
+        let argv = serde_json::to_string(&argv).expect("string vectors serialize");
+        previews.push(format!("{}: {argv}", native_security_label(name)));
+    }
+    Ok(previews)
+}
+
+fn native_command_token(value: &str) -> Result<String, String> {
+    if value.chars().count() > 240 {
+        return Err("MCP command or argument is too long to display safely".to_owned());
+    }
+    Ok(value
+        .chars()
+        .map(|character| {
+            if matches!(
+                get_general_category(character),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            ) {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn native_security_label(value: &str) -> String {
+    value
+        .chars()
+        .take(160)
+        .map(|character| {
+            if matches!(
+                get_general_category(character),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            ) {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// Best-effort attention hint for a newly parked user question.
@@ -300,6 +448,7 @@ pub fn run() {
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
+            put_native_mcp_servers,
             request_user_attention,
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
@@ -318,8 +467,6 @@ pub fn run() {
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,
-            client_execution::computer_use::resolve_computer_use_consent,
-            client_execution::computer_use::resolve_computer_use_confirmation,
             host_access::connect_folder,
             host_access::connect_approved_folder,
             host_access::list_approved_folders,
@@ -610,5 +757,63 @@ mod server_info_tests {
         assert!(serialized.contains("renderer-bearer"));
         assert!(!serialized.contains("native-credential-sentinel"));
         assert!(!serialized.contains("executor"));
+    }
+
+    #[test]
+    fn native_security_labels_strip_format_controls_and_are_bounded() {
+        let label = native_security_label(&format!("trusted\u{202e}\u{200b}{}", "x".repeat(200)));
+        assert!(!label.contains('\u{202e}'));
+        assert!(!label.contains('\u{200b}'));
+        assert_eq!(label.chars().count(), 160);
+        assert!(label.starts_with("trusted\u{fffd}\u{fffd}"));
+    }
+
+    #[test]
+    fn only_enabled_local_commands_require_a_native_preview() {
+        let config = serde_json::json!({
+            "servers": [
+                {"name": "draft", "command": "/bin/echo", "enabled": false},
+                {"name": "remote", "url": "https://example.test/mcp", "enabled": true},
+                {"name": "live", "command": "/bin/sh", "args": ["-c", "echo safe"], "enabled": true}
+            ]
+        });
+        assert_eq!(
+            native_command_previews(&config).unwrap(),
+            vec![r#"live: ["/bin/sh","-c","echo safe"]"#]
+        );
+    }
+
+    #[test]
+    fn native_command_preview_refuses_arguments_it_cannot_show_completely() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "hidden suffix",
+                "command": "/bin/sh",
+                "args": ["-c", "x".repeat(241)],
+                "enabled": true
+            }]
+        });
+        assert!(native_command_previews(&config).is_err());
+    }
+
+    #[test]
+    fn omitted_enabled_defaults_to_an_approved_command_and_every_command_is_shown() {
+        let servers = (0..9)
+            .map(|index| serde_json::json!({"name": format!("server-{index}"), "command": "/bin/true"}))
+            .collect::<Vec<_>>();
+        let previews = native_command_previews(&serde_json::json!({"servers": servers})).unwrap();
+        assert_eq!(previews.len(), 9);
+        assert!(previews[8].starts_with("server-8:"));
+    }
+
+    #[test]
+    fn command_arguments_are_not_truncated_inside_the_displayable_bound() {
+        let suffix = "DANGEROUS_SUFFIX";
+        let argument = format!("{}{}", "x".repeat(180), suffix);
+        let config = serde_json::json!({
+            "servers": [{"name": "long", "command": "/bin/sh", "args": ["-c", argument]}]
+        });
+        let previews = native_command_previews(&config).unwrap();
+        assert!(previews[0].contains(suffix));
     }
 }

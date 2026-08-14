@@ -33,7 +33,7 @@ use tidebreak_core::local_app::{
     app_revision_relative_path, AppBinding, AppGatewayDraft, AppManifest, AppRecord, AppRevision,
     MAX_APP_NAME_CHARS,
 };
-use tidebreak_core::{AgentError, Result, Store};
+use tidebreak_core::{AgentError, OwnerId, Result, Store};
 
 use crate::connected_apps::{
     GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayRegistration,
@@ -257,6 +257,7 @@ impl GatewayDraftRegistry {
     /// that keeps saying no is worse than an honest refusal.
     async fn register(
         &self,
+        owner: &OwnerId,
         record: &AppRecord,
         revision: &AppRevision,
         base_url: &str,
@@ -278,8 +279,15 @@ impl GatewayDraftRegistry {
                 shared_app_id,
                 revision_id,
             }) => {
-                self.persist(record, revision, base_url, &shared_app_id, &revision_id)
-                    .await?;
+                self.persist(
+                    owner,
+                    record,
+                    revision,
+                    base_url,
+                    &shared_app_id,
+                    &revision_id,
+                )
+                .await?;
                 Ok(GatewayRegistration::Registered {
                     shared_app_id,
                     revision_id,
@@ -302,6 +310,7 @@ impl GatewayDraftRegistry {
     /// mapping at what the gateway now serves.
     async fn append(
         &self,
+        owner: &OwnerId,
         draft: &AppGatewayDraft,
         record: &AppRecord,
         revision: &AppRevision,
@@ -316,6 +325,7 @@ impl GatewayDraftRegistry {
             None => Ok(GatewayRegistration::NotRegistered),
             Some(GatewayRegistrationOutcome::Registered { revision_id, .. }) => {
                 self.persist(
+                    owner,
                     record,
                     revision,
                     base_url,
@@ -343,6 +353,7 @@ impl GatewayDraftRegistry {
     /// Record what the gateway now holds for this app at this deployment.
     async fn persist(
         &self,
+        owner: &OwnerId,
         record: &AppRecord,
         revision: &AppRevision,
         base_url: &str,
@@ -350,14 +361,17 @@ impl GatewayDraftRegistry {
         gateway_revision_id: &str,
     ) -> Result<()> {
         self.store
-            .put_app_gateway_draft(&AppGatewayDraft {
-                app_id: record.id,
-                gateway_base_url: base_url.to_owned(),
-                shared_app_id: shared_app_id.to_owned(),
-                gateway_revision_id: gateway_revision_id.to_owned(),
-                synced_revision_id: revision.id,
-                updated_at: chrono::Utc::now(),
-            })
+            .put_app_gateway_draft_scoped(
+                owner,
+                &AppGatewayDraft {
+                    app_id: record.id,
+                    gateway_base_url: base_url.to_owned(),
+                    shared_app_id: shared_app_id.to_owned(),
+                    gateway_revision_id: gateway_revision_id.to_owned(),
+                    synced_revision_id: revision.id,
+                    updated_at: chrono::Utc::now(),
+                },
+            )
             .await
     }
 
@@ -368,15 +382,19 @@ impl GatewayDraftRegistry {
     /// a shared app at the gateway for something the library no longer holds:
     /// the store refuses the mapping write for the same reason, and refusing
     /// here means the network call never happens in the first place.
-    async fn current(&self, app: AppId) -> Result<(AppRecord, AppRevision)> {
+    async fn current(&self, owner: &OwnerId, app: AppId) -> Result<(AppRecord, AppRevision)> {
         let missing = || AgentError::Store(format!("app {app} not found"));
-        let record = self.store.get_app(app).await?.ok_or_else(missing)?;
+        let record = self
+            .store
+            .get_app_scoped(owner, app)
+            .await?
+            .ok_or_else(missing)?;
         if record.deleted_at.is_some() {
             return Err(missing());
         }
         let revision = self
             .store
-            .get_app_revision(record.current_revision)
+            .get_app_revision_scoped(owner, record.current_revision)
             .await?
             .ok_or_else(missing)?;
         Ok((record, revision))
@@ -406,6 +424,7 @@ impl GatewayDraftRegistry {
 impl GatewayDraftSource for GatewayDraftRegistry {
     async fn ensure_registered(
         &self,
+        owner: &OwnerId,
         app: AppId,
         gateway_base_url: &str,
     ) -> Result<GatewayRegistration> {
@@ -413,8 +432,12 @@ impl GatewayDraftSource for GatewayDraftRegistry {
         // Serialize the read-then-register decision per app; see `app_locks`.
         let lock = self.app_lock(app).await;
         let _guard = lock.lock().await;
-        let (record, revision) = self.current(app).await?;
-        match self.store.get_app_gateway_draft(app, &base_url).await? {
+        let (record, revision) = self.current(owner, app).await?;
+        match self
+            .store
+            .get_app_gateway_draft_scoped(owner, app, &base_url)
+            .await?
+        {
             // The gateway is already serving this exact local revision.
             Some(draft) if draft.synced_revision_id == revision.id => {
                 Ok(GatewayRegistration::Registered {
@@ -425,18 +448,25 @@ impl GatewayDraftSource for GatewayDraftRegistry {
             // Registered, but the app has moved on locally. The sync is lazy
             // by design: revisions nobody ever invoked are never pushed, so
             // the gateway's history is what was servable when it was used.
-            Some(draft) => self.append(&draft, &record, &revision, &base_url).await,
-            None => self.register(&record, &revision, &base_url).await,
+            Some(draft) => {
+                self.append(owner, &draft, &record, &revision, &base_url)
+                    .await
+            }
+            None => self.register(owner, &record, &revision, &base_url).await,
         }
     }
 
     async fn relay_consent(
         &self,
+        owner: &OwnerId,
         app: AppId,
         gateway_base_url: &str,
     ) -> Result<GatewayConsentRelay> {
         let base_url = normalized_gateway_base_url(gateway_base_url);
-        let (shared_app_id, revision_id) = match self.ensure_registered(app, &base_url).await? {
+        let (shared_app_id, revision_id) = match self
+            .ensure_registered(owner, app, &base_url)
+            .await?
+        {
             GatewayRegistration::Registered {
                 shared_app_id,
                 revision_id,
@@ -460,12 +490,18 @@ impl GatewayDraftSource for GatewayDraftRegistry {
             // else appended one. Re-establish the pin from the current local
             // revision and consent to that, once.
             Some(GatewayConsentOutcome::RevisionMoved) => {
-                let (record, revision) = self.current(app).await?;
-                let draft = self.store.get_app_gateway_draft(app, &base_url).await?;
+                let (record, revision) = self.current(owner, app).await?;
+                let draft = self
+                    .store
+                    .get_app_gateway_draft_scoped(owner, app, &base_url)
+                    .await?;
                 let Some(draft) = draft else {
                     return Ok(GatewayConsentRelay::NotRegistered);
                 };
-                let revision_id = match self.append(&draft, &record, &revision, &base_url).await? {
+                let revision_id = match self
+                    .append(owner, &draft, &record, &revision, &base_url)
+                    .await?
+                {
                     GatewayRegistration::Registered { revision_id, .. } => revision_id,
                     GatewayRegistration::NotRegistered => {
                         return Ok(GatewayConsentRelay::NotRegistered)
@@ -516,6 +552,7 @@ impl GatewayDraftSource for GatewayDraftRegistry {
 /// has decided no.
 pub(crate) async fn relay_with_consent_self_heal<F, Fut>(
     drafts: &dyn GatewayDraftSource,
+    owner: &OwnerId,
     app: AppId,
     gateway_base_url: &str,
     relay: F,
@@ -530,7 +567,7 @@ where
     if !matches!(outcome, GatewayInvokeOutcome::ConsentRequired { .. }) {
         return Ok(outcome);
     }
-    match drafts.relay_consent(app, gateway_base_url).await {
+    match drafts.relay_consent(owner, app, gateway_base_url).await {
         Ok(GatewayConsentRelay::Consented) => {}
         Ok(refused) => {
             tracing::info!("this app's gateway consent could not be relayed: {refused:?}");
@@ -652,13 +689,19 @@ mod tests {
     impl GatewayDraftSource for ScriptedDrafts {
         async fn ensure_registered(
             &self,
+            _owner: &OwnerId,
             _app: AppId,
             _base_url: &str,
         ) -> Result<GatewayRegistration> {
             unreachable!("the relay resolves registration before the self-heal runs")
         }
 
-        async fn relay_consent(&self, _app: AppId, _base_url: &str) -> Result<GatewayConsentRelay> {
+        async fn relay_consent(
+            &self,
+            _owner: &OwnerId,
+            _app: AppId,
+            _base_url: &str,
+        ) -> Result<GatewayConsentRelay> {
             self.relayed.fetch_add(1, Ordering::SeqCst);
             Ok(GatewayConsentRelay::Consented)
         }
@@ -678,8 +721,12 @@ mod tests {
             relayed: AtomicUsize::new(0),
         };
         let attempts = AtomicUsize::new(0);
-        let outcome =
-            relay_with_consent_self_heal(&drafts, AppId::new(), "https://gw.example/", || {
+        let outcome = relay_with_consent_self_heal(
+            &drafts,
+            &OwnerId::local(),
+            AppId::new(),
+            "https://gw.example/",
+            || {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
                     Ok(if attempt == 0 {
@@ -694,9 +741,10 @@ mod tests {
                         }
                     })
                 }
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, GatewayInvokeOutcome::Executed { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(drafts.relayed.load(Ordering::SeqCst), 1);
@@ -705,13 +753,18 @@ mod tests {
             relayed: AtomicUsize::new(0),
         };
         let attempts = AtomicUsize::new(0);
-        let outcome =
-            relay_with_consent_self_heal(&drafts, AppId::new(), "https://gw.example/", || {
+        let outcome = relay_with_consent_self_heal(
+            &drafts,
+            &OwnerId::local(),
+            AppId::new(),
+            "https://gw.example/",
+            || {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 async { Ok(refusal()) }
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(outcome, GatewayInvokeOutcome::ConsentRequired { .. }),
             "a second refusal is the gateway's answer, carried back as one"

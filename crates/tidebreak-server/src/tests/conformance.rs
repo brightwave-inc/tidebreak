@@ -68,6 +68,77 @@ async fn request(
     router.clone().oneshot(request).await.unwrap()
 }
 
+#[tokio::test]
+async fn sticky_chat_defaults_are_isolated_between_self_host_users() {
+    let (router, _state, _store, _dir) = self_host_app().await;
+    let alice = format!("Bearer {ALICE_TOKEN}");
+    let bob = format!("Bearer {BOB_TOKEN}");
+
+    let alice_chat = make_chat(&router, &alice).await;
+    let patched = patch_chat(
+        &router,
+        &alice,
+        alice_chat.id,
+        serde_json::json!({
+            "permission_mode": "allow",
+            "network_policy": {"mode": "off"},
+        }),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+
+    let bob_chat = make_chat(&router, &bob).await;
+    assert_eq!(bob_chat.permission_mode, None);
+    assert_eq!(
+        bob_chat.network_policy,
+        tidebreak_core::NetworkPolicy::default()
+    );
+
+    let bob_explicit: Chat = json_body(
+        request(
+            &router,
+            "POST",
+            "/chats",
+            &bob,
+            Some(serde_json::json!({
+                "permission_mode": "plan",
+                "network_policy": {"mode": "package_managers"},
+            })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        bob_explicit.permission_mode,
+        Some(tidebreak_core::PermissionMode::Plan)
+    );
+
+    let alice_next = make_chat(&router, &alice).await;
+    assert_eq!(
+        alice_next.permission_mode,
+        Some(tidebreak_core::PermissionMode::Allow)
+    );
+    assert_eq!(
+        alice_next.network_policy,
+        tidebreak_core::NetworkPolicy::Off
+    );
+
+    let alice_settings: serde_json::Value =
+        json_body(request(&router, "GET", "/settings", &alice, None).await).await;
+    let bob_settings: serde_json::Value =
+        json_body(request(&router, "GET", "/settings", &bob, None).await).await;
+    assert_eq!(alice_settings["chat_defaults"]["permission_mode"], "allow");
+    assert_eq!(
+        alice_settings["chat_defaults"]["network_policy"]["mode"],
+        "off"
+    );
+    assert_eq!(bob_settings["chat_defaults"]["permission_mode"], "plan");
+    assert_eq!(
+        bob_settings["chat_defaults"]["network_policy"]["mode"],
+        "package_managers"
+    );
+}
+
 async fn ingest_document(router: &Router, bearer: &str, uri: &str) -> String {
     let accepted: serde_json::Value = json_body(
         post_raw(

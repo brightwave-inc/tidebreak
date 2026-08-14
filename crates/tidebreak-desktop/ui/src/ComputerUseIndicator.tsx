@@ -1,46 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  resolveComputerUseConfirmation,
-  resolveComputerUseConsent,
   resumeComputerUseControl,
   stopComputerUseControl,
   useComputerUseState,
-  type ComputerUseConsentPrompt,
 } from "./computerUse";
-
-/** Human copy for one broker capability ask. */
-function consentCopy(
-  prompt: Pick<
-    ComputerUseConsentPrompt,
-    "appName" | "bundleId" | "capability"
-  >,
-): { title: string; detail: string | null } {
-  if (prompt.bundleId === "") {
-    return {
-      title: "Allow Tidebreak to capture your entire screen?",
-      detail: "This lets the agent see everything visible on the current display.",
-    };
-  }
-  const app = appLabel(prompt.appName, prompt.bundleId);
-  switch (prompt.capability) {
-    case "control_app":
-      return {
-        title: `Allow Tidebreak to control ${app}?`,
-        detail: `It can click, type, and press keys in ${prompt.bundleId}.`,
-      };
-    case "capture_screen":
-      return {
-        title: `Allow Tidebreak to capture ${app}?`,
-        detail: `It can take screenshots of ${prompt.bundleId}.`,
-      };
-    case "read_app_content":
-      return {
-        title: `Allow Tidebreak to read ${app}?`,
-        detail: `It can read the on-screen content exposed by ${prompt.bundleId}.`,
-      };
-  }
-}
 
 function appLabel(appName: string | null, bundleId: string): string {
   // A screen-scoped ask (whole-display capture, screen-wide window list)
@@ -50,9 +14,8 @@ function appLabel(appName: string | null, bundleId: string): string {
 }
 
 /**
- * The computer-use HUD: compact permission cards at the top of the window and
- * a small control indicator at the bottom. Both float over the shell instead
- * of resizing every route around a short-lived decision.
+ * The computer-use HUD is only an indicator and emergency stop. Consent and
+ * consequential confirmation are native dialogs, outside renderer authority.
  *
  * Rendered in the shell so control is visible and stoppable from any screen.
  */
@@ -98,160 +61,12 @@ export function ComputerUseIndicator() {
 
   const showActive =
     snapshot.active !== null && now < snapshot.active.visibleUntilMillis;
-  if (
-    !snapshot.halted &&
-    !showActive &&
-    snapshot.pendingConsents.length === 0 &&
-    snapshot.pendingConfirmations.length === 0
-  ) {
+  if (!snapshot.halted && !showActive) {
     return null;
   }
 
   return (
     <>
-      <div className="pointer-events-none fixed inset-x-0 top-5 z-50 flex max-h-[calc(100vh-8rem)] justify-center px-4">
-        <div className="flex w-full max-w-[26rem] flex-col gap-2 overflow-y-auto p-1">
-          {snapshot.pendingConsents.map((prompt) => {
-            const key = `consent:${prompt.callId}`;
-            const deciding = busy.has(key);
-            const copy = consentCopy(prompt);
-            return (
-              <section
-                key={prompt.callId}
-                className="bg-popover text-popover-foreground pointer-events-auto flex flex-col gap-3 rounded-2xl border p-4 shadow-2xl"
-                aria-label="Computer use permission"
-                aria-busy={deciding}
-              >
-                <div>
-                  <p className="text-muted-foreground mb-1 text-[0.6875rem] font-semibold tracking-[0.08em] uppercase">
-                    Computer use
-                  </p>
-                  <h2 className="text-sm font-semibold break-words">
-                    {copy.title}
-                  </h2>
-                  {copy.detail && (
-                    <p className="text-muted-foreground mt-1 text-xs leading-relaxed break-words">
-                      {copy.detail}
-                    </p>
-                  )}
-                </div>
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={deciding}
-                    onClick={() =>
-                      run(key, "Could not send your decision", () =>
-                        resolveComputerUseConsent(prompt.callId, "decline"),
-                      )
-                    }
-                  >
-                    Don&apos;t allow
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={deciding}
-                    onClick={() =>
-                      run(key, "Could not send your decision", () =>
-                        resolveComputerUseConsent(prompt.callId, "chat"),
-                      )
-                    }
-                  >
-                    Allow for this chat
-                  </Button>
-                  {prompt.grantScope === "project" && (
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      disabled={deciding}
-                      onClick={() =>
-                        run(key, "Could not send your decision", () =>
-                          resolveComputerUseConsent(prompt.callId, "always"),
-                        )
-                      }
-                    >
-                      Always in this project
-                    </Button>
-                  )}
-                  <Button
-                    size="xs"
-                    disabled={deciding}
-                    onClick={() =>
-                      run(key, "Could not send your decision", () =>
-                        resolveComputerUseConsent(prompt.callId, "once"),
-                      )
-                    }
-                  >
-                    Allow once
-                  </Button>
-                </div>
-                {errors[key] && (
-                  <p className="text-destructive text-xs break-words" role="alert">
-                    {errors[key]}
-                  </p>
-                )}
-              </section>
-            );
-          })}
-          {snapshot.pendingConfirmations.map((prompt) => {
-            const key = `confirmation:${prompt.callId}`;
-            const deciding = busy.has(key);
-            return (
-              <section
-                key={prompt.callId}
-                className="bg-popover text-popover-foreground pointer-events-auto flex flex-col gap-3 rounded-2xl border p-4 shadow-2xl"
-                aria-label="Confirm action"
-                aria-busy={deciding}
-              >
-                <div>
-                  <p className="text-muted-foreground mb-1 text-[0.6875rem] font-semibold tracking-[0.08em] uppercase">
-                    Confirm action
-                  </p>
-                  <h2 className="text-sm font-semibold break-words">
-                    Allow Tidebreak to {prompt.reason}?
-                  </h2>
-                  <p className="text-muted-foreground mt-1 text-xs leading-relaxed break-words">
-                    {prompt.targetLabel ? `“${prompt.targetLabel}” in ` : "In "}
-                    {appLabel(prompt.appName, prompt.bundleId)}
-                  </p>
-                </div>
-                <div className="flex justify-end gap-2">
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={deciding}
-                    onClick={() =>
-                      run(key, "Could not send your decision", () =>
-                        resolveComputerUseConfirmation(prompt.callId, false),
-                      )
-                    }
-                  >
-                    Don&apos;t allow
-                  </Button>
-                  <Button
-                    size="xs"
-                    disabled={deciding}
-                    onClick={() =>
-                      run(key, "Could not send your decision", () =>
-                        resolveComputerUseConfirmation(prompt.callId, true),
-                      )
-                    }
-                  >
-                    Allow action
-                  </Button>
-                </div>
-                {errors[key] && (
-                  <p className="text-destructive text-xs break-words" role="alert">
-                    {errors[key]}
-                  </p>
-                )}
-              </section>
-            );
-          })}
-        </div>
-      </div>
-
       {(snapshot.halted || (showActive && snapshot.active)) && (
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
           <div

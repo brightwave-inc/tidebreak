@@ -213,6 +213,30 @@ async fn put_mcp_servers(
         .unwrap()
 }
 
+async fn put_native_mcp_servers(
+    router: &Router,
+    bearer: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/native/mcp/servers")
+                .header(header::AUTHORIZATION, bearer)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn get_mcp_servers(router: &Router, bearer: &str) -> serde_json::Value {
     let response = router
         .clone()
@@ -290,6 +314,29 @@ async fn mcp_settings_roundtrip_disabled_typed_definitions_without_credentials()
 }
 
 #[tokio::test]
+async fn enabled_local_mcp_commands_require_the_native_executor_surface() {
+    let (router, token, _store, _dir) = test_app().await;
+    let bearer = format!("Bearer {token}");
+    let body = serde_json::json!({
+        "servers": [{
+            "name": "local_command",
+            "command": "/not/started",
+            "enabled": true
+        }]
+    });
+
+    let renderer = put_mcp_servers(&router, &bearer, body.clone()).await;
+    assert_eq!(renderer.status(), StatusCode::BAD_REQUEST);
+    let error: AgentErrorInfo = json_body(renderer).await;
+    assert_eq!(error.kind, "native_confirmation_required");
+
+    let native = put_native_mcp_servers(&router, &bearer, body).await;
+    assert_ne!(native.status(), StatusCode::UNAUTHORIZED);
+    let error: AgentErrorInfo = json_body(native).await;
+    assert_ne!(error.kind, "native_confirmation_required");
+}
+
+#[tokio::test]
 async fn failed_mcp_candidate_does_not_replace_the_active_configuration() {
     const MISSING: &str = "TIDEBREAK_TEST_MCP_ROUTE_MISSING_ENV_65B7A2";
     assert!(std::env::var_os(MISSING).is_none());
@@ -309,7 +356,7 @@ async fn failed_mcp_candidate_does_not_replace_the_active_configuration() {
     .await;
     assert_eq!(initial.status(), StatusCode::OK);
 
-    let failed = put_mcp_servers(
+    let failed = put_native_mcp_servers(
         &router,
         &bearer,
         serde_json::json!({
@@ -1910,7 +1957,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
                 .body(Body::from(
                     serde_json::json!({
                         "enabled": true,
-                        "base_url": "http://127.0.0.1:1234/v1",
+                        "base_url": "https://compat.example/v1",
                         "credential": {"type": "api_key", "key": "sk-local"},
                         "models": [{
                             "id": "gpt-5.6-sol",
@@ -2505,7 +2552,7 @@ async fn custom_models_live_under_openai_compatible_with_conservative_capabiliti
                 .body(Body::from(
                     serde_json::json!({
                         "enabled": true,
-                        "base_url": "http://127.0.0.1:1234/v1",
+                        "base_url": "https://compat.example/v1",
                         "credential": {"type": "api_key", "key": "sk-local"},
                         "models": [{
                             "id": "vendor/model",
@@ -2732,7 +2779,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
         providers::ProviderKind::OpenaiCompatible,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: Some("http://127.0.0.1:1234/v1".into()),
+            base_url: Some("https://compat.example/v1".into()),
             models: Vec::new(),
         },
     )
@@ -2926,7 +2973,7 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
         .iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Ollama)
         .expect("an enabled Ollama daemon is a route");
-    assert_eq!(route.api_key, "ollama");
+    assert!(route.api_key.is_empty());
     assert_eq!(route.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
     assert_eq!(route.curated_models, ["qwen3:0.6b"]);
 
@@ -3526,7 +3573,8 @@ async fn a_managed_profile_refuses_manual_mcp_servers_and_accepts_gateway_mounts
                             "enabled": true}]),
     ] {
         let refused =
-            put_mcp_servers(&router, &bearer, serde_json::json!({"servers": candidate})).await;
+            put_native_mcp_servers(&router, &bearer, serde_json::json!({"servers": candidate}))
+                .await;
         assert_eq!(refused.status(), StatusCode::CONFLICT, "{candidate}");
         let error: AgentErrorInfo = json_body(refused).await;
         assert_eq!(error.kind, "managed_profile");

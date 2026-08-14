@@ -383,18 +383,6 @@ impl ProviderKind {
         matches!(self, Self::Fireworks | Self::Together | Self::Openrouter)
     }
 
-    /// Whether this route speaks the shared OpenAI-compatible transport.
-    pub const fn uses_openai_compatible_transport(self) -> bool {
-        matches!(
-            self,
-            Self::Fireworks
-                | Self::Together
-                | Self::Openrouter
-                | Self::Ollama
-                | Self::OpenaiCompatible
-        )
-    }
-
     /// Whether the reader can register model rows beside the endpoint.
     pub const fn accepts_configured_models(self) -> bool {
         matches!(
@@ -452,6 +440,88 @@ impl ProviderKind {
             ProviderCredential::Oauth {} => self == ProviderKind::Openai,
         }
     }
+}
+
+fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    let allowed = match url.scheme() {
+        "https" => true,
+        "http" if allow_credentialless_loopback_http => match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    };
+    if allowed {
+        return true;
+    }
+
+    #[cfg(test)]
+    return test_loopback_provider_urls()
+        .lock()
+        .unwrap()
+        .contains(url.as_str());
+
+    #[cfg(not(test))]
+    false
+}
+
+#[cfg(test)]
+fn test_loopback_provider_urls() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static URLS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    URLS.get_or_init(Default::default)
+}
+
+/// Admit one exact loopback HTTP endpoint used by an in-process provider stub.
+///
+/// This exists only in crate tests. Production builds cannot register an
+/// exception, and provider-update tests exercise the production validator
+/// unless they explicitly opt a URL into this narrow seam first.
+#[cfg(test)]
+pub(crate) fn allow_test_loopback_provider_base_url(base: &str) {
+    let url = url::Url::parse(base).expect("test provider base URL must parse");
+    assert_eq!(url.scheme(), "http", "test seam is only for cleartext HTTP");
+    assert!(
+        match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        },
+        "test seam is only for loopback endpoints"
+    );
+    assert!(url.username().is_empty() && url.password().is_none() && url.fragment().is_none());
+    test_loopback_provider_urls()
+        .lock()
+        .unwrap()
+        .insert(url.to_string());
+}
+
+fn validate_base_url_transport(
+    kind: ProviderKind,
+    base: &str,
+    has_reusable_credential: bool,
+) -> std::result::Result<(), ServerError> {
+    let allow_credentialless_loopback_http =
+        !kind.requires_credential() && !has_reusable_credential;
+    if base_url_is_allowed(base, allow_credentialless_loopback_http) {
+        return Ok(());
+    }
+    Err(ServerError::bad_request(
+        if allow_credentialless_loopback_http {
+            "base_url must use HTTPS, or HTTP on a loopback address for a credentialless provider"
+        } else {
+            "base_url must use HTTPS when provider credentials are present or required"
+        },
+    ))
 }
 
 impl std::fmt::Display for ProviderKind {
@@ -1437,6 +1507,17 @@ pub async fn update_provider(
         )));
     }
 
+    let base_url_changed = update.base_url.is_some();
+    let credential_changed = update.credential.is_some();
+    if let Some(credential) = update.credential.as_ref() {
+        credential.validate()?;
+        if !kind.accepts_credential(credential) {
+            return Err(ServerError::bad_request(format!(
+                "{kind} does not support this credential type"
+            )));
+        }
+    }
+
     let mut config = read_config(store, kind).await?;
 
     if let Some(enabled) = update.enabled {
@@ -1477,6 +1558,16 @@ pub async fn update_provider(
         return Err(ServerError::bad_request(
             "openai_compatible requires a base_url when enabled",
         ));
+    }
+    if config.enabled || base_url_changed || credential_changed {
+        if let Some(base) = kind
+            .effective_base_url(config.base_url.as_deref())
+            .as_deref()
+        {
+            let has_reusable_credential =
+                update.credential.is_some() || has_credential(secrets, kind).await;
+            validate_base_url_transport(kind, base, has_reusable_credential)?;
+        }
     }
     if let Some(credential) = update.credential {
         write_credential(secrets, kind, &credential).await?;
@@ -1870,22 +1961,23 @@ pub async fn collect_routes(
             Some(_) => None,
             None => env_api_key(kind),
         };
-        // Local Ollama accepts unauthenticated requests. The adapter still
-        // sends a bearer token, so an enabled daemon without a stored key
-        // uses a placeholder the endpoint ignores.
+        // Local Ollama accepts unauthenticated requests. Keep its route key
+        // empty so the router can distinguish this narrow trust class from a
+        // reusable bearer credential when validating cleartext loopback URLs.
         let api_key = match api_key {
             Some(key) => key,
-            None if !kind.requires_credential() => "ollama".to_owned(),
+            None if !kind.requires_credential() => String::new(),
             None => continue,
         };
         let base_url = kind.effective_base_url(config.base_url.as_deref());
         if kind == ProviderKind::OpenaiCompatible && base_url.is_none() {
             continue;
         }
-        if kind.uses_openai_compatible_transport() {
-            let base = base_url.as_deref().unwrap_or("");
-            if !(base.starts_with("https://") || base.starts_with("http://")) {
-                continue;
+        if !matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) {
+            if let Some(base) = base_url.as_deref() {
+                if !base_url_is_allowed(base, kind == ProviderKind::Ollama && api_key.is_empty()) {
+                    continue;
+                }
             }
         }
         routes.push(tidebreak_router::Route {
@@ -2033,13 +2125,15 @@ pub async fn provider_is_usable(
     if kind.requires_credential() && !has_credential(secrets, kind).await {
         return Ok(false);
     }
-    if kind.uses_openai_compatible_transport() {
-        let base_url = kind.effective_base_url(config.base_url.as_deref());
-        let Some(base) = base_url else {
-            return Ok(false);
-        };
-        if !(base.starts_with("https://") || base.starts_with("http://")) {
-            return Ok(false);
+    if !matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) {
+        if let Some(base) = kind.effective_base_url(config.base_url.as_deref()) {
+            let has_reusable_credential = has_credential(secrets, kind).await;
+            if !base_url_is_allowed(
+                &base,
+                kind == ProviderKind::Ollama && !has_reusable_credential,
+            ) {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
@@ -2195,6 +2289,89 @@ mod tests {
         .await
         .unwrap();
         (store, directory, policy)
+    }
+
+    async fn provider_test_store() -> (DbStore, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("provider-transport.db").display()
+        ))
+        .await
+        .unwrap();
+        (store, directory)
+    }
+
+    #[tokio::test]
+    async fn provider_updates_reject_credentials_on_cleartext_endpoints() {
+        let (store, _directory) = provider_test_store().await;
+        let secrets = TestSecrets::default();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+
+        let error = update_provider(
+            &store,
+            &secrets,
+            ProviderKind::OpenaiCompatible,
+            ProviderUpdate {
+                enabled: Some(true),
+                base_url: Some(Some("http://127.0.0.1:1234/v1".into())),
+                credential: Some(ProviderCredential::api_key("secret")),
+                models: None,
+            },
+            &*provisioned,
+            &crate::managed_policy::NoOsPolicy,
+        )
+        .await
+        .expect_err("a reusable credential must not be sent over cleartext HTTP");
+        assert!(error.message().contains("must use HTTPS"));
+        assert_eq!(
+            read_credential(&secrets, ProviderKind::OpenaiCompatible)
+                .await
+                .unwrap(),
+            None,
+            "validation must happen before secret storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentialless_ollama_keeps_loopback_http_support() {
+        let (store, _directory) = provider_test_store().await;
+        let secrets = TestSecrets::default();
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+
+        let info = update_provider(
+            &store,
+            &secrets,
+            ProviderKind::Ollama,
+            ProviderUpdate {
+                enabled: Some(true),
+                base_url: Some(Some("http://localhost:11434/v1".into())),
+                credential: None,
+                models: None,
+            },
+            &*provisioned,
+            &crate::managed_policy::NoOsPolicy,
+        )
+        .await
+        .expect("credentialless loopback HTTP remains supported");
+        assert_eq!(info.base_url.as_deref(), Some("http://localhost:11434/v1"));
+
+        let error = update_provider(
+            &store,
+            &secrets,
+            ProviderKind::Ollama,
+            ProviderUpdate {
+                enabled: None,
+                base_url: Some(Some("http://192.168.1.10:11434/v1".into())),
+                credential: None,
+                models: None,
+            },
+            &*provisioned,
+            &crate::managed_policy::NoOsPolicy,
+        )
+        .await
+        .expect_err("credentialless cleartext is loopback-only");
+        assert!(error.message().contains("loopback"));
     }
 
     fn gateway_test_snapshot(

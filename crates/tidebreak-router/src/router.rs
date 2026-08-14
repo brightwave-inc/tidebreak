@@ -473,7 +473,9 @@ impl ModelProvider for Router {
 }
 
 fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
-    if route.api_key.is_empty() && route.token_source.is_none() {
+    let credentialless_ollama =
+        route.kind == RouteKind::Ollama && route.api_key.is_empty() && route.token_source.is_none();
+    if route.api_key.is_empty() && route.token_source.is_none() && !credentialless_ollama {
         return None;
     }
     match route.kind {
@@ -564,9 +566,14 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         | RouteKind::Ollama
         | RouteKind::OpenaiCompatible => {
             let base = route.base_url.as_deref()?;
-            // Refuse non-http(s) schemes so a stored base_url can't point the
-            // adapter at an arbitrary scheme handler.
-            if !(base.starts_with("https://") || base.starts_with("http://")) {
+            let configurable_transport =
+                matches!(route.kind, RouteKind::Ollama | RouteKind::OpenaiCompatible);
+            if configurable_transport && !base_url_is_allowed(base, credentialless_ollama) {
+                return None;
+            }
+            if !configurable_transport
+                && !(base.starts_with("https://") || base.starts_with("http://"))
+            {
                 return None;
             }
             Some(Arc::new(
@@ -597,6 +604,27 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
         | RouteKind::Openrouter
         | RouteKind::Ollama
         | RouteKind::OpenaiCompatible => None,
+    }
+}
+
+fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" if allow_credentialless_loopback_http => url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }),
+        _ => false,
     }
 }
 
@@ -683,7 +711,7 @@ mod tests {
                 RouteKind::OpenaiCompatible,
                 "sk-c",
                 &[],
-                Some("http://127.0.0.1:1234/v1"),
+                Some("https://compat.example/v1"),
             ),
         ]);
         assert_eq!(router.select("claude-opus-4-8"), Some(RouteKind::Anthropic));
@@ -774,7 +802,7 @@ mod tests {
     fn ollama_serves_only_configured_models() {
         let router = Router::build(vec![route(
             RouteKind::Ollama,
-            "ollama",
+            "",
             &["qwen3:0.6b"],
             Some("http://127.0.0.1:11434/v1"),
         )]);
@@ -825,6 +853,36 @@ mod tests {
             Some("file:///etc/passwd"),
         )]);
         assert_eq!(router.select("anything"), None);
+    }
+
+    #[test]
+    fn credentialed_routes_reject_cleartext_http() {
+        let router = Router::build(vec![route(
+            RouteKind::OpenaiCompatible,
+            "sk-c",
+            &[],
+            Some("http://127.0.0.1:1234/v1"),
+        )]);
+        assert_eq!(router.select("anything"), None);
+    }
+
+    #[test]
+    fn credentialless_ollama_allows_only_loopback_cleartext() {
+        let loopback = Router::build(vec![route(
+            RouteKind::Ollama,
+            "",
+            &["local"],
+            Some("http://[::1]:11434/v1"),
+        )]);
+        assert_eq!(loopback.select("local"), Some(RouteKind::Ollama));
+
+        let lan = Router::build(vec![route(
+            RouteKind::Ollama,
+            "",
+            &["remote"],
+            Some("http://192.168.1.10:11434/v1"),
+        )]);
+        assert_eq!(lan.select("remote"), None);
     }
 
     struct StaticSource(&'static str);

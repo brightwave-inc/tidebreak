@@ -18,13 +18,14 @@ use tidebreak_core::{
 use crate::error::ServerError;
 use crate::exec_write_snapshot::{list_file_change_summaries, ExecFileChangeSummary};
 use crate::extract::{Json, Path};
+use crate::principal::AuthContext;
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 use super::providers_models::{refuse_permission_mode_over_ceiling, validate_model_selection};
 use super::settings::{
-    double_option, read_sticky_default, sticky_default_value, write_sticky_default,
-    STICKY_MODEL_KEY, STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY,
+    double_option, read_sticky_default, sticky_default_key, sticky_default_value,
+    write_sticky_default, STICKY_MODEL_KEY, STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY,
     STICKY_REASONING_EFFORT_KEY,
 };
 
@@ -193,9 +194,11 @@ pub struct CreateChat {
 /// defaults (`ask`, open network, configured model).
 pub async fn create_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     store: ScopedStore,
     Json(mut body): Json<CreateChat>,
 ) -> Result<impl IntoResponse, ServerError> {
+    let owner = auth.principal.owner_id();
     // Return a product-facing 400 for an unknown project. The Store and schema
     // independently enforce the same membership invariant inside insertion.
     if let Some(project_id) = body.project_id {
@@ -217,7 +220,8 @@ pub async fn create_chat(
         // sticky value is durable user intent: copy it unchanged so turn
         // admission can resolve a unique gateway equivalent or refuse an
         // ambiguous/unmatched selection honestly.
-        None => match read_sticky_default::<String>(&*state.store, STICKY_MODEL_KEY).await? {
+        None => match read_sticky_default::<String>(&*state.store, &owner, STICKY_MODEL_KEY).await?
+        {
             Some(sticky) => match validate_model_selection(&state, &sticky, false).await {
                 Ok(model) => Some(model),
                 Err(_) if managed.managed => Some(sticky),
@@ -228,14 +232,15 @@ pub async fn create_chat(
     };
     let reasoning_effort = match body.reasoning_effort.as_ref() {
         Some(effort) => Some(*effort),
-        None => read_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY).await?,
+        None => read_sticky_default(&*state.store, &owner, STICKY_REASONING_EFFORT_KEY).await?,
     };
     let permission_mode = match body.permission_mode.as_ref() {
         Some(mode) => Some(*mode),
         // The managed ceiling clamps a sticky mode recorded before the policy
         // arrived: a remembered `allow` under an `ask` ceiling seeds `ask`,
         // mirroring how the turn gate treats stored over-ceiling modes.
-        None => match read_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY).await? {
+        None => match read_sticky_default(&*state.store, &owner, STICKY_PERMISSION_MODE_KEY).await?
+        {
             Some(sticky) => {
                 crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
                     .clamp_permission_mode(Some(sticky))
@@ -246,7 +251,7 @@ pub async fn create_chat(
     let network_policy = match body.network_policy.as_ref() {
         Some(policy) => policy.clone(),
         None => {
-            let mut sticky = read_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY)
+            let mut sticky = read_sticky_default(&*state.store, &owner, STICKY_NETWORK_POLICY_KEY)
                 .await?
                 .unwrap_or_default();
             // Stored values were normalized at write; a stale one that no
@@ -266,25 +271,25 @@ pub async fn create_chat(
     let mut sticky_default_updates = Vec::with_capacity(4);
     if let Some(model) = &body.model {
         sticky_default_updates.push((
-            STICKY_MODEL_KEY.to_owned(),
+            sticky_default_key(&owner, STICKY_MODEL_KEY),
             sticky_default_value(Some(model))?,
         ));
     }
     if let Some(effort) = &body.reasoning_effort {
         sticky_default_updates.push((
-            STICKY_REASONING_EFFORT_KEY.to_owned(),
+            sticky_default_key(&owner, STICKY_REASONING_EFFORT_KEY),
             sticky_default_value(Some(effort))?,
         ));
     }
     if let Some(mode) = &body.permission_mode {
         sticky_default_updates.push((
-            STICKY_PERMISSION_MODE_KEY.to_owned(),
+            sticky_default_key(&owner, STICKY_PERMISSION_MODE_KEY),
             sticky_default_value(Some(mode))?,
         ));
     }
     if let Some(policy) = &body.network_policy {
         sticky_default_updates.push((
-            STICKY_NETWORK_POLICY_KEY.to_owned(),
+            sticky_default_key(&owner, STICKY_NETWORK_POLICY_KEY),
             sticky_default_value(Some(policy))?,
         ));
     }
@@ -339,10 +344,12 @@ pub struct ChatUpdate {
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
 pub async fn patch_chat(
     State(state): State<AppState>,
+    auth: AuthContext,
     store: ScopedStore,
     Path(id): Path<ChatId>,
     Json(mut body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
+    let owner = auth.principal.owner_id();
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
     if let Some(Some(model)) = body.model.as_mut() {
@@ -405,16 +412,34 @@ pub async fn patch_chat(
     // from; an explicit clear (`null`) clears the sticky default the same way,
     // back to the hard default. Recorded server-side so every client benefits.
     if let Some(model) = &body.model {
-        write_sticky_default(&*state.store, STICKY_MODEL_KEY, model.as_ref()).await?;
+        write_sticky_default(&*state.store, &owner, STICKY_MODEL_KEY, model.as_ref()).await?;
     }
     if let Some(effort) = &body.reasoning_effort {
-        write_sticky_default(&*state.store, STICKY_REASONING_EFFORT_KEY, effort.as_ref()).await?;
+        write_sticky_default(
+            &*state.store,
+            &owner,
+            STICKY_REASONING_EFFORT_KEY,
+            effort.as_ref(),
+        )
+        .await?;
     }
     if let Some(mode) = &body.permission_mode {
-        write_sticky_default(&*state.store, STICKY_PERMISSION_MODE_KEY, mode.as_ref()).await?;
+        write_sticky_default(
+            &*state.store,
+            &owner,
+            STICKY_PERMISSION_MODE_KEY,
+            mode.as_ref(),
+        )
+        .await?;
     }
     if let Some(policy) = &body.network_policy {
-        write_sticky_default(&*state.store, STICKY_NETWORK_POLICY_KEY, Some(policy)).await?;
+        write_sticky_default(
+            &*state.store,
+            &owner,
+            STICKY_NETWORK_POLICY_KEY,
+            Some(policy),
+        )
+        .await?;
     }
     if let Some(title) = title {
         chat.title = title;

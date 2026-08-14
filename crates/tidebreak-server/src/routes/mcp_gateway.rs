@@ -12,6 +12,7 @@ use tidebreak_core::{AgentError, CallId, ChatId, SequencedEvent};
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::mcp_config::{McpServersConfig, McpServersInfo};
+use crate::principal::AuthContext;
 use crate::providers::{self};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
@@ -46,8 +47,21 @@ pub async fn get_mcp_servers(
 /// servers, leaving local stdio servers to the user.
 pub async fn put_mcp_servers(
     State(state): State<AppState>,
+    auth: AuthContext,
     Json(body): Json<McpServersConfig>,
 ) -> Result<Json<McpServersInfo>, ServerError> {
+    if state.config.profile == tidebreak_core::Profile::Desktop
+        && !auth.client_executor
+        && body
+            .servers
+            .iter()
+            .any(|server| server.command.is_some() && server.enabled)
+    {
+        return Err(ServerError::bad_request_kind(
+            "native_confirmation_required",
+            "local command MCP servers must be saved through Tidebreak's native confirmation",
+        ));
+    }
     if let Some(server) = body.servers.iter().find(|server| server.plugin.is_some()) {
         return Err(ServerError::bad_request_kind(
             "mcp_plugin_server_read_only",
@@ -352,19 +366,18 @@ fn view_frame_response(body: impl Into<axum::body::Body>) -> Response {
 /// the open affordance, not just the library row.
 pub async fn post_app_view_session(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(id): Path<AppId>,
     Json(body): Json<AppViewSessionRequest>,
 ) -> Result<Json<AppViewSession>, ServerError> {
-    let app = state
-        .store
+    let app = store
         .get_app(id)
         .await?
         .filter(|app| app.deleted_at.is_none())
         .ok_or_else(|| ServerError::not_found(format!("app {id} not found")))?;
     let revision_id = match body.revision {
         Some(revision_id) => {
-            state
-                .store
+            store
                 .get_app_revision(revision_id)
                 .await?
                 .filter(|revision| revision.app_id == id)

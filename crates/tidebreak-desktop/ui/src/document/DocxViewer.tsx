@@ -1,19 +1,17 @@
 import { renderAsync } from "docx-preview";
 import { Loader2Icon } from "lucide-react";
 import type { HTMLAttributes } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
-import { openExternal } from "@/host";
 import { cn } from "@/lib/utils";
 import { useFileDownload, type FileBytesSource } from "./useFileDownload";
 
-const PAGE_GUTTER_PX = 48;
-
 /**
- * docx-preview intentionally renders the Word package into ordinary HTML. Its
- * embedded resources therefore stay local to the document, and disabling
- * altChunk prevents an untrusted DOCX from injecting an HTML iframe.
+ * docx-preview intentionally renders the Word package into ordinary HTML.
+ * altChunk stays disabled so a DOCX cannot add arbitrary HTML to that output.
+ * The generated HTML and CSS are additionally confined to an opaque-origin,
+ * scriptless iframe below.
  */
 export const DOCX_RENDER_OPTIONS = {
   breakPages: true,
@@ -28,25 +26,45 @@ export const DOCX_RENDER_OPTIONS = {
   useBase64URL: true,
 } as const;
 
-const DOCX_VIEWER_STYLES = `
-.tidebreak-docx-viewer .docx-wrapper {
-  min-height: 100%;
-  padding: 24px !important;
-  background: color-mix(in srgb, var(--muted) 45%, transparent) !important;
-}
+const DOCX_FRAME_PREFIX = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; font-src data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; margin: 0; }
+    body {
+      min-width: 0;
+      overflow: auto;
+      background: rgb(241 245 249);
+      font-family: system-ui, sans-serif;
+    }
+    #document-root { min-height: 100%; }
+    #document-root .docx-wrapper {
+      min-height: 100%;
+      padding: 24px !important;
+      background: rgb(241 245 249) !important;
+    }
+    #document-root section.docx {
+      height: auto !important;
+      min-height: var(--tidebreak-docx-page-height);
+      margin: 0 auto 24px !important;
+      overflow: visible !important;
+      color: #111827;
+      box-shadow: 0 1px 2px rgb(15 23 42 / 0.12), 0 8px 28px rgb(15 23 42 / 0.10) !important;
+    }
+    #document-root section.docx:last-child { margin-bottom: 0 !important; }
+  </style>
+</head>
+<body>
+  <div id="document-root">`;
 
-.tidebreak-docx-viewer section.docx {
-  margin: 0 auto 24px !important;
-  color: #111827;
-  box-shadow:
-    0 1px 2px rgb(15 23 42 / 0.12),
-    0 8px 28px rgb(15 23 42 / 0.10) !important;
-}
-
-.tidebreak-docx-viewer section.docx:last-child {
-  margin-bottom: 0 !important;
-}
-`;
+const DOCX_FRAME_SUFFIX = `</div>
+</body>
+</html>`;
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
   source: FileBytesSource;
@@ -58,37 +76,31 @@ export default function DocxViewer({
   className,
   ...restProps
 }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [frameDocument, setFrameDocument] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"parse" | "load" | null>(null);
   const [isReady, setIsReady] = useState(false);
 
   const fileDownload = useFileDownload(source, { parseAs: "arrayBuffer" });
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!fileDownload.data || !container) return;
+    if (!fileDownload.data) return;
 
     let cancelled = false;
-    let resizeObserver: ResizeObserver | null = null;
     const staging = document.createElement("div");
+    setFrameDocument(null);
     setIsReady(false);
     setErrorType(null);
-    container.replaceChildren();
 
-    // docx-preview cannot cancel a parse. Render into a detached node so a
-    // superseded document can finish without overwriting the current one.
+    // docx-preview cannot cancel a parse. Render into a detached node so its
+    // generated styles never enter Tidebreak's main document. The sanitized
+    // serialization is then loaded into a scriptless sandboxed frame.
     void renderAsync(fileDownload.data, staging, staging, DOCX_RENDER_OPTIONS)
       .then(() => {
         if (cancelled) return;
-
-        container.replaceChildren(...staging.childNodes);
-        secureDocumentLinks(container);
-        const pages = preparePages(container);
-        const fitPages = () => fitPagesToWidth(container, pages);
-        fitPages();
-        resizeObserver = new ResizeObserver(fitPages);
-        resizeObserver.observe(container);
-        setIsReady(true);
+        sanitizeRenderedDocument(staging);
+        setFrameDocument(
+          `${DOCX_FRAME_PREFIX}${staging.innerHTML}${DOCX_FRAME_SUFFIX}`,
+        );
       })
       .catch(() => {
         if (!cancelled) setErrorType("parse");
@@ -96,44 +108,12 @@ export default function DocxViewer({
 
     return () => {
       cancelled = true;
-      resizeObserver?.disconnect();
-      container.replaceChildren();
     };
   }, [fileDownload.data]);
 
   useEffect(() => {
     if (fileDownload.error) setErrorType("load");
   }, [fileDownload.error]);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const handleClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      const anchor = target?.closest?.("a") as HTMLAnchorElement | null;
-      if (!anchor || !container.contains(anchor)) return;
-
-      const href = anchor.getAttribute("href");
-      if (!href || href.startsWith("#")) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      const safeHref = safeExternalHref(href);
-      if (!safeHref) return;
-
-      void openExternal(safeHref)
-        .catch(() => false)
-        .then((opened) => {
-          if (!opened) {
-            window.open(safeHref, "_blank", "noopener,noreferrer");
-          }
-        });
-    };
-
-    container.addEventListener("click", handleClick, true);
-    return () => container.removeEventListener("click", handleClick, true);
-  }, []);
 
   if (errorType) {
     return (
@@ -153,13 +133,9 @@ export default function DocxViewer({
 
   return (
     <div
-      className={cn(
-        "tidebreak-docx-viewer relative min-h-0 overflow-auto",
-        className,
-      )}
+      className={cn("relative min-h-0 overflow-hidden", className)}
       {...restProps}
     >
-      <style dangerouslySetInnerHTML={{ __html: DOCX_VIEWER_STYLES }} />
       {isLoading && (
         <div className="bg-background/80 absolute inset-0 z-10 flex items-center justify-center">
           {fileDownload.progress ? (
@@ -176,67 +152,98 @@ export default function DocxViewer({
           )}
         </div>
       )}
-      <div ref={containerRef} className="min-h-full min-w-0" />
+      {frameDocument && (
+        <iframe
+          title="Document preview"
+          sandbox="allow-popups"
+          referrerPolicy="no-referrer"
+          srcDoc={frameDocument}
+          className="h-full min-h-64 w-full border-0"
+          onLoad={() => setIsReady(true)}
+        />
+      )}
     </div>
   );
 }
 
-type PreparedPage = { element: HTMLElement; width: number };
-
 /**
- * Keep Word's page as the minimum height, but let content grow rather than be
- * clipped when a producer did not persist Word's last-rendered page breaks.
+ * Defense in depth for any unexpected element emitted by docx-preview. Styles
+ * remain intentionally intact, but are serialized safely and can only affect
+ * the sandboxed document.
  */
-function preparePages(container: HTMLElement): PreparedPage[] {
-  return Array.from(container.querySelectorAll<HTMLElement>("section.docx")).map(
-    (page) => {
-      const width = page.offsetWidth;
-      const height = page.style.height;
-      if (height) page.style.minHeight = height;
-      page.style.height = "auto";
-      page.style.overflow = "visible";
-      return { element: page, width };
-    },
-  );
-}
+function sanitizeRenderedDocument(container: HTMLElement): void {
+  container
+    .querySelectorAll(
+      "script, iframe, frame, frameset, object, embed, meta, base, link, form, input, button, textarea, select, option, title, noscript, template, xmp, noembed, plaintext",
+    )
+    .forEach((element) => element.remove());
 
-/** Fit pages down to a narrow panel without ever enlarging or reflowing them. */
-function fitPagesToWidth(container: HTMLElement, pages: PreparedPage[]): void {
-  const availableWidth = Math.max(0, container.clientWidth - PAGE_GUTTER_PX);
-  if (availableWidth === 0) return;
-  for (const page of pages) {
-    const scale = page.width > 0 ? Math.min(1, availableWidth / page.width) : 1;
-    page.element.style.zoom = String(scale);
+  for (const element of container.querySelectorAll<HTMLElement>("*")) {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      if (
+        name.startsWith("on") ||
+        name === "srcdoc" ||
+        name === "srcset" ||
+        name === "action" ||
+        name === "formaction" ||
+        name === "ping"
+      ) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+
+    if (element.hasAttribute("src")) {
+      const src = element.getAttribute("src") ?? "";
+      if (!src.startsWith("data:") && !src.startsWith("blob:")) {
+        element.removeAttribute("src");
+      }
+    }
+
+    for (const name of ["href", "xlink:href"]) {
+      if (!element.hasAttribute(name)) continue;
+      const href = element.getAttribute(name) ?? "";
+      if (href.startsWith("#")) continue;
+      const safeHref = safeExternalHref(href);
+      if (safeHref) {
+        element.setAttribute(name, safeHref);
+      } else {
+        element.removeAttribute(name);
+      }
+    }
   }
-}
 
-/** Leave internal bookmarks intact; only HTTPS links may leave the document. */
-function secureDocumentLinks(container: HTMLElement): void {
   for (const anchor of container.querySelectorAll<HTMLAnchorElement>("a")) {
     const href = anchor.getAttribute("href");
-    if (!href || href.startsWith("#")) continue;
-
-    const safeHref = safeExternalHref(href);
-
-    if (safeHref === null) {
-      anchor.removeAttribute("href");
+    if (!href || href.startsWith("#")) {
       anchor.removeAttribute("target");
       anchor.removeAttribute("rel");
       continue;
     }
-
-    anchor.href = safeHref;
     anchor.target = "_blank";
     anchor.rel = "noopener noreferrer";
+  }
+
+  for (const page of container.querySelectorAll<HTMLElement>("section.docx")) {
+    if (page.style.height) {
+      page.style.setProperty("--tidebreak-docx-page-height", page.style.height);
+    }
+  }
+
+  // <style> is an HTML raw-text element. Neutralize a DOCX-controlled closing
+  // tag before innerHTML is embedded in srcdoc so it cannot become frame HTML.
+  for (const style of container.querySelectorAll<HTMLStyleElement>("style")) {
+    style.textContent = style.textContent?.replace(/<\/style/giu, "<\\/style") ?? "";
   }
 }
 
 function safeExternalHref(href: string): string | null {
   try {
     const parsed = new URL(href);
-    return parsed.protocol === "https:" ? parsed.href : null;
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password
+      ? parsed.href
+      : null;
   } catch {
-    // Relative links have no safe meaning outside the DOCX package.
     return null;
   }
 }

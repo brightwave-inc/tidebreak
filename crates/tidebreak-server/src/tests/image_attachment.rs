@@ -1010,7 +1010,7 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
         providers::ProviderKind::OpenaiCompatible,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: Some("http://127.0.0.1:1234/v1".into()),
+            base_url: Some("https://compat.example/v1".into()),
             models: vec![providers::CustomModelConfig {
                 id: "vendor/model".into(),
                 upstream_id: None,
@@ -1114,6 +1114,8 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
     tokio::spawn(async move {
         let _ = axum::serve(listener, provider).await;
     });
+    let provider_base_url = format!("http://{address}/v1");
+    providers::allow_test_loopback_provider_base_url(&provider_base_url);
 
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
@@ -1130,7 +1132,7 @@ async fn a_curated_openai_model_answers_after_receiving_png_and_jpeg_attachments
         providers::ProviderKind::Openai,
         &providers::ProviderConfig {
             enabled: true,
-            base_url: Some(format!("http://{address}/v1")),
+            base_url: Some(provider_base_url),
             models: Vec::new(),
         },
     )

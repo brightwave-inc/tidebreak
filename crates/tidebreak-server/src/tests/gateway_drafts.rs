@@ -241,7 +241,7 @@ async fn a_first_registration_persists_and_retries_a_taken_slug_once() {
     let registry = fixture.registry(gateway.clone());
 
     let registration = registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
     assert_eq!(shared_app_id(&registration), "shared-1");
@@ -271,7 +271,7 @@ async fn a_first_registration_persists_and_retries_a_taken_slug_once() {
 
     // A second relay reads the mapping rather than registering again.
     registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
     assert_eq!(
@@ -294,11 +294,11 @@ async fn a_registration_at_one_gateway_never_answers_for_another() {
     let registry = fixture.registry(gateway.clone());
 
     let first = registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
     let second = registry
-        .ensure_registered(fixture.app_id, GATEWAY_B)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_B)
         .await
         .unwrap();
 
@@ -319,7 +319,7 @@ async fn an_edited_app_pushes_its_current_revision_before_the_next_relay() {
     let gateway = Arc::new(FakeGateway::default());
     let registry = fixture.registry(gateway.clone());
     registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
 
@@ -327,7 +327,7 @@ async fn an_edited_app_pushes_its_current_revision_before_the_next_relay() {
     fixture.revise(b"<html>two</html>").await;
     let current = fixture.revise(b"<html>three</html>").await;
     let registration = registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
 
@@ -362,7 +362,7 @@ async fn a_gateway_that_cannot_hold_the_app_records_no_mapping() {
     let registry = fixture.registry(gateway.clone());
 
     let registration = registry
-        .ensure_registered(fixture.app_id, GATEWAY_A)
+        .ensure_registered(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
     assert_eq!(registration, GatewayRegistration::NotRegistered);
@@ -386,7 +386,7 @@ async fn a_moved_revision_pin_is_re_synced_before_consent_is_relayed_again() {
     let registry = fixture.registry(gateway.clone());
 
     let relayed = registry
-        .relay_consent(fixture.app_id, GATEWAY_A)
+        .relay_consent(&tidebreak_core::OwnerId::local(), fixture.app_id, GATEWAY_A)
         .await
         .unwrap();
 
@@ -423,6 +423,7 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
     impl GatewayDraftSource for UnreachableGateway {
         async fn ensure_registered(
             &self,
+            _owner: &tidebreak_core::OwnerId,
             _app: AppId,
             _gateway_base_url: &str,
         ) -> tidebreak_core::Result<GatewayRegistration> {
@@ -433,6 +434,7 @@ async fn a_grant_survives_a_registration_the_gateway_refuses() {
 
         async fn relay_consent(
             &self,
+            _owner: &tidebreak_core::OwnerId,
             _app: AppId,
             _gateway_base_url: &str,
         ) -> tidebreak_core::Result<GatewayConsentRelay> {

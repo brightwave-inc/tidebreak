@@ -15,6 +15,7 @@ use tidebreak_core::id::{AppId, AppRevisionId};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// How many library rows one listing returns. The library is a personal
@@ -72,8 +73,9 @@ pub struct AppRevisionSummary {
 /// `GET /apps` — the library listing.
 pub async fn get_app_library(
     State(state): State<AppState>,
+    store: ScopedStore,
 ) -> Result<Json<AppLibrary>, ServerError> {
-    let records = state.store.list_apps(MAX_LISTED_APPS).await?;
+    let records = store.list_apps(MAX_LISTED_APPS).await?;
     // The current revisions first, so the fingerprint read knows which gateway
     // apps the listing actually needs — each one is a live catalog read, and
     // the listing must not fetch the whole entitled set to badge apps that
@@ -81,12 +83,7 @@ pub async fn get_app_library(
     // closed below: it lists, but never as granted.
     let mut revisions = Vec::with_capacity(records.len());
     for record in &records {
-        revisions.push(
-            state
-                .store
-                .get_app_revision(record.current_revision)
-                .await?,
-        );
+        revisions.push(store.get_app_revision(record.current_revision).await?);
     }
     let needed = crate::connected_apps::gateway_apps_bound_by(
         revisions
@@ -101,7 +98,7 @@ pub async fn get_app_library(
         // the invoke gate's verdict rather than a cached approximation.
         let granted = match revision {
             Some(revision) => {
-                let grant = state.store.get_app_grant(record.id).await?;
+                let grant = store.get_app_grant(record.id).await?;
                 super::grant_state(&revision.manifest, grant.as_ref(), &current).granted
             }
             None => false,
@@ -120,16 +117,15 @@ pub async fn get_app_library(
 /// `GET /apps/{id}` — one live app's detail. A soft-deleted app answers as
 /// missing, exactly as it does on every other renderer surface.
 pub async fn get_app_detail(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(id): Path<AppId>,
 ) -> Result<Json<AppDetail>, ServerError> {
     let absent = || ServerError::not_found(format!("no app {id}"));
-    let app = state.store.get_app(id).await?.ok_or_else(absent)?;
+    let app = store.get_app(id).await?.ok_or_else(absent)?;
     if app.deleted_at.is_some() {
         return Err(absent());
     }
-    let revisions = state
-        .store
+    let revisions = store
         .list_app_revisions(id)
         .await?
         .into_iter()
@@ -155,10 +151,10 @@ pub async fn get_app_detail(
 /// what deletion removes is every open affordance — the library row, frame
 /// minting, and invoke all refuse a deleted app server-side.
 pub async fn delete_app(
-    State(state): State<AppState>,
+    store: ScopedStore,
     Path(id): Path<AppId>,
 ) -> Result<StatusCode, ServerError> {
-    if !state.store.delete_app(id, Utc::now()).await? {
+    if !store.delete_app(id, Utc::now()).await? {
         return Err(ServerError::not_found(format!("no app {id}")));
     }
     Ok(StatusCode::NO_CONTENT)

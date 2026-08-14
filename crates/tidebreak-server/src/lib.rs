@@ -235,6 +235,11 @@ pub fn app(state: AppState) -> Router {
 
     let client_executor_api = Router::new()
         .route(
+            "/native/mcp/servers",
+            axum::routing::put(routes::put_mcp_servers)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        .route(
             "/sandbox-file-reads/pending",
             get(routes::list_pending_delegated_file_reads),
         )

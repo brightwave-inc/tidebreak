@@ -29,6 +29,7 @@ use tidebreak_core::id::AppId;
 use crate::connected_apps::GatewayRegistration;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// What asking for an app's gateway page came back as.
@@ -110,9 +111,10 @@ fn shared_app_page_url(base_url: &str, shared_app_id: &str) -> Option<String> {
 /// actually serve.
 pub async fn post_app_gateway_page(
     State(state): State<AppState>,
+    store: ScopedStore,
     Path(app_id): Path<AppId>,
 ) -> Result<Json<AppGatewayPageResult>, ServerError> {
-    let (app, revision) = super::app_grant::current_live_app(&state, app_id).await?;
+    let (app, revision) = super::app_grant::current_live_app(&store, app_id).await?;
     // An app that binds nothing at the gateway has nothing there to be. It
     // would register as an empty shared app, so it is refused here rather than
     // sending the author to a page for a shell they cannot share.
@@ -134,7 +136,7 @@ pub async fn post_app_gateway_page(
     };
     let registered = state
         .gateway_drafts
-        .ensure_registered(app.id, &base_url)
+        .ensure_registered(&store.owner_id(), app.id, &base_url)
         .await;
     Ok(Json(match registered {
         Ok(GatewayRegistration::Registered { shared_app_id, .. }) => {

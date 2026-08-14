@@ -48,8 +48,21 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # the lockfile), but parts of the graph resolve platform roots, so the system
 # trust store must exist for outbound model-provider calls.
 # curl: the container healthcheck below, and nothing else.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+#
+# Debian snapshots are immutable, so the digest-pinned base plus this dated
+# repository set resolve the same transitive packages on every rebuild. Bump
+# the snapshot and direct package versions together as a deliberate dependency
+# update; Debian Release signatures still authenticate the snapshot metadata.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260810T000000Z bookworm main' \
+       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260810T000000Z bookworm-updates main' \
+       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260810T000000Z bookworm-security main' \
+       > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates=20250419~deb12u1 \
+       curl=7.88.1-10+deb12u15 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/tidebreak /usr/local/bin/tidebreak

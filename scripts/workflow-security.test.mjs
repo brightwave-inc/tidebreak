@@ -55,6 +55,10 @@ const dockerIgnore = readFileSync(
   repositoryFile("deploy", "self-host", "Dockerfile.dockerignore"),
   "utf8",
 );
+const selfHostDockerfile = readFileSync(
+  repositoryFile("deploy", "self-host", "Dockerfile"),
+  "utf8",
+);
 const denyConfig = readFileSync(repositoryFile("deny.toml"), "utf8");
 const e2bPackage = JSON.parse(
   readFileSync(repositoryFile(".github", "e2b-cli", "package.json"), "utf8"),
@@ -668,6 +672,23 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
   assert.match(
     readFileSync(repositoryFile("scripts", "stage-self-host-build-context.sh"), "utf8"),
     /git -C "\$root" archive --format=tar "\$revision" \| tar -x -C "\$destination"/,
+  );
+});
+
+test("the self-host runtime installs packages from an immutable Debian snapshot", () => {
+  assert.match(
+    selfHostDockerfile,
+    /snapshot\.debian\.org\/archive\/debian\/[0-9]{8}T[0-9]{6}Z/,
+  );
+  assert.match(
+    selfHostDockerfile,
+    /snapshot\.debian\.org\/archive\/debian-security\/[0-9]{8}T[0-9]{6}Z/,
+  );
+  assert.match(selfHostDockerfile, /ca-certificates=[^\s\\]+/);
+  assert.match(selfHostDockerfile, /curl=[^\s\\]+/);
+  assert.doesNotMatch(
+    selfHostDockerfile,
+    /apt-get install -y --no-install-recommends ca-certificates curl/,
   );
 });
 
@@ -1390,6 +1411,65 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
     immutableUpload,
     /if: \$\{\{ needs\.inspect_hosted\.outputs\.exists != 'true' \}\}/,
   );
+});
+
+test("source SBOM generation is isolated from production credentials", () => {
+  const release = workflows["release.yml"];
+  const sbomJob = workflowJob(release, "source_sbom");
+  const publishJob = workflowJob(workflows["release.yml"], "publish");
+
+  assert.match(sbomJob, /needs: \[validate, inspect_hosted\]/);
+  assert.match(sbomJob, /permissions:\n      contents: read/);
+  assert.doesNotMatch(sbomJob, /id-token:/);
+  assert.doesNotMatch(sbomJob, /attestations:/);
+  assert.doesNotMatch(sbomJob, /artifact-metadata:/);
+  assert.doesNotMatch(sbomJob, /\n    environment:/);
+  assert.doesNotMatch(sbomJob, /AWS_|DOWNLOADS_|RELEASE_BASE_URL|vars\.|secrets\./);
+  assert.match(sbomJob, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(
+    sbomJob,
+    /uses: anchore\/sbom-action@[0-9a-f]{40} # v0\.24\.0/,
+  );
+  assert.match(sbomJob, /syft-version: v1\.51\.0/);
+  assert.match(sbomJob, /format: spdx-json/);
+  assert.match(sbomJob, /upload-artifact: false/);
+  assert.match(sbomJob, /upload-release-assets: false/);
+  assert.match(
+    sbomJob,
+    /uses: actions\/upload-artifact@[0-9a-f]{40} # v7/,
+  );
+  assert.match(sbomJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
+  assert.doesNotMatch(publishJob, /anchore\/sbom-action/);
+
+  assert.match(publishJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom\]/);
+  assert.match(publishJob, /needs\.source_sbom\.result == 'success'/);
+  assert.match(
+    publishJob,
+    /uses: actions\/download-artifact@[0-9a-f]{40} # v8/,
+  );
+  assert.match(publishJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
+  assert.match(publishJob, /sha256sum --check --strict/);
+});
+
+test("public releases attest provenance without treating the source SBOM as an installer SBOM", () => {
+  const publishJob = workflowJob(workflows["release.yml"], "publish");
+
+  assert.match(publishJob, /attestations: write/);
+  assert.match(publishJob, /id-token: write/);
+  assert.match(publishJob, /github\.event\.repository\.visibility == 'public'/);
+
+  const attestations = publishJob.match(
+    /uses: actions\/attest@[0-9a-f]{40} # v4\.2\.2/g,
+  );
+  assert.equal(attestations?.length, 1);
+  assert.match(publishJob, /subject-checksums: \$\{\{ runner\.temp \}\}\/immutable-release-files\.sha256/);
+  assert.doesNotMatch(publishJob, /sbom-path:/);
+  assert.doesNotMatch(publishJob, /release-artifacts\.sha256/);
+
+  const provenanceIndex = publishJob.indexOf("- name: Attest immutable release provenance");
+  const awsIndex = publishJob.indexOf("- name: Configure AWS credentials");
+  assert.ok(provenanceIndex !== -1 && awsIndex !== -1);
+  assert.ok(provenanceIndex < awsIndex);
 });
 
 test("GitHub release downloads are copied from the hosted release", () => {

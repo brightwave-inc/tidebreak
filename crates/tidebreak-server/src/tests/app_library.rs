@@ -8,6 +8,20 @@ use tidebreak_core::local_app::{
     AppBinding, AppManifest, AppOperationsBinding, CreateApp, NewAppRevision,
 };
 
+fn app_state_for_owner_test(dir: &std::path::Path, store: Arc<dyn Store>) -> AppState {
+    AppState::new(
+        Config::desktop(dir),
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    )
+}
+
 /// The library lifecycle in one pass: the listing carries renderer-safe rows
 /// whose `granted` badge is the grant surface's own verdict, the detail lists
 /// revision history, and deletion removes the app from every one of those
@@ -130,6 +144,134 @@ async fn library_lists_grant_verdicts_and_deletion_removes_the_row() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// The authenticated principal is carried through every app route before an
+/// app id reaches revisions, grants, invocation, or gateway publication.
+#[tokio::test]
+async fn another_principal_cannot_reach_an_app_through_any_app_route() {
+    use crate::principal::{AuthContext, Principal, Role, UserId};
+
+    let (dir, db) = temp_db_store("app-route-owner.db").await;
+    let store: Arc<dyn Store> = Arc::new(db);
+    let alice = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let app_id = AppId::new();
+    store
+        .create_app_scoped(
+            &alice,
+            &CreateApp {
+                id: app_id,
+                revision: NewAppRevision {
+                    id: AppRevisionId::new(),
+                    manifest: AppManifest {
+                        name: "Alice only".into(),
+                        bindings: Vec::new(),
+                    },
+                    byte_len: 1,
+                    sha256: [0; 32],
+                    turn_id: None,
+                    producing_run_id: None,
+                    chat_id: None,
+                    created_at: chrono::Utc::now(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let router = Router::new()
+        .route("/apps", axum::routing::get(crate::routes::get_app_library))
+        .route(
+            "/apps/{id}",
+            axum::routing::get(crate::routes::get_app_detail).delete(crate::routes::delete_app),
+        )
+        .route(
+            "/apps/{id}/grant",
+            axum::routing::get(crate::routes::get_app_grant_state)
+                .post(crate::routes::post_app_grant)
+                .delete(crate::routes::delete_app_grant),
+        )
+        .route(
+            "/apps/{id}/invoke",
+            axum::routing::post(crate::routes::post_app_invoke),
+        )
+        .route(
+            "/apps/{id}/gateway-page",
+            axum::routing::post(crate::routes::post_app_gateway_page),
+        )
+        .route(
+            "/apps/{id}/view-session",
+            axum::routing::post(crate::routes::post_app_view_session),
+        )
+        .with_state(app_state_for_owner_test(dir.path(), store))
+        .layer(axum::middleware::from_fn(
+            |mut request: Request<Body>, next: axum::middleware::Next| async move {
+                let id = request
+                    .headers()
+                    .get("x-test-user")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("bob")
+                    .to_owned();
+                request.extensions_mut().insert(AuthContext {
+                    principal: Principal::User {
+                        id: UserId::new(&id).unwrap(),
+                        role: Role::Member,
+                    },
+                    client_executor: false,
+                });
+                next.run(request).await
+            },
+        ));
+
+    let request = |method: &str, uri: String, body: Body| {
+        router.clone().oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("x-test-user", "bob")
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+    };
+
+    let listed = request("GET", "/apps".into(), Body::empty()).await.unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body_string(listed).await).unwrap()["apps"],
+        json!([])
+    );
+    for (method, suffix) in [
+        ("GET", ""),
+        ("DELETE", ""),
+        ("GET", "/grant"),
+        ("POST", "/grant"),
+        ("DELETE", "/grant"),
+        ("POST", "/gateway-page"),
+        ("POST", "/view-session"),
+    ] {
+        let body = if suffix == "/view-session" {
+            Body::from("{}")
+        } else {
+            Body::empty()
+        };
+        let response = request(method, format!("/apps/{app_id}{suffix}"), body)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {suffix}"
+        );
+    }
+    let invoked = request(
+        "POST",
+        format!("/apps/{app_id}/invoke"),
+        Body::from(r#"{"operation_id":"listIssues"}"#),
+    )
+    .await
+    .unwrap();
+    assert_eq!(invoked.status(), StatusCode::NOT_FOUND);
 }
 
 async fn body_string(response: axum::response::Response) -> String {

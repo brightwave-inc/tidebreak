@@ -1297,6 +1297,7 @@ impl GatewayRelayDispatcher {
 impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
     async fn dispatch(
         &self,
+        owner: &tidebreak_core::OwnerId,
         app: tidebreak_core::id::AppId,
         request: &crate::connected_apps::GatewayOperationRequest,
     ) -> std::result::Result<
@@ -1341,7 +1342,7 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
         }
         let shared_app_id = match self
             .drafts
-            .ensure_registered(app, &base_url)
+            .ensure_registered(owner, app, &base_url)
             .await
             .map_err(unreachable("register this app at the gateway"))?
         {
@@ -1356,9 +1357,13 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
             }
         };
         let body = shared_app_invoke_body(request);
-        crate::gateway_drafts::relay_with_consent_self_heal(&*self.drafts, app, &base_url, || {
-            self.relay(&connection, &shared_app_id, &body)
-        })
+        crate::gateway_drafts::relay_with_consent_self_heal(
+            &*self.drafts,
+            owner,
+            app,
+            &base_url,
+            || self.relay(&connection, &shared_app_id, &body),
+        )
         .await
     }
 }

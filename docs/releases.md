@@ -152,9 +152,19 @@ automatic.
    behind a literal `false` and never runs — see
    [What comes after v1](deferred.md) — so a release currently produces macOS
    artifacts only.
-7. Only after the build passes does the publisher upload immutable versioned
-   files, advance the public manifests, invalidate their CDN paths, and
-   smoke-test the hosted release. If a prior attempt already uploaded the
+7. For a release that is not already hosted, a separate least-privilege job
+   generates an SPDX JSON SBOM from the exact released source and checksums it
+   independently of the package builds. That job has no production environment,
+   deployment variables, OIDC permission, or AWS role; it transfers the two
+   files to the publisher through a pinned GitHub artifact action. Publication
+   waits for both the package build and source SBOM. For public repositories,
+   the publisher also records
+   Sigstore-backed SLSA-style build provenance for every immutable release file
+   (including `manifest.json`). The source-tree SBOM is deliberately published
+   as source-scoped metadata, not attested as a description of the packaged
+   installers. The publisher then uploads immutable versioned files, advances
+   the public manifests, invalidates their CDN paths, and smoke-tests the hosted
+   release. If a prior attempt already uploaded the
    complete immutable prefix, a new dispatch validates and reuses those bytes,
    skips the desktop build, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
@@ -163,7 +173,8 @@ automatic.
    Release with `.sha256` sidecars — today that is the notarized disk image as
    `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy
    `Tidebreak-macos-apple-silicon.dmg` alias that keeps the existing README URL
-   live through the transition. It would again include
+   live through the transition. It also attaches the release SBOM and its
+   checksum when that release carries one. It would again include
    `Tidebreak-windows-x86_64-setup.exe` if the Windows lane were unparked. It
    holds no signing or AWS credentials. The names omit the version so that
    `https://github.com/brightwave-inc/tidebreak/releases/latest/download/<name>`
@@ -249,9 +260,28 @@ Each macOS architecture directory contains a notarized DMG, a zip of the
 notarized app, a signed `.app.tar.gz` updater archive, its signature, and
 SHA-256 files. A Windows architecture directory, when the lane produces one,
 contains an unsigned NSIS installer, its Tauri updater signature, and SHA-256
-files. The root `manifest.json` and Tauri-compatible `latest.json` are the only
-mutable objects. The workflow refuses to overwrite a versioned object with
-different bytes or move `latest.json` to an older version.
+files. The immutable release root also contains
+`Tidebreak_VERSION_source.spdx.json` and its checksum. The root `manifest.json`
+inside each versioned prefix is immutable; only the unversioned
+Tauri-compatible `manifest.json` and `latest.json` pointers are mutable. The
+workflow refuses to overwrite a versioned object with different bytes or move
+`latest.json` to an older version.
+
+After the repository is public, verify the independently signed provenance for
+any downloaded artifact with GitHub CLI:
+
+```sh
+gh attestation verify Tidebreak-macos-apple-silicon.dmg \
+  --repo brightwave-inc/tidebreak
+```
+
+GitHub artifact attestations require a public repository unless the owner uses
+GitHub Enterprise Cloud. While this repository remains private on another
+plan, the workflow still publishes the checksummed, source-scoped SBOM but
+skips provenance attestation rather than making private release retries fail.
+The SBOM inventories the released source checkout; it must not be interpreted
+as an inventory of files or dependencies embedded in the DMG, app bundle, or
+updater archive.
 
 Packaged macOS apps check `latest.json` 15 seconds after launch and every five
 minutes. When a newer signed version is available, the Tauri updater downloads

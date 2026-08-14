@@ -1,9 +1,10 @@
 use super::*;
 use crate::id::{AgentRunId, AppId, AppRevisionId, ConnectedAppId};
 use crate::local_app::{
-    AppBinding, AppManifest, AppOperationsBinding, CreateApp, NewAppRevision, MAX_APP_BUNDLE_BYTES,
-    MAX_APP_REVISIONS,
+    AppBinding, AppGatewayDraft, AppGrant, AppManifest, AppOperationsBinding, CreateApp,
+    NewAppRevision, MAX_APP_BUNDLE_BYTES, MAX_APP_REVISIONS,
 };
+use crate::OwnerId;
 
 fn at(second: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(1_710_000_000 + second, 0).unwrap()
@@ -247,4 +248,124 @@ async fn deleting_an_app_hides_it_and_refuses_revisions_until_restored() {
         !store.restore_app(AppId::new(), at(60)).await.unwrap(),
         "an unknown app reports no restore"
     );
+}
+
+/// The app row is the authority root: every child path resolves through its
+/// immutable owner, and another principal sees the same absence as for an
+/// unknown id even when it guesses the exact app or revision id.
+#[tokio::test]
+async fn two_principals_cannot_cross_app_ownership() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("user:alice").unwrap();
+    let bob = OwnerId::new("user:bob").unwrap();
+    let request = create_request(1);
+    let created = store.create_app_scoped(&alice, &request).await.unwrap();
+    assert_eq!(created.owner, alice);
+
+    assert_eq!(store.get_app_scoped(&bob, created.id).await.unwrap(), None);
+    assert!(store.list_apps_scoped(&bob, 10).await.unwrap().is_empty());
+    assert_eq!(
+        store
+            .get_app_revision_scoped(&bob, created.current_revision)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(store
+        .list_app_revisions_scoped(&bob, created.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .append_app_revision_scoped(&bob, created.id, &revision(2, 30))
+        .await
+        .is_err());
+    assert!(!store
+        .delete_app_scoped(&bob, created.id, at(60))
+        .await
+        .unwrap());
+
+    let grant = AppGrant {
+        app_id: created.id,
+        bindings: Vec::new(),
+        created_at: at(30),
+    };
+    assert!(store.put_app_grant_scoped(&bob, &grant).await.is_err());
+    store.put_app_grant_scoped(&alice, &grant).await.unwrap();
+    assert_eq!(
+        store.get_app_grant_scoped(&bob, created.id).await.unwrap(),
+        None
+    );
+    assert!(!store
+        .delete_app_grant_scoped(&bob, created.id)
+        .await
+        .unwrap());
+    assert!(store
+        .get_app_grant_scoped(&alice, created.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    let draft = AppGatewayDraft {
+        app_id: created.id,
+        gateway_base_url: "https://gateway.example/".into(),
+        shared_app_id: "shared-1".into(),
+        gateway_revision_id: "revision-1".into(),
+        synced_revision_id: created.current_revision,
+        updated_at: at(45),
+    };
+    assert!(store
+        .put_app_gateway_draft_scoped(&bob, &draft)
+        .await
+        .is_err());
+    store
+        .put_app_gateway_draft_scoped(&alice, &draft)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_app_gateway_draft_scoped(&bob, created.id, &draft.gateway_base_url)
+            .await
+            .unwrap(),
+        None
+    );
+
+    assert!(store.create_app_scoped(&bob, &request).await.is_err());
+    assert_eq!(
+        store
+            .get_app_scoped(&alice, created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner,
+        alice,
+        "an id retry cannot transfer ownership"
+    );
+}
+
+/// Tool-facing writes derive ownership from the durable authoring chat and
+/// cannot append a second principal's app.
+#[tokio::test]
+async fn chat_derived_app_ownership_is_stamped_and_enforced_transactionally() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("user:alice").unwrap();
+    let bob = OwnerId::new("user:bob").unwrap();
+    let alice_chat = sample_chat();
+    let bob_chat = sample_chat();
+    store.create_chat_scoped(&alice, &alice_chat).await.unwrap();
+    store.create_chat_scoped(&bob, &bob_chat).await.unwrap();
+
+    let created = store
+        .create_app_for_chat(alice_chat.id, &create_request(1))
+        .await
+        .unwrap();
+    assert_eq!(created.owner, alice);
+    assert!(store
+        .append_app_revision_for_chat(bob_chat.id, created.id, &revision(2, 30))
+        .await
+        .is_err());
+    assert!(store
+        .append_app_revision_for_chat(alice_chat.id, created.id, &revision(2, 60))
+        .await
+        .is_ok());
 }

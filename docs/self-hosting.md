@@ -219,6 +219,13 @@ docker compose up -d --build
 docker image prune -f     # optional
 ```
 
+The runtime image pins both Debian base images by digest and installs its small
+runtime package set from a dated Debian snapshot with exact direct versions.
+That keeps a rebuild of one commit from silently picking up different `curl`,
+CA-certificate, or transitive package bytes. Updating the snapshot date and
+package pins is therefore an explicit dependency-maintenance change rather
+than an incidental effect of rebuilding.
+
 The server applies its own schema migrations on boot. Take a database backup
 before an upgrade: Tidebreak is pre-1.0 and persisted formats may change
 between versions (see

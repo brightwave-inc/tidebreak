@@ -25,6 +25,9 @@ use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tidebreak_core::{
     validate_computer_capture_screen_arguments, validate_computer_click_arguments,
     validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
@@ -103,7 +106,8 @@ enum ConsentDecision {
     Decline,
 }
 
-/// One parked consent ask, as the renderer needs it.
+/// One native consent ask. This stays host-side: the renderer never receives
+/// the call id or an authority that can resolve the decision.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentPromptView {
@@ -123,7 +127,7 @@ pub(crate) enum ConsentGrantScope {
     Project,
 }
 
-/// One parked consequential-action confirmation, as the renderer needs it.
+/// One native consequential-action confirmation.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfirmationPromptView {
@@ -153,20 +157,6 @@ pub(crate) struct ActiveControlView {
 pub(crate) struct ComputerUseSnapshot {
     pub(crate) active: Option<ActiveControlView>,
     pub(crate) halted: bool,
-    pub(crate) pending_consents: Vec<ConsentPromptView>,
-    pub(crate) pending_confirmations: Vec<ConfirmationPromptView>,
-}
-
-/// What a parked prompt is waiting on, with the channel that resolves it.
-enum PendingPrompt {
-    Consent {
-        view: ConsentPromptView,
-        decision: oneshot::Sender<ConsentDecision>,
-    },
-    Confirmation {
-        view: ConfirmationPromptView,
-        decision: oneshot::Sender<bool>,
-    },
 }
 
 /// Indicator bookkeeping, kept separate so the lock is never held across an
@@ -200,7 +190,6 @@ pub(crate) struct ComputerUseState {
     /// cleared only by the user (resume, or a fresh consent approval — both
     /// are explicit opt-ins).
     halt: tokio::sync::watch::Sender<bool>,
-    prompts: StdMutex<HashMap<CallId, PendingPrompt>>,
 }
 
 impl Default for ComputerUseState {
@@ -210,7 +199,6 @@ impl Default for ComputerUseState {
             app_names: StdMutex::new(HashMap::new()),
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
-            prompts: StdMutex::new(HashMap::new()),
         }
     }
 }
@@ -290,24 +278,9 @@ impl ComputerUseState {
     }
 
     fn snapshot(&self) -> ComputerUseSnapshot {
-        let prompts = lock(&self.prompts);
         ComputerUseSnapshot {
             active: lock(&self.indicator).active.clone(),
             halted: self.is_halted(),
-            pending_consents: prompts
-                .values()
-                .filter_map(|prompt| match prompt {
-                    PendingPrompt::Consent { view, .. } => Some(view.clone()),
-                    PendingPrompt::Confirmation { .. } => None,
-                })
-                .collect(),
-            pending_confirmations: prompts
-                .values()
-                .filter_map(|prompt| match prompt {
-                    PendingPrompt::Confirmation { view, .. } => Some(view.clone()),
-                    PendingPrompt::Consent { .. } => None,
-                })
-                .collect(),
         }
     }
 }
@@ -316,6 +289,160 @@ fn emit_state(app: &AppHandle, cu: &ComputerUseState) {
     if let Err(error) = app.emit(STATE_EVENT, cu.snapshot()) {
         eprintln!("tidebreak-desktop: could not emit computer-use state: {error}");
     }
+}
+
+async fn native_binary_choice(
+    app: &AppHandle,
+    title: &str,
+    message: &str,
+    allow_label: &str,
+) -> Result<bool, String> {
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            allow_label.to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native computer-use prompt closed unexpectedly".to_owned())
+}
+
+async fn native_three_way_choice(
+    app: &AppHandle,
+    title: &str,
+    message: &str,
+    first: &str,
+    second: &str,
+    cancel: &str,
+) -> Result<MessageDialogResult, String> {
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            first.to_owned(),
+            second.to_owned(),
+            cancel.to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show_with_result(move |answer| {
+        let _ = sender.send(answer);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native computer-use prompt closed unexpectedly".to_owned())
+}
+
+async fn native_consent_choice(
+    app: &AppHandle,
+    view: &ConsentPromptView,
+) -> Result<ConsentDecision, String> {
+    let app_label = if view.bundle_id.is_empty() {
+        "your entire screen".to_owned()
+    } else {
+        crate::native_security_label(view.app_name.as_deref().unwrap_or(&view.bundle_id))
+    };
+    let action = match view.capability {
+        ConsentCapability::CaptureScreen => "capture",
+        ConsentCapability::ReadAppContent => "read on-screen content from",
+        ConsentCapability::ControlApp => "control",
+    };
+    let first = native_three_way_choice(
+        app,
+        "Allow computer use?",
+        &format!(
+            "Allow Tidebreak to {action} {app_label}? This permission is enforced by the native host, outside the conversation renderer."
+        ),
+        "Allow once",
+        "Remember permission…",
+        "Don't allow",
+    )
+    .await?;
+    match first {
+        MessageDialogResult::Yes => Ok(ConsentDecision::Once),
+        MessageDialogResult::Custom(ref value) if value == "Allow once" => {
+            Ok(ConsentDecision::Once)
+        }
+        MessageDialogResult::No => {
+            if view.grant_scope == ConsentGrantScope::Chat {
+                return Ok(ConsentDecision::Chat);
+            }
+            let scope = native_three_way_choice(
+                app,
+                "Remember computer-use permission?",
+                "Choose how widely Tidebreak may remember this native permission.",
+                "This chat",
+                "This project",
+                "Cancel",
+            )
+            .await?;
+            remembered_scope(scope)
+        }
+        MessageDialogResult::Custom(ref value) if value == "Remember permission…" => {
+            if view.grant_scope == ConsentGrantScope::Chat {
+                return Ok(ConsentDecision::Chat);
+            }
+            let scope = native_three_way_choice(
+                app,
+                "Remember computer-use permission?",
+                "Choose how widely Tidebreak may remember this native permission.",
+                "This chat",
+                "This project",
+                "Cancel",
+            )
+            .await?;
+            remembered_scope(scope)
+        }
+        _ => Ok(ConsentDecision::Decline),
+    }
+}
+
+fn remembered_scope(answer: MessageDialogResult) -> Result<ConsentDecision, String> {
+    match answer {
+        MessageDialogResult::Yes => Ok(ConsentDecision::Chat),
+        MessageDialogResult::No => Ok(ConsentDecision::Always),
+        MessageDialogResult::Custom(value) if value == "This chat" => Ok(ConsentDecision::Chat),
+        MessageDialogResult::Custom(value) if value == "This project" => {
+            Ok(ConsentDecision::Always)
+        }
+        _ => Ok(ConsentDecision::Decline),
+    }
+}
+
+async fn native_confirmation_choice(
+    app: &AppHandle,
+    view: &ConfirmationPromptView,
+) -> Result<bool, String> {
+    let app_label =
+        crate::native_security_label(view.app_name.as_deref().unwrap_or(&view.bundle_id));
+    let target = view
+        .target_label
+        .as_deref()
+        .map(crate::native_security_label)
+        .unwrap_or_else(|| "an unlabeled control".to_owned());
+    let reason = crate::native_security_label(&view.reason);
+    native_binary_choice(
+        app,
+        "Confirm consequential action",
+        &format!("Allow Tidebreak to {reason}?\n\nTarget: {target}\nApplication: {app_label}"),
+        "Allow action",
+    )
+    .await
 }
 
 // MARK: - Tauri surface
@@ -337,61 +464,24 @@ pub(crate) fn stop_computer_use_control(app: AppHandle, state: State<'_, HostAcc
     emit_state(&app, &state.computer_use);
 }
 
-/// Re-arm control after a Stop. Explicit and user-driven only.
+/// Re-arm control after a Stop. A renderer request may open the native prompt,
+/// but cannot silently authorize the state transition.
 #[tauri::command]
-pub(crate) fn resume_computer_use_control(app: AppHandle, state: State<'_, HostAccess>) {
-    state.computer_use.resume();
-    emit_state(&app, &state.computer_use);
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResolveConsentRequest {
-    call_id: Uuid,
-    decision: ConsentDecision,
-}
-
-/// Commit the user's per-app consent decision for a parked computer-use call.
-#[tauri::command]
-pub(crate) fn resolve_computer_use_consent(
+pub(crate) async fn resume_computer_use_control(
     app: AppHandle,
     state: State<'_, HostAccess>,
-    request: ResolveConsentRequest,
 ) -> Result<(), String> {
-    let prompt = lock(&state.computer_use.prompts).remove(&CallId::from(request.call_id));
-    let Some(PendingPrompt::Consent { decision, .. }) = prompt else {
-        return Err("that computer-use consent request is no longer pending".to_owned());
-    };
-    // A grant the user just approved is an explicit opt-in, which is also what
-    // re-arms control after a Stop.
-    if request.decision != ConsentDecision::Decline {
+    if native_binary_choice(
+        &app,
+        "Resume computer control?",
+        "Resume only if you want Tidebreak to continue controlling applications on this Mac.",
+        "Resume control",
+    )
+    .await?
+    {
         state.computer_use.resume();
+        emit_state(&app, &state.computer_use);
     }
-    let _ = decision.send(request.decision);
-    emit_state(&app, &state.computer_use);
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResolveConfirmationRequest {
-    call_id: Uuid,
-    confirmed: bool,
-}
-
-/// Commit the user's decision on one consequential action the broker held.
-#[tauri::command]
-pub(crate) fn resolve_computer_use_confirmation(
-    app: AppHandle,
-    state: State<'_, HostAccess>,
-    request: ResolveConfirmationRequest,
-) -> Result<(), String> {
-    let prompt = lock(&state.computer_use.prompts).remove(&CallId::from(request.call_id));
-    let Some(PendingPrompt::Confirmation { decision, .. }) = prompt else {
-        return Err("that computer-use confirmation is no longer pending".to_owned());
-    };
-    let _ = decision.send(request.confirmed);
-    emit_state(&app, &state.computer_use);
     Ok(())
 }
 
@@ -1012,8 +1102,8 @@ fn stopped_resolution() -> StoredResolution {
     )
 }
 
-/// The per-app consent park: surface the card, wait for the decision, write
-/// the grant the decision implies, then re-issue the operation once.
+/// The per-app consent park: surface a native prompt, wait for the decision,
+/// write the grant the decision implies, then re-issue the operation once.
 async fn dispatch_consent(
     app: &AppHandle,
     state: &HostAccess,
@@ -1037,24 +1127,10 @@ async fn dispatch_consent(
             SubjectKind::Conversation => ConsentGrantScope::Chat,
         },
     };
-    let (sender, receiver) = oneshot::channel();
-    {
-        let mut prompts = lock(&cu.prompts);
-        prompts.insert(
-            call.id,
-            PendingPrompt::Consent {
-                view,
-                decision: sender,
-            },
-        );
-    }
-    emit_state(app, cu);
     let decision = tokio::select! {
-        decision = receiver => decision.unwrap_or(ConsentDecision::Decline),
+        decision = native_consent_choice(app, &view) => decision.unwrap_or(ConsentDecision::Decline),
         () = cu.wait_for_halt() => ConsentDecision::Decline,
     };
-    lock(&cu.prompts).remove(&call.id);
-    emit_state(app, cu);
 
     if cu.is_halted() {
         return stopped_resolution();
@@ -1163,7 +1239,8 @@ async fn revoke_once_grant(
 }
 
 /// The act-time consequential confirmation: the broker is holding the action
-/// and honors the confirmation only while the target's label still matches.
+/// and honors the native confirmation only while the target's label still
+/// matches.
 async fn dispatch_confirmation(
     app: &AppHandle,
     state: &HostAccess,
@@ -1179,24 +1256,10 @@ async fn dispatch_confirmation(
         target_label: held.target_label.clone(),
         reason: held.reason.clone(),
     };
-    let (sender, receiver) = oneshot::channel();
-    {
-        let mut prompts = lock(&cu.prompts);
-        prompts.insert(
-            call.id,
-            PendingPrompt::Confirmation {
-                view,
-                decision: sender,
-            },
-        );
-    }
-    emit_state(app, cu);
     let confirmed = tokio::select! {
-        confirmed = receiver => confirmed.unwrap_or(false),
+        confirmed = native_confirmation_choice(app, &view) => confirmed.unwrap_or(false),
         () = cu.wait_for_halt() => false,
     };
-    lock(&cu.prompts).remove(&call.id);
-    emit_state(app, cu);
 
     if !confirmed {
         return unavailable(

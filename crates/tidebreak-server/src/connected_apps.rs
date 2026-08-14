@@ -553,6 +553,7 @@ pub(crate) trait GatewayInvokeDispatcher: Send + Sync {
     /// already checked the pin, the grant, and the fingerprint currency of.
     async fn dispatch(
         &self,
+        owner: &tidebreak_core::OwnerId,
         app: tidebreak_core::id::AppId,
         request: &GatewayOperationRequest,
     ) -> Result<crate::connectors::GatewayInvokeOutcome, GatewayDispatchError>;
@@ -575,6 +576,7 @@ pub(crate) trait GatewayDraftSource: Send + Sync {
     /// appending as needed.
     async fn ensure_registered(
         &self,
+        owner: &tidebreak_core::OwnerId,
         app: tidebreak_core::id::AppId,
         gateway_base_url: &str,
     ) -> tidebreak_core::Result<GatewayRegistration>;
@@ -588,6 +590,7 @@ pub(crate) trait GatewayDraftSource: Send + Sync {
     /// from the live revision, accepting only a revision pin from here.
     async fn relay_consent(
         &self,
+        owner: &tidebreak_core::OwnerId,
         app: tidebreak_core::id::AppId,
         gateway_base_url: &str,
     ) -> tidebreak_core::Result<GatewayConsentRelay>;
