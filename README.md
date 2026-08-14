@@ -6,9 +6,7 @@
 <h1 align="center">Tidebreak</h1>
 
 <p align="center">
-  <strong>A private AI coworker that runs on your machine.</strong><br>
-  Bring your files and model, then leave with versioned documents, analysis,
-  and reusable local apps.
+  <strong>A local-first agentic coworker you can configure without limit. Choose your files and model. Walk away with a spreadsheet, deck, or working app.
 </p>
 
 <p align="center">
