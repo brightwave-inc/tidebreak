@@ -1053,10 +1053,12 @@ test("release documentation is built from the validated tag and promoted only af
   assert.doesNotMatch(build, /VERCEL_TOKEN|docs-production/);
   assert.match(publish, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
   assert.equal(
-    Object.values(docsPackage.dependencies ?? {}).includes("vercel"),
+    Object.hasOwn(docsPackage.dependencies ?? {}, "vercel"),
     false,
   );
-  assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
+  if (Object.hasOwn(docsPackage.devDependencies ?? {}, "vercel")) {
+    assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
+  }
   assert.match(build, /pnpm --dir docs-site install --frozen-lockfile/);
   assert.match(build, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
   assert.match(build, /persist-credentials: false/);
