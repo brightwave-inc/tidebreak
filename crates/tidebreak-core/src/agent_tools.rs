@@ -1112,12 +1112,13 @@ pub fn sandbox_exec_tool_spec() -> ToolSpec {
          empty and is yours alone: it holds nothing but what your own earlier commands wrote, and \
          you cannot reach the conversation, the user's files, or any connected folder from it. \
          Write only under the workspace (relative paths); absolute paths like /tmp are not durable \
-         here. Save only final deliverables under output/ (for example .md, .csv, .xlsx, .pdf, \
-         .pptx, .docx, .chart.json) — each file there is published to the user as a durable output \
+         here. Save only final deliverables under output/ (for example .md, .csv, .py, .tsx, \
+         .xlsx, .pdf, .pptx, .docx, .chart.json) — each file there is published to the user as a durable output \
          named by its own filename, and writing the same filename again publishes a new version of \
          that same output. Keep helper scripts and other intermediates in the workspace root (or \
-         any path outside output/); source files under output/ are not published. Name deliverables \
-         the way you want the user to see them. Every command returns bounded stdout and stderr.",
+         any path outside output/). Source files are valid final deliverables when the task asks for \
+         code. Name deliverables the way you want the user to see them. Every command returns bounded \
+         stdout and stderr.",
     )
 }
 

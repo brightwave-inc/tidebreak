@@ -937,24 +937,16 @@ mod output_scan {
         assert!(!workspace.path().join(&relative).exists());
     }
 
-    /// A background agent that builds a deck often leaves the generator script
-    /// next to the PPTX under output/. The scan must publish the deliverable
-    /// and refuse the script with a note — otherwise junk lands in the catalog
-    /// beside the real file. Foreground turns are out of scope for this skip.
+    /// Directory placement is the deliverable declaration. A background run
+    /// can therefore return source code itself, using the same text-output path
+    /// and media type as a foreground turn.
     #[tokio::test]
-    async fn a_sandbox_run_does_not_publish_helper_scripts_beside_deliverables() {
+    async fn a_sandbox_run_publishes_source_code_outputs() {
         let (_dir, store, chat) = store_with_chat().await;
         let scratch = tempfile::tempdir().unwrap();
         let dir = open_scratch(scratch.path());
 
-        // Minimal well-formed empty ZIP = valid PPTX signature for the scan.
-        write_output_file(
-            scratch.path(),
-            "deck.pptx",
-            b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
-        );
-        write_output_file(scratch.path(), "build_deck.py", b"print('hi')\n");
-        write_output_file(scratch.path(), "helper.sh", b"#!/bin/sh\n");
+        write_output_file(scratch.path(), "solution.py", b"print('hi')\n");
 
         let scan = sync_output_directory(
             &store,
@@ -973,15 +965,10 @@ mod output_scan {
             .iter()
             .map(|entry| entry.filename.as_str())
             .collect();
-        assert_eq!(published, ["deck.pptx"]);
-        assert!(scan
-            .notes
-            .iter()
-            .any(|note| { note.contains("build_deck.py") && note.contains("workspace root") }));
-        assert!(scan
-            .notes
-            .iter()
-            .any(|note| note.contains("helper.sh") && note.contains("workspace root")));
+        assert_eq!(published, ["solution.py"]);
+        assert!(scan.notes.is_empty());
+        let outputs = store.list_outputs(chat.id, 10).await.unwrap();
+        assert_eq!(outputs[0].media_type, "text/plain");
         assert_eq!(store.list_outputs(chat.id, 10).await.unwrap().len(), 1);
     }
 }

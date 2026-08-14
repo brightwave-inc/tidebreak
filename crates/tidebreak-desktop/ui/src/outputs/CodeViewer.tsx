@@ -2,6 +2,59 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 
+// `rehype-highlight` bundles lowlight's common grammars. Keep this mapping to
+// that exact set: recognized source extensions outside it still use the source
+// viewer, with the media-type fallback selecting plain text.
+const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
+  py: "python",
+  pyw: "python",
+  js: "javascript",
+  jsx: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  rs: "rust",
+  go: "go",
+  java: "java",
+  c: "c",
+  h: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  hxx: "cpp",
+  cs: "csharp",
+  rb: "ruby",
+  php: "php",
+  swift: "swift",
+  kt: "kotlin",
+  kts: "kotlin",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  fish: "bash",
+  sql: "sql",
+  css: "css",
+  scss: "scss",
+  sass: "scss",
+  less: "less",
+  vue: "xml",
+  svelte: "xml",
+  toml: "ini",
+  yaml: "yaml",
+  yml: "yaml",
+  xml: "xml",
+  graphql: "graphql",
+  gql: "graphql",
+  lua: "lua",
+  r: "r",
+  pl: "perl",
+  pm: "perl",
+};
+
 /**
  * Fence long enough that no run of backticks inside `content` can close it.
  * Markdown fences match the longest opening run, so stretching past the
@@ -26,6 +79,16 @@ export function codeLanguageForMediaType(mediaType: string): string {
   }
 }
 
+/** Highlight language for a source filename, when the extension identifies one. */
+export function codeLanguageForFilename(filename: string): string | null {
+  const lower = filename.toLowerCase();
+  if (["dockerfile", "makefile", "justfile"].includes(lower)) {
+    return lower === "dockerfile" ? "bash" : "makefile";
+  }
+  const extension = lower.includes(".") ? lower.split(".").pop()! : "";
+  return LANGUAGE_BY_EXTENSION[extension] ?? null;
+}
+
 /**
  * Syntax-highlighted source view for curated text outputs that are not
  * markdown (JSON, HTML-as-source, plain text).
@@ -36,11 +99,15 @@ export function codeLanguageForMediaType(mediaType: string): string {
 export function CodeViewer({
   content,
   mediaType,
+  filename,
 }: {
   content: string;
   mediaType: string;
+  filename?: string;
 }) {
-  const language = codeLanguageForMediaType(mediaType);
+  const language =
+    (filename && codeLanguageForFilename(filename)) ??
+    codeLanguageForMediaType(mediaType);
   const markdown = useMemo(
     () => fence(language, content),
     [language, content],

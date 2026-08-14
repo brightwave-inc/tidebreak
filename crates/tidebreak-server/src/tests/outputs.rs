@@ -51,8 +51,8 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
         .join(workspace.as_str())
         .join(tidebreak_core::EXEC_OUTPUT_DIRECTORY);
     std::fs::create_dir_all(&output_dir).unwrap();
-    let published = b"# Q3 revenue\n\nUp.";
-    std::fs::write(output_dir.join("summary.md"), published).unwrap();
+    let published = b"def revenue():\n    return 'up'\n";
+    std::fs::write(output_dir.join("analysis.py"), published).unwrap();
     let provider = crate::code_execution::ConfiguredCodeExecutionProvider::new(
         store.clone(),
         Arc::new(MemSecrets::default()),
@@ -70,8 +70,8 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
         json_body(get(&router, &bearer, &format!("/chats/{}/outputs", chat.id)).await).await;
     assert_eq!(catalog["truncated"], false);
     let summary = &catalog["deliverables"][0];
-    assert_eq!(summary["filename"], "summary.md");
-    assert_eq!(summary["mediaType"], "text/markdown");
+    assert_eq!(summary["filename"], "analysis.py");
+    assert_eq!(summary["mediaType"], "text/plain");
     assert_eq!(summary["revisionCount"], 1);
     assert_eq!(summary["producingRunId"], run_id.to_string());
     assert_eq!(summary["sizeBytes"], published.len());
@@ -98,7 +98,7 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
             &format!("{outputs}/revisions"),
             serde_json::json!({
                 "expectedRevisionId": first_revision,
-                "content": "# Q3 revenue\n\nUp, and to the right.",
+                "content": "def revenue():\n    return 'up and to the right'\n",
             }),
         )
         .await,
@@ -172,7 +172,7 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
             .await
         )
         .await,
-        b"# Q3 revenue\n\nUp, and to the right."
+        b"def revenue():\n    return 'up and to the right'\n"
     );
     // …and the current bytes are the restored ones.
     assert_eq!(
