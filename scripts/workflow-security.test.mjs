@@ -66,6 +66,9 @@ const e2bPackage = JSON.parse(
 const docsPackage = JSON.parse(
   readFileSync(repositoryFile("docs-site", "package.json"), "utf8"),
 );
+const vercelCliPackage = JSON.parse(
+  readFileSync(repositoryFile(".github", "vercel-cli", "package.json"), "utf8"),
+);
 
 function workflowJob(source, name) {
   const marker = `  ${name}:\n`;
@@ -1059,8 +1062,14 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(build, /pnpm --dir docs-site package:vercel/);
   assert.match(build, /\.vercel\/output\/static\/docs\/index\.html/);
   assert.match(build, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-prebuilt/);
-  assert.doesNotMatch(publish, /actions\/checkout|docs-site install|docs-site build/);
-  assert.match(publish, /pnpm add --global vercel@59\.0\.0 --ignore-scripts/);
+  assert.doesNotMatch(publish, /docs-site install|docs-site build/);
+  assert.equal(vercelCliPackage.dependencies.vercel, "59.0.0");
+  assert.match(publish, /sparse-checkout: \.github\/vercel-cli/);
+  assert.match(
+    publish,
+    /pnpm --dir \.github\/vercel-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.doesNotMatch(publish, /pnpm (?:add --global|dlx)|npx/);
   assert.match(publish, /actions\/download-artifact@[0-9a-f]{40} # v8/);
   assert.match(publish, /asset_path=.*\/docs\/_next\//);
   assert.match(publish, /content-security-policy:/);
@@ -1071,11 +1080,11 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(publish, /--skip-domain/);
   assert.match(publish, /--meta "releaseTag=\$RELEASE_TAG"/);
   assert.match(publish, /--meta "releaseSha=\$RELEASE_SHA"/);
-  assert.match(publish, /vercel curl/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
   assert.match(publish, /\/docs\/quickstart\//);
   assert.match(publish, /\/docs\/search-index\.json/);
   assert.match(publish, /\/docs\/sitemap\.xml/);
-  assert.match(publish, /vercel promote/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel promote/);
 
   const deploy = publish.indexOf("Create an unaliased production deployment");
   const smoke = publish.indexOf("Smoke-test the staged deployment");

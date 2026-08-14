@@ -195,14 +195,21 @@ jobs:
       VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
       VERCEL_SCOPE: brightwave-inc
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          sparse-checkout: .github/vercel-cli
+          sparse-checkout-cone-mode: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Install the pinned deployment client
-        run: pnpm add --global vercel@59.0.0 --ignore-scripts
+          cache: pnpm
+          cache-dependency-path: .github/vercel-cli/pnpm-lock.yaml
+      - name: Install the locked deployment client
+        run: pnpm --dir .github/vercel-cli install --frozen-lockfile --ignore-scripts
       - name: Download the inert prebuilt documentation
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -225,7 +232,7 @@ jobs:
             echo "The docs-production environment must provide VERCEL_TOKEN." >&2
             exit 1
           }
-          deployment_json="$(vercel deploy \
+          deployment_json="$(./.github/vercel-cli/node_modules/.bin/vercel deploy \
             --prebuilt \
             --prod \
             --skip-domain \
@@ -247,7 +254,7 @@ jobs:
           request() {
             local path="$1"
             local output="$2"
-            vercel curl "$path" \
+            ./.github/vercel-cli/node_modules/.bin/vercel curl "$path" \
               --deployment "$DEPLOYMENT_URL" \
               --scope "$VERCEL_SCOPE" \
               --token "$VERCEL_TOKEN" \
@@ -259,7 +266,7 @@ jobs:
           }
 
           request /docs/ "$RUNNER_TEMP/docs-index.html"
-          vercel curl /docs/ \
+          ./.github/vercel-cli/node_modules/.bin/vercel curl /docs/ \
             --deployment "$DEPLOYMENT_URL" \
             --scope "$VERCEL_SCOPE" \
             --token "$VERCEL_TOKEN" \
@@ -295,7 +302,7 @@ jobs:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: >-
-          vercel promote "$DEPLOYMENT_URL"
+          ./.github/vercel-cli/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
           --yes
           --scope "$VERCEL_SCOPE"
           --token "$VERCEL_TOKEN"
@@ -305,7 +312,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           for _ in {1..12}; do
-            production_json="$(vercel inspect \
+            production_json="$(./.github/vercel-cli/node_modules/.bin/vercel inspect \
               https://tidebreak-docs.vercel.app \
               --scope "$VERCEL_SCOPE" \
               --token "$VERCEL_TOKEN" \

@@ -19,6 +19,8 @@ const fixturePaths = [
   ".github/workflows",
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
+  ".github/vercel-cli/package.json",
+  ".github/vercel-cli/pnpm-lock.yaml",
   "docs-site/package.json",
   "crates/tidebreak-desktop/tauri.conf.json",
   "crates/tidebreak-desktop/tauri.staging.conf.json",
