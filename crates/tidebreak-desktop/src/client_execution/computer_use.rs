@@ -190,11 +190,11 @@ pub(crate) struct ComputerUseState {
     /// cleared only by the user (resume, or a fresh consent approval — both
     /// are explicit opt-ins).
     halt: tokio::sync::watch::Sender<bool>,
-    /// Linearizes Stop with redemption of a broker-held consequential action.
-    /// The gate stays held until the broker accepts or rejects the one-shot
-    /// confirmation so Stop either lands before dispatch (and prevents it) or
-    /// after that dispatch has already become authoritative.
-    consequential_dispatch: tokio::sync::Mutex<()>,
+    /// Linearizes Stop with every broker dispatch that can act on the host.
+    /// The gate stays held through the broker round-trip so Stop either lands
+    /// before dispatch (and prevents it) or after that dispatch has already
+    /// completed. Read-only operations do not take this gate.
+    acting_dispatch: tokio::sync::Mutex<()>,
 }
 
 impl Default for ComputerUseState {
@@ -204,7 +204,7 @@ impl Default for ComputerUseState {
             app_names: StdMutex::new(HashMap::new()),
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
-            consequential_dispatch: tokio::sync::Mutex::new(()),
+            acting_dispatch: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -274,18 +274,18 @@ impl ComputerUseState {
     }
 
     async fn halt(&self) {
-        let _dispatch = self.consequential_dispatch.lock().await;
+        let _dispatch = self.acting_dispatch.lock().await;
         // send_replace, not send: the latch must hold even when no prompt is
         // currently parked on it (send drops the value with zero receivers).
         self.halt.send_replace(true);
     }
 
-    async fn redeem_consequential<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
+    async fn dispatch_acting<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        let _dispatch = self.consequential_dispatch.lock().await;
+        let _dispatch = self.acting_dispatch.lock().await;
         if self.is_halted() {
             return Err(stopped_resolution());
         }
@@ -1019,9 +1019,9 @@ async fn dispatch_broker(
     let acting = acts_on_host(&call.name);
     let bundle_id = request_bundle_id(&request).map(str::to_owned);
 
-    // The halt latch is checked immediately before the round-trip so Stop
-    // always lands first; the broker's blocklist is mirrored here so a blocked
-    // app fails closed without surfacing a consent card for it.
+    // The broker's blocklist is mirrored here so a blocked app fails closed
+    // without surfacing a consent card for it. Acting dispatches take the Stop
+    // gate below; that gate owns the authoritative final halt check.
     if acting && cu.is_halted() {
         return stopped_resolution();
     }
@@ -1040,15 +1040,23 @@ async fn dispatch_broker(
         }
     }
 
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: tidebreak_host_broker::RequestId::new(),
-            context: context.execution,
-            request: request.clone(),
-        })
-        .await;
+    let envelope = OperationEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: tidebreak_host_broker::RequestId::new(),
+        context: context.execution,
+        request: request.clone(),
+    };
+    let result = if acting {
+        match cu
+            .dispatch_acting(|| state.broker.operation(envelope))
+            .await
+        {
+            Ok(result) => result,
+            Err(resolution) => return resolution,
+        }
+    } else {
+        state.broker.operation(envelope).await
+    };
     match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
             if cu.is_halted() {
@@ -1199,19 +1207,27 @@ async fn dispatch_consent(
     // did not cover the op (a broker-side surprise, not another ask). A held
     // consequential action re-authorizes at confirm time, so the one-time
     // grant must outlive the whole continuation — revoke happens after it.
-    if cu.is_halted() {
-        revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
-        return stopped_resolution();
-    }
-    let result = state
-        .broker
-        .operation(OperationEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: tidebreak_host_broker::RequestId::new(),
-            context: context.execution,
-            request,
-        })
-        .await;
+    let envelope = OperationEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: tidebreak_host_broker::RequestId::new(),
+        context: context.execution,
+        request,
+    };
+    let acting = acts_on_host(&call.name);
+    let result = if acting {
+        match cu
+            .dispatch_acting(|| state.broker.operation(envelope))
+            .await
+        {
+            Ok(result) => result,
+            Err(resolution) => {
+                revoke_once_grant(state, decision, capability, bundle_id.as_deref(), call).await;
+                return resolution;
+            }
+        }
+    } else {
+        state.broker.operation(envelope).await
+    };
     let resolution = match result {
         Ok(OperationResult::CuNeedsConfirmation(held)) => {
             if cu.is_halted() {
@@ -1305,7 +1321,7 @@ async fn dispatch_confirmation(
     });
     let deadline = tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
     let result = match cu
-        .redeem_consequential(|| state.broker.control_without_retry(confirm, deadline))
+        .dispatch_acting(|| state.broker.control_without_retry(confirm, deadline))
         .await
     {
         Ok(result) => result,
@@ -1729,6 +1745,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_prevents_an_ordinary_acting_request_from_starting_after_it_completes() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (ready_to_dispatch, dispatch_ready) = oneshot::channel::<()>();
+        let (continue_dispatch, dispatch_continues) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let dispatch_cu = std::sync::Arc::clone(&cu);
+        let dispatch = tokio::spawn(async move {
+            ready_to_dispatch
+                .send(())
+                .expect("the test observes the acting request before dispatch");
+            dispatch_continues
+                .await
+                .expect("the acting request may continue");
+            dispatch_cu
+                .dispatch_acting(|| async move {
+                    broker_request
+                        .send("ordinary_acting_request")
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        dispatch_ready
+            .await
+            .expect("the acting request reaches the pre-dispatch pause");
+        cu.halt().await;
+        continue_dispatch
+            .send(())
+            .expect("release the acting request after Stop completes");
+
+        let resolution = dispatch
+            .await
+            .expect("the acting dispatch task completes")
+            .expect_err("Stop must prevent the ordinary acting broker request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped acting request fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_prevents_a_post_consent_reissue_from_starting_after_it_completes() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (consent_committed, consent_is_committed) = oneshot::channel::<()>();
+        let (continue_reissue, reissue_continues) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let reissue_cu = std::sync::Arc::clone(&cu);
+        let reissue = tokio::spawn(async move {
+            consent_committed
+                .send(())
+                .expect("the test observes consent before the reissue");
+            reissue_continues
+                .await
+                .expect("the authorized reissue may continue");
+            reissue_cu
+                .dispatch_acting(|| async move {
+                    broker_request
+                        .send("post_consent_reissue")
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        consent_is_committed
+            .await
+            .expect("consent reaches the pre-reissue pause");
+        cu.halt().await;
+        continue_reissue
+            .send(())
+            .expect("release the authorized reissue after Stop completes");
+
+        let resolution = reissue
+            .await
+            .expect("the post-consent reissue task completes")
+            .expect_err("Stop must prevent the post-consent broker request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped post-consent reissue fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn stop_after_native_approval_prevents_confirmation_redemption() {
         let cu = std::sync::Arc::new(ComputerUseState::default());
         let (approved, native_approval) = oneshot::channel::<()>();
@@ -1742,7 +1844,7 @@ mod tests {
                 .await
                 .expect("the approved action may continue");
             redemption_cu
-                .redeem_consequential(|| async move {
+                .dispatch_acting(|| async move {
                     broker_request
                         .send(ControlRequest::CuConfirmControlAction(
                             CuConfirmControlActionRequest {
