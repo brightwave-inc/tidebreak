@@ -114,23 +114,17 @@ jobs:
             exit 1
           }
 
-  publish_docs:
-    name: publish release documentation
+  build_docs:
+    name: build release documentation
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment:
-      name: docs-production
-      url: https://tidebreak-docs.vercel.app/docs/
     permissions:
       contents: read
     env:
       BASE_PATH: /docs
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-      VERCEL_ORG_ID: team_akhCRtYAsxrr6iIL6g6YGuKY
-      VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
-      VERCEL_SCOPE: brightwave-inc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -168,6 +162,54 @@ jobs:
           test -f .vercel/output/static/docs/quickstart/index.html
           test -f .vercel/output/static/docs/search-index.json
           test -f .vercel/output/static/docs/sitemap.xml
+      - name: Transfer inert prebuilt documentation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-prebuilt
+          path: .vercel/output
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain the static-content digest manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
+          path: ${{ runner.temp }}/tidebreak-docs-${{ needs.validate.outputs.tag }}.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  publish_docs:
+    name: publish release documentation
+    needs: [validate, build_docs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: docs-production
+      url: https://tidebreak-docs.vercel.app/docs/
+    permissions:
+      contents: read
+    env:
+      RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      VERCEL_ORG_ID: team_akhCRtYAsxrr6iIL6g6YGuKY
+      VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
+      VERCEL_SCOPE: brightwave-inc
+    steps:
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Install the pinned deployment client
+        run: pnpm add --global vercel@59.0.0 --ignore-scripts
+      - name: Download the inert prebuilt documentation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-prebuilt
+          path: .vercel/output
+      - name: Link the fixed documentation project
+        run: |
           mkdir -p .vercel
           jq -n \
             --arg orgId "$VERCEL_ORG_ID" \
@@ -183,7 +225,7 @@ jobs:
             echo "The docs-production environment must provide VERCEL_TOKEN." >&2
             exit 1
           }
-          deployment_json="$(./docs-site/node_modules/.bin/vercel deploy \
+          deployment_json="$(vercel deploy \
             --prebuilt \
             --prod \
             --skip-domain \
@@ -205,7 +247,7 @@ jobs:
           request() {
             local path="$1"
             local output="$2"
-            ./docs-site/node_modules/.bin/vercel curl "$path" \
+            vercel curl "$path" \
               --deployment "$DEPLOYMENT_URL" \
               --scope "$VERCEL_SCOPE" \
               --token "$VERCEL_TOKEN" \
@@ -217,6 +259,16 @@ jobs:
           }
 
           request /docs/ "$RUNNER_TEMP/docs-index.html"
+          vercel curl /docs/ \
+            --deployment "$DEPLOYMENT_URL" \
+            --scope "$VERCEL_SCOPE" \
+            --token "$VERCEL_TOKEN" \
+            -- \
+            --fail \
+            --silent \
+            --show-error \
+            --dump-header "$RUNNER_TEMP/docs-headers" \
+            --output /dev/null
           request /docs/quickstart/ "$RUNNER_TEMP/docs-quickstart.html"
           request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
@@ -230,6 +282,11 @@ jobs:
             *) echo "Documentation did not reference a safe Next asset." >&2; exit 1 ;;
           esac
           request "$asset_path" "$RUNNER_TEMP/docs-asset"
+          grep -Fqi 'content-security-policy:' "$RUNNER_TEMP/docs-headers"
+          grep -Fqi 'cross-origin-opener-policy: same-origin' "$RUNNER_TEMP/docs-headers"
+          grep -Fqi 'cross-origin-resource-policy: same-origin' "$RUNNER_TEMP/docs-headers"
+          grep -Fqi 'x-content-type-options: nosniff' "$RUNNER_TEMP/docs-headers"
+          grep -Fqi 'x-frame-options: DENY' "$RUNNER_TEMP/docs-headers"
           jq -e 'type == "array" and length > 0' \
             "$RUNNER_TEMP/docs-search-index.json" >/dev/null
           grep -Fq '<urlset' "$RUNNER_TEMP/docs-sitemap.xml"
@@ -238,7 +295,7 @@ jobs:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: >-
-          ./docs-site/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
+          vercel promote "$DEPLOYMENT_URL"
           --yes
           --scope "$VERCEL_SCOPE"
           --token "$VERCEL_TOKEN"
@@ -248,7 +305,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           for _ in {1..12}; do
-            production_json="$(./docs-site/node_modules/.bin/vercel inspect \
+            production_json="$(vercel inspect \
               https://tidebreak-docs.vercel.app \
               --scope "$VERCEL_SCOPE" \
               --token "$VERCEL_TOKEN" \
@@ -261,23 +318,20 @@ jobs:
               --silent \
               --show-error \
               https://tidebreak-docs.vercel.app/docs/ \
+              --dump-header "$RUNNER_TEMP/docs-production-headers" \
               --output "$RUNNER_TEMP/docs-production.html" \
               && grep -Fq 'https://tidebreak.sh/docs/' \
-                "$RUNNER_TEMP/docs-production.html"; then
+                "$RUNNER_TEMP/docs-production.html" \
+              && grep -Fqi 'content-security-policy:' \
+                "$RUNNER_TEMP/docs-production-headers" \
+              && grep -Fqi 'x-frame-options: DENY' \
+                "$RUNNER_TEMP/docs-production-headers"; then
               exit 0
             fi
             sleep 5
           done
           echo "The promoted docs deployment did not become healthy." >&2
           exit 1
-      - name: Retain the static-content digest manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
-          path: ${{ runner.temp }}/tidebreak-docs-${{ needs.validate.outputs.tag }}.sha256
-          if-no-files-found: error
-          retention-days: 90
-
   inspect_hosted:
     name: inspect hosted release
     needs: validate

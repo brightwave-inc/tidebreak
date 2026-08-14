@@ -1033,45 +1033,54 @@ test("release builds use the trusted shared main cache scope", () => {
 });
 
 test("release documentation is built from the validated tag and promoted only after staged checks", () => {
-  const job = workflowJob(workflows["release.yml"], "publish_docs");
+  const build = workflowJob(workflows["release.yml"], "build_docs");
+  const publish = workflowJob(workflows["release.yml"], "publish_docs");
 
-  assert.match(job, /^    needs: validate$/m);
-  assert.match(job, /^    environment:\n      name: docs-production$/m);
-  assert.match(job, /^    permissions:\n      contents: read$/m);
-  assert.doesNotMatch(job, /id-token: write|contents: write/);
-  assert.match(job, /BASE_PATH: \/docs/);
-  assert.match(job, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
-  const jobEnvironment = job.match(/^    env:[\s\S]*?(?=^    steps:)/m)?.[0] ?? '';
-  assert.doesNotMatch(jobEnvironment, /VERCEL_TOKEN/);
-  assert.match(job, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
+  assert.match(build, /^    needs: validate$/m);
+  assert.doesNotMatch(build, /^    environment:/m);
+  assert.match(publish, /^    needs: \[validate, build_docs\]$/m);
+  assert.match(publish, /^    environment:\n      name: docs-production$/m);
+  assert.match(build, /^    permissions:\n      contents: read$/m);
+  assert.match(publish, /^    permissions:\n      contents: read$/m);
+  assert.doesNotMatch(`${build}\n${publish}`, /id-token: write|contents: write/);
+  assert.match(build, /BASE_PATH: \/docs/);
+  assert.match(build, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.doesNotMatch(build, /VERCEL_TOKEN|docs-production/);
+  assert.match(publish, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
   assert.equal(
     Object.values(docsPackage.dependencies ?? {}).includes("vercel"),
     false,
   );
   assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
-  assert.match(job, /pnpm --dir docs-site install --frozen-lockfile/);
-  assert.match(job, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
-  assert.match(job, /test "\$\(git rev-parse HEAD\)" = "\$RELEASE_SHA"/);
-  assert.match(job, /pnpm --dir docs-site build/);
-  assert.match(job, /pnpm --dir docs-site package:vercel/);
-  assert.match(job, /\.vercel\/output\/static\/docs\/index\.html/);
-  assert.match(job, /asset_path=.*\/docs\/_next\//);
-  assert.match(job, /\.id == \$id and \.readyState == "READY"/);
-  assert.match(job, /--prebuilt/);
-  assert.match(job, /--prod/);
-  assert.match(job, /--skip-domain/);
-  assert.match(job, /--meta "releaseTag=\$RELEASE_TAG"/);
-  assert.match(job, /--meta "releaseSha=\$RELEASE_SHA"/);
-  assert.match(job, /\.\/docs-site\/node_modules\/\.bin\/vercel curl/);
-  assert.match(job, /\/docs\/quickstart\//);
-  assert.match(job, /\/docs\/search-index\.json/);
-  assert.match(job, /\/docs\/sitemap\.xml/);
-  assert.match(job, /\.\/docs-site\/node_modules\/\.bin\/vercel promote/);
+  assert.match(build, /pnpm --dir docs-site install --frozen-lockfile/);
+  assert.match(build, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(build, /test "\$\(git rev-parse HEAD\)" = "\$RELEASE_SHA"/);
+  assert.match(build, /pnpm --dir docs-site build/);
+  assert.match(build, /pnpm --dir docs-site package:vercel/);
+  assert.match(build, /\.vercel\/output\/static\/docs\/index\.html/);
+  assert.match(build, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-prebuilt/);
+  assert.doesNotMatch(publish, /actions\/checkout|docs-site install|docs-site build/);
+  assert.match(publish, /pnpm add --global vercel@59\.0\.0 --ignore-scripts/);
+  assert.match(publish, /actions\/download-artifact@[0-9a-f]{40} # v8/);
+  assert.match(publish, /asset_path=.*\/docs\/_next\//);
+  assert.match(publish, /content-security-policy:/);
+  assert.match(publish, /x-frame-options: DENY/);
+  assert.match(publish, /\.id == \$id and \.readyState == "READY"/);
+  assert.match(publish, /--prebuilt/);
+  assert.match(publish, /--prod/);
+  assert.match(publish, /--skip-domain/);
+  assert.match(publish, /--meta "releaseTag=\$RELEASE_TAG"/);
+  assert.match(publish, /--meta "releaseSha=\$RELEASE_SHA"/);
+  assert.match(publish, /vercel curl/);
+  assert.match(publish, /\/docs\/quickstart\//);
+  assert.match(publish, /\/docs\/search-index\.json/);
+  assert.match(publish, /\/docs\/sitemap\.xml/);
+  assert.match(publish, /vercel promote/);
 
-  const deploy = job.indexOf("Create an unaliased production deployment");
-  const smoke = job.indexOf("Smoke-test the staged deployment");
-  const promote = job.indexOf("Promote the verified deployment");
-  const production = job.indexOf("Verify the production alias");
+  const deploy = publish.indexOf("Create an unaliased production deployment");
+  const smoke = publish.indexOf("Smoke-test the staged deployment");
+  const promote = publish.indexOf("Promote the verified deployment");
+  const production = publish.indexOf("Verify the production alias");
   assert.ok(
     deploy !== -1 && deploy < smoke && smoke < promote && promote < production,
     "docs must be staged, checked, promoted, and then verified in that order",

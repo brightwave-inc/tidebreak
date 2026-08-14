@@ -306,7 +306,7 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "release documentation is built from the validated tag",
     mutate: (source) =>
-      editWorkflowJob(source, "publish_docs", (job) =>
+      editWorkflowJob(source, "build_docs", (job) =>
         job.replace(
           "          ref: ${{ needs.validate.outputs.sha }}\n",
           "          ref: main\n",
