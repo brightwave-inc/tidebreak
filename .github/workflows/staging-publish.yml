@@ -192,6 +192,7 @@ jobs:
     needs: [validate_staging, prepare_macos_staging]
     if: ${{ inputs.channel == 'staging' }}
     runs-on: macos-latest
+    timeout-minutes: 90
     environment:
       name: desktop-staging
       url: https://downloads.brightwave.io/tidebreak/staging/manifest.json
