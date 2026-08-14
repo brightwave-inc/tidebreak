@@ -1,7 +1,23 @@
 # Tidebreak Docs
 
-The documentation site for Tidebreak. Next.js (App Router) with MDX content,
-built as a static export.
+The user documentation for Tidebreak. It is a Next.js App Router site with MDX
+content, built as a static export and published at
+<https://www.tidebreak.sh/docs/>.
+
+## Documentation boundaries
+
+- `content/docs/` teaches people how to install, configure, and use Tidebreak.
+- The repository root [`README.md`](../README.md) is a short project and
+  contributor entry point; it should link here instead of reproducing guides.
+- [`docs/`](../docs) holds maintainer architecture, contracts, operations,
+  plans, and decision records.
+- Product positioning and launch copy belong to the separate
+  [`brightwave-inc/tidebreak-site`](https://github.com/brightwave-inc/tidebreak-site)
+  marketing repository.
+
+When a subject matters to both users and maintainers, write each page for its
+audience and link across the boundary. Do not keep two near-identical versions
+of the same guide.
 
 ## Local development
 
