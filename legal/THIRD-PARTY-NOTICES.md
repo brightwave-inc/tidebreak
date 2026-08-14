@@ -5736,13 +5736,13 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @tanstack/history 1.162.0
+### @tanstack/history 1.162.1
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.18
+### @tanstack/react-router 1.170.25
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5754,7 +5754,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/router-core 1.171.15
+### @tanstack/router-core 1.171.21
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -7708,13 +7708,13 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/npm/node-semver.git
 - License text: `LICENSE` ([L-0ae52fe329cc](#l-0ae52fe329cc))
 
-### seroval 1.5.6
+### seroval 1.6.2
 
 - License: `MIT`
 - Repository: https://github.com/lxsmnsyc/seroval.git
 - License text: `LICENSE` ([L-2bd8a2c61751](#l-2bd8a2c61751))
 
-### seroval-plugins 1.5.6
+### seroval-plugins 1.6.2
 
 - License: `MIT`
 - Repository: https://github.com/lxsmnsyc/seroval.git
