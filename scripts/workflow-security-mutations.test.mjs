@@ -19,6 +19,7 @@ const fixturePaths = [
   ".github/workflows",
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
+  "docs-site/package.json",
   "crates/tidebreak-desktop/tauri.conf.json",
   "crates/tidebreak-desktop/tauri.staging.conf.json",
   "crates/tidebreak-desktop/Cargo.toml",
@@ -299,6 +300,45 @@ const mutations = [
           "          ref: ${{ github.sha }}\n",
         ),
       ),
+  },
+  {
+    name: "docs exact release checkout",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) =>
+        job.replace(
+          "          ref: ${{ needs.validate.outputs.sha }}\n",
+          "          ref: main\n",
+        ),
+      ),
+  },
+  {
+    name: "docs unaliased staging deployment",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) =>
+        job.replace("            --skip-domain \\\n", ""),
+      ),
+  },
+  {
+    name: "docs promotion follows staged checks",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) => {
+        const promote = job.match(
+          /      - name: Promote the verified deployment[\s\S]*?(?=\n      - name: Verify the production alias)/,
+        )?.[0];
+        assert.ok(promote);
+        return job
+          .replace(promote, "")
+          .replace(
+            "      - name: Smoke-test the staged deployment\n",
+            `${promote}\n      - name: Smoke-test the staged deployment\n`,
+          );
+      }),
   },
   {
     name: "source SBOM pinned artifact transfer",

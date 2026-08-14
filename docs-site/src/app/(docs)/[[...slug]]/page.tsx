@@ -96,12 +96,20 @@ export async function generateMetadata(
     return {
       title: { absolute: 'Tidebreak Docs' },
       description: 'Documentation for Tidebreak.',
+      alternates: { canonical: 'https://tidebreak.sh/docs/' },
     };
   }
+
+  const publicPath = page.slugs.length > 0
+    ? `${page.slugs.join('/')}/`
+    : '';
 
   return {
     title: page.title,
     description: page.description,
+    alternates: {
+      canonical: `https://tidebreak.sh/docs/${publicPath}`,
+    },
     openGraph: {
       images: getPageImage(page).url,
     },

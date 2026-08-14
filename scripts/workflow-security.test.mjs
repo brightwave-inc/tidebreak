@@ -63,6 +63,9 @@ const denyConfig = readFileSync(repositoryFile("deny.toml"), "utf8");
 const e2bPackage = JSON.parse(
   readFileSync(repositoryFile(".github", "e2b-cli", "package.json"), "utf8"),
 );
+const docsPackage = JSON.parse(
+  readFileSync(repositoryFile("docs-site", "package.json"), "utf8"),
+);
 
 function workflowJob(source, name) {
   const marker = `  ${name}:\n`;
@@ -1027,6 +1030,48 @@ test("release builds use the trusted shared main cache scope", () => {
     /repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$RELEASE_TAG/,
   );
   assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+});
+
+test("release documentation is built from the validated tag and promoted only after staged checks", () => {
+  const job = workflowJob(workflows["release.yml"], "publish_docs");
+
+  assert.match(job, /^    needs: validate$/m);
+  assert.match(job, /^    environment:\n      name: docs-production$/m);
+  assert.match(job, /^    permissions:\n      contents: read$/m);
+  assert.doesNotMatch(job, /id-token: write|contents: write/);
+  assert.match(job, /BASE_PATH: \/docs/);
+  assert.match(job, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(job, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
+  assert.equal(
+    Object.values(docsPackage.dependencies ?? {}).includes("vercel"),
+    false,
+  );
+  assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
+  assert.match(job, /pnpm --dir docs-site install --frozen-lockfile/);
+  assert.match(job, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(job, /test "\$\(git rev-parse HEAD\)" = "\$RELEASE_SHA"/);
+  assert.match(job, /pnpm --dir docs-site build/);
+  assert.match(job, /pnpm --dir docs-site package:vercel/);
+  assert.match(job, /\.vercel\/output\/static\/docs\/index\.html/);
+  assert.match(job, /--prebuilt/);
+  assert.match(job, /--prod/);
+  assert.match(job, /--skip-domain/);
+  assert.match(job, /--meta "releaseTag=\$RELEASE_TAG"/);
+  assert.match(job, /--meta "releaseSha=\$RELEASE_SHA"/);
+  assert.match(job, /\.\/docs-site\/node_modules\/\.bin\/vercel curl/);
+  assert.match(job, /\/docs\/quickstart\//);
+  assert.match(job, /\/docs\/search-index\.json/);
+  assert.match(job, /\/docs\/sitemap\.xml/);
+  assert.match(job, /\.\/docs-site\/node_modules\/\.bin\/vercel promote/);
+
+  const deploy = job.indexOf("Create an unaliased production deployment");
+  const smoke = job.indexOf("Smoke-test the staged deployment");
+  const promote = job.indexOf("Promote the verified deployment");
+  const production = job.indexOf("Verify the production alias");
+  assert.ok(
+    deploy !== -1 && deploy < smoke && smoke < promote && promote < production,
+    "docs must be staged, checked, promoted, and then verified in that order",
+  );
 });
 
 test("cache warming cannot access production credentials or publish", () => {

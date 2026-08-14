@@ -38,6 +38,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"], optional = true }
+url = { workspace = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]

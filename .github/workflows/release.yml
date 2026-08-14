@@ -114,6 +114,148 @@ jobs:
             exit 1
           }
 
+  publish_docs:
+    name: publish release documentation
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: docs-production
+      url: https://tidebreak-docs.vercel.app/docs/
+    permissions:
+      contents: read
+    env:
+      BASE_PATH: /docs
+      RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      VERCEL_ORG_ID: team_akhCRtYAsxrr6iIL6g6YGuKY
+      VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
+      VERCEL_SCOPE: brightwave-inc
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - name: Require the validated release source
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || {
+            echo "Documentation checkout does not match the validated release." >&2
+            exit 1
+          }
+          [[ -n "$VERCEL_TOKEN" ]] || {
+            echo "The docs-production environment must provide VERCEL_TOKEN." >&2
+            exit 1
+          }
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: docs-site/pnpm-lock.yaml
+      - name: Install locked documentation dependencies
+        run: pnpm --dir docs-site install --frozen-lockfile
+      - name: Link the dedicated production project
+        run: >-
+          ./docs-site/node_modules/.bin/vercel pull
+          --yes
+          --environment=production
+          --scope "$VERCEL_SCOPE"
+          --token "$VERCEL_TOKEN"
+      - name: Build and validate the static release documentation
+        run: |
+          pnpm --dir docs-site build
+          pnpm --dir docs-site lint
+          pnpm --dir docs-site types:check
+          test -f docs-site/out/index.html
+          test -f docs-site/out/search-index.json
+          test -f docs-site/out/sitemap.xml
+          find docs-site/out -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > "$RUNNER_TEMP/tidebreak-docs-$RELEASE_TAG.sha256"
+          pnpm --dir docs-site package:vercel
+          test -f .vercel/output/static/docs/index.html
+          test -f .vercel/output/static/docs/quickstart/index.html
+          test -f .vercel/output/static/docs/search-index.json
+          test -f .vercel/output/static/docs/sitemap.xml
+      - name: Create an unaliased production deployment
+        id: deploy
+        run: |
+          deployment_json="$(./docs-site/node_modules/.bin/vercel deploy \
+            --prebuilt \
+            --prod \
+            --skip-domain \
+            --yes \
+            --meta "releaseTag=$RELEASE_TAG" \
+            --meta "releaseSha=$RELEASE_SHA" \
+            --scope "$VERCEL_SCOPE" \
+            --token "$VERCEL_TOKEN" \
+            --json)"
+          deployment_url="$(jq -er .url <<<"$deployment_json")"
+          echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
+      - name: Smoke-test the staged deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          request() {
+            local path="$1"
+            local output="$2"
+            ./docs-site/node_modules/.bin/vercel curl "$path" \
+              --deployment "$DEPLOYMENT_URL" \
+              --scope "$VERCEL_SCOPE" \
+              --token "$VERCEL_TOKEN" \
+              -- \
+              --fail \
+              --silent \
+              --show-error \
+              --output "$output"
+          }
+
+          request /docs/ "$RUNNER_TEMP/docs-index.html"
+          request /docs/quickstart/ "$RUNNER_TEMP/docs-quickstart.html"
+          request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
+          request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
+
+          grep -Fq 'https://tidebreak.sh/docs/' "$RUNNER_TEMP/docs-index.html"
+          grep -Fq '/docs/_next/' "$RUNNER_TEMP/docs-index.html"
+          jq -e 'type == "array" and length > 0' \
+            "$RUNNER_TEMP/docs-search-index.json" >/dev/null
+          grep -Fq '<urlset' "$RUNNER_TEMP/docs-sitemap.xml"
+      - name: Promote the verified deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+        run: >-
+          ./docs-site/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
+          --yes
+          --scope "$VERCEL_SCOPE"
+          --token "$VERCEL_TOKEN"
+      - name: Verify the production alias
+        run: |
+          for _ in {1..12}; do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              https://tidebreak-docs.vercel.app/docs/ \
+              --output "$RUNNER_TEMP/docs-production.html" \
+              && grep -Fq 'https://tidebreak.sh/docs/' \
+                "$RUNNER_TEMP/docs-production.html"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The promoted docs deployment did not become healthy." >&2
+          exit 1
+      - name: Retain the static-content digest manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
+          path: ${{ runner.temp }}/tidebreak-docs-${{ needs.validate.outputs.tag }}.sha256
+          if-no-files-found: error
+          retention-days: 90
+
   inspect_hosted:
     name: inspect hosted release
     needs: validate

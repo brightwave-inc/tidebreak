@@ -137,12 +137,22 @@ automatic.
    published release, checks out that exact tag, rejects malformed tags,
    prereleases, drafts, or commits outside `main`, and pins all later jobs to
    the resolved commit SHA.
-5. The dispatched workflow first checks whether that exact tag, commit, and
+5. In parallel with the desktop release, the documentation publisher checks
+   out that validated SHA and builds `docs-site/` as a static export under
+   `/docs`. It creates an unaliased production-target deployment in the
+   dedicated Vercel project, smoke-tests the staged root page, nested content,
+   search index, sitemap, assets, and canonical metadata, and only then
+   promotes that immutable deployment to `tidebreak-docs.vercel.app`. The
+   `docs-production` environment supplies the only required secret,
+   `VERCEL_TOKEN`; its project and organization identifiers are non-secret
+   workflow constants. A failed build or smoke test leaves the previous docs
+   deployment serving production.
+6. The dispatched workflow first checks whether that exact tag, commit, and
    publication date already have a complete immutable release on S3.
    Credential-free prerequisites — one per platform — otherwise compile the tag
    with its product version and save unsigned Cargo outputs before any signing
    or notarization can fail.
-6. The production jobs reuse those prepared compiler outputs — every cache key
+7. The production jobs reuse those prepared compiler outputs — every cache key
    they can restore names the release commit or, at minimum, the `Cargo.lock`
    and toolchain hashes, and they delete the linked binaries the archive
    carries so the products they package are always linked from the tag's own
@@ -152,7 +162,7 @@ automatic.
    behind a literal `false` and never runs — see
    [What comes after v1](deferred.md) — so a release currently produces macOS
    artifacts only.
-7. For a release that is not already hosted, a separate least-privilege job
+8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
    deployment variables, OIDC permission, or AWS role; it transfers the two
@@ -168,7 +178,7 @@ automatic.
    complete immutable prefix, a new dispatch validates and reuses those bytes,
    skips the desktop build, and resumes only mutable metadata publication,
    CDN invalidation, and smoke testing.
-8. A final job downloads every installer the immutable manifest lists back from
+9. A final job downloads every installer the immutable manifest lists back from
    the CDN, checks them against its digests, and attaches them to the GitHub
    Release with `.sha256` sidecars — today that is the notarized disk image as
    `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy

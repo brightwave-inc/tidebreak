@@ -608,7 +608,7 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
 }
 
 fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> bool {
-    let Ok(url) = reqwest::Url::parse(base) else {
+    let Ok(url) = url::Url::parse(base) else {
         return false;
     };
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
