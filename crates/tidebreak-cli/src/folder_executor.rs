@@ -7,7 +7,7 @@
 //! A headless install had no such client at all, so a turn that used a folder
 //! an operator had connected parked forever. This module is that client for the
 //! processes that own broker state on this machine: `tidebreak serve`, and the
-//! engine `tidebreak -p` and `tidebreak tui` embed.
+//! engine `tidebreak -p` embeds.
 //!
 //! **It is not a second authority.** Every folder operation goes to
 //! [`tidebreak_host_broker`]'s capability-checked operation surface, which
@@ -34,7 +34,7 @@
 //! only when it embedded the engine. An attached (`--server`) run has no such
 //! credential and starts no executor: the call belongs to whichever process owns
 //! that server's host state, and now — if that process is `tidebreak serve`, an
-//! embedded `tidebreak -p`, or `tidebreak tui` — it is actually answered there.
+//! embedded `tidebreak -p` — it is actually answered there.
 //! Each host operation opens the broker briefly and drops it, so operator
 //! `tidebreak folder` provisioning can take `host-broker.lock` between calls
 //! without stopping the daemon.
@@ -179,7 +179,7 @@ impl FolderExecutor {
     /// receipt store until the server has the terminal result, so the next pass
     /// picks the work up again. Diagnostics go to the profile's log file rather
     /// than stderr — this loop polls, and a repeating notice would flood a print
-    /// run's stderr and overwrite the TUI's terminal.
+    /// run's stderr and corrupt its output.
     pub async fn run(self, scope: Scope) {
         let interval = match scope {
             Scope::Chat(_) => DRIVEN_POLL_INTERVAL,

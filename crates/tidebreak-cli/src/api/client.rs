@@ -14,9 +14,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
-    AgentActivityItem, AgentRunSnapshot, ChatSummary, GrantRung, InboxItem, ModelCatalog,
-    OutputPreview, OutputRevisions, OutputsCatalog, PendingApprovalSnapshot, PendingPlan,
-    PendingQuestions, ProviderInfo, ProvidersList, Transcript,
+    AgentActivityItem, AgentRunSnapshot, ChatSummary, GrantRung, ModelCatalog, OutputPreview,
+    OutputRevisions, OutputsCatalog, PendingPlan, PendingQuestions, ProviderInfo, ProvidersList,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -125,7 +124,7 @@ impl Client {
         Ok(chat.id)
     }
 
-    /// Verify a chat exists, so `tui --chat <id>` fails fast on a typo.
+    /// Verify a chat exists before a command operates on it.
     pub async fn require_chat(&self, chat: ChatId) -> Result<()> {
         let response = self
             .http
@@ -150,49 +149,12 @@ impl Client {
         self.get_json(format!("{}/chats", self.base)).await
     }
 
-    /// Everything parked on the user across chats, oldest first.
-    pub async fn list_inbox(&self) -> Result<Vec<InboxItem>> {
-        self.get_json(format!("{}/inbox", self.base)).await
-    }
-
-    /// The visible transcript plus the journal watermark to resume events at.
-    pub async fn get_transcript(&self, chat: ChatId) -> Result<Transcript> {
-        self.get_json(format!("{}/chats/{chat}/messages", self.base))
-            .await
-    }
-
-    /// Rename a chat; `None` clears back to an untitled chat.
-    pub async fn rename_chat(&self, chat: ChatId, title: Option<&str>) -> Result<()> {
-        let response = self
-            .http
-            .patch(format!("{}/chats/{chat}", self.base))
-            .json(&serde_json::json!({ "title": title }))
-            .send()
-            .await
-            .map_err(request_error)?;
-        Self::expect_success(response).await?;
-        Ok(())
-    }
-
     /// Patch the chat's model selection; `None` clears back to the default.
     pub async fn set_chat_model(&self, chat: ChatId, model: Option<&str>) -> Result<()> {
         let response = self
             .http
             .patch(format!("{}/chats/{chat}", self.base))
             .json(&serde_json::json!({ "model": model }))
-            .send()
-            .await
-            .map_err(request_error)?;
-        Self::expect_success(response).await?;
-        Ok(())
-    }
-
-    /// Patch the chat's reasoning-effort override; `None` clears it.
-    pub async fn set_chat_effort(&self, chat: ChatId, effort: Option<&str>) -> Result<()> {
-        let response = self
-            .http
-            .patch(format!("{}/chats/{chat}", self.base))
-            .json(&serde_json::json!({ "reasoning_effort": effort }))
             .send()
             .await
             .map_err(request_error)?;
@@ -218,31 +180,6 @@ impl Client {
             .json::<ChatSummary>()
             .await
             .map_err(request_error)
-    }
-
-    /// Move a chat between projects (or out of one with `None`).
-    pub async fn set_chat_project(
-        &self,
-        chat: ChatId,
-        project: Option<tidebreak_core::ProjectId>,
-    ) -> Result<ChatSummary> {
-        let response = self
-            .http
-            .patch(format!("{}/chats/{chat}", self.base))
-            .json(&serde_json::json!({ "project_id": project }))
-            .send()
-            .await
-            .map_err(request_error)?;
-        Self::expect_success(response)
-            .await?
-            .json::<ChatSummary>()
-            .await
-            .map_err(request_error)
-    }
-
-    /// Every project (workspace), most recently created first.
-    pub async fn list_projects(&self) -> Result<Vec<super::wire::ProjectSummary>> {
-        self.get_json(format!("{}/projects", self.base)).await
     }
 
     /// Delete a chat outright.
@@ -448,15 +385,6 @@ impl Client {
             .map_err(request_error)?;
         Self::expect_success(response).await?;
         Ok(())
-    }
-
-    /// Approvals parked on this chat right now (recovery on resume).
-    pub async fn list_pending_approvals(
-        &self,
-        chat: ChatId,
-    ) -> Result<Vec<PendingApprovalSnapshot>> {
-        self.get_json(format!("{}/chats/{chat}/approvals", self.base))
-            .await
     }
 
     /// Plans awaiting review on this chat.

@@ -1,6 +1,6 @@
 //! Attach or embed — how a command reaches a server.
 //!
-//! Every client command (`tui`, `-p`, and the setup families) needs an
+//! Every client command (`-p` and the setup families) needs an
 //! `tidebreak-server` to talk to, and there are two honest ways to get one. By
 //! default the CLI **embeds**: it binds the server in-process over its own data
 //! directory, which is the right shape for a script or an agent trying things

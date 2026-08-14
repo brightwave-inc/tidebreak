@@ -1,6 +1,6 @@
 ---
 title: Running headless
-description: The tidebreak CLI — serve, tui, one-shot prompts, and the MCP stdio server.
+description: The tidebreak CLI — serve, one-shot prompts, and the MCP stdio server.
 ---
 
 The desktop app embeds a local HTTP + WebSocket server. The same server, agent
@@ -21,7 +21,6 @@ the built binary if you have it on your path.
 tidebreak serve
 tidebreak mcp <workspace>
 tidebreak rehome-secrets
-tidebreak tui [--chat <id> | --new]
 tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
            [--permission-mode ask|auto|allow|plan]
 
@@ -53,7 +52,7 @@ tidebreak chat create
 
 A bare `tidebreak` with no arguments runs `serve`.
 
-`tui`, `-p`, `output`, `attach`, and the setup commands additionally take
+`-p`, `output`, `attach`, and the setup commands additionally take
 `--server <url>` / `--server-token-env <var>`, or `--attach` — see
 [Attaching to a running server](#attaching-to-a-running-server).
 
@@ -77,25 +76,6 @@ running it under a logging supervisor.
 The API is not exposed on a public interface. There is no generated OpenAPI
 document — the route table and handler documentation in `tidebreak-server` are
 the specification.
-
-### `tui`
-
-An interactive terminal chat. It boots the same in-process server and drives it
-over the loopback API.
-
-```sh
-cargo run -p tidebreak-cli -- tui
-cargo run -p tidebreak-cli -- tui --chat <chat-uuid>
-cargo run -p tidebreak-cli -- tui --new
-```
-
-With no flags it opens a picker over the existing chats — enter resumes the
-selected one, `n` starts a new chat, `esc` leaves. On a profile with no chats
-yet there is nothing to pick, so it goes straight into a new chat. `--new`
-always skips the picker; `--chat` resumes one by id.
-
-Inside a session, `/chats` (or `ctrl+o`) reopens the same switcher and `/model`
-picks the model for the current chat.
 
 ### `-p` (one-shot)
 
@@ -370,7 +350,6 @@ bearer only — never the native executor credential):
 export TIDEBREAK_DATA_DIR="$HOME/Library/Application Support/io.brightwave.tidebreak.dev"
 cargo run -p tidebreak-cli -- --attach provider list
 cargo run -p tidebreak-cli -- -p "what changed today?" --attach
-cargo run -p tidebreak-cli -- tui --attach
 ```
 
 On a release desktop build, the directory is `io.brightwave.tidebreak` (no
@@ -384,7 +363,7 @@ export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
 cargo run -p tidebreak-cli -- --server http://127.0.0.1:53421 provider list
 ```
 
-`--server` / `--attach` work on `tui`, `-p`, and every setup command.
+`--server` / `--attach` work on `-p` and every setup command.
 `TIDEBREAK_SERVER_URL` sets the same thing as `--server` for a whole shell, and
 the flag wins over it. After the endpoint is resolved, an attached command
 writes no log file and touches no keychain — it is only an HTTP+WebSocket
