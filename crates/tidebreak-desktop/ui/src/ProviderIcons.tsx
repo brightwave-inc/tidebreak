@@ -1,4 +1,4 @@
-import { LockOpenIcon } from "lucide-react";
+import { LockOpenIcon, NetworkIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import type { ProviderKind } from "./api";
 
@@ -259,6 +259,11 @@ export function OpenModelIcon(props: IconProps) {
   return <LockOpenIcon {...props} />;
 }
 
+/** The serving route for a mixed catalog supplied by an organization. */
+export function ModelGatewayIcon(props: IconProps) {
+  return <NetworkIcon {...props} />;
+}
+
 /**
  * The mark for a catalog row.
  *
@@ -292,8 +297,9 @@ export function ProviderIcon({
     case "ollama":
       return <OllamaIcon {...rest} />;
     case "openai_compatible":
-    case "model_gateway":
       return <OpenModelIcon {...rest} />;
+    case "model_gateway":
+      return <ModelGatewayIcon {...rest} />;
     case "fireworks":
       return <FireworksIcon {...rest} />;
     case "together":

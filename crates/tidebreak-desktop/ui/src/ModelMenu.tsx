@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   Gauge,
+  Search,
 } from "lucide-react";
 import type {
   ModelInfo,
@@ -187,11 +188,36 @@ export function visibleModelGroups(
   models: readonly ModelInfo[],
   selectedKey: string | null,
 ): { provider: ProviderKind; models: ModelInfo[] }[] {
-  return groupByProvider(models).filter(
-    (group) =>
-      group.models.some((model) => model.available) ||
-      (selectedKey !== null &&
-        group.models.some((model) => model.key === selectedKey)),
+  return groupByProvider(models).flatMap((group) => {
+    if (group.models.some((model) => model.available)) return [group];
+    if (selectedKey === null) return [];
+
+    // Keep an unavailable explicit selection visible so the picker explains
+    // what the chat still names, but do not resurrect that provider's entire
+    // disabled catalog. This is especially noisy after a gateway becomes the
+    // usable route for the same upstream models.
+    const selected = group.models.find((model) => model.key === selectedKey);
+    return selected ? [{ ...group, models: [selected] }] : [];
+  });
+}
+
+/** Models visible in cross-provider search, in the same order as browsing. */
+export function matchingModels(
+  groups: readonly { provider: ProviderKind; models: readonly ModelInfo[] }[],
+  query: string,
+): ModelInfo[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [];
+  return groups.flatMap((group) =>
+    group.models.filter((model) => {
+      const vendor = model.vendor ? providerLabel(model.vendor) : "";
+      return [
+        model.display_name,
+        model.id,
+        providerLabel(model.provider),
+        vendor,
+      ].some((value) => value.toLocaleLowerCase().includes(needle));
+    }),
   );
 }
 
@@ -323,6 +349,8 @@ export function ModelMenu({
   const pillModel = known ?? (isDefault ? usableDefault : null);
 
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
   const [activeProvider, setActiveProvider] = useState<ProviderKind | null>(
     () => pickerProviderForSelection(rail, known ?? usableDefault),
   );
@@ -331,14 +359,57 @@ export function ModelMenu({
   const activeGroup =
     groups.find((group) => group.provider === activeRail?.provider) ?? null;
   const showProviderRail = rail.length > 0;
+  const searchResults = matchingModels(groups, query);
+  const searching = query.length > 0;
 
   function openMenu(next: boolean) {
     if (next) {
+      setQuery("");
       setActiveProvider(
         pickerProviderForSelection(rail, known ?? usableDefault),
       );
     }
     setOpen(next);
+  }
+
+  function chooseModel(model: ModelInfo, selected: boolean) {
+    if (selected || !model.available) return;
+    if (pillModel && pillModel.provider !== model.provider) {
+      warnAboutPromptCacheChange();
+    }
+    void onChange(model.key);
+  }
+
+  function modelRow(model: ModelInfo, showProvider: boolean = false) {
+    const selected = isDefault
+      ? usableDefault?.key === model.key
+      : canonical === model.key;
+    return (
+      <DropdownMenuItem
+        key={model.key}
+        disabled={disabled || !model.available}
+        // Picking a model is the whole point of opening this, so the menu
+        // closes on it. Re-selecting the current row still closes naturally.
+        onSelect={() => chooseModel(model, selected)}
+        className="flex items-center gap-2"
+      >
+        <ProviderIcon
+          provider={model.vendor ?? model.provider}
+          modelId={model.id}
+          className="size-4 shrink-0"
+        />
+        <span className="min-w-0 flex-1 truncate text-sm">
+          {model.display_name}
+        </span>
+        {showProvider && (
+          <span className="text-muted-foreground shrink-0 text-[0.65rem]">
+            {providerLabel(model.provider)}
+          </span>
+        )}
+        <ModelToolCapabilityChip model={model} />
+        {selected && <Check className="ml-auto size-4" />}
+      </DropdownMenuItem>
+    );
   }
 
   return (
@@ -369,6 +440,14 @@ export function ModelMenu({
         side="top"
         collisionPadding={12}
         className="model-menu-content w-80 p-0"
+        onKeyDownCapture={(event) => {
+          if (event.target === searchInput.current) return;
+          if (event.metaKey || event.ctrlKey || event.altKey) return;
+          if (event.key.length !== 1) return;
+          event.preventDefault();
+          setQuery((current) => current + event.key);
+          requestAnimationFrame(() => searchInput.current?.focus());
+        }}
       >
         {showProviderRail && (
           <div
@@ -378,8 +457,6 @@ export function ModelMenu({
           >
             {rail.map((entry) => {
               const selected = activeRail?.provider === entry.provider;
-              const mark = groups.find((group) => group.provider === entry.provider)
-                ?.models[0];
               return (
                 <WithTooltip
                   key={entry.provider}
@@ -407,8 +484,11 @@ export function ModelMenu({
                     onClick={() => setActiveProvider(entry.provider)}
                   >
                     <ProviderIcon
-                      provider={mark?.vendor ?? entry.provider}
-                      modelId={mark?.id}
+                      // A rail tab represents the route serving the group,
+                      // not whichever upstream vendor happened to be first.
+                      // Gateway catalogs are mixed, so their tab must stay the
+                      // generic gateway mark while rows retain vendor marks.
+                      provider={entry.provider}
                       className="size-4"
                     />
                     {selected && (
@@ -425,6 +505,21 @@ export function ModelMenu({
         )}
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="border-border border-b p-1.5">
+            <label className="bg-muted/40 focus-within:ring-ring flex h-8 items-center gap-2 rounded-md px-2 focus-within:ring-2">
+              <Search className="text-muted-foreground size-3.5 shrink-0" />
+              <input
+                ref={searchInput}
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => event.stopPropagation()}
+                placeholder="Search models"
+                aria-label="Search models"
+                className="placeholder:text-muted-foreground min-w-0 flex-1 bg-transparent text-sm outline-none"
+              />
+            </label>
+          </div>
           <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
           {!anyAvailable && (
             <p className="text-muted-foreground px-2 py-2 text-sm">
@@ -434,7 +529,7 @@ export function ModelMenu({
             </p>
           )}
 
-          {activeRail && !activeRail.connected && (
+          {!searching && activeRail && !activeRail.connected && (
             <div>
               <div className="flex flex-col items-start gap-3 px-2 py-3">
                 <ProviderIcon
@@ -466,45 +561,25 @@ export function ModelMenu({
             </div>
           )}
 
-          {activeGroup && (
+          {!searching && activeGroup && (
             <div>
-              {activeGroup.models.map((model) => {
-                const selected = isDefault
-                  ? usableDefault?.key === model.key
-                  : canonical === model.key;
-                return (
-                  <DropdownMenuItem
-                    key={model.key}
-                    disabled={disabled || !model.available}
-                    // Picking a model is the whole point of opening this, so
-                    // the menu closes on it. Re-selecting what is already
-                    // chosen still closes: the reader asked for this model and
-                    // has it, and holding the menu open would read as a
-                    // dropped click.
-                    onSelect={() => {
-                      if (selected || !model.available) return;
-                      if (pillModel && pillModel.provider !== model.provider) {
-                        warnAboutPromptCacheChange();
-                      }
-                      void onChange(model.key);
-                    }}
-                    className="flex items-center gap-2"
-                  >
-                    <ProviderIcon
-                      provider={model.vendor ?? model.provider}
-                      modelId={model.id}
-                      className="size-4 shrink-0"
-                    />
-                    <span className="text-sm">{model.display_name}</span>
-                    <ModelToolCapabilityChip model={model} />
-                    {selected && <Check className="ml-auto size-4" />}
-                  </DropdownMenuItem>
-                );
-              })}
+              {activeGroup.models.map((model) => modelRow(model))}
             </div>
           )}
 
-          {!isDefault && !known && (
+          {searching && (
+            <div>
+              {searchResults.length > 0 ? (
+                searchResults.map((model) => modelRow(model, true))
+              ) : (
+                <p className="text-muted-foreground px-2 py-3 text-sm">
+                  No models match “{query}”.
+                </p>
+              )}
+            </div>
+          )}
+
+          {!searching && !isDefault && !known && (
             <div>
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled className="flex items-center gap-2">

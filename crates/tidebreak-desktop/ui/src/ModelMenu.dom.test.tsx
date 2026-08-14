@@ -97,3 +97,56 @@ it("warns only when a model choice switches providers", async () => {
       "This change may prevent prompt cache reuse, increasing cost and latency on the next turn.",
   });
 });
+
+it("searches every visible provider when typing with the picker open", async () => {
+  const onChange = vi.fn();
+  render(
+    <ModelMenu
+      models={MODELS}
+      value="anthropic::claude-sonnet-4"
+      onSetUpProvider={() => {}}
+      onChange={onChange}
+    />,
+  );
+
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  await user.keyboard("gpt");
+
+  expect(screen.getByRole("searchbox", { name: "Search models" })).toHaveValue(
+    "gpt",
+  );
+  await user.click(screen.getByRole("menuitem", { name: /GPT-5/ }));
+  expect(onChange).toHaveBeenCalledWith("openai::gpt-5");
+});
+
+it("uses the generic gateway mark for a mixed gateway rail", async () => {
+  const gatewayModels: ModelInfo[] = [
+    {
+      ...MODELS[0],
+      key: "model_gateway::claude-sonnet-4",
+      provider: "model_gateway",
+      vendor: "anthropic",
+    },
+    {
+      ...MODELS[2],
+      key: "model_gateway::gpt-5",
+      provider: "model_gateway",
+      vendor: "openai",
+    },
+  ];
+  render(
+    <ModelMenu
+      models={gatewayModels}
+      value={gatewayModels[0].key}
+      onSetUpProvider={() => {}}
+      onChange={() => {}}
+    />,
+  );
+
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  const gatewayTab = screen.getByRole("tab", { name: "Model Gateway" });
+  expect(gatewayTab.querySelector(".lucide-network")).not.toBeNull();
+  expect(gatewayTab.querySelector("svg[fill='#D97757']")).toBeNull();
+});
