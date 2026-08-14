@@ -1,17 +1,12 @@
 name: Publish desktop release
 
-run-name: >-
-  ${{ github.event_name == 'release'
-    && format('Dispatch desktop {0}', github.event.release.tag_name)
-    || format('Publish desktop {0}', github.event.inputs.release_tag) }}
+run-name: Publish desktop ${{ github.event.inputs.release_tag }}
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Published GitHub Release tag to build
+        description: Draft or published GitHub Release tag to build
         required: true
         type: string
 
@@ -19,47 +14,21 @@ permissions:
   contents: read
 
 concurrency:
-  # The release-event run only dispatches the real build on main. Give that
-  # short-lived run its own group so it cannot block the dispatched build.
   # Serialize production builds so two tags cannot race mutable latest.json.
-  group: >-
-    ${{ github.event_name == 'release'
-      && format('tidebreak-desktop-release-dispatch-{0}', github.run_id)
-      || 'tidebreak-desktop-production-release' }}
+  group: tidebreak-desktop-production-release
   cancel-in-progress: false
 
 jobs:
-  dispatch:
-    name: dispatch trusted main build
-    if: ${{ github.event_name == 'release' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Reject an invalid published release tag
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/check-release-tag.mjs "$RELEASE_TAG"
-      - name: Dispatch the build from the shared main cache scope
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: >-
-          gh workflow run release.yml
-          --repo "$GITHUB_REPOSITORY"
-          --ref main
-          --field release_tag="$RELEASE_TAG"
-
   validate:
     name: validate release tag
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
+      draft: ${{ steps.release.outputs.draft }}
       published_at: ${{ steps.release.outputs.published_at }}
+      release_id: ${{ steps.release.outputs.release_id }}
       sha: ${{ steps.release.outputs.sha }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -67,8 +36,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ github.event.inputs.release_tag }}
-      - name: Validate the published release and derive its product version
+          ref: ${{ github.sha }}
+      - name: Validate the release and freeze its source tag
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,43 +45,78 @@ jobs:
         run: |
           node scripts/check-release-tag.mjs "$RELEASE_TAG"
 
-          release_json="$(gh api \
-            -H 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
-          [[ "$(jq -r .tag_name <<<"$release_json")" = "$RELEASE_TAG" ]] || {
-            echo "GitHub returned metadata for a different release tag." >&2
+          release_json="$(
+            gh api --paginate \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -cs \
+                --arg tag "$RELEASE_TAG" \
+                '[.[][] | select(.tag_name == $tag)]
+                 | if length == 1 then .[0] else empty end'
+          )"
+          [[ -n "$release_json" ]] || {
+            echo "Expected exactly one draft or published release tagged $RELEASE_TAG." >&2
             exit 1
           }
-          [[ "$(jq -r .draft <<<"$release_json")" = false ]] || {
-            echo "Production desktop builds require a published GitHub Release." >&2
+          [[ "$(jq -r .tag_name <<<"$release_json")" = "$RELEASE_TAG" ]] || {
+            echo "GitHub returned metadata for a different release tag." >&2
             exit 1
           }
           [[ "$(jq -r .prerelease <<<"$release_json")" = false ]] || {
             echo "Production desktop builds cannot be published from a GitHub prerelease." >&2
             exit 1
           }
-          published_at="$(jq -er \
-            '.published_at | select(type == "string" and length > 0)' \
-            <<<"$release_json")"
+
+          draft="$(jq -r .draft <<<"$release_json")"
+          release_id="$(jq -er .id <<<"$release_json")"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            release_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          else
+            [[ "$draft" = true ]] || {
+              echo "Published release $RELEASE_TAG is missing its Git tag." >&2
+              exit 1
+            }
+            release_sha="$GITHUB_SHA"
+            jq -n \
+              --arg ref "refs/tags/$RELEASE_TAG" \
+              --arg sha "$release_sha" \
+              '{ref: $ref, sha: $sha}' | gh api \
+                --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                --input - >/dev/null
+          fi
+
+          published_at="$(jq -r '.published_at // empty' <<<"$release_json")"
+          if [[ "$draft" = false && -z "$published_at" ]]; then
+            echo "Published release $RELEASE_TAG has no publication timestamp." >&2
+            exit 1
+          fi
+
+          jq '{name, body, tag_name, target_commitish, prerelease}' \
+            <<<"$release_json" > "$RUNNER_TEMP/release-snapshot.json"
           {
+            echo "draft=$draft"
             echo "published_at=$published_at"
-            echo "sha=$(git rev-parse HEAD)"
+            echo "release_id=$release_id"
+            echo "sha=$release_sha"
             echo "tag=$RELEASE_TAG"
+            echo "version=${RELEASE_TAG#v}"
           } >> "$GITHUB_OUTPUT"
       - name: Require a commit from main
         env:
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || {
-            echo "The validated tag changed while resolving its commit." >&2
-            exit 1
-          }
           git fetch origin main:refs/remotes/origin/main
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main || {
             echo "Release tag $RELEASE_TAG does not point to a commit on main." >&2
             exit 1
           }
+      - name: Retain the release draft snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-release-${{ steps.release.outputs.release_id }}-snapshot
+          path: ${{ runner.temp }}/release-snapshot.json
+          if-no-files-found: error
+          retention-days: 7
 
   build_docs:
     name: build release documentation
@@ -185,7 +189,7 @@ jobs:
 
   publish_docs:
     name: publish release documentation
-    needs: [validate, build_docs]
+    needs: [validate, build_docs, finalize_release]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -491,7 +495,11 @@ jobs:
   prepare_macos:
     name: prepare unsigned macOS · universal
     needs: [validate, inspect_hosted]
-    if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+    if: >-
+      ${{
+        needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.outputs.exists != 'true'
+      }}
     runs-on: macos-latest
     timeout-minutes: 60
     env:
@@ -624,6 +632,7 @@ jobs:
       ${{
         always()
         && needs.validate.result == 'success'
+        && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
         && needs.inspect_hosted.outputs.exists != 'true'
         && needs.prepare_macos.result == 'success'
@@ -1013,7 +1022,12 @@ jobs:
     # parks this job and `build_windows` without disturbing the rest of the
     # release gating, so resuming Windows is flipping two literals plus the
     # `windows` descriptor in scripts/create-release-manifests.mjs.
-    if: ${{ false && needs.inspect_hosted.outputs.exists != 'true' }}
+    if: >-
+      ${{
+        false
+        && needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.outputs.exists != 'true'
+      }}
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -1133,6 +1147,7 @@ jobs:
         false
         && always()
         && needs.validate.result == 'success'
+        && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
         && needs.inspect_hosted.outputs.exists != 'true'
         && needs.prepare_windows.result == 'success'
@@ -1351,7 +1366,11 @@ jobs:
   source_sbom:
     name: generate source SBOM
     needs: [validate, inspect_hosted]
-    if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+    if: >-
+      ${{
+        needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.outputs.exists != 'true'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1395,7 +1414,7 @@ jobs:
 
   publish:
     name: publish downloads.brightwave.io
-    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom]
+    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom, finalize_release]
     # `build_windows` is parked (see docs/deferred.md), so a skipped result is
     # the expected steady state; only an outright failure may block publishing.
     if: >-
@@ -1403,8 +1422,10 @@ jobs:
         always()
         && needs.validate.result == 'success'
         && needs.inspect_hosted.result == 'success'
+        && needs.finalize_release.result == 'success'
         && (
           needs.inspect_hosted.outputs.exists == 'true'
+          || needs.validate.outputs.draft != 'true'
           || (
             needs.build_macos.result == 'success'
             && needs.build_windows.result != 'failure'
@@ -1425,7 +1446,7 @@ jobs:
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_SHA: ${{ needs.validate.outputs.sha }}
-      RELEASE_PUBLISHED_AT: ${{ needs.validate.outputs.published_at }}
+      RELEASE_PUBLISHED_AT: ${{ needs.finalize_release.outputs.published_at }}
       RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
       AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
       AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
@@ -1453,7 +1474,11 @@ jobs:
           fi
 
       - name: Download universal macOS artifacts
-        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+        if: >-
+          ${{
+            needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
@@ -1461,11 +1486,51 @@ jobs:
 
       # Parked with the Windows build; see docs/deferred.md.
       - name: Download Windows artifacts
-        if: ${{ false && needs.inspect_hosted.outputs.exists != 'true' }}
+        if: >-
+          ${{
+            false
+            && needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: dist/windows/x86_64
+
+      - name: Recover build inputs from the immutable GitHub Release
+        if: >-
+          ${{
+            needs.validate.outputs.draft != 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p recovery dist/macos/universal
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir recovery
+
+          while IFS= read -r -d '' checksum; do
+            (cd recovery && sha256sum --check --strict "${checksum#recovery/}")
+          done < <(find recovery -name '*.sha256' -type f -print0)
+
+          base="Tidebreak_${TIDEBREAK_VERSION}_universal"
+          cp recovery/Tidebreak-macos-universal.dmg \
+            "dist/macos/universal/$base.dmg"
+          for suffix in app.zip app.tar.gz app.tar.gz.sig; do
+            file="$base.$suffix"
+            [[ -f "recovery/$file" ]] || {
+              echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+              exit 1
+            }
+            cp "recovery/$file" "dist/macos/universal/$file"
+          done
+
+          sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          cp "recovery/$sbom" "dist/$sbom"
+          cp "recovery/$sbom.sha256" "dist/$sbom.sha256"
+          (cd dist && sha256sum --check --strict "$sbom.sha256")
 
       - name: Create release manifests and checksums
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
@@ -1479,7 +1544,11 @@ jobs:
           --base-url "$RELEASE_BASE_URL"
 
       - name: Download the checksummed source SBOM
-        if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
+        if: >-
+          ${{
+            needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
@@ -1652,17 +1721,24 @@ jobs:
           fi
 
   attach_downloads:
-    name: attach GitHub release downloads
-    needs: [validate, publish]
-    # `publish` inherits the parked `build_windows` skip through its own needs
-    # (see docs/deferred.md), and an implicit `success()` reads that whole
-    # chain — so without this guard the job skips on green runs. Only the two
-    # jobs this one actually depends on decide whether it runs.
+    name: prepare GitHub release downloads
+    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom]
+    # A published release already owns immutable assets. A draft instead needs
+    # the fresh package build and SBOM before those assets can be attached.
     if: >-
       ${{
         always()
         && needs.validate.result == 'success'
-        && needs.publish.result == 'success'
+        && needs.inspect_hosted.result == 'success'
+        && (
+          needs.validate.outputs.draft != 'true'
+          || (
+            needs.build_macos.result == 'success'
+            && needs.build_windows.result != 'failure'
+            && needs.build_windows.result != 'cancelled'
+            && needs.source_sbom.result == 'success'
+          )
+        )
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1670,71 +1746,190 @@ jobs:
     env:
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-      RELEASE_BASE_URL: https://downloads.brightwave.io/tidebreak
     steps:
-      # The hosted release is the only source of artifact bytes. Re-downloading
-      # it here keeps the GitHub assets a verified copy of what the CDN serves,
-      # and works the same whether this run built the release or resumed one.
-      - name: Download the published installers
+      - name: Download the verified macOS build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
+          path: release-artifacts/macos
+
+      - name: Download the checksummed source SBOM
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-source-sbom-${{ needs.validate.outputs.version }}
+          path: release-artifacts/sbom
+
+      - name: Prepare downloads from the verified build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
         run: |
           mkdir -p downloads
-          manifest="$RUNNER_TEMP/manifest.json"
-          curl --fail --silent --show-error \
-            "$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/manifest.json" \
-            --output "$manifest"
-
-          while IFS=$'\t' read -r platform arch url digest; do
-            case "$platform/$arch" in
-              macos/universal) name="Tidebreak-macos-universal.dmg" ;;
-              windows/x86_64) name="Tidebreak-windows-x86_64-setup.exe" ;;
-              *) echo "Unsupported release platform: $platform/$arch" >&2; exit 1 ;;
-            esac
-            curl --fail --silent --show-error --location "$url" \
-              --output "downloads/$name"
-            printf '%s  %s\n' "$digest" "$name" > "downloads/$name.sha256"
-            (cd downloads && sha256sum --check --strict "$name.sha256")
-          done < <(jq -r \
-            '.artifacts[]
-             | select((.platform == "macos" and .format == "dmg")
-                 or (.platform == "windows" and .format == "nsis"))
-             | [.platform, .arch, .url, .sha256] | @tsv' \
-            "$manifest")
-
-          dmg_count="$(find downloads -name '*.dmg' -type f | wc -l)"
-          (( dmg_count == 1 )) || {
-            echo "Expected one macOS disk image, found $dmg_count." >&2
+          base="Tidebreak_${TIDEBREAK_VERSION}_universal"
+          source_dmg="release-artifacts/macos/$base.dmg"
+          [[ -f "$source_dmg" ]] || {
+            echo "The verified build did not contain the universal DMG." >&2
             exit 1
           }
+          cp "$source_dmg" downloads/Tidebreak-macos-universal.dmg
+          (cd downloads && sha256sum Tidebreak-macos-universal.dmg \
+            > Tidebreak-macos-universal.dmg.sha256)
 
-          # Keep the existing permanent README URL live across the transition
-          # to universal packages. Both names carry the same CDN-verified bytes;
-          # the universal name is canonical for new links.
+          for suffix in app.zip app.tar.gz app.tar.gz.sig; do
+            file="$base.$suffix"
+            [[ -f "release-artifacts/macos/$file" ]] || {
+              echo "The verified build did not contain $file." >&2
+              exit 1
+            }
+            cp "release-artifacts/macos/$file" "downloads/$file"
+            (cd downloads && sha256sum "$file" > "$file.sha256")
+          done
+
+          sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
+          cp "release-artifacts/sbom/$sbom" "downloads/$sbom"
+          cp "release-artifacts/sbom/$sbom.sha256" "downloads/$sbom.sha256"
+          (cd downloads && sha256sum --check --strict "$sbom.sha256")
+
+      - name: Download existing immutable GitHub assets
+        if: ${{ needs.validate.outputs.draft != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p downloads
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir downloads
+
+      - name: Verify the complete GitHub asset set
+        run: |
           universal_dmg="downloads/Tidebreak-macos-universal.dmg"
           compatibility_dmg="downloads/Tidebreak-macos-apple-silicon.dmg"
           [[ -f "$universal_dmg" ]] || {
-            echo "The universal macOS disk image was not downloaded." >&2
+            echo "The universal macOS disk image was not prepared." >&2
             exit 1
           }
-          cp "$universal_dmg" "$compatibility_dmg"
-          (cd downloads && sha256sum "$(basename "$compatibility_dmg")" \
-            > "$(basename "$compatibility_dmg").sha256")
+          if [[ ! -f "$compatibility_dmg" ]]; then
+            cp "$universal_dmg" "$compatibility_dmg"
+            (cd downloads && sha256sum "$(basename "$compatibility_dmg")" \
+              > "$(basename "$compatibility_dmg").sha256")
+          fi
 
-          sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
-          sbom_url="$RELEASE_BASE_URL/releases/v$TIDEBREAK_VERSION/$sbom"
-          if curl --fail --silent --show-error --head "$sbom_url" >/dev/null; then
-            curl --fail --silent --show-error "$sbom_url" \
-              --output "downloads/$sbom"
-            curl --fail --silent --show-error "$sbom_url.sha256" \
-              --output "downloads/$sbom.sha256"
-            (cd downloads && sha256sum --check --strict "$sbom.sha256")
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.sha256) continue ;;
+            esac
+            [[ -f "$file.sha256" ]] || {
+              echo "Release asset has no checksum sidecar: ${file#downloads/}" >&2
+              exit 1
+            }
+          done < <(find downloads -type f -print0)
+          while IFS= read -r -d '' checksum; do
+            (cd downloads && sha256sum --check --strict "${checksum#downloads/}")
+          done < <(find downloads -name '*.sha256' -type f -print0)
+
+          if [[ "${{ needs.validate.outputs.draft }}" != true \
+            && "${{ needs.inspect_hosted.outputs.exists }}" != true ]]; then
+            base="Tidebreak_${TIDEBREAK_VERSION}_universal"
+            for file in \
+              "$base.app.zip" \
+              "$base.app.tar.gz" \
+              "$base.app.tar.gz.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"; do
+              [[ -f "downloads/$file" ]] || {
+                echo "Immutable release cannot recover hosted publication without $file." >&2
+                exit 1
+              }
+            done
           fi
 
       # Version-free asset names give the README permanent one-click download
-      # links through GitHub's /releases/latest/download/ redirect.
-      - name: Attach the installers to the GitHub Release
+      # links through GitHub's /releases/latest/download/ redirect. Assets are
+      # attached while the release is still a draft; immutable releases cannot
+      # be changed after the final publication step below.
+      - name: Attach or verify the GitHub Release downloads
+        env:
+          RELEASE_DRAFT: ${{ needs.validate.outputs.draft }}
+          RELEASE_ID: ${{ needs.validate.outputs.release_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$RELEASE_DRAFT" = true ]]; then
+            gh release upload "$RELEASE_TAG" downloads/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          fi
+
+          find downloads -type f -exec basename {} \; | sort \
+            > "$RUNNER_TEMP/expected-release-assets"
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+            --jq '.[].name' | sort > "$RUNNER_TEMP/actual-release-assets"
+          diff -u \
+            "$RUNNER_TEMP/expected-release-assets" \
+            "$RUNNER_TEMP/actual-release-assets"
+
+  finalize_release:
+    name: publish immutable GitHub Release
+    needs: [validate, attach_downloads]
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.attach_downloads.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      published_at: ${{ steps.release.outputs.published_at }}
+    steps:
+      - name: Download the frozen release metadata
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-release-${{ needs.validate.outputs.release_id }}-snapshot
+          path: ${{ runner.temp }}/release-snapshot
+
+      - name: Publish or validate the immutable release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release upload "$RELEASE_TAG" downloads/*
-          --repo "$GITHUB_REPOSITORY"
-          --clobber
+          RELEASE_DRAFT: ${{ needs.validate.outputs.draft }}
+          RELEASE_ID: ${{ needs.validate.outputs.release_id }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          tag_sha="$(gh api \
+            "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" \
+            --jq .sha)"
+          [[ "$tag_sha" = "$RELEASE_SHA" ]] || {
+            echo "Release tag $RELEASE_TAG moved after validation." >&2
+            exit 1
+          }
+
+          if [[ "$RELEASE_DRAFT" = true ]]; then
+            snapshot="$RUNNER_TEMP/release-snapshot/release-snapshot.json"
+            jq '. + {draft: false, make_latest: "true"}' "$snapshot" | gh api \
+              --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --input - >/dev/null
+          fi
+
+          release_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          [[ "$(jq -r .tag_name <<<"$release_json")" = "$RELEASE_TAG" ]] || {
+            echo "GitHub published a release for the wrong tag." >&2
+            exit 1
+          }
+          [[ "$(jq -r .draft <<<"$release_json")" = false ]] || {
+            echo "GitHub Release $RELEASE_TAG is still a draft." >&2
+            exit 1
+          }
+          [[ "$(jq -r .prerelease <<<"$release_json")" = false ]] || {
+            echo "GitHub Release $RELEASE_TAG unexpectedly became a prerelease." >&2
+            exit 1
+          }
+          published_at="$(jq -er \
+            '.published_at | select(type == "string" and length > 0)' \
+            <<<"$release_json")"
+          echo "published_at=$published_at" >> "$GITHUB_OUTPUT"

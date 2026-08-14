@@ -508,7 +508,7 @@ const mutations = [
   {
     name: "README macOS download matches an uploaded asset",
     file: "README.md",
-    expected: "GitHub release publication preserves verified asset provenance",
+    expected: "GitHub release assets are attached before immutable publication",
     mutate: (source) =>
       source.replace(
         /Tidebreak-macos-[\w-]+\.dmg/,

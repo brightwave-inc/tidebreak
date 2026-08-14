@@ -126,20 +126,19 @@ automatic.
    prerelease, and the notes contain the intended PRs.
    For the first release only, set `v0.1.0`, click **Generate release notes**,
    and curate the full-history result as described above.
-3. Complete the release-readiness review, then click **Publish release**.
-4. GitHub creates the tag and emits the `release.published` event. Confirm the
-   draft still has its proposed `vMAJOR.MINOR.PATCH` tag before publishing:
-   GitHub can otherwise publish an untagged release. A short-lived dispatcher
-   rejects an invalid tag before it queues a production build; for a valid tag,
-   it starts the production build from the current `main` workflow and passes
-   only that tag. Running the build from `main` gives every release the same
-   trusted compiler-cache scope; the build still queries GitHub for the
-   published release, checks out that exact tag, rejects malformed tags,
-   prereleases, drafts, or commits outside `main`, and pins all later jobs to
-   the resolved commit SHA.
-5. In parallel with the desktop release, the documentation publisher checks
-   out that validated SHA and builds `docs-site/` as a static export under
-   `/docs`. It creates an unaliased production-target deployment in the
+3. Complete the release-readiness review, but do **not** publish the draft in
+   GitHub. Immutable releases cannot accept assets after publication.
+4. Open **Actions → Publish desktop release → Run workflow**, select `main`,
+   and enter the draft's exact tag. The workflow queries that draft from the
+   trusted `main` workflow, rejects malformed tags or prereleases, creates the
+   tag at the current `main` commit when it does not already exist, and retains
+   the same tag on a retry. It snapshots the draft metadata so a later merge
+   cannot change the notes or proposed version while the build is running, and
+   pins every later job to the frozen commit SHA.
+5. In parallel with the desktop build, the documentation builder checks out
+   that validated SHA and builds `docs-site/` as a static export under `/docs`.
+   Publication waits until the GitHub Release itself has been published. It
+   then creates an unaliased production-target deployment in the
    dedicated Vercel project, smoke-tests the staged root page, nested content,
    search index, sitemap, assets, and canonical metadata, and only then
    promotes that immutable deployment to `tidebreak-docs.vercel.app`. The
@@ -147,7 +146,7 @@ automatic.
    `VERCEL_TOKEN`; its project and organization identifiers are non-secret
    workflow constants. A failed build or smoke test leaves the previous docs
    deployment serving production.
-6. The dispatched workflow first checks whether that exact tag, commit, and
+6. The workflow first checks whether that exact tag, commit, and
    publication date already have a complete immutable release on S3.
    Credential-free prerequisites — one per platform — otherwise compile the tag
    with its product version and save unsigned Cargo outputs before any signing
@@ -167,35 +166,42 @@ automatic.
    independently of the package builds. That job has no production environment,
    deployment variables, OIDC permission, or AWS role; it transfers the two
    files to the publisher through a pinned GitHub artifact action. Publication
-   waits for both the package build and source SBOM. For public repositories,
-   the publisher also records
-   Sigstore-backed SLSA-style build provenance for every immutable release file
-   (including `manifest.json`). The source-tree SBOM is deliberately published
-   as source-scoped metadata, not attested as a description of the packaged
-   installers. The publisher then uploads immutable versioned files, advances
-   the public manifests, invalidates their CDN paths, and smoke-tests the hosted
-   release. If a prior attempt already uploaded the
-   complete immutable prefix, a new dispatch validates and reuses those bytes,
-   skips the desktop build, and resumes only mutable metadata publication,
-   CDN invalidation, and smoke testing.
-9. A final job downloads every installer the immutable manifest lists back from
-   the CDN, checks them against its digests, and attaches them to the GitHub
-   Release with `.sha256` sidecars — today that is the notarized disk image as
+   waits for both the package build and source SBOM. The source-tree SBOM is
+   deliberately published as source-scoped metadata, not attested as a
+   description of the packaged installers.
+9. Before publication, a credential-free job attaches the verified build
+   outputs and their `.sha256` sidecars to the draft GitHub Release — today that
+   is the notarized disk image as
    `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy
    `Tidebreak-macos-apple-silicon.dmg` alias that keeps the existing README URL
-   live through the transition. It also attaches the release SBOM and its
-   checksum when that release carries one. It would again include
-   `Tidebreak-windows-x86_64-setup.exe` if the Windows lane were unparked. It
-   holds no signing or AWS credentials. The names omit the version so that
+   live through the transition. It retains the versioned app zip, signed updater
+   archive, updater signature, source SBOM, and checksum sidecars on GitHub as
+   recovery inputs. It would again include the Windows installer and updater
+   assets if the Windows lane were unparked. This job holds no signing or AWS
+   credentials. The two DMG names omit the version so that
    `https://github.com/brightwave-inc/tidebreak/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
+10. Only after every GitHub asset is present does the workflow restore the
+    frozen title and notes and publish the draft. GitHub then locks the release
+    tag and assets. The workflow uses GitHub's resulting publication timestamp
+    to create and attest the hosted manifest, uploads immutable versioned files,
+    advances the public manifests, invalidates their CDN paths, and smoke-tests
+    the hosted release. If a prior attempt already uploaded the complete
+    immutable prefix, a new dispatch validates and reuses those bytes, skips the
+    desktop build, and resumes only mutable metadata publication, CDN
+    invalidation, and smoke testing. If GitHub publication succeeded but hosted
+    publication did not, the retry downloads and verifies the retained GitHub
+    assets, reconstructs the hosted release inputs from those immutable bytes,
+    and resumes S3/CDN publication without rebuilding signed or notarized
+    artifacts.
 
-Publishing the native draft is the only release boundary. Merging ordinary PRs
-updates the draft but never builds or ships a desktop version. A published
-GitHub Release is considered shipped only when its dispatched **Publish
-desktop release** build completes successfully; the initial dispatch run is
-not the shipping signal.
+Running **Publish desktop release** is the only release operation. Merging
+ordinary PRs updates the draft but never builds or ships a desktop version, and
+manually clicking GitHub's **Publish release** button is no longer part of the
+procedure. The GitHub Release becomes public only after its verified assets are
+attached; the release is considered fully shipped when the workflow also
+finishes hosted metadata and documentation publication successfully.
 
 ## Public desktop delivery
 
@@ -411,10 +417,11 @@ Treat the release workflow as public even while the repository is private:
 
 - Release actions are pinned to immutable commit SHAs. Dependabot is responsible
   for proposing reviewed action updates.
-- A published native GitHub Release dispatches the production build on the
-  protected `main` workflow. The build accepts only a published, non-prerelease
-  tag whose resolved commit is on `main`. It never runs with production secrets
-  for a pull request or a manually selected feature-branch workflow.
+- An explicit manual dispatch on the protected `main` workflow freezes the
+  native draft's tag before any production build. The build accepts only a
+  non-prerelease release whose resolved commit is on `main`, and it publishes
+  the GitHub Release only after attaching verified assets. It never runs with
+  production secrets for a pull request or a manually selected feature branch.
 - The jobs that build and sign check out that immutable commit SHA. The two
   AWS-credentialed jobs — the hosted-release inspection and the publisher —
   deliberately check out the dispatching `main` commit instead, so they run the
