@@ -726,11 +726,15 @@ pub fn strip_orphaned_tool_blocks(messages: &mut Vec<ChatMessage>) {
     }
 
     for msg in messages.iter_mut() {
+        let original_len = msg.content.len();
         msg.content.retain(|block| match block {
             ContentBlock::ToolUse { id, .. } => result_ids.contains(id),
             ContentBlock::ToolResult { tool_use_id, .. } => use_ids.contains(tool_use_id),
             _ => true,
         });
+        if msg.role == Role::Assistant && msg.content.len() != original_len {
+            invalidate_provider_native_state(msg);
+        }
     }
 
     messages.retain(|msg| !msg.content.is_empty());
@@ -750,10 +754,23 @@ fn merge_adjacent_roles(messages: &mut Vec<ChatMessage>) {
             // that reconstructed response as modified thinking state. Drop
             // the whole side channel whenever repair merges messages: plain
             // content remains valid history, partial native replay does not.
-            messages[i].reasoning = MessageReasoning::default();
             messages[i].content.extend(next.content);
+            if messages[i].role == Role::Assistant {
+                invalidate_provider_native_state(&mut messages[i]);
+            }
         } else {
             i += 1;
+        }
+    }
+}
+
+/// Drop opaque provider state after structural repair changes an assistant
+/// response while retaining its portable cleartext content.
+fn invalidate_provider_native_state(message: &mut ChatMessage) {
+    message.reasoning = MessageReasoning::default();
+    for block in &mut message.content {
+        if let ContentBlock::ProviderExecutedToolCall { replay, .. } = block {
+            *replay = None;
         }
     }
 }
@@ -819,7 +836,7 @@ pub fn content_floor_for_level(level: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{MessageReasoning, ReasoningOrigin};
+    use crate::provider::{MessageReasoning, ProviderToolReplay, ReasoningOrigin};
     use serde_json::json;
 
     fn user_msg(text: &str) -> ChatMessage {
@@ -1145,6 +1162,122 @@ mod tests {
         // Structural repair is not a context reduction — reporting one here
         // would tell the client its context had been truncated.
         assert!(!was_reduced);
+    }
+
+    #[test]
+    fn repairing_orphaned_assistant_content_drops_signed_reasoning() {
+        let origin = ReasoningOrigin {
+            provider: Some(crate::provider::ProviderId::new("anthropic")),
+            model: "claude-opus-5".into(),
+        };
+        let mut assistant = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "I will inspect that.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tu_orphan".into(),
+                    name: "read_file".into(),
+                    input: json!({ "path": "notes.txt" }),
+                },
+            ],
+            reasoning: MessageReasoning::default(),
+        };
+        assistant.reasoning = MessageReasoning::captured(
+            origin.clone(),
+            vec![json!({
+                "type": "thinking",
+                "thinking": "inspect the file",
+                "signature": "signed-response"
+            })],
+        );
+        let messages = vec![user_msg("go"), assistant, user_msg("continue")];
+
+        let (fitted, was_reduced) = fit_to_budget(&messages, 100_000, 500);
+
+        assert!(!was_reduced);
+        let repaired = &fitted[1];
+        assert_eq!(repaired.role, Role::Assistant);
+        assert_eq!(repaired.content.len(), 1);
+        assert!(matches!(
+            &repaired.content[0],
+            ContentBlock::Text { text } if text == "I will inspect that."
+        ));
+        assert!(
+            repaired.reasoning.is_empty(),
+            "the signature belongs to the response before its tool call was removed"
+        );
+        assert!(repaired
+            .reasoning
+            .replayable_for(origin.provider.as_ref(), &origin.model)
+            .is_empty());
+    }
+
+    #[test]
+    fn merging_repaired_assistant_messages_drops_nested_provider_replay() {
+        let origin = ReasoningOrigin {
+            provider: Some(crate::provider::ProviderId::new("anthropic")),
+            model: "claude-opus-5".into(),
+        };
+        let provider_call = ContentBlock::ProviderExecutedToolCall {
+            name: "web_search".into(),
+            input: json!({ "query": "tide charts" }),
+            output: json!({ "results": [{ "title": "Harbor forecast" }] }),
+            is_error: false,
+            replay: Some(ProviderToolReplay::captured(
+                origin,
+                vec![
+                    json!({ "type": "server_tool_use", "id": "srv_1" }),
+                    json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srv_1",
+                        "content": [{ "type": "encrypted_content", "data": "opaque" }]
+                    }),
+                ],
+            )),
+        };
+        let messages = vec![
+            user_msg("search"),
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![provider_call],
+                reasoning: MessageReasoning::default(),
+            },
+            tool_result_msg("missing_host_call", "orphan separator"),
+            assistant_msg("Here is the summary."),
+        ];
+
+        let (fitted, was_reduced) = fit_to_budget(&messages, 100_000, 500);
+
+        assert!(!was_reduced);
+        assert_eq!(fitted.len(), 2);
+        let merged = &fitted[1];
+        assert_eq!(merged.role, Role::Assistant);
+        assert_eq!(merged.content.len(), 2);
+        match &merged.content[0] {
+            ContentBlock::ProviderExecutedToolCall {
+                input,
+                output,
+                replay,
+                ..
+            } => {
+                assert_eq!(input, &json!({ "query": "tide charts" }));
+                assert_eq!(
+                    output,
+                    &json!({ "results": [{ "title": "Harbor forecast" }] })
+                );
+                assert!(
+                    replay.is_none(),
+                    "native replay belongs to the pre-merge assistant response"
+                );
+            }
+            block => panic!("expected provider-executed tool call, got {block:?}"),
+        }
+        assert!(matches!(
+            &merged.content[1],
+            ContentBlock::Text { text } if text == "Here is the summary."
+        ));
     }
 
     #[test]

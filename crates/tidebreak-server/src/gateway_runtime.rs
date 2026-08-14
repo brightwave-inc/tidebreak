@@ -39,6 +39,10 @@ const MODEL_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// long enough not to hammer an unreachable gateway.
 const MODEL_SYNC_RETRY: Duration = Duration::from_secs(60);
 
+/// Sticky model choice copied into chats created without an explicit model.
+/// Kept in sync with the settings route's persisted contract.
+const STICKY_MODEL_KEY: &str = "chat_default.model";
+
 pub(crate) struct GatewayRuntime {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
@@ -969,6 +973,25 @@ impl GatewayRuntime {
                         Some(&equivalent),
                     )
                     .await?;
+                }
+            }
+        }
+        if let Some(selection) = self
+            .store
+            .get_setting(STICKY_MODEL_KEY)
+            .await?
+            .and_then(|value| serde_json::from_value::<String>(value).ok())
+        {
+            if let Some(equivalent) =
+                providers::unique_gateway_equivalent(&*self.store, policy, &selection).await?
+            {
+                self.pause_migration_for_test().await;
+                if self.store.get_setting(STICKY_MODEL_KEY).await?
+                    == Some(serde_json::Value::String(selection))
+                {
+                    self.store
+                        .set_setting(STICKY_MODEL_KEY, &serde_json::Value::String(equivalent))
+                        .await?;
                 }
             }
         }
@@ -1972,6 +1995,13 @@ mod tests {
         )
         .await
         .unwrap();
+        store
+            .set_setting(
+                STICKY_MODEL_KEY,
+                &serde_json::Value::String("anthropic::claude-opus-5".into()),
+            )
+            .await
+            .unwrap();
         let pinned = tidebreak_core::Chat {
             id: tidebreak_core::ChatId::new(),
             project_id: None,
@@ -1994,6 +2024,75 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("model_gateway::sample-claude")
+        );
+        assert_eq!(
+            store.get_setting(STICKY_MODEL_KEY).await.unwrap(),
+            Some(serde_json::Value::String(
+                "model_gateway::sample-claude".into()
+            ))
+        );
+        assert_eq!(
+            store
+                .get_chat(pinned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_migrates_a_uniquely_owned_legacy_bare_selection() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+
+        crate::model_roles::write_selection(
+            &*store,
+            crate::model_roles::ModelRole::Chat,
+            Some("claude-opus-5"),
+        )
+        .await
+        .unwrap();
+        store
+            .set_setting(
+                STICKY_MODEL_KEY,
+                &serde_json::Value::String("claude-opus-5".into()),
+            )
+            .await
+            .unwrap();
+        let pinned = tidebreak_core::Chat {
+            id: tidebreak_core::ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some("claude-opus-5".into()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&pinned).await.unwrap();
+
+        runtime.sync_models().await.unwrap();
+
+        assert_eq!(
+            crate::model_roles::read_selection(&*store, crate::model_roles::ModelRole::Chat)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("model_gateway::sample-claude")
+        );
+        assert_eq!(
+            store.get_setting(STICKY_MODEL_KEY).await.unwrap(),
+            Some(serde_json::Value::String(
+                "model_gateway::sample-claude".into()
+            ))
         );
         assert_eq!(
             store

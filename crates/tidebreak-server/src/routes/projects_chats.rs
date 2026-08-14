@@ -209,13 +209,25 @@ pub async fn create_chat(
         crate::code_execution::normalize_network_policy(policy)?;
     }
     let title = normalize_chat_title(body.title)?;
+    // Catalog sync can migrate both the sticky model and existing chat rows.
+    // Hold the same lock from the sticky read through the transactional chat
+    // insert, so a create cannot copy a stale value while migration is
+    // changing it, and a concurrent explicit create wins as one operation.
+    let _model_write = crate::providers::GATEWAY_STATE_WRITES.lock().await;
+    let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
     let model = match body.model.as_ref() {
         Some(model) => Some(model.clone()),
-        // A sticky selection that no longer validates — deregistered model,
-        // disabled or uncredentialed provider — falls back to the configured
-        // default instead of failing the create or pinning a dead model.
+        // On an unmanaged profile, preserve the historical recovery behavior
+        // for a stale deregistered sticky value. Under managed routing the
+        // sticky value is explicit user intent: if migration found no unique
+        // gateway equivalent, keep it on the chat so turn admission refuses
+        // honestly instead of silently choosing the catalog's first model.
         None => match read_sticky_default::<String>(&*state.store, STICKY_MODEL_KEY).await? {
-            Some(sticky) => validate_model_selection(&state, &sticky, false).await.ok(),
+            Some(sticky) => match validate_model_selection(&state, &sticky, false).await {
+                Ok(model) => Some(model),
+                Err(_) if managed.managed => Some(sticky),
+                Err(_) => None,
+            },
             None => None,
         },
     };

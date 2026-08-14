@@ -2269,8 +2269,14 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         "model_gateway::gateway-haiku"
     );
 
-    // The unresolved global pin must not silently become the gateway's first
-    // unrelated model when a turn is admitted.
+    // Clear the global pin: the explicit sticky choice made by the prior chat
+    // must still survive independently. An unmatched sticky value is copied
+    // onto the new chat and refused honestly rather than becoming an implicit
+    // first-model fallback.
+    let cleared = put_role("chat", serde_json::json!({"selection": null})).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let cleared: serde_json::Value = json_body(cleared).await;
+    assert_eq!(cleared["resolved_key"], "model_gateway::gateway-flagship");
     let chat_response = router
         .clone()
         .oneshot(
@@ -2286,18 +2292,19 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .unwrap();
     assert_eq!(chat_response.status(), StatusCode::CREATED);
     let chat: Chat = json_body(chat_response).await;
+    assert_eq!(chat.model.as_deref(), Some("openai::gpt-5.6-sol"));
     assert_eq!(
         send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "hello").await,
         StatusCode::CONFLICT
     );
 
-    // Clearing the explicit selection restores automatic behavior. The boot
-    // default is process state rather than persisted user intent, so managed
-    // chat may fall back to the gateway's first entitled model.
-    let cleared = put_role("chat", serde_json::json!({"selection": null})).await;
-    assert_eq!(cleared.status(), StatusCode::OK);
-    let cleared: serde_json::Value = json_body(cleared).await;
-    assert_eq!(cleared["resolved_key"], "model_gateway::gateway-flagship");
+    // Clearing the sticky value restores automatic behavior. The boot default
+    // is process state rather than persisted user intent, so managed chat may
+    // fall back to the gateway's first entitled model.
+    store
+        .set_setting("chat_default.model", &serde_json::Value::Null)
+        .await
+        .unwrap();
     let fallback_chat_response = router
         .clone()
         .oneshot(

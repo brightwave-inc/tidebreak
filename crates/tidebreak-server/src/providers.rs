@@ -812,15 +812,18 @@ pub(crate) async fn unique_gateway_equivalent(
     policy: &crate::managed_policy::ManagedPolicy,
     selection: &str,
 ) -> Result<Option<String>> {
-    let Some((provider, id)) = model_registry::parse_selection_key(selection) else {
-        return Ok(None);
+    let spec = if let Some((provider, id)) = model_registry::parse_selection_key(selection) {
+        if provider == ProviderKind::ModelGateway {
+            return Ok(None);
+        }
+        model_registry::find_for(provider, id)
+    } else {
+        // Pre-provider-selection builds persisted bare curated ids. Only the
+        // registry's unique direct-provider owner is safe to migrate: hosted
+        // mirrors and genuinely ambiguous names must not make us guess.
+        model_registry::find(selection)
     };
-    if provider == ProviderKind::ModelGateway {
-        return Ok(None);
-    }
-    let Some(spec) = model_registry::find_for(provider, id) else {
-        return Ok(None);
-    };
+    let Some(spec) = spec else { return Ok(None) };
     let mut matches = gateway_models(store, policy)
         .await?
         .into_iter()
