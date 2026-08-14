@@ -1021,7 +1021,10 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
         .await
         .unwrap();
     let lease = Uuid::new_v4();
-    let now = chrono::Utc::now();
+    // Turn acceptance uses SQLite's authoritative clock rounded to the end of
+    // its current millisecond. Claim just beyond that window so a same-tick
+    // fixture setup cannot make the newly queued turn appear not due yet.
+    let now = chrono::Utc::now() + chrono::Duration::milliseconds(1);
     let turn = store
         .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
         .await
@@ -1631,8 +1634,12 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
     // spend most of the ordinary 30-second guard waiting for scheduler time even
     // though the same flow completes immediately in isolation. Keep a hard
     // bound while leaving enough headroom for the integration-heavy suite.
+    // Keep this pool at the minimum width the nested durable-operation path
+    // needs: one connection can be held while another store operation advances,
+    // but a wide pool only makes operation-log and run-accounting writes compete
+    // for SQLite's single writer lock and exhaust its busy timeout under CI load.
     tokio::time::timeout(Duration::from_secs(60), async {
-        let (_dir, store, chat) = store_with_pool(Some(32)).await;
+        let (_dir, store, chat) = store_with_pool(Some(2)).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
 
         let backend = MockBackend::spawning();
