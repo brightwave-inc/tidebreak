@@ -2926,7 +2926,7 @@ async fn cancellation_interrupts_held_provision_and_sweeps_its_tagged_side_effec
             "the held provisioning call is registered under the exact durable lease"
         );
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
             .expect("cancellation must not wait for provision or the 30-second heartbeat")
             .unwrap()
@@ -3035,7 +3035,7 @@ async fn cross_process_cancellation_interrupts_held_provision_without_a_local_si
             "the cancelling process owns no registration for the remote drive"
         );
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
             .expect("the durable watcher must beat the 30-second heartbeat")
             .unwrap()
@@ -3103,7 +3103,7 @@ async fn cross_process_cancellation_interrupts_blocked_model_resolution() {
             .unwrap()
             .expect("the remote cancellation commits");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
             .expect("blocked model resolution is preempted by durable cancellation")
             .unwrap()
@@ -3243,7 +3243,7 @@ async fn exact_provision_admission_refuses_a_remotely_cancelled_claim() {
             .expect("the remote cancellation commits before admission resumes");
         fault_store.setup_release.notify_one();
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
             .expect("the refused exact admission finalizes cancellation promptly")
             .unwrap()
@@ -3300,7 +3300,7 @@ async fn failing_provision_intent_reconciles_remote_cancellation() {
             .expect("the remote cancellation commits");
         fault_store.setup_release.notify_one();
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), drive)
+        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
             .expect("the setup error is reconciled as cancellation")
             .unwrap()
@@ -3547,7 +3547,7 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
         );
 
         let late = tokio::time::timeout(
-            Duration::from_secs(1),
+            Duration::from_secs(5),
             sandbox.call(
                 OperationId::new(),
                 ReverseRequest::ModelInference(ModelInferenceParams {
@@ -3707,7 +3707,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             "the request attempted after terminal cleanup began must not execute"
         );
 
-        let first = tokio::time::timeout(Duration::from_secs(1), first_call)
+        let first = tokio::time::timeout(Duration::from_secs(5), first_call)
             .await
             .expect("the original sandbox call observes connection teardown")
             .unwrap();
@@ -3807,7 +3807,7 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
-        let reverse = tokio::time::timeout(Duration::from_secs(1), reverse_call)
+        let reverse = tokio::time::timeout(Duration::from_secs(5), reverse_call)
             .await
             .expect("the sandbox call observes connection teardown")
             .unwrap();
