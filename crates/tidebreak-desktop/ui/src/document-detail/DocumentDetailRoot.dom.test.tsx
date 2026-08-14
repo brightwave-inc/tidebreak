@@ -48,10 +48,20 @@ vi.mock("@/document/PdfViewer", async () => {
   };
 });
 
-// Univer renders to a canvas through a worker, which jsdom has neither of. The
-// stand-in reports the range the panel handed it, which is the part the panel
-// is responsible for; selecting and scrolling to those cells is the viewer's
-// own, and it already did that before anything produced a range.
+// Spreadsheet viewers render to a canvas through a worker, which jsdom has
+// neither of. These stand-ins report the range the panel handed them, which is
+// the part the panel is responsible for; selecting and scrolling to those
+// cells is the viewer's own behavior.
+vi.mock("@/document/NativeSpreadsheetViewer", () => ({
+  default: ({ highlightRange }: { highlightRange?: SheetHighlightRange }) => (
+    <div>
+      {highlightRange
+        ? `Sheet ${highlightRange.sheetName} ${highlightRange.startCell}:${highlightRange.endCell}`
+        : "Workbook"}
+    </div>
+  ),
+}));
+
 vi.mock("@/document/UniverSpreadsheetViewer", () => ({
   default: ({ highlightRange }: { highlightRange?: SheetHighlightRange }) => (
     <div>
