@@ -1,4 +1,4 @@
-# 8. Settled folder positions
+# 11. Settled folder positions
 
 - Status: Accepted
 - Date: 2026-08-11

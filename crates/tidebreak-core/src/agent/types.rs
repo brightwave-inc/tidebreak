@@ -70,7 +70,7 @@ Include only facts explicit in the conversation above. Preserve opaque source, c
 /// Compaction is deliberately not one of these: it runs on the conversation's
 /// own model and route so it can read the conversation's prompt cache instead
 /// of paying full price for a second copy of the transcript. See
-/// `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
+/// `docs/decisions/0019-compaction-rides-the-conversation-cache.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UtilityModel {
     /// Explicit provider route for this model.

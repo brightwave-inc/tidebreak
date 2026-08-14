@@ -1,9 +1,9 @@
-# 13. Desktop Staging Channel from Main
+# 16. Desktop Staging Channel from Main
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Owners: desktop and release
-- Related: [releases](../releases.md), [decision 12](0012-tidebreak-product-and-technical-identity.md)
+- Related: [releases](../releases.md), [decision 15](0015-tidebreak-product-and-technical-identity.md)
 - Supersedes: none
 
 ## Context

@@ -101,7 +101,7 @@ pub async fn post_compact(
         // request shape, and a turn's request advertises the turn's tools. An
         // on-demand compaction therefore starts cold more often than the
         // in-turn pass does — see
-        // `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
+        // `docs/decisions/0019-compaction-rides-the-conversation-cache.md`.
         std::sync::Arc::new(ToolRegistry::new()),
         state.store.clone(),
         config,

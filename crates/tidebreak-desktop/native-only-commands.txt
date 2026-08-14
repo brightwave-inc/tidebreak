@@ -1,6 +1,6 @@
 # Native-only Tauri commands.
 #
-# Decision record 5 (docs/decisions/0005-cli-headless-feature-parity.md) makes
+# Decision record 7 (docs/decisions/0007-cli-headless-feature-parity.md) makes
 # the server HTTP/WS API the canonical product surface: a feature has
 # CLI/headless parity when it is reachable through `tidebreak-server` routes.
 # A `#[tauri::command]` is reserved for what genuinely needs the native shell —
@@ -16,7 +16,7 @@
 #
 # Adding a line is a conscious amendment, not a formality: if the command is not
 # native-only, it belongs behind a server route instead. Lines marked
-# `TODO(record 5)` are commands that already existed when the gate landed and do
+# `TODO(record 7)` are commands that already existed when the gate landed and do
 # not fit the closed native-only set — they are recorded debt to migrate, not
 # precedent for new ones.
 #
@@ -61,14 +61,14 @@ desktop_update_state: reports the native auto-updater's state.
 check_for_update: asks the native auto-updater to check.
 restart_for_update: relaunches the app to apply a staged native update.
 
-# TODO(record 5): commands that predate the gate and do not fit the native-only
+# TODO(record 7): commands that predate the gate and do not fit the native-only
 # set. Each should become a server route with a CLI client; until then they are
 # listed so the gate stays honest about what is already owed.
-publish_chat_image: TODO(record 5) — publishes pasted image bytes from the renderer; no native shell involvement, belongs on the ingest routes.
-list_connected_folders: TODO(record 5) — broker read with no native UI; headless consumers need the same listing.
-list_approved_folders: TODO(record 5) — broker read with no native UI.
-list_capability_consents: TODO(record 5) — broker read with no native UI; the consent projection should be a route.
-revoke_capability_consent: TODO(record 5) — broker mutation with no native dialog; revocation must be reachable headlessly.
-disconnect_folder: TODO(record 5) — broker mutation with no native dialog; record 5 item 4 gives folders a CLI path.
-forget_folder: TODO(record 5) — broker mutation with no native dialog.
-purge_deleted_conversation_subject: TODO(record 5) — broker cleanup with no native dialog.
+publish_chat_image: TODO(record 7) — publishes pasted image bytes from the renderer; no native shell involvement, belongs on the ingest routes.
+list_connected_folders: TODO(record 7) — broker read with no native UI; headless consumers need the same listing.
+list_approved_folders: TODO(record 7) — broker read with no native UI.
+list_capability_consents: TODO(record 7) — broker read with no native UI; the consent projection should be a route.
+revoke_capability_consent: TODO(record 7) — broker mutation with no native dialog; revocation must be reachable headlessly.
+disconnect_folder: TODO(record 7) — broker mutation with no native dialog; record 7 item 4 gives folders a CLI path.
+forget_folder: TODO(record 7) — broker mutation with no native dialog.
+purge_deleted_conversation_subject: TODO(record 7) — broker cleanup with no native dialog.

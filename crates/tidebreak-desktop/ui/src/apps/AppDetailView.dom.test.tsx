@@ -627,7 +627,7 @@ describe("AppDetailView", () => {
   };
 
   it("opens the app's page at the gateway rather than publishing here", async () => {
-    // Decision record 11: publishing mutates entitlement state the gateway
+    // Decision record 14: publishing mutates entitlement state the gateway
     // owns, so this host resolves the address and hands the author over. What
     // it must never do is publish, and there is no longer anything here that
     // could.

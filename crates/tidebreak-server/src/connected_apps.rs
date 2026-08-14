@@ -504,8 +504,8 @@ pub(crate) fn governed_rest_dispatcher(
 
 /// One shared-app operation call, as the invoke route assembled it.
 ///
-/// The field names are the gateway's own invoke vocabulary (ADR 0036) rather
-/// than a second spelling of it: `gateway_app` is what crosses the wire as
+/// The field names are the gateway's own invoke vocabulary rather than a
+/// second spelling of it: `gateway_app` is what crosses the wire as
 /// `connected_app_id`, and the three passthrough halves are opaque JSON the
 /// server never interprets — a bundle authored against a harness frame speaks
 /// exactly this shape to the gateway shell.

@@ -1,10 +1,10 @@
-# 16. Scoped Local Import Capability for Attached CLI Publication
+# 22. Scoped Local Import Capability for Attached CLI Publication
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - Owners: cli, server, desktop
-- Related: [`0005-cli-headless-feature-parity.md`](0005-cli-headless-feature-parity.md),
-  [`0009-data-dir-listen-endpoint.md`](0009-data-dir-listen-endpoint.md)
+- Related: [`0007-cli-headless-feature-parity.md`](0007-cli-headless-feature-parity.md),
+  [`0012-data-dir-listen-endpoint.md`](0012-data-dir-listen-endpoint.md)
 - Supersedes: none
 
 ## Context
@@ -22,7 +22,7 @@ currently grouped with native client-executor routes, so `--attach attach`
 always receives HTTP 401. The primary bearer is valid; the missing credential
 is a capability the command can never obtain. Directly publishing caller-held
 bytes is not a native host action, but admitting it with the full
-client-executor token would collapse the boundary decision 9 protects.
+client-executor token would collapse the boundary decision 12 protects.
 
 ## Decision
 

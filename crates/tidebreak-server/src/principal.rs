@@ -20,7 +20,7 @@
 //! (owner-scoped data and capability discovery) and the deployment plane
 //! (what the deployment *is*, and its shared secrets) is enforced by
 //! [`crate::auth::require_admin`] over the role resolved here — see
-//! `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
+//! `docs/decisions/0006-self-host-deployment-plane-authorization.md`.
 
 use std::fmt;
 use std::sync::Arc;

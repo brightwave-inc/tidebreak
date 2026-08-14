@@ -58,8 +58,8 @@
   --info-background: oklch(0.951 0.026 236.824);
   --info-border: oklch(0.391 0.09 240.876);
 
-  /* Brand highlight — the band a cited phrase carries and the chip beside it. */
-  --brightwave: oklch(0.87 0.2 102);
+  /* Brand highlight — the band a source phrase carries and the chip beside it. */
+  --brand-accent: oklch(0.87 0.2 102);
   --citation-mark: var(--color-neutral-300);
   --citation-mark-active-ink: var(--foreground);
 
@@ -101,9 +101,8 @@
 
 .dark {
   /* --- Tidebreak palette (oklch, dark mode) --- */
-  /* Deliberate divergence from Brightwave: cool near-neutral grays (hue ~262,
-     chroma <= 0.01) instead of the warm hue-85 ramp, which read brown at low
-     lightness. Elevation is carried by the lightness ramp alone:
+  /* Cool near-neutral grays (hue ~262, chroma <= 0.01) keep low-lightness
+     surfaces from reading brown. Elevation is carried by the lightness ramp:
      page chrome 0.12 < popover 0.14 < card 0.16 < content surface 0.21. */
   color-scheme: dark;
 
@@ -160,7 +159,7 @@
 
   /* The band keeps its brand chroma on a dark page; only the chip and the glyph
      it sits on have to swap so the mark stays legible either way. */
-  --brightwave: oklch(0.87 0.2 102);
+  --brand-accent: oklch(0.87 0.2 102);
   --citation-mark: var(--color-neutral-700);
   --citation-mark-active-ink: var(--background);
 
@@ -227,7 +226,7 @@
   --color-info-background: var(--info-background);
   --color-info-border: var(--info-border);
 
-  --color-brightwave: var(--brightwave);
+  --color-brand-accent: var(--brand-accent);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
@@ -813,7 +812,7 @@ body {
    from nothing to the full phrase — an underline's thickness is animatable, its
    length is not. */
 .inline-citation-phrase {
-  background-image: linear-gradient(var(--brightwave), var(--brightwave));
+  background-image: linear-gradient(var(--brand-accent), var(--brand-accent));
   background-position: left bottom;
   background-repeat: no-repeat;
   background-size: 0% 35%;
@@ -838,7 +837,7 @@ body {
 .inline-citation:hover .inline-citation-mark,
 .inline-citation:focus-visible .inline-citation-mark,
 .inline-citation[data-state="open"] .inline-citation-mark {
-  background: var(--brightwave);
+  background: var(--brand-accent);
 }
 
 /* Mirrored to read as a closing quote, and filled rather than stroked because a

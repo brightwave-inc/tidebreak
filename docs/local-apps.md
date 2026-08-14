@@ -36,7 +36,7 @@ An app revision is an untrusted **bundle** and a trusted **manifest**:
   connected-app records ([connected-apps.md](connected-apps.md)) that
   contribute them, `{ folder, access }` naming a connected folder, or
   `{ gateway_app, operation_ids[] }` naming a connected app the model gateway
-  holds (record 7). The manifest — not the bundle — is what the user consents
+  holds (record 10). The manifest — not the bundle — is what the user consents
   to and what the host enforces per call.
 
   The gateway shape resolves against the signed-in gateway session: the
@@ -225,7 +225,7 @@ history is what was servable when it was used. From there the gateway stores
 everything sharing-related: the draft and its revisions, the published status,
 and the per-team grants that make it openable.
 
-**Publishing is not done here.** Decision record 11 places it on the gateway's
+**Publishing is not done here.** Decision record 14 places it on the gateway's
 own web surface, next to the publish state, the grants, and the revocation it
 belongs with. Publishing mutates gateway-owned entitlement state; every other
 mutation of that state already happens at the gateway, and a publish dialog in
@@ -239,7 +239,7 @@ publish route.
 Three properties make the registration a copy rather than a translation:
 
 - **The binding vocabulary maps.** A gateway binding already names what the
-  gateway's own shared-app manifests name — record 7 rejected the
+  gateway's own shared-app manifests name — record 10 rejected the
   translate-at-publish design, because a manifest rewritten at share time was
   never run the way its viewers will run it. Folder and local `rest_api`
   bindings are dropped rather than translated: they name capabilities that

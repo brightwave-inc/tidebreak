@@ -1,9 +1,9 @@
-# 21. Apps Have Immutable Principal Ownership
+# 28. Apps Have Immutable Principal Ownership
 
 - Status: Proposed
 - Date: 2026-08-14
 - Owners: app runtime and storage
-- Related: 0004-self-host-deployment-plane-authorization.md, principal-scoped storage
+- Related: 0006-self-host-deployment-plane-authorization.md, principal-scoped storage
 - Supersedes: none
 
 ## Context

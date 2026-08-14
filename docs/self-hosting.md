@@ -29,7 +29,7 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes three things about the server:
   nobody is empowered to configure.
 
 The deployment posture is stated in
-[decision record 4](decisions/0004-self-host-deployment-plane-authorization.md):
+[decision record 6](decisions/0006-self-host-deployment-plane-authorization.md):
 the server and its database run inside the operator's own network, and TLS
 termination and network exposure belong to the operator's fronting
 infrastructure. Tidebreak serves plain HTTP and never terminates TLS.
@@ -94,7 +94,7 @@ and connected-app sign-in and sign-out.
 That split is a property of the router rather than of individual handlers, so
 a configuration route cannot quietly land outside the gate. The reasoning, the
 rejected alternatives, and what would make us revisit it are in
-[decision record 4](decisions/0004-self-host-deployment-plane-authorization.md).
+[decision record 6](decisions/0006-self-host-deployment-plane-authorization.md).
 
 Give `admin` only to the people who actually administer the deployment: MCP
 server definitions spawn processes on the host, and the provider credentials

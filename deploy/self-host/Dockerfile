@@ -14,7 +14,7 @@
 #   docker build -f "$context/deploy/self-host/Dockerfile" -t tidebreak-self-host "$context"
 #   rm -rf "$context"
 #
-# The deployment posture this image assumes is decision record 4: the server
+# The deployment posture this image assumes is decision record 6: the server
 # and its PostgreSQL database run inside the operator's own network, and TLS
 # termination plus network exposure belong to the operator's fronting
 # infrastructure. Nothing here terminates TLS. See docs/self-hosting.md.

@@ -2,8 +2,8 @@
 //!
 //! After a successful bind, the server writes `{data_dir}/listen.json` so a
 //! second process can attach without the token riding argv. See
-//! [`docs/decisions/0009-data-dir-listen-endpoint.md`] and
-//! [`docs/decisions/0016-scoped-local-import-capability.md`]. The
+//! [`docs/decisions/0012-data-dir-listen-endpoint.md`] and
+//! [`docs/decisions/0022-scoped-local-import-capability.md`]. The
 //! client-executor credential is deliberately absent. A separate scoped token
 //! permits only publication of bytes the attached process already holds.
 

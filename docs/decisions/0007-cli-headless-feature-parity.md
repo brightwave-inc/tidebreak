@@ -1,11 +1,11 @@
-# 5. CLI/Headless Feature Parity: the Server API Is the Product Surface
+# 7. CLI/Headless Feature Parity: the Server API Is the Product Surface
 
 - Status: Accepted
 - Date: 2026-08-10
 - Owners: cli, server, desktop
 - Related: [`docs-site/content/docs/headless.mdx`](../../docs-site/content/docs/headless.mdx)
   (current headless documentation),
-  [`docs/crates.md`](../crates.md) (crate boundaries; flags `openwave-cli` as
+  [`docs/crates.md`](../crates.md) (crate boundaries; flags `tidebreak-cli` as
   a partial baseline), record 2 (pre-v1 mutability of persisted and wire
   formats)
 - Supersedes: none
@@ -20,7 +20,7 @@ an unattended run needs to keep going.
 
 **What is true today.** The desktop app is a thin Tauri shell around an
 embedded `openwave-server`; the React UI talks to it over the same HTTP+WS API
-(~90 routes in [`crates/openwave-server/src/lib.rs`](../../crates/openwave-server/src/lib.rs))
+(~90 routes in [`crates/tidebreak-server/src/lib.rs`](../../crates/tidebreak-server/src/lib.rs))
 that `openwave serve` exposes. Chats, turns, event streaming, models,
 providers, credentials, approvals, plans, questions, permission modes, MCP
 servers, plugins, and settings are all plain HTTP — none of them go through
@@ -31,7 +31,7 @@ already headless.
 **What is not reachable headlessly.** The gaps are concentrated:
 
 - **Unattended turns die on interaction points.** Print mode auto-rejects
-  every approval ([`crates/openwave-cli/src/print.rs`](../../crates/openwave-cli/src/print.rs))
+  every approval ([`crates/tidebreak-cli/src/print.rs`](../../crates/tidebreak-cli/src/print.rs))
   and *cancels the turn* when the agent proposes a plan or asks a question —
   precisely the events a driving agent could answer if the CLI surfaced them.
 - **Setup requires raw HTTP.** There are no CLI subcommands for provider,
@@ -40,7 +40,7 @@ already headless.
 - **Host folder access has no headless consent path.** Connected folders are
   brokered by `openwave-host-broker` behind a native picker/dialog. The broker
   already models an `OperatorConfig` consent method designed for headless
-  provisioning ([`crates/openwave-host-broker/src/capability.rs`](../../crates/openwave-host-broker/src/capability.rs)),
+  provisioning ([`crates/tidebreak-host-broker/src/capability.rs`](../../crates/tidebreak-host-broker/src/capability.rs)),
   but nothing wires it up.
 - **Attachments and output export are Tauri commands.** Attaching local files
   and exporting deliverables/output revisions live in

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-07
 - Owners: desktop
-- Related: [How OpenWave works](../how-openwave-works.md) (document model),
+- Related: [How Tidebreak works](../how-tidebreak-works.md) (document model),
   [Tool architecture](../tools.md) (the document-reading tool pair),
   [Host access and connected folders](../host-access.md) (the grant subject a
   conversation carries, and the creation-time root snapshot this record

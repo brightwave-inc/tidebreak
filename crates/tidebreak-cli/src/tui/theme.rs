@@ -11,7 +11,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 /// The one brand accent: the wordmark, ❯ input markers, the working spinner,
-/// the approval card's gutter and approve action. From `--brightwave`
+/// the approval card's gutter and approve action. From `--brand-accent`
 /// (oklch 0.87 0.2 102).
 pub const ACCENT: Color = Color::Rgb(240, 215, 0);
 

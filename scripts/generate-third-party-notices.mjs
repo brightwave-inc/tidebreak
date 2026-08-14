@@ -434,7 +434,7 @@ export function renderNotices({ rustPackages, nodePackages }) {
     "```",
     "",
     "It covers every package in the resolved Cargo workspace graph that is not",
-    "an Tidebreak crate, and every package in the desktop UI's production",
+    "a Tidebreak crate, and every package in the desktop UI's production",
     "dependency graph. Development-only dependencies are excluded because they",
     "are not distributed.",
     "",

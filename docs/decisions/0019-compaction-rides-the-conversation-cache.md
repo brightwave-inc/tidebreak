@@ -1,6 +1,6 @@
-# 15. Compaction rides the conversation's prompt cache
+# 19. Compaction rides the conversation's prompt cache
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Owners: agent runtime
 - Related: `crates/tidebreak-core/src/agent/context.rs`,

@@ -67,8 +67,8 @@ The product store therefore owns an output record whose identity is an opaque
   foreground turn or a background run, never both — recorded in two mutually
   exclusive nullable references so existing turn-produced revisions are
   unchanged and a background run can now be attributed just as precisely. Only a
-  turn producer may carry retrieval citations, which resolve against the turn's
-  evidence. Revision rows are insert-only.
+  turn producer may carry retrieval source references, which resolve against
+  the turn's evidence. Revision rows are insert-only.
 - Updating an output appends a revision and republishes the current one. The
   replaced revision keeps its own id and stays readable, so an update can no
   longer destroy the bytes it supersedes.

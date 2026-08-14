@@ -148,7 +148,7 @@ The connector speaks a small, versioned HTTP surface on the gateway:
   draft, appending each later revision, and relaying a viewer's consent and
   the app's own operation calls. The gateway's **publish** route is
   deliberately absent: publishing is a governance action done on the
-  gateway's web surface (decision record 11), and no code path here calls it.
+  gateway's web surface (decision record 14), and no code path here calls it.
   What this host resolves instead is the address of the app's page there, so
   the author can be handed over to it.
 - `/oauth/authorize`, `/oauth/token`, `/oauth/revoke` — the flow above.

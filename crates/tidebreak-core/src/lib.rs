@@ -8,10 +8,9 @@
 //! This crate must never depend on a specific client, and is independently
 //! publishable on crates.io.
 //!
-//! Built incrementally with the M0 walking skeleton. Present so far: [`id`]
-//! (typed identifiers), [`error`], [`model`] (the persisted chat/message
-//! model), [`tool`] (the tool contract), and [`provider`] (the model-provider
-//! contract).
+//! The main surfaces are [`id`] (typed identifiers), [`error`], [`model`] (the
+//! persisted chat/message model), [`tool`] (the tool contract), and [`provider`]
+//! (the model-provider contract).
 
 /// Version of the Tidebreak product containing this crate.
 ///

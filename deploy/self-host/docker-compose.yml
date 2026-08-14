@@ -2,8 +2,8 @@
 #
 # THIS STACK BINDS TO LOCALHOST BY DESIGN. The published port below is
 # `127.0.0.1:8080`, and the API it serves is plain HTTP with bearer-token
-# authentication. Decision record 4 (docs/decisions/
-# 0004-self-host-deployment-plane-authorization.md) states the supported
+# authentication. Decision record 6 (docs/decisions/
+# 0006-self-host-deployment-plane-authorization.md) states the supported
 # posture: the server and PostgreSQL run inside the operator's own network,
 # and TLS termination plus network exposure belong to the operator's fronting
 # infrastructure. Do not change the port binding to `0.0.0.0` to "make it

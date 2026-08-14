@@ -5,7 +5,7 @@ when someone uses it, why the code has several asynchronous state machines, and
 where the unfinished edges are. It is meant to be readable before you know the
 Rust code or the history behind it.
 
-Tidebreak is pre-alpha. The runtime is substantially more complete than the
+Tidebreak is pre-1.0. The runtime is substantially more complete than the
 desktop experience, and both the schema and crate boundaries are still free to
 change.
 
@@ -147,7 +147,7 @@ billed at the model and reasoning effort chosen for the conversation. Compacting
 a long transcript is deliberately *not* one of those: it runs on the chat's own
 model so the summarization call can read the conversation's prompt cache instead
 of paying for a second full copy of the transcript — see
-[decision 0015](decisions/0015-compaction-rides-the-conversation-cache.md). Each
+[decision 0019](decisions/0019-compaction-rides-the-conversation-cache.md). Each
 role can be pinned to one model (`PUT /models/roles/{role}`, stored under
 `model.<role>`); left automatic, it resolves against an ordered list of curated
 defaults and takes the first entry whose provider is enabled and credentialed.
@@ -552,7 +552,7 @@ result rather than applying the instruction twice.
 Attaching a file does not crawl connected roots. Files enter through the
 composer, are scoped to the exact chat, and are linked to the user message that
 introduced them. They render as chips in the transcript; opening a chip uses the
-same document viewer as a citation. A source URI is identity and provenance;
+same document viewer as a response's source pill. A source URI is identity and provenance;
 Tidebreak does not fetch that URI itself. The lower-level global and project
 document APIs remain as legacy surfaces, but the desktop does not use them as a
 fallback or expose a standalone source catalog.
@@ -596,7 +596,7 @@ path.
 Readiness follows the row itself: non-empty canonical text is `readable`, and
 empty canonical text is `stored_no_text`. A real decode error fails the upload
 request instead of creating a failed background job. Source regions and parser
-fingerprints are not persisted because span citations and reparse decisions no
+fingerprints are not persisted because source locators and reparse decisions no
 longer consume them.
 
 ### 4. Retire unused blobs
@@ -608,29 +608,30 @@ but never became referenced because a later catalog transaction failed.
 
 ## How grounded sources reach a chat answer
 
-A citation is written by the model itself: an inline directive wrapping the
-cited phrase and naming a document id plus a human-scale locator — a page or
-page range, a line range, or a workbook sheet optionally narrowed to a cell
-range. The model cites the position it saw when it read the source; there is
-no server-side span resolution, no evidence store, and no opaque token
-protocol. The loop validates only shape and bounds before committing the
-message and its ordered citation records together, and exact retries reuse the
-same message and citation identities, so an ambiguous database response cannot
+The model can attach a source reference to an answer by naming a document id
+plus a human-scale locator — a page or page range, a line range, or a workbook
+sheet optionally narrowed to a cell range. It records the position it saw when
+it read the source; there is no server-side span resolution, evidence store, or
+opaque token protocol. The loop validates shape and bounds before committing
+the message and its ordered source records together. Exact retries reuse the
+same message and source identities, so an ambiguous database response cannot
 create a second historical answer.
 
-The transcript API exposes each citation as a small record: ordinal, document
-id, and locator. Clicking a citation opens the document viewer at that
-locator. The precision is deliberately coarse — the reader lands on the page
-or lines, not a highlighted span — and a locator the model gets slightly wrong
-still opens the right document. Deleting or replacing a document leaves older
-citations pointing at a source that may no longer exist; the viewer says so
-rather than rewriting history.
+The transcript API still calls these records `citations`; that is an internal
+wire and storage term, not the product presentation. The desktop shows a
+numbered **Sources** row below the response. Expanding it reveals the recorded
+locations, and opening one takes the reader to that source in the document
+viewer. The precision is deliberately coarse — the reader lands on the page or
+lines, not a highlighted span — and a locator the model gets slightly wrong
+still opens the right document. Deleting or replacing a document leaves an
+older source record pointing at something that may no longer exist; the viewer
+says so rather than rewriting history.
 
 During generation, an incremental filter recognizes directives even when a
 provider splits them across many streaming events, so partially streamed
 directive syntax never flashes through the live renderer stream; malformed or
 incomplete marker-like prose remains ordinary text. Messages written before
-this grammar render their historical directives as plain cited text.
+this grammar render their historical directives as plain text.
 
 ## The different ways to run Tidebreak
 
@@ -643,8 +644,8 @@ The browser-facing API is not exposed on a public network interface.
 The current UI is a workspace-style conversation shell, not the complete
 product. It reopens durable chats and supports conversation create/list/switch/
 rename/delete, transcript hydration, Markdown messages, file and photo
-attachments on messages with a document viewer, inline citation chips that
-open the viewer at the cited position, live and historical tool-call rendering
+attachments on messages with a document viewer, expandable source pills that
+open the viewer at the recorded position, live and historical tool-call rendering
 including exec preview images, reconnectable streaming, provider and
 web-search setup, model selection, a foreground-turn stop control, approval
 prompts, and native connected-folder attach/list/revoke from the chat. The foreground stop control sends
@@ -810,7 +811,7 @@ remembered a check, and a route-table conformance suite drives one admin and
 one member across the assembled router to keep that classification honest.
 Roles beyond the two, groups, per-capability grants, and per-user provider
 credentials are deliberately excluded — see
-[decision 4](decisions/0004-self-host-deployment-plane-authorization.md).
+[decision 6](decisions/0006-self-host-deployment-plane-authorization.md).
 
 Configuration remains deployment-scoped rather than per-user: the settings
 table configures the deployment itself, shared credentials are the point of a

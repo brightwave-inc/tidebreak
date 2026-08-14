@@ -6,7 +6,7 @@
 //! [`ModelRole::Utility`] is for work the user did not ask for: naming a chat
 //! and judging an approval today, and other maintenance later. Compacting a
 //! transcript is deliberately not one of them — it runs on the conversation's
-//! own model so it can read that conversation's prompt cache (decision 0015).
+//! own model so it can read that conversation's prompt cache (decision 0019).
 //! Two roles is deliberate; adding a third is an entry in the tables below
 //! rather than a refactor.
 //!

@@ -3,7 +3,7 @@
 //! The three identities must not share a bundle id, product name, keychain
 //! service, or deep-link scheme. Debug is selected by the build profile;
 //! staging is selected by `TIDEBREAK_CHANNEL=staging` on a release build.
-//! See [`docs/decisions/0013-desktop-staging-channel.md`].
+//! See [`docs/decisions/0016-desktop-staging-channel.md`].
 
 pub const PRODUCTION_IDENTIFIER: &str = "io.brightwave.tidebreak";
 pub const DEV_IDENTIFIER: &str = "io.brightwave.tidebreak.dev";

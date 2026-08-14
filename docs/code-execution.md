@@ -450,6 +450,6 @@ tool arguments, logs, or renderer responses. Remote API endpoints are fixed by
 the build; Daytona toolbox URLs returned by the control plane are restricted to
 HTTPS Daytona origins. By default both managed providers allow internet access
 inside the sandbox, unlike the local native provider; a configured
-[egress policy](#egress-policy) restricts that access at sandbox creation. E2B's
+[network policy](#per-chat-network-policy) restricts that access at sandbox creation. E2B's
 enforcement is confirmed but applied-with-gaps; Daytona's per-sandbox policy is a
 strict, live-confirmed boundary conditional on org tier 3+.

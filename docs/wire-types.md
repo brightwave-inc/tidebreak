@@ -118,7 +118,7 @@ worth knowing before adding types.
 ## Scope today
 
 **Generated: the whole renderer surface.** The WebSocket frame and event union, the
-tool vocabulary and previews, approval kinds, the transcript and its citations,
+tool vocabulary and previews, approval kinds, the transcript and its source records,
 all three consent surfaces, and the configuration, catalog, project, chat, and
 agent-run DTOs.
 
@@ -135,8 +135,9 @@ agent-run DTOs.
 Two generated types carry a visible override rather than being aliased, both
 written with `Omit` so the divergence is legible:
 
-- **`ChatMessage.citations`** stays optional. The server always sends it, but the
-  transcript arrives as a parsed cast with no validation, so the `?` is what
+- **`ChatMessage.citations`** stays optional. Despite the internal field name,
+  these records populate the desktop's **Sources** row. The server always sends
+  it, but the transcript arrives as a parsed cast with no validation, so the `?` is what
   forces the guard that reads it. Narrowing it would delete that guard rather
   than earn it.
 - **`ModelInfo.key`** is re-branded as `ModelSelectionKey`. The wire is honestly

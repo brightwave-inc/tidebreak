@@ -1,10 +1,10 @@
-# 17. Background Agent Runs Own Cumulative Usage Accounting
+# 23. Background Agent Runs Own Cumulative Usage Accounting
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - Owners: core storage, sandbox workers, agent-run API
 - Related: [`docs/agent-runs.md`](../agent-runs.md),
-  [`0015-compaction-rides-the-conversation-cache.md`](0015-compaction-rides-the-conversation-cache.md)
+  [`0019-compaction-rides-the-conversation-cache.md`](0019-compaction-rides-the-conversation-cache.md)
 - Supersedes: none
 
 ## Context

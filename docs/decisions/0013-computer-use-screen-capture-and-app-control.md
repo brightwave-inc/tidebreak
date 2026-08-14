@@ -1,6 +1,6 @@
-# 10. Computer use: screen capture and app control
+# 13. Computer use: screen capture and app control
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 - Owners: desktop / agent core
 - Related: [`docs/deferred.md`](../deferred.md) (browser surface), permission

@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a focused improvement to Tidebreak.
+title: "feat: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the work you are trying to complete, not only the interface you want.
+        Large implementation proposals should be discussed here before a pull request is opened.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Explain the workflow, constraint, or missing capability.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What happens today?
+      description: Include workarounds and why they are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would a good outcome look like?
+      description: A product outcome is more useful than a prescriptive implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, examples, screenshots, or constraints that would help evaluate the request.

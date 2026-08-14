@@ -1,9 +1,9 @@
-# 14. Gateway capability negotiation, not version pinning
+# 17. Gateway capability negotiation, not version pinning
 
 - Status: Accepted
 - Date: 2026-08-13
 - Owners: gateway connector / providers
-- Related: 0007 (gateway app bindings), the model gateway's own member-catalog
+- Related: 0010 (gateway app bindings), the model gateway's own member-catalog
   contract (`GET /api/v1/me/catalog`, `surfaces`, denial codes) shipped in
   model-gateway #635/#636
 
@@ -68,3 +68,12 @@ on that boundary. Revisit if gateway deployments ever become centrally
 version-managed (a fleet where the matrix cannot rot), or if a surface
 arrives that genuinely cannot degrade — either would justify a hard minimum
 gateway version at pairing time instead.
+
+## Validation
+
+- Catalog sync tests cover both the preferred member-catalog response and the
+  legacy models/apps fallback after a 404.
+- Gateway wire fixtures accept unknown additive fields and unknown denial
+  codes without failing the whole response.
+- No client behavior branches on `gateway_version`; it remains diagnostic
+  metadata only.

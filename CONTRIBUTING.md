@@ -1,8 +1,8 @@
 # Contributing to Tidebreak
 
-Thanks for your interest in Tidebreak! It's early — the fastest way to help right
-now is to try the walking skeleton as it lands, file sharp issues, and discuss
-design before large changes.
+Thanks for your interest in Tidebreak! It's early — the fastest way to help is
+to try the latest build, file focused issues, and discuss design before large
+changes.
 
 ## Ground rules
 

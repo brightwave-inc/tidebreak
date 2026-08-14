@@ -1,9 +1,9 @@
-# 6. Mid-turn sends queue by default; steering is the explicit alternative
+# 9. Mid-turn sends queue by default; steering is the explicit alternative
 
 - Status: Accepted
 - Date: 2026-08-10
 - Owners: chat turn lifecycle, desktop composer
-- Related: [0005](0005-checkin-needs-input.md); `crates/openwave-core/src/db/ops/turn/queued.rs`
+- Related: [0008](0008-checkin-needs-input.md); `crates/tidebreak-core/src/db/ops/turn/queued.rs`
 - Supersedes: —
 
 ## Context

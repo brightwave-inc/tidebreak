@@ -1,6 +1,6 @@
-# 18. Model-Declared Blocked Turns Are Refused, Not Completed
+# 24. Model-Declared Blocked Turns Are Refused, Not Completed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - Owners: agent runtime, turn lifecycle, CLI
 - Related: [`docs-site/content/docs/headless.mdx`](../../docs-site/content/docs/headless.mdx),

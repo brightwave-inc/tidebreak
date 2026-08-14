@@ -19,7 +19,7 @@
 //! prompts instead of a card per action; over-asking on navigation-shaped words
 //! (cancel, back, close, decline) trains click-through and makes the capability
 //! unusable. So commit-shaped words trip the gate and navigation-shaped words
-//! do not. This is a deliberate tradeoff recorded in decision record 0010: we
+//! do not. This is a deliberate tradeoff recorded in decision record 0013: we
 //! accept a slightly narrower tripwire in exchange for a consent flow the user
 //! will actually read.
 
@@ -58,10 +58,10 @@ pub enum Consequence {
 /// Deliberately narrow: navigation- and dismissal-shaped words (cancel, back,
 /// close, decline, confirm, accept, archive, block, report, approve) are NOT
 /// here. Asking again on those is the over-asking failure mode — see decision
-/// record 0010.
+/// record 0013.
 ///
 /// Locale bound: this lexicon is English. That is a deliberate accepted
-/// bound (decision record 0010), not an omission to fill with a translation
+/// bound (decision record 0013), not an omission to fill with a translation
 /// dictionary. Navigation words in other languages remaining untripped is
 /// the same over-ask tradeoff as keeping the English list short.
 const RISK_ACTION_WORDS: &[&str] = &[
@@ -166,7 +166,7 @@ pub fn key_press_needs_confirmation(key: &str, has_modifier: bool) -> bool {
 fn classify_click(role: Option<&str>, label: Option<&str>) -> Consequence {
     // Icon-only activatable controls have no label the lexicon can read, so
     // they cannot be classified as navigation and must not fail open as
-    // Benign. See decision record 0010.
+    // Benign. See decision record 0013.
     if is_activatable_control_role(role) && label_missing_or_empty(label) {
         return Consequence::Consequential {
             reason: "This control has no accessible label, so it cannot be \

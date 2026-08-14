@@ -1,6 +1,6 @@
 //! Parity gate for the desktop's Tauri IPC surface.
 //!
-//! Decision record 5 makes the server HTTP/WS API the canonical product
+//! Decision record 7 makes the server HTTP/WS API the canonical product
 //! surface and closes the set of features that may legitimately be native-only.
 //! Nothing enforces that in review reliably, so this scans the crate's own
 //! sources for `#[tauri::command]` and holds the result against
@@ -10,7 +10,7 @@
 /// Where the allowlist lives, relative to the crate root — named in the failure
 /// messages so the fix path needs no searching.
 const ALLOWLIST_FILE: &str = "crates/tidebreak-desktop/native-only-commands.txt";
-const RECORD: &str = "docs/decisions/0005-cli-headless-feature-parity.md";
+const RECORD: &str = "docs/decisions/0007-cli-headless-feature-parity.md";
 
 const ALLOWLIST: &str = include_str!("../native-only-commands.txt");
 
@@ -109,7 +109,7 @@ fn allowlist_covers_every_tauri_command() {
     assert!(
         unlisted.is_empty(),
         "these #[tauri::command] handlers are not in {ALLOWLIST_FILE}:\n{}\n\n\
-         Decision record 5 ({RECORD}) makes the server HTTP/WS API the product \
+         Decision record 7 ({RECORD}) makes the server HTTP/WS API the product \
          surface and closes the set of native-only features. Give the feature \
          `tidebreak-server` routes and call them from the UI, or — if it \
          genuinely needs the native shell — add it to {ALLOWLIST_FILE} with a \
@@ -125,7 +125,7 @@ fn allowlist_covers_every_tauri_command() {
         stale.is_empty(),
         "{ALLOWLIST_FILE} lists commands that no longer exist: {stale:?}\n\n\
          A stale entry silently pre-approves a name a later change could reuse. \
-         Remove these lines — see decision record 5 ({RECORD})."
+         Remove these lines — see decision record 7 ({RECORD})."
     );
 
     let mut seen = allowlisted.clone();

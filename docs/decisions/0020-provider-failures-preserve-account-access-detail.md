@@ -1,6 +1,6 @@
-# 16. Provider failures preserve account-access detail
+# 20. Provider failures preserve account-access detail
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - Owners: provider routing and desktop chat
 - Related: `crates/tidebreak-router/src/sse.rs`, `crates/tidebreak-server/src/event_projection.rs`

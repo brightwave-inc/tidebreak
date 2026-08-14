@@ -165,7 +165,7 @@ pub const TOOL_RESULT_IMAGE_MESSAGE_WINDOW: usize = 10;
 ///
 /// The standing rule this follows — a boundary never slides through
 /// already-sent bytes — is recorded in
-/// `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
+/// `docs/decisions/0019-compaction-rides-the-conversation-cache.md`.
 pub fn evict_old_tool_result_images(messages: &mut [ChatMessage], keep_messages: usize) {
     // Quantizing down can only shrink the cutoff, so the newest
     // `keep_messages` are never touched; in the worst case the pixels of up to
@@ -218,7 +218,7 @@ pub fn evict_old_tool_result_images(messages: &mut [ChatMessage], keep_messages:
 ///
 /// The standing rule this follows — a boundary never slides through
 /// already-sent bytes — is recorded in
-/// `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
+/// `docs/decisions/0019-compaction-rides-the-conversation-cache.md`.
 pub fn evict_images_beyond(messages: &mut [ChatMessage], keep_last_n: usize) {
     let total = messages
         .iter()

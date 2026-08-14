@@ -54,9 +54,9 @@ app on behalf of a caller. Its guarantees, all server-side and fail-closed:
 - Response bounds are sized for interactive UIs, not model context
   windows — deliberately larger than tool-result clamps.
 
-This is a scoped local analog of the gateway's governed REST tools
-(its ADR 0008), minus multi-user governance — which is exactly why managed
-profiles do not get it (below).
+This is the local form of the gateway's governed REST-tool contract, without
+multi-user governance — which is exactly why managed profiles do not get it
+(below).
 
 ## Bindings key off the app
 
@@ -81,7 +81,7 @@ placement. Rotating the credential value behind the same reference does not
 invalidate consent; repointing the reference does.
 
 A manifest may also bind `{ gateway_app, operation_ids[] }` — an app the
-model gateway holds, named by the gateway's own id (record 7). It is not a
+model gateway holds, named by the gateway's own id (record 10). It is not a
 connected-app record and nothing about it resolves locally, so it keys off
 its own namespace and carries its own canonical fingerprint form: the gateway
 origin, the app id, and a hash of the operation catalog the gateway declared.

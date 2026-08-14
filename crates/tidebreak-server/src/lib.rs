@@ -334,7 +334,7 @@ pub fn app(state: AppState) -> Router {
     // what the deployment can do stay on the member plane below, including the
     // `GET` halves of paths whose `PUT` lives here.
     //
-    // See `docs/decisions/0004-self-host-deployment-plane-authorization.md`.
+    // See `docs/decisions/0006-self-host-deployment-plane-authorization.md`.
     let deployment_api = Router::new()
         .route("/settings", axum::routing::put(routes::put_settings))
         .route(

@@ -626,7 +626,7 @@ impl GrantScope {
             // Compared without narration on both sides: the model's sentence
             // about a call is display-only, so the same action described in
             // different words is the same action and a standing grant covers
-            // it. See `docs/decisions/0015-tool-call-narration.md`.
+            // it. See `docs/decisions/0018-tool-call-narration.md`.
             Self::ExactAction(granted) => granted.without_summary() == action.without_summary(),
             // Only a command has an executable or a token run to name.
             Self::AnyArgsFor { .. } | Self::CommandPrefix { .. } => false,

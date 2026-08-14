@@ -1,10 +1,10 @@
-# 16. Separate Durable Model Selection from Frozen Execution Identity
+# 21. Separate Durable Model Selection from Frozen Execution Identity
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - Owners: model routing and turn execution
 - Related: [`docs/model-providers.md`](../model-providers.md),
-  [`0014-gateway-capability-negotiation.md`](0014-gateway-capability-negotiation.md),
+  [`0017-gateway-capability-negotiation.md`](0017-gateway-capability-negotiation.md),
   [`0002-pre-v1-schema-and-persisted-format-mutability.md`](0002-pre-v1-schema-and-persisted-format-mutability.md)
 
 ## Context

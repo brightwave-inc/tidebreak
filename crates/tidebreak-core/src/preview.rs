@@ -105,7 +105,7 @@ pub const MAX_ACTIVITY_EXEC_OUTPUT_CHARS: usize = 2_000;
 /// Command and search fields use the foreground approval-card projection so
 /// both surfaces share the same sanitization. The summary is projected the
 /// same way but shown only here and on the result card, never on an approval
-/// card — see `docs/decisions/0015-tool-call-narration.md`.
+/// card — see `docs/decisions/0018-tool-call-narration.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentActivityDetail {
@@ -249,7 +249,7 @@ fn receipt_tail(result: &str, max_chars: usize) -> Option<String> {
 /// Most variants also carry a `summary`: one sentence the model wrote about
 /// what its own call is doing. It is **display-only**, and it is the one field
 /// here that is prose rather than a projection of the action. See
-/// `docs/decisions/0015-tool-call-narration.md` — it never reaches an approval
+/// `docs/decisions/0018-tool-call-narration.md` — it never reaches an approval
 /// card, never reaches the auto-approval judge, and is never part of a grant's
 /// identity ([`Self::without_summary`]), because a call that could describe
 /// itself to a consent decision could describe itself favourably.

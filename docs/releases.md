@@ -365,7 +365,7 @@ the configured distribution. No long-lived AWS access key belongs in GitHub.
 Every relevant push to `main` also publishes a packaged **staging** app, a
 third desktop identity that can run beside both `cargo tauri dev` and an
 installed release. The contract is recorded in
-[decision record 13](decisions/0013-desktop-staging-channel.md).
+[decision record 16](decisions/0016-desktop-staging-channel.md).
 
 Staging is a release-profile build with a blue icon, product name
 `Tidebreak [staging]`, identifier `io.brightwave.tidebreak.staging`, keychain

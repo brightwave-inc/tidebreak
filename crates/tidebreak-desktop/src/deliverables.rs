@@ -2,7 +2,7 @@
 //!
 //! Everything a conversation output *is* — its catalog, previews, revision
 //! history, restores, edits, and its bytes — now lives on the server's HTTP
-//! surface, where a headless client reaches it too (decision record 5). What
+//! surface, where a headless client reaches it too (decision record 7). What
 //! is left here is the one thing that genuinely needs the native shell: the
 //! save dialog, and the write to the path a reader chooses. The bytes come
 //! from `GET /chats/{chat}/outputs/{output}/content` like any other client's

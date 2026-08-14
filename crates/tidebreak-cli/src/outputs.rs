@@ -1,7 +1,7 @@
 //! `tidebreak output …` and `tidebreak attach …` — conversation outputs and file
 //! attachment without a desktop.
 //!
-//! Both are thin clients of the server's HTTP surface (decision record 5): the
+//! Both are thin clients of the server's HTTP surface (decision record 7): the
 //! catalog, previews, version history, and revision bytes come from the output
 //! routes, and an attachment goes through the same document-ingest and image
 //! routes the desktop's picker feeds. The one thing that happens here rather

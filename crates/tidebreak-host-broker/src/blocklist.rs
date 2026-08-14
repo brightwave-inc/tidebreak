@@ -20,7 +20,7 @@ pub const BLOCKED_CONTROL_BUNDLES: &[&str] = &[
     // over any of these reaches unsandboxed local execution (focus the
     // integrated shell, type a command, press Return) and would bypass the
     // sandboxed exec path. A bundle-id list cannot enumerate every app that
-    // embeds a shell; this is the common class. See decision record 0010.
+    // embeds a shell; this is the common class. See decision record 0013.
     "com.apple.Terminal",
     "com.googlecode.iterm2",
     "dev.warp.",
