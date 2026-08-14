@@ -146,6 +146,44 @@ async fn put_native_mcp_servers(
     serde_json::from_slice(&body).map_err(|error| format!("decode MCP server response: {error}"))
 }
 
+const MAX_NATIVE_APPROVAL_FIELD_CHARS: usize = 240;
+const MAX_NATIVE_APPROVAL_MANIFEST_CHARS: usize = 16_384;
+
+#[derive(Serialize)]
+struct NativeCommandApproval<'a> {
+    server: &'a str,
+    argv: Vec<String>,
+    cwd: NativeCommandCwd,
+    environment: NativeCommandEnvironment,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "path")]
+enum NativeCommandCwd {
+    DesktopProcessCurrentDirectory,
+    Configured(String),
+}
+
+#[derive(Serialize)]
+struct NativeCommandEnvironment {
+    ambient_environment: &'static str,
+    inherited_from_desktop_process: Vec<String>,
+    stored_secrets: Vec<NativeStoredSecret>,
+}
+
+#[derive(Serialize)]
+struct NativeStoredSecret {
+    name: String,
+    effect: NativeStoredSecretEffect,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeStoredSecretEffect {
+    SetFromThisSave,
+    PreserveExistingStoredValue,
+}
+
 fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
     let servers = config
         .get("servers")
@@ -179,32 +217,131 @@ fn native_command_previews(config: &Value) -> Result<Vec<String>, String> {
                 argv.push(native_command_token(argument)?);
             }
         }
-        let argv = serde_json::to_string(&argv).expect("string vectors serialize");
-        previews.push(format!("{}: {argv}", native_security_label(name)));
+
+        let cwd = match server.get("cwd") {
+            None | Some(Value::Null) => NativeCommandCwd::DesktopProcessCurrentDirectory,
+            Some(Value::String(path)) => NativeCommandCwd::Configured(native_command_token(path)?),
+            Some(_) => return Err("MCP command cwd must be a string or null".to_owned()),
+        };
+        let mut inherited_from_desktop_process =
+            native_string_array(server, "env_from", "MCP env_from must be an array")?;
+        inherited_from_desktop_process.sort_unstable();
+        reject_duplicates(
+            &inherited_from_desktop_process,
+            "MCP env_from contains a duplicate name",
+        )?;
+
+        let mut stored_names = native_string_array(server, "env", "MCP env must be an array")?;
+        stored_names.sort_unstable();
+        reject_duplicates(&stored_names, "MCP env contains a duplicate name")?;
+        if stored_names
+            .iter()
+            .any(|name| inherited_from_desktop_process.binary_search(name).is_ok())
+        {
+            return Err("an MCP environment name cannot be both stored and inherited".to_owned());
+        }
+
+        let env_values = match server.get("env_values") {
+            None => None,
+            Some(Value::Object(values)) => Some(values),
+            Some(_) => return Err("MCP env_values must be an object".to_owned()),
+        };
+        if let Some(values) = env_values {
+            for (name, value) in values {
+                native_command_token(name)?;
+                if !value.is_string() {
+                    return Err("every MCP environment value must be a string".to_owned());
+                }
+                if stored_names.binary_search(name).is_err() {
+                    return Err(
+                        "every MCP env_values entry must name a stored environment variable"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        let stored_secrets = stored_names
+            .into_iter()
+            .map(|name| NativeStoredSecret {
+                effect: if env_values.is_some_and(|values| values.contains_key(&name)) {
+                    NativeStoredSecretEffect::SetFromThisSave
+                } else {
+                    NativeStoredSecretEffect::PreserveExistingStoredValue
+                },
+                name,
+            })
+            .collect();
+        let safe_name = native_command_token(name)?;
+        let manifest = serde_json::to_string_pretty(&NativeCommandApproval {
+            server: &safe_name,
+            argv,
+            cwd,
+            environment: NativeCommandEnvironment {
+                ambient_environment: "cleared",
+                inherited_from_desktop_process,
+                stored_secrets,
+            },
+        })
+        .expect("native command approval manifests serialize infallibly");
+        if manifest.chars().count() > MAX_NATIVE_APPROVAL_MANIFEST_CHARS {
+            return Err("MCP command approval manifest is too long to display safely".to_owned());
+        }
+        previews.push(manifest);
+    }
+    let manifest_chars = previews
+        .iter()
+        .map(|preview| preview.chars().count())
+        .sum::<usize>()
+        .saturating_add(previews.len().saturating_sub(1));
+    if manifest_chars > MAX_NATIVE_APPROVAL_MANIFEST_CHARS {
+        return Err("MCP command approval manifest is too long to display safely".to_owned());
     }
     Ok(previews)
 }
 
-fn native_command_token(value: &str) -> Result<String, String> {
-    if value.chars().count() > 240 {
-        return Err("MCP command or argument is too long to display safely".to_owned());
-    }
-    Ok(value
-        .chars()
-        .map(|character| {
-            if matches!(
-                get_general_category(character),
-                GeneralCategory::Control
-                    | GeneralCategory::Format
-                    | GeneralCategory::LineSeparator
-                    | GeneralCategory::ParagraphSeparator
-            ) {
-                '\u{fffd}'
-            } else {
-                character
-            }
+fn native_string_array(
+    server: &Value,
+    field: &str,
+    type_error: &str,
+) -> Result<Vec<String>, String> {
+    let Some(value) = server.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or_else(|| type_error.to_owned())?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("every MCP {field} entry must be a string"))
+                .and_then(native_command_token)
         })
-        .collect())
+        .collect()
+}
+
+fn reject_duplicates(values: &[String], error: &str) -> Result<(), String> {
+    if values.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error.to_owned());
+    }
+    Ok(())
+}
+
+fn native_command_token(value: &str) -> Result<String, String> {
+    if value.chars().count() > MAX_NATIVE_APPROVAL_FIELD_CHARS {
+        return Err("MCP command approval field is too long to display safely".to_owned());
+    }
+    if value.chars().any(|character| {
+        matches!(
+            get_general_category(character),
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        )
+    }) {
+        return Err("MCP command approval field contains unsafe formatting characters".to_owned());
+    }
+    Ok(value.to_owned())
 }
 
 pub(crate) fn native_security_label(value: &str) -> String {
@@ -733,6 +870,12 @@ mod bundle_tests {
 mod server_info_tests {
     use super::*;
 
+    fn single_native_approval(config: Value) -> Value {
+        let previews = native_command_previews(&config).expect("valid native command preview");
+        assert_eq!(previews.len(), 1);
+        serde_json::from_str(&previews[0]).expect("approval is a canonical JSON manifest")
+    }
+
     #[tokio::test]
     async fn wait_server_info_returns_the_published_boot_error() {
         let (tx, rx) = watch::channel(None);
@@ -777,10 +920,17 @@ mod server_info_tests {
                 {"name": "live", "command": "/bin/sh", "args": ["-c", "echo safe"], "enabled": true}
             ]
         });
+        let approval = single_native_approval(config);
+        assert_eq!(approval["server"], "live");
         assert_eq!(
-            native_command_previews(&config).unwrap(),
-            vec![r#"live: ["/bin/sh","-c","echo safe"]"#]
+            approval["argv"],
+            serde_json::json!(["/bin/sh", "-c", "echo safe"])
         );
+        assert_eq!(
+            approval["cwd"]["source"],
+            "desktop_process_current_directory"
+        );
+        assert_eq!(approval["environment"]["ambient_environment"], "cleared");
     }
 
     #[test]
@@ -803,7 +953,8 @@ mod server_info_tests {
             .collect::<Vec<_>>();
         let previews = native_command_previews(&serde_json::json!({"servers": servers})).unwrap();
         assert_eq!(previews.len(), 9);
-        assert!(previews[8].starts_with("server-8:"));
+        let ninth: Value = serde_json::from_str(&previews[8]).unwrap();
+        assert_eq!(ninth["server"], "server-8");
     }
 
     #[test]
@@ -815,5 +966,114 @@ mod server_info_tests {
         });
         let previews = native_command_previews(&config).unwrap();
         assert!(previews[0].contains(suffix));
+    }
+
+    #[test]
+    fn cwd_and_inherited_path_changes_are_explicit_in_native_approval() {
+        let base = serde_json::json!({
+            "servers": [{
+                "name": "workspace",
+                "command": "node",
+                "args": ["server.mjs"],
+                "cwd": "/srv/first",
+                "env_from": ["HOME"]
+            }]
+        });
+        let changed = serde_json::json!({
+            "servers": [{
+                "name": "workspace",
+                "command": "node",
+                "args": ["server.mjs"],
+                "cwd": "/srv/second",
+                "env_from": ["HOME", "PATH"]
+            }]
+        });
+        let first = single_native_approval(base);
+        let second = single_native_approval(changed);
+        assert_ne!(first, second);
+        assert_eq!(first["cwd"]["path"], "/srv/first");
+        assert_eq!(second["cwd"]["path"], "/srv/second");
+        assert_eq!(
+            second["environment"]["inherited_from_desktop_process"],
+            serde_json::json!(["HOME", "PATH"])
+        );
+    }
+
+    #[test]
+    fn stored_secret_sources_and_preservation_are_visible_without_values() {
+        let preserved = serde_json::json!({
+            "servers": [{
+                "name": "private docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["DOCS_TOKEN", "LOG_LEVEL"]
+            }]
+        });
+        let replaced = serde_json::json!({
+            "servers": [{
+                "name": "private docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["DOCS_TOKEN", "LOG_LEVEL"],
+                "env_values": {"DOCS_TOKEN": "secret-sentinel-value"}
+            }]
+        });
+        let preserved = single_native_approval(preserved);
+        let replaced = single_native_approval(replaced);
+        assert_ne!(preserved, replaced);
+        assert_eq!(
+            replaced["environment"]["stored_secrets"],
+            serde_json::json!([
+                {"name": "DOCS_TOKEN", "effect": "set_from_this_save"},
+                {"name": "LOG_LEVEL", "effect": "preserve_existing_stored_value"}
+            ])
+        );
+        let encoded = replaced.to_string();
+        assert!(!encoded.contains("secret-sentinel-value"));
+    }
+
+    #[test]
+    fn environment_source_changes_alter_approval_and_never_show_parent_values() {
+        let inherited = serde_json::json!({
+            "servers": [{
+                "name": "docs",
+                "command": "/usr/bin/docs-mcp",
+                "env_from": ["PRIVATE_DOCS_TOKEN"]
+            }]
+        });
+        let stored = serde_json::json!({
+            "servers": [{
+                "name": "docs",
+                "command": "/usr/bin/docs-mcp",
+                "env": ["PRIVATE_DOCS_TOKEN"]
+            }]
+        });
+        let inherited = single_native_approval(inherited);
+        let stored = single_native_approval(stored);
+        assert_ne!(inherited, stored);
+        assert_eq!(
+            inherited["environment"]["inherited_from_desktop_process"],
+            serde_json::json!(["PRIVATE_DOCS_TOKEN"])
+        );
+        assert_eq!(
+            stored["environment"]["stored_secrets"],
+            serde_json::json!([{
+                "name": "PRIVATE_DOCS_TOKEN",
+                "effect": "preserve_existing_stored_value"
+            }])
+        );
+        if let Ok(parent_value) = std::env::var("PRIVATE_DOCS_TOKEN") {
+            assert!(!inherited.to_string().contains(&parent_value));
+        }
+    }
+
+    #[test]
+    fn native_approval_refuses_unrepresentable_environment_manifest() {
+        let config = serde_json::json!({
+            "servers": [{
+                "name": "oversized",
+                "command": "/bin/true",
+                "env_from": ["X".repeat(MAX_NATIVE_APPROVAL_FIELD_CHARS + 1)]
+            }]
+        });
+        assert!(native_command_previews(&config).is_err());
     }
 }
