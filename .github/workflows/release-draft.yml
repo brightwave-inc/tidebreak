@@ -101,22 +101,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Plan title-derived labels for merged pull requests
         run: |
-          gh pr list \
-            --repo "$GITHUB_REPOSITORY" \
-            --state merged \
-            --base main \
-            --limit 1000 \
-            --json number,title,labels \
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/pulls?state=closed&base=main&per_page=100" | \
+            jq -s '[.[][] | select(.merged_at != null) | {number, title, labels: [.labels[].name]}]' \
             > "$RUNNER_TEMP/merged-prs.json"
           node scripts/create-release-label-plan.mjs \
             < "$RUNNER_TEMP/merged-prs.json" \
             > "$RUNNER_TEMP/release-label-plan.json"
 
           total="$(jq -r .summary.total "$RUNNER_TEMP/release-label-plan.json")"
-          (( total < 1000 )) || {
-            echo "The merged-PR query reached its 1000-item safety limit." >&2
-            exit 1
-          }
+          echo "Backfilled labels for $total merged pull requests."
           jq .summary "$RUNNER_TEMP/release-label-plan.json"
           {
             echo '## Release-label backfill'
