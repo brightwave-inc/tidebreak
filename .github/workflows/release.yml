@@ -131,7 +131,6 @@ jobs:
       VERCEL_ORG_ID: team_akhCRtYAsxrr6iIL6g6YGuKY
       VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
       VERCEL_SCOPE: brightwave-inc
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -140,10 +139,6 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || {
             echo "Documentation checkout does not match the validated release." >&2
-            exit 1
-          }
-          [[ -n "$VERCEL_TOKEN" ]] || {
-            echo "The docs-production environment must provide VERCEL_TOKEN." >&2
             exit 1
           }
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -156,13 +151,6 @@ jobs:
           cache-dependency-path: docs-site/pnpm-lock.yaml
       - name: Install locked documentation dependencies
         run: pnpm --dir docs-site install --frozen-lockfile
-      - name: Link the dedicated production project
-        run: >-
-          ./docs-site/node_modules/.bin/vercel pull
-          --yes
-          --environment=production
-          --scope "$VERCEL_SCOPE"
-          --token "$VERCEL_TOKEN"
       - name: Build and validate the static release documentation
         run: |
           pnpm --dir docs-site build
@@ -180,9 +168,21 @@ jobs:
           test -f .vercel/output/static/docs/quickstart/index.html
           test -f .vercel/output/static/docs/search-index.json
           test -f .vercel/output/static/docs/sitemap.xml
+          mkdir -p .vercel
+          jq -n \
+            --arg orgId "$VERCEL_ORG_ID" \
+            --arg projectId "$VERCEL_PROJECT_ID" \
+            '{orgId: $orgId, projectId: $projectId}' \
+            > .vercel/project.json
       - name: Create an unaliased production deployment
         id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
+          [[ -n "$VERCEL_TOKEN" ]] || {
+            echo "The docs-production environment must provide VERCEL_TOKEN." >&2
+            exit 1
+          }
           deployment_json="$(./docs-site/node_modules/.bin/vercel deploy \
             --prebuilt \
             --prod \
@@ -194,10 +194,13 @@ jobs:
             --token "$VERCEL_TOKEN" \
             --json)"
           deployment_url="$(jq -er .url <<<"$deployment_json")"
+          deployment_id="$(jq -er .deployment.id <<<"$deployment_json")"
           echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Smoke-test the staged deployment
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           request() {
             local path="$1"
@@ -220,21 +223,40 @@ jobs:
 
           grep -Fq 'https://tidebreak.sh/docs/' "$RUNNER_TEMP/docs-index.html"
           grep -Fq '/docs/_next/' "$RUNNER_TEMP/docs-index.html"
+          asset_path="$(grep -oE '/docs/_next/[^" ]+' \
+            "$RUNNER_TEMP/docs-index.html" | head -n 1)"
+          case "$asset_path" in
+            /docs/_next/*) ;;
+            *) echo "Documentation did not reference a safe Next asset." >&2; exit 1 ;;
+          esac
+          request "$asset_path" "$RUNNER_TEMP/docs-asset"
           jq -e 'type == "array" and length > 0' \
             "$RUNNER_TEMP/docs-search-index.json" >/dev/null
           grep -Fq '<urlset' "$RUNNER_TEMP/docs-sitemap.xml"
       - name: Promote the verified deployment
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: >-
           ./docs-site/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
           --yes
           --scope "$VERCEL_SCOPE"
           --token "$VERCEL_TOKEN"
       - name: Verify the production alias
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.id }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           for _ in {1..12}; do
-            if curl \
+            production_json="$(./docs-site/node_modules/.bin/vercel inspect \
+              https://tidebreak-docs.vercel.app \
+              --scope "$VERCEL_SCOPE" \
+              --token "$VERCEL_TOKEN" \
+              --json 2>/dev/null || true)"
+            if jq -e --arg id "$DEPLOYMENT_ID" \
+              '.id == $id and .readyState == "READY"' \
+              <<<"$production_json" >/dev/null \
+              && curl \
               --fail \
               --silent \
               --show-error \

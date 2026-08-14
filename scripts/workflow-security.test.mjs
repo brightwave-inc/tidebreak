@@ -1041,6 +1041,8 @@ test("release documentation is built from the validated tag and promoted only af
   assert.doesNotMatch(job, /id-token: write|contents: write/);
   assert.match(job, /BASE_PATH: \/docs/);
   assert.match(job, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  const jobEnvironment = job.match(/^    env:[\s\S]*?(?=^    steps:)/m)?.[0] ?? '';
+  assert.doesNotMatch(jobEnvironment, /VERCEL_TOKEN/);
   assert.match(job, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
   assert.equal(
     Object.values(docsPackage.dependencies ?? {}).includes("vercel"),
@@ -1053,6 +1055,8 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(job, /pnpm --dir docs-site build/);
   assert.match(job, /pnpm --dir docs-site package:vercel/);
   assert.match(job, /\.vercel\/output\/static\/docs\/index\.html/);
+  assert.match(job, /asset_path=.*\/docs\/_next\//);
+  assert.match(job, /\.id == \$id and \.readyState == "READY"/);
   assert.match(job, /--prebuilt/);
   assert.match(job, /--prod/);
   assert.match(job, /--skip-domain/);
