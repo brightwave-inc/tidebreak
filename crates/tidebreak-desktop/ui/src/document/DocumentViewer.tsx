@@ -25,6 +25,11 @@ const PdfViewer = lazy(() =>
 const UniverSpreadsheetViewer = lazy(
   () => import("@/document/UniverSpreadsheetViewer"),
 );
+const SpreadsheetViewer = lazy(() =>
+  import("@/document/SpreadsheetViewer").then((m) => ({
+    default: m.SpreadsheetViewer,
+  })),
+);
 const DocxViewer = lazy(() => import("@/document/DocxViewer"));
 // Presentations render as converted PDFs; the viewer carries the conversion
 // states (preparing, converter missing) on top of the lazy PDF engine.
@@ -137,14 +142,28 @@ export function DocumentViewer({
     );
   }
 
-  if (SPREADSHEET_MEDIA_TYPES.has(type) || DELIMITED_TEXT_MEDIA_TYPES.has(type)) {
+  if (SPREADSHEET_MEDIA_TYPES.has(type)) {
+    return (
+      <ViewerBoundary>
+        <SpreadsheetViewer
+          key={source.id}
+          source={source}
+          mediaType={type}
+          highlightRange={citationCellRange}
+          className={className}
+        />
+      </ViewerBoundary>
+    );
+  }
+
+  if (DELIMITED_TEXT_MEDIA_TYPES.has(type)) {
     return (
       <ViewerBoundary>
         <UniverSpreadsheetViewer
           key={source.id}
           source={source}
           highlightRange={citationCellRange}
-          isCsv={DELIMITED_TEXT_MEDIA_TYPES.has(type)}
+          isCsv
           className={className}
         />
       </ViewerBoundary>

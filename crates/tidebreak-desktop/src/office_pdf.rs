@@ -1,8 +1,7 @@
-//! Presentation-to-PDF conversion for the inline preview.
+//! Office-document-to-PDF conversion for inline previews.
 //!
-//! There is no presentation engine in the renderer, so slides are shown the
-//! way most tools outside PowerPoint show them: converted to PDF and drawn by
-//! the PDF viewer. Conversion prefers the app's own managed LibreOffice
+//! Presentations and the high-fidelity spreadsheet view are converted to PDF
+//! and drawn by the PDF viewer. Conversion prefers the app's own managed LibreOffice
 //! (downloaded and digest-verified by [`crate::office_install`] the first
 //! time a preview needs it, on macOS), then falls back to one the user
 //! installed. Its absence is a first-class state the renderer turns into a
@@ -38,12 +37,12 @@ use tidebreak_core::MAX_BINARY_DELIVERABLE_BYTES;
 use tokio::process::Command;
 
 /// LibreOffice loads the whole document before exporting; 90 seconds is
-/// generous for any deck the 16 MB input cap admits, and bounds a hang on a
+/// generous for any document the 16 MB input cap admits, and bounds a hang on a
 /// crafted file.
 const CONVERT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// A PDF export larger than this is not a preview any more. Four times the
-/// binary-output ceiling covers decks whose images recompress badly.
+/// binary-output ceiling covers documents whose images recompress badly.
 const MAX_PDF_BYTES: u64 = 4 * MAX_BINARY_DELIVERABLE_BYTES as u64;
 
 /// Disk budget for cached conversions. Oldest files are pruned past this;
@@ -62,8 +61,8 @@ const CONVERTER_CONFINED: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PresentationPdfRequest {
-    /// The presentation's bytes, base64 like every other bulk IPC payload.
+pub(crate) struct OfficePdfRequest {
+    /// The office document's bytes, base64 like every other bulk IPC payload.
     content_base64: String,
     /// Stored media type of the source; picks the input filename extension
     /// LibreOffice keys its import filter on.
@@ -83,7 +82,7 @@ pub(crate) struct PresentationPdfRequest {
     rename_all_fields = "camelCase",
     tag = "status"
 )]
-pub(crate) enum PresentationPdfResult {
+pub(crate) enum OfficePdfResult {
     Converted {
         pdf_base64: String,
     },
@@ -103,26 +102,26 @@ pub(crate) enum PresentationPdfResult {
     },
 }
 
-fn converter_missing() -> PresentationPdfResult {
-    PresentationPdfResult::ConverterMissing {
+fn converter_missing() -> OfficePdfResult {
+    OfficePdfResult::ConverterMissing {
         installable: crate::office_install::supported(),
         install_failure: crate::office_install::last_failure(),
     }
 }
 
-/// Convert one presentation's bytes to PDF with the user's LibreOffice.
+/// Convert one supported office document's bytes to PDF with LibreOffice.
 ///
 /// Bytes travel in and out rather than a document identity so the one command
 /// serves both transports the viewers already use — HTTP-fetched source
 /// documents and IPC-read output revisions — without duplicating either
 /// resolution path here.
 #[tauri::command]
-pub(crate) async fn convert_presentation_to_pdf(
+pub(crate) async fn convert_office_to_pdf(
     app: AppHandle,
-    request: PresentationPdfRequest,
-) -> Result<PresentationPdfResult, String> {
+    request: OfficePdfRequest,
+) -> Result<OfficePdfResult, String> {
     let extension = input_extension(&request.media_type)
-        .ok_or_else(|| "That file type has no presentation preview".to_owned())?;
+        .ok_or_else(|| "That file type has no office preview".to_owned())?;
     let bytes = BASE64
         .decode(request.content_base64.as_bytes())
         .map_err(|_| "Could not read that file".to_owned())?;
@@ -135,16 +134,16 @@ pub(crate) async fn convert_presentation_to_pdf(
 
     let data_dir = crate::data_dir(&app)?;
     let cache_dir = data_dir.join(CACHE_DIRECTORY);
-    let cache_path = cache_dir.join(format!("{}.pdf", content_key(&bytes)));
+    let cache_path = cache_dir.join(format!("{}.pdf", content_key(&bytes, extension)));
     if let Ok(cached) = tokio::fs::read(&cache_path).await {
         if !cached.is_empty() {
-            return Ok(PresentationPdfResult::Converted {
+            return Ok(OfficePdfResult::Converted {
                 pdf_base64: BASE64.encode(cached),
             });
         }
     }
 
-    // One conversion at a time. Duplicate requests for the same deck arrive
+    // One conversion at a time. Duplicate requests for the same document arrive
     // routinely (two panels, or a fetch retried around an aborted render) and
     // used to race two cold LibreOffice launches — flaky in exactly the
     // hard-to-reproduce way, and their `.partial` cache staging collided.
@@ -153,7 +152,7 @@ pub(crate) async fn convert_presentation_to_pdf(
     let _serialized = conversion_lock().lock().await;
     if let Ok(cached) = tokio::fs::read(&cache_path).await {
         if !cached.is_empty() {
-            return Ok(PresentationPdfResult::Converted {
+            return Ok(OfficePdfResult::Converted {
                 pdf_base64: BASE64.encode(cached),
             });
         }
@@ -170,13 +169,13 @@ pub(crate) async fn convert_presentation_to_pdf(
         // LibreOffice at all: the install hint is the actionable message.
         Err(ConversionError::Spawn) => return Ok(converter_missing()),
         Err(ConversionError::Sandbox(reason)) => {
-            return Ok(PresentationPdfResult::Failed {
+            return Ok(OfficePdfResult::Failed {
                 message: "Could not sandbox LibreOffice".to_owned(),
                 details: sanitize_diagnostic(&reason),
             })
         }
         Err(ConversionError::Failed(failure)) => {
-            return Ok(PresentationPdfResult::Failed {
+            return Ok(OfficePdfResult::Failed {
                 message: failure.message,
                 details: sanitize_diagnostic(&failure.details),
             })
@@ -187,7 +186,7 @@ pub(crate) async fn convert_presentation_to_pdf(
     // still a preview.
     let _ = store_cached_pdf(&cache_dir, &cache_path, &pdf).await;
 
-    Ok(PresentationPdfResult::Converted {
+    Ok(OfficePdfResult::Converted {
         pdf_base64: BASE64.encode(pdf),
     })
 }
@@ -204,14 +203,21 @@ fn input_extension(media_type: &str) -> Option<&'static str> {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
         "application/vnd.ms-powerpoint" => Some("ppt"),
         "application/vnd.oasis.opendocument.presentation" => Some("odp"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
+        "application/vnd.ms-excel" => Some("xls"),
+        "application/vnd.oasis.opendocument.spreadsheet" => Some("ods"),
         _ => None,
     }
 }
 
-/// Cache key: the SHA-256 of the source bytes. Content-addressed like blob
-/// ids, so the same deck imported twice converts once.
-fn content_key(bytes: &[u8]) -> String {
+/// Cache key: the conversion profile plus the SHA-256 of the source bytes.
+/// The profile is part of the identity because Calc's one-page-per-sheet
+/// export is intentionally different from LibreOffice's default print export.
+fn content_key(bytes: &[u8], extension: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"office-pdf-v2\0");
+    hasher.update(extension.as_bytes());
+    hasher.update(b"\0");
     hasher.update(bytes);
     let digest = hasher.finalize();
     let mut key = String::with_capacity(64);
@@ -419,7 +425,7 @@ async fn run_conversion(
         .map_err(|error| {
             ConversionError::Failed(ConversionFailure::message(format!("workspace: {error}")))
         })?;
-    let input = workdir.path().join(format!("slides.{extension}"));
+    let input = workdir.path().join(format!("document.{extension}"));
     let out_dir = workdir.path().join("out");
     let profile = workdir.path().join("profile");
     let profile_uri = file_uri(&profile).map_err(|error| {
@@ -433,6 +439,8 @@ async fn run_conversion(
     })?;
 
     let mut command = converter_command(soffice, workdir.path())?;
+    let export_filter = pdf_export_filter(extension);
+
     command
         .arg("--headless")
         .arg("--nologo")
@@ -441,7 +449,7 @@ async fn run_conversion(
         .arg("--nofirststartwizard")
         .arg(format!("-env:UserInstallation={profile_uri}"))
         .arg("--convert-to")
-        .arg("pdf")
+        .arg(export_filter)
         .arg("--outdir")
         .arg(&out_dir)
         .arg(&input)
@@ -474,7 +482,7 @@ async fn run_conversion(
         .await
         .map_err(|_| {
             ConversionError::Failed(ConversionFailure::message(
-                "Converting the presentation timed out",
+                "Converting the document timed out",
             ))
         })?
         .map_err(|error| {
@@ -483,7 +491,7 @@ async fn run_conversion(
 
     // LibreOffice can exit zero without writing anything, so the produced
     // file — present and non-empty — is the success signal, not the code.
-    let produced = out_dir.join("slides.pdf");
+    let produced = out_dir.join("document.pdf");
     let metadata = tokio::fs::metadata(&produced).await;
     let produced_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     if !output.status.success() || produced_len == 0 {
@@ -542,6 +550,18 @@ async fn run_conversion(
     })
 }
 
+fn pdf_export_filter(extension: &str) -> &'static str {
+    match extension {
+        // Preserve a spreadsheet as one complete canvas per sheet instead of
+        // chopping dashboards into ordinary printer pages.
+        "xlsx" | "xls" | "ods" => concat!(
+            "pdf:calc_pdf_Export:",
+            r#"{"SinglePageSheets":{"type":"boolean","value":"true"}}"#
+        ),
+        _ => "pdf",
+    }
+}
+
 fn first_line(detail: &str) -> &str {
     detail.lines().next().unwrap_or(detail)
 }
@@ -565,7 +585,7 @@ fn sanitize_diagnostic(detail: &str) -> String {
 ///
 /// Temp roots can contain spaces, `#`, or other URI-reserved characters.
 /// Passing the display path verbatim makes LibreOffice reject the value with
-/// "The string contains invalid characters" before it opens the deck.
+/// "The string contains invalid characters" before it opens the document.
 fn file_uri(path: &Path) -> Result<String, &'static str> {
     url::Url::from_file_path(path)
         .map(|uri| uri.into())
@@ -644,7 +664,7 @@ impl tidebreak_code_execution::HostOfficeConverter for ExecOfficeConverter {
             ));
         }
         let cache_dir = self.data_dir.join(CACHE_DIRECTORY);
-        let cache_path = cache_dir.join(format!("{}.pdf", content_key(bytes)));
+        let cache_path = cache_dir.join(format!("{}.pdf", content_key(bytes, extension)));
         if let Ok(cached) = tokio::fs::read(&cache_path).await {
             if !cached.is_empty() {
                 return Ok(cached);
@@ -664,7 +684,7 @@ impl tidebreak_code_execution::HostOfficeConverter for ExecOfficeConverter {
         match run_conversion(&soffice, bytes, extension).await {
             Ok(pdf) => {
                 // Cache best-effort, shared with the preview panel: the same
-                // deck previewed and QA-rendered converts once.
+                // document previewed and QA-rendered converts once.
                 let _ = store_cached_pdf(&cache_dir, &cache_path, &pdf).await;
                 Ok(pdf)
             }
@@ -689,7 +709,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn presentation_media_types_map_to_import_extensions() {
+    fn office_media_types_map_to_import_extensions() {
         assert_eq!(
             input_extension(
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -704,7 +724,19 @@ mod tests {
             input_extension("application/vnd.oasis.opendocument.presentation"),
             Some("odp")
         );
+        assert_eq!(
+            input_extension("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            Some("xlsx")
+        );
+        assert_eq!(input_extension("application/vnd.ms-excel"), Some("xls"));
         assert_eq!(input_extension("application/pdf"), None);
+    }
+
+    #[test]
+    fn spreadsheet_export_keeps_each_sheet_on_one_pdf_page() {
+        assert!(pdf_export_filter("xlsx").contains("calc_pdf_Export"));
+        assert!(pdf_export_filter("xlsx").contains("SinglePageSheets"));
+        assert_eq!(pdf_export_filter("pptx"), "pdf");
     }
 
     /// A verified managed install answers resolution outright; the system is
@@ -757,10 +789,10 @@ mod tests {
     /// The IPC wire contract for the preview. The renderer reads these keys
     /// by name, and an enum-level `rename_all` renames only the variants —
     /// leaving `pdf_base64` on the wire, which the renderer read as
-    /// `undefined` and handed to `atob`, failing every presentation preview.
+    /// `undefined` and handed to `atob`, failing every office preview.
     #[test]
     fn conversion_result_serializes_camel_case_variants_and_fields() {
-        let converted = serde_json::to_value(PresentationPdfResult::Converted {
+        let converted = serde_json::to_value(OfficePdfResult::Converted {
             pdf_base64: "JVBERi0=".to_owned(),
         })
         .unwrap();
@@ -769,7 +801,7 @@ mod tests {
             serde_json::json!({ "status": "converted", "pdfBase64": "JVBERi0=" })
         );
 
-        let missing = serde_json::to_value(PresentationPdfResult::ConverterMissing {
+        let missing = serde_json::to_value(OfficePdfResult::ConverterMissing {
             installable: true,
             install_failure: Some("Download cancelled".to_owned()),
         })
@@ -783,7 +815,7 @@ mod tests {
             })
         );
 
-        let failed = serde_json::to_value(PresentationPdfResult::Failed {
+        let failed = serde_json::to_value(OfficePdfResult::Failed {
             message: "LibreOffice failed".to_owned(),
             details: "Exit status: exit status: 1".to_owned(),
         })

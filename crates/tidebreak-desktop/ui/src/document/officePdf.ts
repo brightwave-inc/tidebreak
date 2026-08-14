@@ -1,11 +1,10 @@
 /**
- * Presentations preview as converted PDFs.
+ * Office documents preview as converted PDFs.
  *
- * No engine here draws slides natively, so a presentation is converted to PDF
- * by a LibreOffice the user already has installed and rendered with the PDF
- * viewer. The conversion command takes the original bytes and returns PDF
- * bytes, which keeps it transport-agnostic: HTTP-fetched source documents and
- * IPC-read output revisions wrap into the same converted source.
+ * LibreOffice converts presentations and spreadsheets to PDF for the existing
+ * PDF viewer. The command takes original bytes and returns PDF bytes, which
+ * keeps it transport-agnostic: HTTP-fetched source documents and IPC-read
+ * output revisions wrap into the same converted source.
  *
  * A machine without LibreOffice is a designed-for state, not an error path:
  * the converter's absence surfaces as {@link ConverterMissingError} and the
@@ -22,6 +21,12 @@ export const PRESENTATION_MEDIA_TYPES = new Set([
   "application/vnd.oasis.opendocument.presentation",
 ]);
 
+export const SPREADSHEET_MEDIA_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "application/vnd.oasis.opendocument.spreadsheet",
+]);
+
 /**
  * LibreOffice is not installed (or its remains cannot start).
  *
@@ -35,14 +40,14 @@ export class ConverterMissingError extends Error {
   readonly installFailure: string | null;
 
   constructor(installable = false, installFailure: string | null = null) {
-    super("No presentation converter is installed");
+    super("No office document converter is installed");
     this.name = "ConverterMissingError";
     this.installable = installable;
     this.installFailure = installFailure;
   }
 }
 
-type PresentationPdfResponse =
+type OfficePdfResponse =
   | { status: "converted"; pdfBase64: string }
   | {
       status: "converterMissing";
@@ -51,29 +56,29 @@ type PresentationPdfResponse =
     }
   | { status: "failed"; message: string; details: string };
 
-export class PresentationConversionError extends Error {
+export class OfficeConversionError extends Error {
   readonly details: string;
 
   constructor(message: string, details: string) {
     super(message);
-    this.name = "PresentationConversionError";
+    this.name = "OfficeConversionError";
     this.details = details;
   }
 }
 
 /**
- * Convert one presentation's bytes to PDF on the host.
+ * Convert one supported office document's bytes to PDF on the host.
  *
  * Throws {@link ConverterMissingError} when there is no LibreOffice to run;
  * every other failure propagates as an ordinary error with the host's message.
  */
-export async function convertPresentationToPdf(
+export async function convertOfficeToPdf(
   bytes: Uint8Array,
   mediaType: string,
 ): Promise<Uint8Array> {
-  const response = (await invoke("convert_presentation_to_pdf", {
+  const response = (await invoke("convert_office_to_pdf", {
     request: { contentBase64: encodeBase64(bytes), mediaType },
-  })) as PresentationPdfResponse;
+  })) as OfficePdfResponse;
   if (response.status === "converterMissing") {
     throw new ConverterMissingError(
       response.installable,
@@ -81,10 +86,10 @@ export async function convertPresentationToPdf(
     );
   }
   if (response.status === "failed") {
-    throw new PresentationConversionError(response.message, response.details);
+    throw new OfficeConversionError(response.message, response.details);
   }
   if (typeof response.pdfBase64 !== "string" || response.pdfBase64 === "") {
-    throw new Error("Invalid presentation preview response");
+    throw new Error("Invalid office preview response");
   }
   return decodeBase64(response.pdfBase64);
 }
@@ -198,14 +203,14 @@ export function resetConverterInstallStateForTest(): void {
 }
 
 /**
- * The converted-PDF bytes of a presentation source.
+ * The converted-PDF bytes of an office-document source.
  *
  * Wraps the original source rather than a new identity: the cache key extends
  * the original's (which already names immutable content), so the in-session
  * byte cache holds the converted PDF and a re-open never reconverts. The host
  * keeps its own on-disk cache keyed by content hash for cross-session hits.
  */
-export function presentationPdfSource(
+export function officePdfSource(
   original: FileBytesSource,
   mediaType: string,
 ): FileBytesSource {
@@ -214,7 +219,7 @@ export function presentationPdfSource(
     cacheKey: `${original.cacheKey}/converted-pdf`,
     fetch: async (signal, onProgress) => {
       const source = await original.fetch(signal, onProgress);
-      const pdf = await convertPresentationToPdf(source.bytes, mediaType);
+      const pdf = await convertOfficeToPdf(source.bytes, mediaType);
       if (signal.aborted) {
         throw new DOMException("The operation was aborted.", "AbortError");
       }
@@ -222,6 +227,9 @@ export function presentationPdfSource(
     },
   };
 }
+
+export const presentationPdfSource = officePdfSource;
+export const spreadsheetPdfSource = officePdfSource;
 
 function encodeBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -238,8 +246,8 @@ function decodeBase64(value: string): Uint8Array {
     binary = atob(value);
   } catch {
     // `atob` rejects malformed input with "The string contains invalid
-    // characters", which says nothing about presentations to whoever reads it.
-    throw new Error("Invalid presentation preview response");
+    // characters", which says nothing about the preview to whoever reads it.
+    throw new Error("Invalid office preview response");
   }
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {

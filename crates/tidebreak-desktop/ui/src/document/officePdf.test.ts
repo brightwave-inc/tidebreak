@@ -7,10 +7,10 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
 import {
   ConverterMissingError,
-  convertPresentationToPdf,
+  convertOfficeToPdf,
   installPresentationConverter,
-  presentationPdfSource,
-  PresentationConversionError,
+  officePdfSource,
+  OfficeConversionError,
   resetConverterInstallStateForTest,
   warmPresentationConverter,
 } from "./officePdf";
@@ -25,20 +25,20 @@ beforeEach(() => {
   resetConverterInstallStateForTest();
 });
 
-describe("presentation-to-PDF conversion", () => {
+describe("office-to-PDF conversion", () => {
   it("round-trips bytes through the host command as base64", async () => {
     invokeMock.mockResolvedValue({
       status: "converted",
       pdfBase64: btoa("%PDF-1.7 fake"),
     });
 
-    const pdf = await convertPresentationToPdf(
+    const pdf = await convertOfficeToPdf(
       new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
       PPTX,
     );
 
     expect(new TextDecoder().decode(pdf)).toBe("%PDF-1.7 fake");
-    expect(invokeMock).toHaveBeenCalledWith("convert_presentation_to_pdf", {
+    expect(invokeMock).toHaveBeenCalledWith("convert_office_to_pdf", {
       request: { contentBase64: btoa("PK\x03\x04"), mediaType: PPTX },
     });
   });
@@ -50,7 +50,7 @@ describe("presentation-to-PDF conversion", () => {
       installFailure: "Download cancelled",
     });
 
-    const error = await convertPresentationToPdf(
+    const error = await convertOfficeToPdf(
       new Uint8Array([1]),
       PPTX,
     ).then(
@@ -72,7 +72,7 @@ describe("presentation-to-PDF conversion", () => {
         "Exit status: exit status: 1\n\nStandard error:\nfirst line\nsecond line",
     });
 
-    const error = await convertPresentationToPdf(
+    const error = await convertOfficeToPdf(
       new Uint8Array([1]),
       PPTX,
     ).then(
@@ -80,7 +80,7 @@ describe("presentation-to-PDF conversion", () => {
       (thrown: unknown) => thrown,
     );
 
-    expect(error).toBeInstanceOf(PresentationConversionError);
+    expect(error).toBeInstanceOf(OfficeConversionError);
     expect(error).toMatchObject({
       message: "LibreOffice failed: source file could not be loaded",
       details:
@@ -186,7 +186,7 @@ describe("presentation-to-PDF conversion", () => {
       }),
     };
 
-    const converted = presentationPdfSource(original, PPTX);
+    const converted = officePdfSource(original, PPTX);
     expect(converted.cacheKey).toBe("document/chat/doc-1/converted-pdf");
 
     const fetched = await converted.fetch(new AbortController().signal);

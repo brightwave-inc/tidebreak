@@ -308,7 +308,7 @@ pub fn run() {
             deliverables::export_deliverable,
             chat_debug::copy_chat_debug_bundle,
             chat_debug::save_chat_debug_bundle,
-            office_pdf::convert_presentation_to_pdf,
+            office_pdf::convert_office_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,
             office_install::warm_presentation_converter,

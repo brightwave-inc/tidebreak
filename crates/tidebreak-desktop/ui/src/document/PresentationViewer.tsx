@@ -11,7 +11,11 @@
  * install-it-yourself hint, and a failed conversion gets its own card so a
  * corrupt file never reads as a broken app.
  */
-import { Loader2Icon, PresentationIcon } from "lucide-react";
+import {
+  FileSpreadsheetIcon,
+  Loader2Icon,
+  PresentationIcon,
+} from "lucide-react";
 import { lazy, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -20,8 +24,8 @@ import {
   cancelPresentationConverterInstall,
   ConverterMissingError,
   installPresentationConverter,
-  PresentationConversionError,
-  presentationPdfSource,
+  OfficeConversionError,
+  officePdfSource,
   type ConverterInstallProgress,
 } from "@/document/officePdf";
 import {
@@ -43,11 +47,31 @@ interface Props {
 }
 
 export function PresentationViewer({ source, mediaType, className }: Props) {
+  return (
+    <ConvertedOfficeViewer
+      source={source}
+      mediaType={mediaType}
+      kind="presentation"
+      className={className}
+    />
+  );
+}
+
+interface ConvertedOfficeViewerProps extends Props {
+  kind: "presentation" | "spreadsheet";
+}
+
+export function ConvertedOfficeViewer({
+  source,
+  mediaType,
+  kind,
+  className,
+}: ConvertedOfficeViewerProps) {
   // Bumped when the managed install completes, so the conversion that found
   // no converter is retried under a fresh cache key.
   const [attempt, setAttempt] = useState(0);
   const pdfSource = useMemo(() => {
-    const converted = presentationPdfSource(source, mediaType);
+    const converted = officePdfSource(source, mediaType);
     return attempt === 0
       ? converted
       : { ...converted, cacheKey: `${converted.cacheKey}#${attempt}` };
@@ -73,29 +97,30 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
       return (
         <ConverterInstall
           key={attempt}
+          kind={kind}
           initialFailure={error.installFailure}
           onReady={() => setAttempt((current) => current + 1)}
         />
       );
     }
     return (
-      <PresentationNotice>
-        Install LibreOffice to preview presentations. The file itself is fine —
+      <OfficeNotice kind={kind}>
+        Install LibreOffice to preview this {kind}. The file itself is fine —
         Save as… exports it unchanged.
-      </PresentationNotice>
+      </OfficeNotice>
     );
   }
 
   if (error !== null || data === null) {
     return (
-      <PresentationNotice>
+      <OfficeNotice kind={kind}>
         <span className="block">
-          This presentation could not be converted for preview.
+          This {kind} could not be converted for preview.
         </span>
         {error?.message ? (
           <span className="mt-1 block">{error.message}</span>
         ) : null}
-        {error instanceof PresentationConversionError ? (
+        {error instanceof OfficeConversionError ? (
           <details className="mt-3 w-full text-left">
             <summary className="cursor-pointer text-xs font-medium text-foreground">
               Troubleshooting details
@@ -106,7 +131,7 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
           </details>
         ) : null}
         <span className="mt-1 block">Save as… exports the original file.</span>
-      </PresentationNotice>
+      </OfficeNotice>
     );
   }
 
@@ -127,9 +152,11 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
  * with the reason; only the explicit retry starts another download.
  */
 function ConverterInstall({
+  kind,
   initialFailure,
   onReady,
 }: {
+  kind: "presentation" | "spreadsheet";
   initialFailure: string | null;
   onReady: () => void;
 }) {
@@ -168,9 +195,9 @@ function ConverterInstall({
 
   if (!running) {
     return (
-      <PresentationNotice>
+      <OfficeNotice kind={kind}>
         <span className="block">
-          Couldn’t set up the presentation preview
+          Couldn’t set up the {kind} preview
           {failure ? `: ${failure}` : "."}
         </span>
         <span className="mt-1 block">
@@ -188,7 +215,7 @@ function ConverterInstall({
         >
           Try again
         </Button>
-      </PresentationNotice>
+      </OfficeNotice>
     );
   }
 
@@ -201,10 +228,10 @@ function ConverterInstall({
   return (
     <div className="flex grow items-center justify-center p-6">
       <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
-        <PresentationIcon className="size-6 text-muted-foreground" />
+        <OfficeIcon kind={kind} />
         <p className="text-sm text-muted-foreground" role="status">
           {downloading
-            ? "Preparing presentation preview — downloading LibreOffice (~300 MB)…"
+            ? `Preparing ${kind} preview — downloading LibreOffice (~300 MB)…`
             : "Setting up LibreOffice…"}
         </p>
         <Progress value={percent ?? undefined} className="w-56" />
@@ -232,11 +259,22 @@ function formatMegabytes(bytes: number): string {
   return Math.round(bytes / (1024 * 1024)).toString();
 }
 
-function PresentationNotice({ children }: { children: React.ReactNode }) {
+function OfficeIcon({ kind }: { kind: "presentation" | "spreadsheet" }) {
+  const Icon = kind === "presentation" ? PresentationIcon : FileSpreadsheetIcon;
+  return <Icon className="size-6 text-muted-foreground" />;
+}
+
+function OfficeNotice({
+  kind,
+  children,
+}: {
+  kind: "presentation" | "spreadsheet";
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex grow items-center justify-center p-6">
       <div className="flex w-full max-w-xl flex-col items-center gap-3 text-center">
-        <PresentationIcon className="size-6 text-muted-foreground" />
+        <OfficeIcon kind={kind} />
         <p className="text-sm text-muted-foreground" role="status">
           {children}
         </p>
