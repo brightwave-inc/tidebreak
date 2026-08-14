@@ -1,6 +1,7 @@
 name-template: "Tidebreak v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 tag-prefix: "v"
+include-pre-releases: true
 categories:
   - title: "Breaking Changes"
     exclusive: true
