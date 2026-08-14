@@ -1,6 +1,10 @@
 # Build-script approvals in both formats: `allowBuilds` for pnpm >= 11,
 # `onlyBuiltDependencies` for pnpm 10 (what CI pins). Keep the lists in sync.
 overrides:
+  # react-xlsx 0.16.1 pins 0.1.21, whose XLSX drawing parser misses
+  # self-closing chart references. 0.1.23 is API-compatible and restores the
+  # worksheet chart layer for read-only previews.
+  '@dukelib/sheets-wasm@0.1.21': 0.1.23
   nanoid@5.1.11: 5.1.16
 allowBuilds:
   canvas: true

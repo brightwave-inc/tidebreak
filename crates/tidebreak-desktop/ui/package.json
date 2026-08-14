@@ -13,6 +13,8 @@
     "tauri": "cargo tauri"
   },
   "dependencies": {
+    "@dukelib/sheets-wasm": "0.1.23",
+    "@extend-ai/react-xlsx": "0.16.1",
     "@radix-ui/react-alert-dialog": "1.1.23",
     "@radix-ui/react-checkbox": "1.3.11",
     "@radix-ui/react-dialog": "1.1.23",
