@@ -26,8 +26,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 885
-- Desktop UI production packages: 442
-- Distinct license texts: 581
+- Desktop UI production packages: 464
+- Distinct license texts: 593
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -5370,6 +5370,18 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/babel/babel.git
 - License text: `LICENSE` ([L-8f08c824b2bb](#l-8f08c824b2bb))
 
+### @dukelib/sheets-wasm 0.1.23
+
+- License: `MIT`
+- Repository: https://github.com/guseggert/duke-sheets.git
+- License text: not distributed with this package
+
+### @extend-ai/react-xlsx 0.16.1
+
+- License: `MIT`
+- Repository: git+https://github.com/extend-hq/react-xlsx.git
+- License text: `LICENSE` ([L-24fdfac792e0](#l-24fdfac792e0))
+
 ### @flatten-js/interval-tree 1.1.3
 
 - License: `MIT`
@@ -5754,6 +5766,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
+### @tanstack/react-virtual 3.14.9
+
+- License: `MIT`
+- Repository: git+https://github.com/TanStack/virtual.git
+- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
+
 ### @tanstack/router-core 1.171.21
 
 - License: `MIT`
@@ -5765,6 +5783,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
+
+### @tanstack/virtual-core 3.17.7
+
+- License: `MIT`
+- Repository: git+https://github.com/TanStack/virtual.git
+- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
 ### @tauri-apps/api 2.11.1
 
@@ -6640,6 +6664,12 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/comma-separated-tokens
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
 
+### commander 2.20.3
+
+- License: `MIT`
+- Repository: https://github.com/tj/commander.js.git
+- License text: `LICENSE` ([L-4cc9c2af4eb0](#l-4cc9c2af4eb0))
+
 ### commander 8.3.0
 
 - License: `MIT`
@@ -6663,6 +6693,72 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/frenic/csstype
 - License text: `LICENSE` ([L-6a972b33787e](#l-6a972b33787e))
+
+### d3-array 3.2.4
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-array.git
+- License text: `LICENSE` ([L-f57e3a2cabf2](#l-f57e3a2cabf2))
+
+### d3-color 3.1.0
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-color.git
+- License text: `LICENSE` ([L-4f4f9997e3d9](#l-4f4f9997e3d9))
+
+### d3-format 3.1.2
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-format.git
+- License text: `LICENSE` ([L-9fe3e95ca3e8](#l-9fe3e95ca3e8))
+
+### d3-geo 3.1.1
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-geo.git
+- License text: `LICENSE` ([L-e87ae4ac338d](#l-e87ae4ac338d))
+
+### d3-hierarchy 3.1.2
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-hierarchy.git
+- License text: `LICENSE` ([L-6019bf345195](#l-6019bf345195))
+
+### d3-interpolate 3.0.1
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-interpolate.git
+- License text: `LICENSE` ([L-6019bf345195](#l-6019bf345195))
+
+### d3-path 3.1.0
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-path.git
+- License text: `LICENSE` ([L-58f959e2911c](#l-58f959e2911c))
+
+### d3-scale 4.0.2
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-scale.git
+- License text: `LICENSE` ([L-6019bf345195](#l-6019bf345195))
+
+### d3-shape 3.2.0
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-shape.git
+- License text: `LICENSE` ([L-4f4f9997e3d9](#l-4f4f9997e3d9))
+
+### d3-time 3.1.0
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-time.git
+- License text: `LICENSE` ([L-4f4f9997e3d9](#l-4f4f9997e3d9))
+
+### d3-time-format 4.1.0
+
+- License: `ISC`
+- Repository: https://github.com/d3/d3-time-format.git
+- License text: `LICENSE` ([L-6019bf345195](#l-6019bf345195))
 
 ### date-fns 4.1.0
 
@@ -6796,6 +6892,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/101arrowz/fflate
 - License text: `LICENSE` ([L-62249119bb7d](#l-62249119bb7d))
 
+### fflate 0.8.3
+
+- License: `MIT`
+- Repository: https://github.com/101arrowz/fflate
+- License text: `LICENSE` ([L-0a1df3a083d0](#l-0a1df3a083d0))
+
 ### franc-min 6.2.0
 
 - License: `MIT`
@@ -6927,6 +7029,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/remarkablemark/inline-style-parser.git
 - License text: `LICENSE` ([L-9cac2500def4](#l-9cac2500def4))
+
+### internmap 2.0.3
+
+- License: `ISC`
+- Repository: https://github.com/mbostock/internmap.git
+- License text: `LICENSE` ([L-f4bb8f655fdb](#l-f4bb8f655fdb))
 
 ### is-alphabetical 2.0.1
 
@@ -7630,6 +7738,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/ikatyang-collab/regexp-util
 - License text: `LICENSE` ([L-f04d53ae9397](#l-f04d53ae9397))
 
+### regl 2.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/regl-project/regl.git
+- License text: `LICENSE` ([L-8be7c5766fe5](#l-8be7c5766fe5))
+
 ### rehype-highlight 7.0.2
 
 - License: `MIT`
@@ -7839,6 +7953,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/alexreardon/tiny-invariant.git
 - License text: `LICENSE` ([L-b1c501095de7](#l-b1c501095de7))
 
+### topojson-client 3.1.0
+
+- License: `ISC`
+- Repository: https://github.com/topojson/topojson-client.git
+- License text: `LICENSE` ([L-5d72d08481a4](#l-5d72d08481a4))
+
 ### trigram-utils 2.0.1
 
 - License: `MIT`
@@ -7935,6 +8055,12 @@ License identifiers named across all declared expressions:
 - Repository: syntax-tree/unist-util-visit-parents
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
 
+### us-atlas 3.0.1
+
+- License: `ISC`
+- Repository: https://github.com/topojson/us-atlas.git
+- License text: `LICENSE` ([L-7f7a686a9e08](#l-7f7a686a9e08))
+
 ### use-callback-ref 1.3.3
 
 - License: `MIT`
@@ -7994,6 +8120,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: wooorm/web-namespaces
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
+
+### world-atlas 2.0.2
+
+- License: `ISC`
+- Repository: https://github.com/topojson/world-atlas.git
+- License text: `LICENSE` ([L-7f7a686a9e08](#l-7f7a686a9e08))
 
 ### wrap-ansi 7.0.0
 
@@ -8601,6 +8733,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### L-0a1df3a083d0
+
+```
+MIT License
+
+Copyright (c) 2026 Arjun Barrett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-0ae52fe329cc
@@ -11083,6 +11241,32 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### L-24fdfac792e0
+
+```
+MIT License
+
+Copyright (c) 2026 CrowdView Inc, dba Extend
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-26235c41e314
@@ -15110,6 +15294,24 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### L-4f4f9997e3d9
+
+```
+Copyright 2010-2022 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
 ### L-4f8ade273d40
 
 ```
@@ -16391,6 +16593,24 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### L-58f959e2911c
+
+```
+Copyright 2015-2022 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
 ### L-59013a5c8d3a
 
 ```
@@ -17007,6 +17227,24 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### L-5d72d08481a4
+
+```
+Copyright 2012-2019 Michael Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
 ### L-5dd2a43c0ed6
 
 ```
@@ -17585,6 +17823,24 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### L-6019bf345195
+
+```
+Copyright 2010-2021 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
 ```
 
 ### L-602ef1d5d3db
@@ -23716,6 +23972,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+### L-7f7a686a9e08
+
+```
+Copyright 2013-2019 Michael Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
 ### L-7f91c2a4eddb
 
 ```
@@ -25032,6 +25306,33 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-8be7c5766fe5
+
+```
+
+The MIT License (MIT)
+
+Copyright (c) 2016 Mikola Lysenko
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### L-8d1f81ea4e87
@@ -27686,6 +27987,24 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-9fe3e95ca3e8
+
+```
+Copyright 2010-2026 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
 ```
 
 ### L-a00511478c83
@@ -36728,6 +37047,45 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### L-e87ae4ac338d
+
+```
+Copyright 2010-2024 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+This license applies to GeographicLib, versions 1.12 and later.
+
+Copyright 2008-2012 Charles Karney
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### L-e91069c31b4e
 
 ```
@@ -37808,6 +38166,24 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### L-f4bb8f655fdb
+
+```
+Copyright 2021 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
+
 ### L-f4bc3f3c5bfd
 
 ```
@@ -37832,6 +38208,24 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-f57e3a2cabf2
+
+```
+Copyright 2010-2023 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
 ```
 
 ### L-f5b5e0e777c1
