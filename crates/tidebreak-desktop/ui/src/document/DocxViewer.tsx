@@ -104,7 +104,7 @@ export default function DocxViewer({
     // is then loaded into a scriptless sandboxed frame.
     void renderAsync(fileDownload.data, staging, staging, DOCX_RENDER_OPTIONS)
       .then(async () => {
-        await nextAnimationFrame();
+        await waitForLayoutPass();
         if (cancelled) return;
         sanitizeRenderedDocument(staging);
         setFrameDocument(
@@ -185,6 +185,8 @@ export default function DocxViewer({
  * the sandboxed document.
  */
 function sanitizeRenderedDocument(container: HTMLElement): void {
+  const externalHrefs = new WeakMap<Element, string>();
+
   container
     .querySelectorAll(
       "script, iframe, frame, frameset, object, embed, meta, base, link, form, input, button, textarea, select, option, title, noscript, template, xmp, noembed, plaintext",
@@ -196,6 +198,7 @@ function sanitizeRenderedDocument(container: HTMLElement): void {
       const name = attribute.name.toLowerCase();
       if (
         name.startsWith("on") ||
+        name === "data-tidebreak-external-href" ||
         name === "srcdoc" ||
         name === "srcset" ||
         name === "action" ||
@@ -223,15 +226,14 @@ function sanitizeRenderedDocument(container: HTMLElement): void {
         name === "href" &&
         element.tagName.toLowerCase() === "a"
       ) {
-        element.setAttribute("data-tidebreak-external-href", safeHref);
+        externalHrefs.set(element, safeHref);
       }
       element.removeAttribute(name);
     }
   }
 
   for (const anchor of container.querySelectorAll<HTMLAnchorElement>("a")) {
-    const externalHref = anchor.getAttribute("data-tidebreak-external-href");
-    anchor.removeAttribute("data-tidebreak-external-href");
+    const externalHref = externalHrefs.get(anchor);
     anchor.removeAttribute("target");
     anchor.removeAttribute("rel");
     if (externalHref) {
@@ -259,6 +261,13 @@ function nextAnimationFrame(): Promise<void> {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => resolve());
   });
+}
+
+function waitForLayoutPass(): Promise<void> {
+  return Promise.race([
+    nextAnimationFrame(),
+    new Promise<void>((resolve) => window.setTimeout(resolve, 100)),
+  ]);
 }
 
 function safeExternalHref(href: string): string | null {

@@ -129,6 +129,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
       - name: Require the validated release source
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || {
@@ -150,18 +151,22 @@ jobs:
           pnpm --dir docs-site build
           pnpm --dir docs-site lint
           pnpm --dir docs-site types:check
+          pnpm --dir docs-site test:vercel-output
           test -f docs-site/out/index.html
           test -f docs-site/out/search-index.json
           test -f docs-site/out/sitemap.xml
-          find docs-site/out -type f -print0 \
-            | sort -z \
-            | xargs -0 sha256sum \
-            > "$RUNNER_TEMP/tidebreak-docs-$RELEASE_TAG.sha256"
           pnpm --dir docs-site package:vercel
           test -f .vercel/output/static/docs/index.html
           test -f .vercel/output/static/docs/quickstart/index.html
           test -f .vercel/output/static/docs/search-index.json
           test -f .vercel/output/static/docs/sitemap.xml
+          (
+            cd .vercel/output
+            find . -type f -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              > "$RUNNER_TEMP/tidebreak-docs-$RELEASE_TAG.sha256"
+          )
       - name: Transfer inert prebuilt documentation
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -198,6 +203,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
           sparse-checkout: .github/vercel-cli
           sparse-checkout-cone-mode: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -215,6 +221,18 @@ jobs:
         with:
           name: tidebreak-docs-${{ needs.validate.outputs.tag }}-prebuilt
           path: .vercel/output
+      - name: Download the documentation digest manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-docs-${{ needs.validate.outputs.tag }}-manifest
+          path: ${{ runner.temp }}/docs-manifest
+      - name: Verify the transferred documentation
+        run: |
+          (
+            cd .vercel/output
+            sha256sum --check --strict \
+              "$RUNNER_TEMP/docs-manifest/tidebreak-docs-$RELEASE_TAG.sha256"
+          )
       - name: Link the fixed documentation project
         run: |
           mkdir -p .vercel
@@ -240,7 +258,6 @@ jobs:
             --meta "releaseTag=$RELEASE_TAG" \
             --meta "releaseSha=$RELEASE_SHA" \
             --scope "$VERCEL_SCOPE" \
-            --token "$VERCEL_TOKEN" \
             --json)"
           deployment="$(jq -ce '.deployment // .' <<<"$deployment_json")"
           deployment_url="$(jq -er .url <<<"$deployment")"
@@ -258,7 +275,6 @@ jobs:
             ./.github/vercel-cli/node_modules/.bin/vercel curl "$path" \
               --deployment "$DEPLOYMENT_URL" \
               --scope "$VERCEL_SCOPE" \
-              --token "$VERCEL_TOKEN" \
               -- \
               --fail \
               --silent \
@@ -270,7 +286,6 @@ jobs:
           ./.github/vercel-cli/node_modules/.bin/vercel curl /docs/ \
             --deployment "$DEPLOYMENT_URL" \
             --scope "$VERCEL_SCOPE" \
-            --token "$VERCEL_TOKEN" \
             -- \
             --fail \
             --silent \
@@ -290,7 +305,9 @@ jobs:
             *) echo "Documentation did not reference a safe Next asset." >&2; exit 1 ;;
           esac
           request "$asset_path" "$RUNNER_TEMP/docs-asset"
-          grep -Fqi 'content-security-policy:' "$RUNNER_TEMP/docs-headers"
+          grep -Eqi "content-security-policy:.*default-src 'self'" "$RUNNER_TEMP/docs-headers"
+          grep -Eqi "content-security-policy:.*object-src 'none'" "$RUNNER_TEMP/docs-headers"
+          grep -Eqi "content-security-policy:.*frame-ancestors 'none'" "$RUNNER_TEMP/docs-headers"
           grep -Fqi 'cross-origin-opener-policy: same-origin' "$RUNNER_TEMP/docs-headers"
           grep -Fqi 'cross-origin-resource-policy: same-origin' "$RUNNER_TEMP/docs-headers"
           grep -Fqi 'x-content-type-options: nosniff' "$RUNNER_TEMP/docs-headers"
@@ -306,7 +323,6 @@ jobs:
           ./.github/vercel-cli/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
           --yes
           --scope "$VERCEL_SCOPE"
-          --token "$VERCEL_TOKEN"
       - name: Verify the production alias
         env:
           DEPLOYMENT_ID: ${{ steps.deploy.outputs.id }}
@@ -316,7 +332,6 @@ jobs:
             production_json="$(./.github/vercel-cli/node_modules/.bin/vercel inspect \
               https://tidebreak-docs.vercel.app \
               --scope "$VERCEL_SCOPE" \
-              --token "$VERCEL_TOKEN" \
               --json 2>/dev/null || true)"
             if jq -e --arg id "$DEPLOYMENT_ID" \
               '.id == $id and .readyState == "READY"' \
@@ -330,7 +345,11 @@ jobs:
               --output "$RUNNER_TEMP/docs-production.html" \
               && grep -Fq 'https://www.tidebreak.sh/docs/' \
                 "$RUNNER_TEMP/docs-production.html" \
-              && grep -Fqi 'content-security-policy:' \
+              && grep -Eqi "content-security-policy:.*default-src 'self'" \
+                "$RUNNER_TEMP/docs-production-headers" \
+              && grep -Eqi "content-security-policy:.*object-src 'none'" \
+                "$RUNNER_TEMP/docs-production-headers" \
+              && grep -Eqi "content-security-policy:.*frame-ancestors 'none'" \
                 "$RUNNER_TEMP/docs-production-headers" \
               && grep -Fqi 'x-frame-options: DENY' \
                 "$RUNNER_TEMP/docs-production-headers"; then

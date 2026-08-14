@@ -49,6 +49,14 @@ function renderPage(bodyContainer: HTMLElement, label = "document") {
   unsafe.textContent = "unsafe";
   page.append(unsafe);
 
+  const spoofed = document.createElement("a");
+  spoofed.setAttribute(
+    "data-tidebreak-external-href",
+    "javascript:alert('spoofed')",
+  );
+  spoofed.textContent = "spoofed";
+  page.append(spoofed);
+
   const bookmark = document.createElement("a");
   bookmark.href = "#section-2";
   bookmark.textContent = "bookmark";
@@ -129,9 +137,28 @@ it("confines generated document styles to an opaque-origin sandbox", async () =>
     "External link (copy this address): https://example.com/report",
   );
   expect(frame.srcdoc).not.toContain("http://example.com/plain");
+  expect(frame.srcdoc).not.toContain("data-tidebreak-external-href");
+  expect(frame.srcdoc).not.toContain("javascript:alert");
 
   rerender(<DocxViewer source={source()} />);
   expect(docxMocks.renderAsync).toHaveBeenCalledTimes(1);
+});
+
+it("finishes rendering when animation frames are suspended", async () => {
+  const requestAnimationFrame = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation(() => 1);
+
+  try {
+    const { container } = render(<DocxViewer source={source()} />);
+
+    await waitFor(
+      () => expect(container.querySelector("iframe")).not.toBeNull(),
+      { timeout: 500 },
+    );
+  } finally {
+    requestAnimationFrame.mockRestore();
+  }
 });
 
 it("does not let a superseded parse overwrite the current document", async () => {

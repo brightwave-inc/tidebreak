@@ -1057,22 +1057,40 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/);
   assert.match(build, /pnpm --dir docs-site install --frozen-lockfile/);
   assert.match(build, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(build, /persist-credentials: false/);
   assert.match(build, /test "\$\(git rev-parse HEAD\)" = "\$RELEASE_SHA"/);
   assert.match(build, /pnpm --dir docs-site build/);
+  assert.match(build, /pnpm --dir docs-site test:vercel-output/);
   assert.match(build, /pnpm --dir docs-site package:vercel/);
   assert.match(build, /\.vercel\/output\/static\/docs\/index\.html/);
+  assert.match(build, /cd \.vercel\/output/);
+  assert.match(build, /find \. -type f -print0/);
+  assert.match(build, /tidebreak-docs-\$RELEASE_TAG\.sha256/);
   assert.match(build, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-prebuilt/);
   assert.doesNotMatch(publish, /docs-site install|docs-site build/);
   assert.equal(vercelCliPackage.dependencies.vercel, "59.0.0");
   assert.match(publish, /sparse-checkout: \.github\/vercel-cli/);
+  assert.match(publish, /persist-credentials: false/);
   assert.match(
     publish,
     /pnpm --dir \.github\/vercel-cli install --frozen-lockfile --ignore-scripts/,
   );
   assert.doesNotMatch(publish, /pnpm (?:add --global|dlx)|npx/);
   assert.match(publish, /actions\/download-artifact@[0-9a-f]{40} # v8/);
+  assert.match(publish, /name: tidebreak-docs-\$\{\{ needs\.validate\.outputs\.tag \}\}-manifest/);
+  assert.match(publish, /sha256sum --check --strict/);
   assert.match(publish, /asset_path=.*\/docs\/_next\//);
-  assert.match(publish, /content-security-policy:/);
+  for (const directive of [
+    "default-src 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+  ]) {
+    assert.equal(
+      publish.split(`content-security-policy:.*${directive}`).length - 1,
+      2,
+      `staged and promoted docs must both verify ${directive}`,
+    );
+  }
   assert.match(publish, /x-frame-options: DENY/);
   assert.match(publish, /\.id == \$id and \.readyState == "READY"/);
   assert.match(publish, /--prebuilt/);
@@ -1084,18 +1102,31 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(publish, /deployment_url=.*jq -er \.url/);
   assert.match(publish, /deployment_id=.*jq -er \.id/);
   assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
+  assert.doesNotMatch(publish, /--token/);
   assert.match(publish, /\/docs\/quickstart\//);
   assert.match(publish, /\/docs\/search-index\.json/);
   assert.match(publish, /\/docs\/sitemap\.xml/);
   assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel promote/);
 
   const deploy = publish.indexOf("Create an unaliased production deployment");
+  const verify = publish.indexOf("Verify the transferred documentation");
   const smoke = publish.indexOf("Smoke-test the staged deployment");
   const promote = publish.indexOf("Promote the verified deployment");
   const production = publish.indexOf("Verify the production alias");
   assert.ok(
-    deploy !== -1 && deploy < smoke && smoke < promote && promote < production,
-    "docs must be staged, checked, promoted, and then verified in that order",
+    verify !== -1 &&
+      verify < deploy &&
+      deploy < smoke &&
+      smoke < promote &&
+      promote < production,
+    "docs must be verified, staged, checked, promoted, and then verified in that order",
+  );
+
+  const packageOutput = build.indexOf("pnpm --dir docs-site package:vercel");
+  const digestOutput = build.indexOf("find . -type f -print0");
+  assert.ok(
+    packageOutput !== -1 && packageOutput < digestOutput,
+    "the digest must cover the packaged Vercel output, including config.json",
   );
 });
 
@@ -1565,17 +1596,19 @@ test("GitHub release downloads are copied from the hosted release", () => {
   // manifest, rather than a second copy built alongside the hosted release.
   assert.match(attachJob, /releases\/v\$TIDEBREAK_VERSION\/manifest\.json/);
   assert.match(attachJob, /sha256sum --check --strict/);
-  if (/Tidebreak-macos-universal\.dmg/.test(attachJob)) {
-    assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
-  }
+  assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
   assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
   assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
 
-  assert.match(
-    readFileSync(repositoryFile("README.md"), "utf8"),
-    /releases\/latest\/download\/Tidebreak-macos-universal\.dmg/,
-    "the README download link must match the published asset name",
+  const macDownloadLink = readFileSync(repositoryFile("README.md"), "utf8")
+    .match(
+      /releases\/latest\/download\/(Tidebreak-macos-[\w-]+\.dmg)/,
+    )?.[1];
+  assert.ok(macDownloadLink, "the README must publish a macOS download link");
+  assert.ok(
+    attachJob.includes(`downloads/${macDownloadLink}`),
+    `attach_downloads must upload ${macDownloadLink}`,
   );
 });
 

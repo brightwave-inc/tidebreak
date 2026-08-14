@@ -316,6 +316,51 @@ const mutations = [
       ),
   },
   {
+    name: "docs output config test execution",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_docs", (job) =>
+        job.replace("          pnpm --dir docs-site test:vercel-output\n", ""),
+      ),
+  },
+  {
+    name: "docs manifest verification before deployment",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) =>
+        job.replace(
+          /      - name: Verify the transferred documentation[\s\S]*?(?=\n      - name: Link the fixed documentation project)/,
+          "",
+        ),
+      ),
+  },
+  {
+    name: "docs deployment token stays out of argv",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) =>
+        job.replace(
+          '            --scope "$VERCEL_SCOPE" \\\n            --json)',
+          '            --scope "$VERCEL_SCOPE" \\\n            --token "$VERCEL_TOKEN" \\\n            --json)',
+        ),
+      ),
+  },
+  {
+    name: "docs deployed CSP directive checks",
+    file: ".github/workflows/release.yml",
+    expected: "release documentation is built from the validated tag",
+    mutate: (source) =>
+      editWorkflowJob(source, "publish_docs", (job) =>
+        job.replace(
+          '          grep -Eqi "content-security-policy:.*object-src \'none\'" "$RUNNER_TEMP/docs-headers"\n',
+          "",
+        ),
+      ),
+  },
+  {
     name: "docs unaliased staging deployment",
     file: ".github/workflows/release.yml",
     expected: "release documentation is built from the validated tag",
@@ -457,6 +502,16 @@ const mutations = [
           "save-if: false",
           "save-if: ${{ matrix.arch == 'aarch64' }}",
         ),
+      ),
+  },
+  {
+    name: "README macOS download matches an uploaded asset",
+    file: "README.md",
+    expected: "GitHub release downloads are copied from the hosted release",
+    mutate: (source) =>
+      source.replace(
+        /Tidebreak-macos-[\w-]+\.dmg/,
+        "Tidebreak-macos-legacy.dmg",
       ),
   },
 ];

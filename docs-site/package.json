@@ -9,6 +9,7 @@
     "prebuild": "node scripts/generate-search-index.mjs",
     "build": "next build",
     "package:vercel": "node scripts/package-vercel-output.mjs",
+    "test:vercel-output": "node --test scripts/vercel-output-config.test.mjs",
     "start": "serve out",
     "types:check": "next typegen && tsc --noEmit",
     "lint": "eslint"
