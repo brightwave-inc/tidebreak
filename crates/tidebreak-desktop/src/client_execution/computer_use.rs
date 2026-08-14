@@ -190,6 +190,11 @@ pub(crate) struct ComputerUseState {
     /// cleared only by the user (resume, or a fresh consent approval — both
     /// are explicit opt-ins).
     halt: tokio::sync::watch::Sender<bool>,
+    /// Linearizes Stop with redemption of a broker-held consequential action.
+    /// The gate stays held until the broker accepts or rejects the one-shot
+    /// confirmation so Stop either lands before dispatch (and prevents it) or
+    /// after that dispatch has already become authoritative.
+    consequential_dispatch: tokio::sync::Mutex<()>,
 }
 
 impl Default for ComputerUseState {
@@ -199,6 +204,7 @@ impl Default for ComputerUseState {
             app_names: StdMutex::new(HashMap::new()),
             indicator: StdMutex::new(IndicatorState::default()),
             halt: tokio::sync::watch::channel(false).0,
+            consequential_dispatch: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -267,10 +273,23 @@ impl ComputerUseState {
         }
     }
 
-    fn halt(&self) {
+    async fn halt(&self) {
+        let _dispatch = self.consequential_dispatch.lock().await;
         // send_replace, not send: the latch must hold even when no prompt is
         // currently parked on it (send drops the value with zero receivers).
         self.halt.send_replace(true);
+    }
+
+    async fn redeem_consequential<T, F, Fut>(&self, dispatch: F) -> Result<T, StoredResolution>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _dispatch = self.consequential_dispatch.lock().await;
+        if self.is_halted() {
+            return Err(stopped_resolution());
+        }
+        Ok(dispatch().await)
     }
 
     fn resume(&self) {
@@ -459,9 +478,13 @@ pub(crate) fn computer_use_state(state: State<'_, HostAccess>) -> ComputerUseSna
 /// wanted. In-memory only — a restart re-arms, and every agent whose op was
 /// short-circuited was already told not to retry.
 #[tauri::command]
-pub(crate) fn stop_computer_use_control(app: AppHandle, state: State<'_, HostAccess>) {
-    state.computer_use.halt();
+pub(crate) async fn stop_computer_use_control(
+    app: AppHandle,
+    state: State<'_, HostAccess>,
+) -> Result<(), String> {
+    state.computer_use.halt().await;
     emit_state(&app, &state.computer_use);
+    Ok(())
 }
 
 /// Re-arm control after a Stop. A renderer request may open the native prompt,
@@ -1281,7 +1304,14 @@ async fn dispatch_confirmation(
         confirmation_id: held.confirmation_id,
     });
     let deadline = tokio::time::Instant::now() + crate::broker::MUTATION_DISPATCH_WINDOW;
-    match state.broker.control_without_retry(confirm, deadline).await {
+    let result = match cu
+        .redeem_consequential(|| state.broker.control_without_retry(confirm, deadline))
+        .await
+    {
+        Ok(result) => result,
+        Err(resolution) => return resolution,
+    };
+    match result {
         Ok(ControlResult::CuConfirmControlAction(meta)) => completed(control_meta_json(&meta)),
         Ok(_) => unavailable(
             "operation_failed",
@@ -1672,11 +1702,11 @@ mod tests {
         assert_eq!(wire.element_fingerprint.as_deref(), Some("abc"));
     }
 
-    #[test]
-    fn the_halt_latch_short_circuits_before_any_broker_round_trip() {
+    #[tokio::test]
+    async fn the_halt_latch_short_circuits_before_any_broker_round_trip() {
         let cu = ComputerUseState::default();
         assert!(!cu.is_halted());
-        cu.halt();
+        cu.halt().await;
         assert!(cu.is_halted());
         // The gate the dispatcher runs immediately before dispatch: halted
         // control ops get the non-retryable stop error without a broker call.
@@ -1696,6 +1726,49 @@ mod tests {
 
         cu.resume();
         assert!(!cu.is_halted());
+    }
+
+    #[tokio::test]
+    async fn stop_after_native_approval_prevents_confirmation_redemption() {
+        let cu = std::sync::Arc::new(ComputerUseState::default());
+        let (approved, native_approval) = oneshot::channel::<()>();
+        let (continue_after_approval, continue_redemption) = oneshot::channel::<()>();
+        let (broker_request, mut broker_requests) = tokio::sync::mpsc::unbounded_channel();
+
+        let redemption_cu = std::sync::Arc::clone(&cu);
+        let redemption = tokio::spawn(async move {
+            native_approval.await.expect("native approval arrives");
+            continue_redemption
+                .await
+                .expect("the approved action may continue");
+            redemption_cu
+                .redeem_consequential(|| async move {
+                    broker_request
+                        .send(ControlRequest::CuConfirmControlAction(
+                            CuConfirmControlActionRequest {
+                                confirmation_id: Uuid::new_v4(),
+                            },
+                        ))
+                        .expect("the broker observer remains open");
+                })
+                .await
+        });
+
+        approved.send(()).expect("approve the native prompt");
+        cu.halt().await;
+        continue_after_approval
+            .send(())
+            .expect("release the approved action after Stop");
+
+        let resolution = redemption
+            .await
+            .expect("the redemption task completes")
+            .expect_err("Stop must prevent the confirmation request");
+        let StoredResolution::Failed { error_code, .. } = resolution else {
+            panic!("a stopped confirmation fails the call");
+        };
+        assert_eq!(error_code, "stopped_by_user");
+        assert!(broker_requests.try_recv().is_err());
     }
 
     #[test]
