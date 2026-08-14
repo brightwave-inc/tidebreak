@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   boundedComposerHeight,
   Composer,
+  composerFolderChips,
   imageSendBlocker,
   MAX_COMPOSER_LINES,
   shouldRestoreComposerFocus,
   shouldSubmitComposerKey,
+  type ComposerFolders,
   type ComposerImages,
 } from "./Composer";
 import {
@@ -586,5 +588,31 @@ describe("Composer", () => {
     );
 
     expect(markup).not.toContain('aria-label="Context:');
+  });
+});
+
+describe("composerFolderChips", () => {
+  const folders: ComposerFolders = {
+    items: [
+      {
+        rootId: "root-1",
+        displayName: "Downloads",
+        status: "connected",
+        statements: [],
+      },
+    ],
+    working: false,
+    error: null,
+    onRemove: vi.fn(),
+  };
+
+  it("hides standing grants once the draft has consumed them", () => {
+    expect(composerFolderChips({ ...folders, pendingIds: [] })).toEqual([]);
+  });
+
+  it("keeps a folder the draft is still holding", () => {
+    expect(
+      composerFolderChips({ ...folders, pendingIds: ["root-1"] }),
+    ).toEqual(folders.items);
   });
 });

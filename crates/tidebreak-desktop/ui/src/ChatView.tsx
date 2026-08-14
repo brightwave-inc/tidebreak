@@ -159,8 +159,10 @@ export function ChatView({
       onDraftChange("");
       // Pills go with the text they were attached to: accepted guidance has
       // already carried them, and leaving them behind would silently re-invoke
-      // the same skills on whatever is typed next.
+      // the same skills on whatever is typed next. Folder chips are the same
+      // draft context; the grants stay on the chat.
       useComposerDrafts.getState().setSkills(chat.id, []);
+      useComposerDrafts.getState().setFolders(chat.id, []);
       onVoiceInputAccepted();
     },
     voiceInputUsed,

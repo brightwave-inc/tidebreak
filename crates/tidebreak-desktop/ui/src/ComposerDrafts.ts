@@ -60,6 +60,11 @@ export type ComposerAttachmentDraft = {
   files: ImportedDocument[];
   /** Skills the next message will invoke, by catalog name, in pick order. */
   skills: string[];
+  /**
+   * Connected-folder root ids the composer is holding as this draft's
+   * context. Standing grants live on the chat; these are only the chips.
+   */
+  folders: string[];
   pendingChatId: string | null;
 };
 
@@ -67,6 +72,7 @@ export const EMPTY_ATTACHMENT_DRAFT: ComposerAttachmentDraft = {
   images: [],
   files: [],
   skills: [],
+  folders: [],
   pendingChatId: null,
 };
 
@@ -75,6 +81,7 @@ function isEmptyAttachmentDraft(draft: ComposerAttachmentDraft): boolean {
     draft.images.length === 0 &&
     draft.files.length === 0 &&
     draft.skills.length === 0 &&
+    draft.folders.length === 0 &&
     draft.pendingChatId === null
   );
 }
@@ -96,6 +103,7 @@ function storableDraft(
       .map((image) => ({ ...image, previewUrl: null })),
     files: draft.files,
     skills: draft.skills,
+    folders: draft.folders,
     pendingChatId: draft.pendingChatId,
   };
 }
@@ -123,6 +131,9 @@ function parseStoredAttachmentDraft(value: string): ComposerAttachmentDraft | nu
       files,
       skills: (Array.isArray(parsed.skills) ? parsed.skills : []).filter(
         (skill): skill is string => typeof skill === "string",
+      ),
+      folders: (Array.isArray(parsed.folders) ? parsed.folders : []).filter(
+        (folder): folder is string => typeof folder === "string",
       ),
       pendingChatId:
         typeof parsed.pendingChatId === "string" ? parsed.pendingChatId : null,
@@ -196,6 +207,7 @@ export type ComposerDraftStore = {
   setImages: (key: string, images: ImageAttachment[]) => void;
   setFiles: (key: string, files: ImportedDocument[]) => void;
   setSkills: (key: string, skills: string[]) => void;
+  setFolders: (key: string, folders: string[]) => void;
   setPendingChatId: (key: string, chatId: string | null) => void;
 };
 
@@ -241,6 +253,8 @@ export function createComposerDraftStore() {
         updateAttachments(key, (current) => ({ ...current, files })),
       setSkills: (key, skills) =>
         updateAttachments(key, (current) => ({ ...current, skills })),
+      setFolders: (key, folders) =>
+        updateAttachments(key, (current) => ({ ...current, folders })),
       setPendingChatId: (key, chatId) =>
         updateAttachments(key, (current) => ({
           ...current,
