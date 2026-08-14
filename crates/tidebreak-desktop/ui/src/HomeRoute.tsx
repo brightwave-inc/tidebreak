@@ -387,8 +387,12 @@ export function HomeRoute() {
             }}
             executionConfigClient={client}
             promptLibrary={promptLibrary}
-            heading="Welcome to Tidebreak"
-            description="Choose how the agent works, add what it needs, and start with a real task."
+            heading={walkthroughAvailable ? "Welcome to Tidebreak" : undefined}
+            description={
+              walkthroughAvailable
+                ? "Choose how the agent works, add what it needs, and start with a real task."
+                : undefined
+            }
             onStartWalkthrough={
               walkthroughAvailable
                 ? () => setWalkthroughOpen(true)

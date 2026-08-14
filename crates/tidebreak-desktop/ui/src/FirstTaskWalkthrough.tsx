@@ -1,7 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export const FIRST_TASK_WALKTHROUGH_KEY =
   "tidebreak.first-task-walkthrough.v1";
@@ -32,13 +38,13 @@ const STEPS: readonly WalkthroughStep[] = [
     id: "permissions",
     target: "permissions",
     title: "Choose a permission level",
-    body: "Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a safe place to start.",
+    body: "Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a balanced place to start.",
   },
   {
     id: "attachments",
     target: "tools",
     title: "Add attachments",
-    body: "Open Tools to attach files for this task or connect a folder when the agent should work across a collection of files.",
+    body: "Open Tools to attach files from your computer. This option appears in the desktop app when local file access is available.",
   },
 ] as const;
 
@@ -89,7 +95,6 @@ export function FirstTaskWalkthrough({
 }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [rect, setRect] = useState<ElementRect | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
   const step = STEPS[stepIndex];
 
   useEffect(() => {
@@ -132,22 +137,6 @@ export function FirstTaskWalkthrough({
     };
   }, [open, step.target]);
 
-  useEffect(() => {
-    if (!open) return;
-    dialogRef.current?.focus();
-  }, [open, stepIndex, rect]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      finish("skipped");
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
-
   function finish(outcome: FirstTaskWalkthroughOutcome) {
     storeOutcome(outcome);
     onClose(outcome);
@@ -173,10 +162,14 @@ export function FirstTaskWalkthrough({
       : rect.bottom + 12
     : window.innerHeight / 2;
 
-  return createPortal(
-    <div className="fixed inset-0 z-[100]" aria-live="polite">
-      <div className="absolute inset-0 bg-black/45" aria-hidden="true" />
-      {rect && (
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) finish("skipped");
+      }}
+    >
+      {rect && createPortal(
         <div
           className="pointer-events-none fixed z-[101] rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
           aria-hidden="true"
@@ -187,15 +180,13 @@ export function FirstTaskWalkthrough({
             height: rect.height + 8,
             boxShadow: "0 0 0 9999px rgb(0 0 0 / 0.01)",
           }}
-        />
+        />,
+        document.body,
       )}
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={`first-task-walkthrough-${step.id}`}
-        tabIndex={-1}
-        className="fixed z-[102] rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-xl outline-none"
+      <DialogContent
+        withCloseButton={false}
+        overlayClassName="z-[100] bg-black/45"
+        className="z-[102] block max-w-none translate-x-0 translate-y-0 gap-0 rounded-xl border-border bg-popover p-4 text-popover-foreground shadow-xl duration-0 data-[state=closed]:animate-none data-[state=open]:animate-none"
         style={{
           top: dialogTop,
           left: dialogLeft,
@@ -213,15 +204,12 @@ export function FirstTaskWalkthrough({
             {stepIndex + 1} of {STEPS.length}
           </span>
         </div>
-        <h2
-          id={`first-task-walkthrough-${step.id}`}
-          className="mt-3 text-base font-semibold tracking-[-0.01em]"
-        >
+        <DialogTitle className="mt-3 text-base tracking-[-0.01em]">
           {step.title}
-        </h2>
-        <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+        </DialogTitle>
+        <DialogDescription className="mt-1.5 leading-relaxed">
           {step.body}
-        </p>
+        </DialogDescription>
         <div className="mt-4 flex items-center gap-2">
           <Button
             type="button"
@@ -256,8 +244,7 @@ export function FirstTaskWalkthrough({
             {stepIndex === STEPS.length - 1 ? "Done" : "Next"}
           </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -20,18 +22,33 @@ function Targets() {
   );
 }
 
+function WalkthroughHarness({
+  onClose,
+}: {
+  onClose: (outcome: "completed" | "skipped") => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <>
+      <Targets />
+      <FirstTaskWalkthrough
+        open={open}
+        onClose={(outcome) => {
+          onClose(outcome);
+          setOpen(false);
+        }}
+      />
+    </>
+  );
+}
+
 beforeEach(() => window.localStorage.clear());
 afterEach(cleanup);
 
 describe("FirstTaskWalkthrough", () => {
   it("walks the four setup controls, remembers completion, and returns focus", async () => {
     const onClose = vi.fn();
-    render(
-      <>
-        <Targets />
-        <FirstTaskWalkthrough open onClose={onClose} />
-      </>,
-    );
+    render(<WalkthroughHarness onClose={onClose} />);
 
     expect(
       screen.getByRole("heading", { name: "Choose a model" }),
@@ -60,20 +77,36 @@ describe("FirstTaskWalkthrough", () => {
     );
   });
 
-  it("treats Escape as an intentional skip", () => {
+  it("treats Escape as an intentional skip", async () => {
+    const user = userEvent.setup();
     const onClose = vi.fn();
-    render(
-      <>
-        <Targets />
-        <FirstTaskWalkthrough open onClose={onClose} />
-      </>,
-    );
+    render(<WalkthroughHarness onClose={onClose} />);
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    await user.keyboard("{Escape}");
 
     expect(onClose).toHaveBeenCalledWith("skipped");
     expect(window.localStorage.getItem(FIRST_TASK_WALKTHROUGH_KEY)).toBe(
       "skipped",
+    );
+  });
+
+  it("keeps keyboard focus inside the walkthrough through layout changes", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <Targets />
+        <FirstTaskWalkthrough open onClose={vi.fn()} />
+      </>,
+    );
+
+    const next = screen.getByRole("button", { name: "Next" });
+    next.focus();
+    fireEvent(window, new Event("resize"));
+    expect(next).toHaveFocus();
+
+    await user.tab();
+    expect(screen.getByRole("dialog")).toContainElement(
+      document.activeElement as HTMLElement | null,
     );
   });
 });
