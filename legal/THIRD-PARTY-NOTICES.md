@@ -1278,25 +1278,25 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/myrrlyn/funty
 - License text: `LICENSE.txt` ([L-72641d65642c](#l-72641d65642c))
 
-### futures 0.3.33
+### futures 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
 - License text: `LICENSE-APACHE` ([L-ca1991cda75e](#l-ca1991cda75e)), `LICENSE-MIT` ([L-b420d8add23b](#l-b420d8add23b))
 
-### futures-channel 0.3.33
+### futures-channel 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
 - License text: `LICENSE-APACHE` ([L-ca1991cda75e](#l-ca1991cda75e)), `LICENSE-MIT` ([L-b420d8add23b](#l-b420d8add23b))
 
-### futures-core 0.3.33
+### futures-core 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
 - License text: `LICENSE-APACHE` ([L-ca1991cda75e](#l-ca1991cda75e)), `LICENSE-MIT` ([L-b420d8add23b](#l-b420d8add23b))
 
-### futures-executor 0.3.33
+### futures-executor 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
@@ -1308,7 +1308,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Matthias247/futures-intrusive
 - License text: `LICENSE-APACHE` ([L-bd3fa888432f](#l-bd3fa888432f)), `LICENSE-MIT` ([L-53b796ce5ff2](#l-53b796ce5ff2))
 
-### futures-io 0.3.33
+### futures-io 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
@@ -1320,19 +1320,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/futures-lite
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a)), `LICENSE-THIRD-PARTY` ([L-20746cc8a2fd](#l-20746cc8a2fd))
 
-### futures-macro 0.3.33
+### futures-macro 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
 - License text: `LICENSE-APACHE` ([L-ca1991cda75e](#l-ca1991cda75e)), `LICENSE-MIT` ([L-b420d8add23b](#l-b420d8add23b))
 
-### futures-sink 0.3.33
+### futures-sink 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
 - License text: `LICENSE-APACHE` ([L-ca1991cda75e](#l-ca1991cda75e)), `LICENSE-MIT` ([L-b420d8add23b](#l-b420d8add23b))
 
-### futures-task 0.3.33
+### futures-task 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
@@ -1344,7 +1344,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/async-rs/futures-timer
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### futures-util 0.3.33
+### futures-util 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/futures-rs
