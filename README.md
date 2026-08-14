@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <a href="https://www.tidebreak.sh">Website</a> ·
-  <a href="https://www.tidebreak.sh/docs/">User documentation</a> ·
+  <a href="https://www.tidebreak.io">Website</a> ·
+  <a href="https://www.tidebreak.io/docs/">User documentation</a> ·
   <a href="https://github.com/brightwave-inc/tidebreak/releases/latest">Latest release</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -42,8 +42,8 @@ providers without starting over. Credentials stay in the operating system's
 credential store, while chats and outputs remain in the local Tidebreak
 profile.
 
-The [website](https://www.tidebreak.sh) is the product overview. The
-[user documentation](https://www.tidebreak.sh/docs/) covers installation,
+The [website](https://www.tidebreak.io) is the product overview. The
+[user documentation](https://www.tidebreak.io/docs/) covers installation,
 configuration, permissions, connected folders, code execution, outputs, and
 the headless CLI.
 
@@ -75,7 +75,7 @@ The headless server uses the same core runtime:
 ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 
-See the [headless documentation](https://www.tidebreak.sh/docs/headless/) for
+See the [headless documentation](https://www.tidebreak.io/docs/headless/) for
 one-shot mode, HTTP API, MCP server, configuration, and self-hosting.
 
 ## Repository guide

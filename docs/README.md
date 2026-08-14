@@ -6,7 +6,7 @@ deliberately parked. It is versioned with the implementation and written for
 contributors and operators.
 
 User-facing guides live in [`docs-site/content/docs/`](../docs-site/content/docs)
-and publish to [tidebreak.sh/docs](https://www.tidebreak.sh/docs/). The product
+and publish to [tidebreak.io/docs](https://www.tidebreak.io/docs/). The product
 overview and launch copy belong to the separate
 [`brightwave-inc/tidebreak-site`](https://github.com/brightwave-inc/tidebreak-site)
 repository. Keep those surfaces focused rather than copying the same product

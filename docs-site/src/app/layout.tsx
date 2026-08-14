@@ -2,6 +2,7 @@ import { Geist, Geist_Mono } from 'next/font/google';
 import { Provider } from '@/components/provider';
 import type { Metadata } from 'next';
 import { getPage, getPageImage } from '@/lib/content';
+import { PRODUCT_URL } from '@/lib/site';
 import './global.css';
 
 const geistSans = Geist({
@@ -18,7 +19,7 @@ const homePage = getPage([]);
 const homeImage = homePage ? getPageImage(homePage).url : '/og/image.png';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://www.tidebreak.sh'),
+  metadataBase: new URL(PRODUCT_URL),
   title: {
     default: 'Tidebreak Docs',
     template: '%s — Tidebreak Docs',

@@ -9,6 +9,7 @@ import {
   stripImports,
   generateStaticParams as genParams,
 } from '@/lib/content';
+import { PUBLIC_DOCS_URL } from '@/lib/site';
 import { TableOfContents } from '@/components/toc';
 import { PageNavigation } from '@/components/page-nav';
 import type { Metadata } from 'next';
@@ -96,7 +97,7 @@ export async function generateMetadata(
     return {
       title: { absolute: 'Tidebreak Docs' },
       description: 'Documentation for Tidebreak.',
-      alternates: { canonical: 'https://www.tidebreak.sh/docs/' },
+      alternates: { canonical: PUBLIC_DOCS_URL },
     };
   }
 
@@ -108,7 +109,7 @@ export async function generateMetadata(
     title: page.title,
     description: page.description,
     alternates: {
-      canonical: `https://www.tidebreak.sh/docs/${publicPath}`,
+      canonical: new URL(publicPath, PUBLIC_DOCS_URL).toString(),
     },
     openGraph: {
       images: getPageImage(page).url,

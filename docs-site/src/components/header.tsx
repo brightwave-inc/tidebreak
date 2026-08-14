@@ -6,8 +6,8 @@ import { ThemeToggle } from './theme-toggle';
 import { SearchTrigger } from './search-trigger';
 import { Button } from '@/components/ui/button';
 import { Menu } from 'lucide-react';
+import { PRODUCT_URL } from '@/lib/site';
 
-const PRODUCT_URL = 'https://www.tidebreak.sh';
 const REPO_URL = 'https://github.com/brightwave-inc/tidebreak';
 
 const navLinks = [{ text: 'Product', href: PRODUCT_URL }];

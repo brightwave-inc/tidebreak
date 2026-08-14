@@ -49,10 +49,10 @@ describe("citation directives", () => {
 
 describe("safeMarkdownUrl", () => {
   it("permits only secure external links", () => {
-    expect(safeMarkdownUrl("https://tidebreak.dev/docs")).toBe(
-      "https://tidebreak.dev/docs",
+    expect(safeMarkdownUrl("https://tidebreak.io/docs")).toBe(
+      "https://tidebreak.io/docs",
     );
-    expect(safeMarkdownUrl("http://tidebreak.dev")).toBeUndefined();
+    expect(safeMarkdownUrl("http://tidebreak.io")).toBeUndefined();
     expect(safeMarkdownUrl("javascript:alert(1)")).toBeUndefined();
     expect(safeMarkdownUrl("data:text/html,unsafe")).toBeUndefined();
     expect(safeMarkdownUrl("file:///Users/example/private.txt")).toBeUndefined();
@@ -73,14 +73,14 @@ describe("MessageMarkdown", () => {
   it("renders useful Markdown without emitting embeds or unsafe links", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>
-        {"## Heading\n\n- `inline` item\n\n> A quote\n\n[Docs](https://tidebreak.dev/docs) [Unsafe](javascript:alert(1))\n\n![remote](https://example.com/image.png)\n\n<iframe src=\"https://example.com\"></iframe>"}
+        {"## Heading\n\n- `inline` item\n\n> A quote\n\n[Docs](https://tidebreak.io/docs) [Unsafe](javascript:alert(1))\n\n![remote](https://example.com/image.png)\n\n<iframe src=\"https://example.com\"></iframe>"}
       </MessageMarkdown>,
     );
 
     expect(markup).toContain("<h2>Heading</h2>");
     expect(markup).toContain("<code>inline</code>");
     expect(markup).toContain("<blockquote>");
-    expect(markup).toContain('href="https://tidebreak.dev/docs"');
+    expect(markup).toContain('href="https://tidebreak.io/docs"');
     expect(markup).toContain("Image omitted: remote");
     expect(markup).not.toContain("<img");
     expect(markup).not.toContain("<iframe");
