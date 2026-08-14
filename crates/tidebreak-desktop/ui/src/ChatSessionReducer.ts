@@ -61,7 +61,8 @@ export type ChatSessionState = {
    */
   sandboxPreparing: boolean;
   /**
-   * Semantic compaction is running on the utility model for the open turn.
+   * Semantic compaction is running for the open turn, on the conversation's
+   * own model and route.
    * Cleared on finished or any turn-terminal event so it never sticks.
    */
   compacting: boolean;

@@ -35,9 +35,7 @@ use crate::tool::{ToolErrorCategory, ToolOutput};
 use super::events::{AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent, EventSink};
 use super::registry::ToolRegistry;
 use super::transcript::{parse_args, tool_result_blocks};
-use super::types::{
-    AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest, TurnWebSearch, WRAP_UP_INSTRUCTION,
-};
+use super::types::{AgentConfig, AgentTurnOutcome, SandboxAgentSpawnRequest, WRAP_UP_INSTRUCTION};
 use super::{
     AcceptedServerCall, Agent, AssistantCandidate, CallIsolation, ClientArgumentResolution,
     PendingCall, SandboxSpawnGate, StreamAttempt, StreamEnd, TurnExecution,
@@ -374,15 +372,24 @@ impl Agent {
         let mut repeat_streak: Option<((String, String), usize)> = None;
 
         // One iteration past the budget is the wrap-up: the model is told the
-        // turn is over and asked for a closing answer with no tools advertised,
+        // turn is over and asked for a closing answer it may not use tools for,
         // so exhausting the budget ends in a real message rather than an error.
         // A zero budget is the degenerate case of the same contract: a lease
         // segment resuming after the budget was spent — a parked checkpoint on
         // the last budgeted step, or a retried wrap-up failure — goes straight
         // to the wrap-up call, which is safe to admit because it consumes no
         // budget and cannot ask for another round (#1181).
-        for step in 0..=self.config.max_steps {
+        //
+        // The iteration after *that* exists only for a provider that accepts
+        // `tool_choice: none` and calls a tool regardless; it runs only when
+        // the flag below is set, and only ever once.
+        let mut wrap_up_without_tools = false;
+        for step in 0..=self.config.max_steps + 1 {
             let wrap_up = step >= self.config.max_steps;
+            let wrap_up_retry = step > self.config.max_steps;
+            if wrap_up_retry && !wrap_up_without_tools {
+                break;
+            }
             // The wrap-up call is outside the budget. Counting it would let a
             // resumed attempt inherit a step debt, and would make the turn's
             // reported step count exceed the ceiling it just respected.
@@ -398,7 +405,7 @@ impl Agent {
                     None,
                 ));
             }
-            if wrap_up {
+            if wrap_up && !wrap_up_retry {
                 transcript.push(ChatMessage::text(Role::System, WRAP_UP_INSTRUCTION));
             }
             // Boundary steer: inject any queued messages before the next model call.
@@ -423,27 +430,64 @@ impl Agent {
                 refusal_details,
             } = 'step_attempt: loop {
                 let stream = loop {
-                    let created = self
-                        .maybe_create_context_checkpoint(super::context::CreateContextCheckpoint {
-                            chat_id: chat.id,
-                            transcript: &transcript,
-                            source_boundaries: &source_boundaries,
-                            user_texts: &user_texts,
-                            current: checkpoint.as_ref(),
-                            attempted_boundary: &mut checkpoint_attempt_boundary,
-                            events,
-                            // The threshold is the automatic trigger, and this
-                            // pass answers no particular request.
-                            ignore_threshold: false,
-                            focus: None,
-                        })
+                    let mut prefix = self
+                        .build_request_prefix(
+                            chat,
+                            &transcript,
+                            reduction_level,
+                            checkpoint.as_ref(),
+                            checkpoint_boundary,
+                            wrap_up,
+                        )
                         .await?;
+                    // Compaction rides this exact prefix, so it is assembled
+                    // first and the call only appends to it. The wrap-up step is
+                    // skipped: it constrains `tool_choice`, which costs the
+                    // message cache a ride-along would have read, and a
+                    // checkpoint written there cannot shorten a turn that is
+                    // already writing its last answer.
+                    let created = if wrap_up {
+                        None
+                    } else {
+                        self.maybe_create_context_checkpoint(
+                            super::context::CreateContextCheckpoint {
+                                chat_id: chat.id,
+                                transcript: &transcript,
+                                source_boundaries: &source_boundaries,
+                                user_texts: &user_texts,
+                                current: checkpoint.as_ref(),
+                                attempted_boundary: &mut checkpoint_attempt_boundary,
+                                events,
+                                prefix: &prefix,
+                                // The threshold is the automatic trigger, and
+                                // this pass answers no particular request.
+                                ignore_threshold: false,
+                                focus: None,
+                            },
+                        )
+                        .await?
+                    };
                     if let Some(created) = created {
                         checkpoint_boundary = source_boundaries
                             .iter()
                             .find(|source| source.message_id == created.source_message_id)
                             .map(|source| source.provider_boundary);
                         checkpoint = Some(created);
+                        // The new checkpoint stands in for the prefix the step
+                        // was about to send, so the request is reassembled
+                        // around it. One rebuild is enough: the boundary just
+                        // advanced and the attempt fence is set, so a second
+                        // pass could not compact again.
+                        prefix = self
+                            .build_request_prefix(
+                                chat,
+                                &transcript,
+                                reduction_level,
+                                checkpoint.as_ref(),
+                                checkpoint_boundary,
+                                wrap_up,
+                            )
+                            .await?;
                     }
                     // Cancellation may have arrived while the maintenance stream
                     // was active. Its usage belongs to the checkpoint record, not
@@ -457,61 +501,43 @@ impl Agent {
                             None,
                         ));
                     }
-                    let (mut fitted, reduced) = self.fit_transcript(
-                        &transcript,
-                        reduction_level,
-                        checkpoint.as_ref(),
-                        checkpoint_boundary,
-                    );
-                    context::evict_old_tool_result_images(
-                        &mut fitted,
-                        context::TOOL_RESULT_IMAGE_MESSAGE_WINDOW,
-                    );
-                    // Hydration can evict an image that no longer fits the outbound
-                    // bound, so the token estimate is taken after it, not before.
-                    let images = self.hydrate_images(&mut fitted).await?;
-                    let fitted_tokens = context::estimate_transcript_tokens(&fitted);
+                    let reduced = prefix.reduced;
+                    let fitted_tokens = context::estimate_transcript_tokens(&prefix.messages);
+                    // `tool_choice` is only meaningful alongside a tool array.
+                    // A chat-only config (or an empty tool surface) that sent
+                    // `none` with no tools is a pairing providers reject — and
+                    // it would hard-fail the one step that exists to guarantee
+                    // an answer. With no tools the step is already terminal by
+                    // construction, so the control has nothing to add.
+                    let advertises_tools = !prefix.tools.is_empty();
                     let request = ChatRequest {
                         provider: self.config.provider.clone(),
                         conversation: Some(chat.id),
                         model: self.config.model.clone(),
                         reasoning_model: self.config.reasoning_model,
                         system: self.config.system_prompt.clone(),
-                        messages: fitted,
-                        // Withholding the schemas is what makes the wrap-up
-                        // terminal: a model with no tools to name cannot ask for
-                        // another round of them, so this works on every provider
-                        // without depending on a tool-choice constraint.
-                        tools: if wrap_up || !self.config.tools_supported {
+                        messages: prefix.messages,
+                        // Forbidding a tool call is what makes the wrap-up
+                        // terminal. Withholding the schemas would do it too, but
+                        // tools render at the front of the request, so an empty
+                        // array shares no cached prefix with anything this chat
+                        // has sent — full price on the largest transcript of the
+                        // turn, to save nothing. The empty array is held back
+                        // for the retry a provider that ignored `none` forces,
+                        // where structural termination is the only guarantee
+                        // left and the cache is already forfeit.
+                        tools: if wrap_up_retry {
                             Vec::new()
                         } else {
-                            let mut specs = self.tools.specs_for_surface(
-                                self.agent_orchestration_active(),
-                                matches!(chat.permission_mode, Some(PermissionMode::Plan)),
-                            );
-                            // The host tool and the provider's own search are
-                            // one capability with one name. Advertising both
-                            // would offer the model two `web_search` tools —
-                            // a request most providers reject outright — so
-                            // the registered one is withheld for exactly the
-                            // turns the host routed elsewhere or turned off.
-                            if self.config.web_search != TurnWebSearch::Host {
-                                specs.retain(|spec| spec.name != crate::WEB_SEARCH_TOOL);
-                            }
-                            specs
+                            prefix.tools
                         },
+                        tool_choice: (wrap_up && !wrap_up_retry && advertises_tools)
+                            .then_some(crate::provider::ToolChoice::None),
                         max_tokens: self.config.max_tokens,
                         temperature: self.config.temperature,
                         reasoning_effort: self.config.reasoning_effort,
-                        // The wrap-up call is the turn writing its answer from
-                        // what it already has. Leaving the vendor budget on it
-                        // would let the provider start fresh research inside
-                        // the step whose whole purpose is to stop.
-                        vendor_web_search: match self.config.web_search {
-                            TurnWebSearch::Vendor(vendor) if !wrap_up => Some(vendor),
-                            _ => None,
-                        },
-                        images,
+                        vendor_web_search: prefix.vendor_web_search,
+                        images: prefix.images,
                         ..Default::default()
                     };
 
@@ -648,7 +674,7 @@ impl Agent {
                 calls.clear();
             }
 
-            // The wrap-up call advertised no tools, so a call here is a provider
+            // The wrap-up call forbade tool calls, so a call here is a provider
             // anomaly, not a decision to act. Answer each one so no client is
             // left holding a call that never resolves, then drop them: there is
             // no step left to run them in, and admitting them would ask the loop
@@ -664,6 +690,23 @@ impl Agent {
                     );
                 }
                 calls.clear();
+                // Declined calls and no prose is not an answer: the turn would
+                // fail as empty, and the worker's retry would re-enter the same
+                // wrap-up and burn another attempt on a provider that has
+                // already shown it does not honour `tool_choice: none`. Ask
+                // once more with no tools on the request at all, which is
+                // terminal by construction rather than by the provider's
+                // cooperation. Nothing was appended to the transcript for this
+                // step, so the retry asks the same question.
+                if !wrap_up_retry && text.trim().is_empty() {
+                    // The abandoned leg may have streamed reasoning a live
+                    // client already rendered; mark it discarded so the
+                    // retry's answer starts a fresh bubble instead of
+                    // inheriting thinking that led nowhere.
+                    events.send(AgentEvent::StreamInterrupted);
+                    wrap_up_without_tools = true;
+                    continue;
+                }
             }
 
             let candidate_message_id = if calls.is_empty() && !publish_terminal {

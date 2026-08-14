@@ -316,7 +316,6 @@ async fn one_titling_call_runs_per_chat_at_a_time() {
         model: "utility-model".into(),
         reasoning_model: false,
         reasoning_effort: None,
-        context_window: 8_000,
     };
     send_message(&router, &bearer, chat.id, "Reconcile Q3 revenue for me").await;
     wait_for_turn(&store, chat.id).await;

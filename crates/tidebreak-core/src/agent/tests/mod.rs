@@ -15,7 +15,7 @@ use super::transcript::{
     rebuild_transcript_with_boundary, tool_result_blocks, truncate_to_bytes,
     CHECKPOINT_CONTEXT_PREFIX,
 };
-use super::types::CONTEXT_CHECKPOINT_SYSTEM_PROMPT;
+use super::types::{CONTEXT_CHECKPOINT_INSTRUCTION, CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS};
 use super::*;
 use crate::approval::{ApprovalDecision, ApprovalRequest, RefuseGate, ToolApprovalKind};
 use crate::compaction::CompactionPolicy;
@@ -29,7 +29,7 @@ use crate::model::{
     Chat, MessageAttachment, PermissionMode, Project, ToolCallExecution, ToolCallStatus,
     TurnRunStatus,
 };
-use crate::provider::{ChatRequest, ProviderEvent, ProviderId, Usage, VendorWebSearch};
+use crate::provider::{ChatRequest, ProviderEvent, ProviderId, ToolChoice, Usage, VendorWebSearch};
 use crate::semantic_checkpoint::{ContextCheckpoint, ContextCheckpointPayloadV2};
 use crate::storage::AcceptClaimedToolCallOutcome;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolScratch, ToolSpec};
@@ -125,9 +125,13 @@ struct SiblingSandboxSpawnProvider;
 
 /// Asks for a tool once, then answers, recording the tool surface each
 /// request advertised.
+/// The tool surface of one recorded request: the names advertised, and whether
+/// the request constrained the model's use of them.
+type AdvertisedTools = (Vec<String>, Option<ToolChoice>);
+
 struct ToolSurfaceRecordingProvider {
     calls: AtomicUsize,
-    advertised: Arc<Mutex<Vec<Vec<String>>>>,
+    advertised: Arc<Mutex<Vec<AdvertisedTools>>>,
 }
 
 #[async_trait]
@@ -137,10 +141,10 @@ impl ModelProvider for ToolSurfaceRecordingProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        self.advertised
-            .lock()
-            .unwrap()
-            .push(req.tools.iter().map(|tool| tool.name.clone()).collect());
+        self.advertised.lock().unwrap().push((
+            req.tools.iter().map(|tool| tool.name.clone()).collect(),
+            req.tool_choice.clone(),
+        ));
         let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             vec![
                 ProviderEvent::ToolCallStarted {
@@ -160,6 +164,56 @@ impl ModelProvider for ToolSurfaceRecordingProvider {
             vec![
                 ProviderEvent::TextDelta {
                     text: "done".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
+/// Accepts `tool_choice: none` and calls a tool anyway — the pathological
+/// OpenAI-compatible runtime the wrap-up has to survive. Answers with prose
+/// only once no tools are advertised at all.
+struct ToolChoiceIgnoringProvider {
+    calls: AtomicUsize,
+    advertised: Arc<Mutex<Vec<AdvertisedTools>>>,
+}
+
+#[async_trait]
+impl ModelProvider for ToolChoiceIgnoringProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("fake")
+    }
+
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        let tools_offered = !req.tools.is_empty();
+        self.advertised.lock().unwrap().push((
+            req.tools.iter().map(|tool| tool.name.clone()).collect(),
+            req.tool_choice.clone(),
+        ));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = if tools_offered {
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: format!("call_{}", self.calls.load(Ordering::SeqCst)),
+                    name: "read_file".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"path":"note.txt"}"#.into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "done anyway".into(),
                 },
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn,
@@ -304,9 +358,12 @@ impl ModelProvider for ClientToolProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        // A wrap-up call advertises no tools, and a model with no schemas in
-        // front of it answers in prose.
-        if req.tools.is_empty() {
+        // A wrap-up call forbids tool calls, so the model answers in prose. It
+        // says so with `tool_choice: none` where there are tools to forbid, and
+        // by advertising none at all where there are not — the host withholds
+        // the control on a tool-less request because providers reject that
+        // pairing.
+        if req.tool_choice == Some(ToolChoice::None) || req.tools.is_empty() {
             return Ok(stream::iter(vec![
                 ProviderEvent::TextDelta {
                     text: "that is as far as I got".into(),
@@ -2480,12 +2537,170 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
         Some((Role::Assistant, "done")),
         "the reader keeps a real answer: {messages:?}"
     );
-    // The wrap-up call carries no tool schemas, so the model has no way to
-    // ask for a round the budget cannot pay for.
+    // The wrap-up forbids a tool call rather than withholding the schemas.
+    // Tools render at the front of the request, so an empty array would share
+    // no cached prefix with any step of the turn — a full-price read of the
+    // largest transcript the turn ever sends, to buy a termination guarantee
+    // `tool_choice` already gives.
     let advertised = advertised.lock().unwrap().clone();
     assert_eq!(advertised.len(), 2, "one tool step, then the wrap-up");
-    assert!(!advertised[0].is_empty());
-    assert!(advertised[1].is_empty());
+    assert_eq!(advertised[0].0, advertised[1].0);
+    assert!(!advertised[0].0.is_empty());
+    assert_eq!(advertised[0].1, None);
+    assert_eq!(advertised[1].1, Some(ToolChoice::None));
+}
+
+/// `tool_choice` without a tool array is a pairing providers reject, and the
+/// wrap-up is the one step that exists to guarantee the turn an answer — so a
+/// hard failure there costs the reader everything. A chat-only model advertises
+/// no tools, which already makes the step terminal by construction, so the
+/// control is withheld rather than sent alone.
+#[tokio::test]
+async fn a_chat_only_wrap_up_sends_no_tool_choice_and_still_answers() {
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+
+    // No budget at all, so the very first call is the wrap-up.
+    let advertised = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(ToolSurfaceRecordingProvider {
+            // Start on the provider's answer branch: a chat-only model has
+            // nothing to call.
+            calls: AtomicUsize::new(1),
+            advertised: advertised.clone(),
+        }),
+        Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+        store.clone(),
+        AgentConfig {
+            model: "chat-only".into(),
+            tools_supported: false,
+            max_steps: 0,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    agent.run_turn(&chat, "just answer", &tx).await.unwrap();
+    drop(tx);
+    let events: Vec<AgentEvent> = rx.collect().await;
+
+    assert!(
+        matches!(events.last(), Some(AgentEvent::TurnCompleted { .. })),
+        "the chat-only wrap-up must still produce an answer: {events:?}"
+    );
+    assert_eq!(
+        advertised.lock().unwrap().as_slice(),
+        &[(Vec::<String>::new(), None)],
+        "no tools and therefore no tool_choice"
+    );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .last()
+            .map(|message| (message.role, message.content.as_str())),
+        Some((Role::Assistant, "done")),
+    );
+}
+
+/// `tool_choice: none` is a request, not a guarantee: an OpenAI-compatible
+/// runtime may accept it and call a tool regardless. That leaves the wrap-up
+/// with declined calls and no prose, which is not an answer — the turn would
+/// fail as empty and the worker's retry would re-enter the same wrap-up and
+/// burn another attempt. One retry with no tools on the request is terminal by
+/// construction rather than by the provider's cooperation.
+#[tokio::test]
+async fn a_wrap_up_a_provider_answers_with_a_tool_call_retries_without_tools() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+
+    let advertised = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(ToolChoiceIgnoringProvider {
+            calls: AtomicUsize::new(0),
+            advertised: advertised.clone(),
+        }),
+        Arc::new(ToolRegistry::new().with(Box::new(ReadFile))),
+        store.clone(),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 1,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    agent.run_turn(&chat, "read note.txt", &tx).await.unwrap();
+    drop(tx);
+    let events: Vec<AgentEvent> = rx.collect().await;
+
+    assert!(
+        matches!(events.last(), Some(AgentEvent::TurnCompleted { .. })),
+        "the retry closes the turn instead of failing it as empty: {events:?}"
+    );
+    let messages = store.list_messages(chat.id).await.unwrap();
+    assert_eq!(
+        messages
+            .last()
+            .map(|message| (message.role, message.content.as_str())),
+        Some((Role::Assistant, "done anyway")),
+    );
+    let advertised = advertised.lock().unwrap().clone();
+    assert_eq!(
+        advertised.len(),
+        3,
+        "one tool step, the ordinary wrap-up, then the retry: {advertised:?}"
+    );
+    // The ordinary wrap-up is tried first and keeps the cache: same tools, only
+    // the choice constrained. Only the retry pays the empty array.
+    assert_eq!(advertised[1].0, advertised[0].0);
+    assert_eq!(advertised[1].1, Some(ToolChoice::None));
+    assert!(
+        advertised[2].0.is_empty(),
+        "the retry is structurally terminal: {advertised:?}"
+    );
+    assert_eq!(advertised[2].1, None);
 }
 
 #[tokio::test]
@@ -2537,7 +2752,7 @@ async fn a_chat_only_model_never_receives_tool_schemas() {
         .unwrap();
     assert_eq!(
         advertised.lock().unwrap().as_slice(),
-        &[Vec::<String>::new()]
+        &[(Vec::<String>::new(), None)]
     );
 }
 
@@ -5806,6 +6021,9 @@ struct SemanticCheckpointProvider {
     foreground_calls: Arc<AtomicUsize>,
     malformed_summary: bool,
     tool_first: bool,
+    /// Answer the compaction call with a tool call instead of a summary — the
+    /// request advertises the conversation's tools, so a model may take one.
+    checkpoint_calls_tool: bool,
 }
 
 #[async_trait]
@@ -5815,16 +6033,31 @@ impl ModelProvider for SemanticCheckpointProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        // Prefix rather than equality: a compaction the user asked for may carry
-        // their focus line after the standing instructions, and it is still the
-        // maintenance call.
-        let maintenance = request
-            .system
-            .as_deref()
-            .is_some_and(|system| system.starts_with(CONTEXT_CHECKPOINT_SYSTEM_PROMPT));
+        // The compaction call is the conversation's own request with one
+        // instruction appended, so its trailing message is what tells it apart —
+        // prefix rather than equality, because a compaction the user asked for
+        // carries their focus line after the standing instructions.
+        let maintenance = is_checkpoint_request(&request);
         self.requests.lock().unwrap().push(request);
         if maintenance {
             self.summary_calls.fetch_add(1, Ordering::SeqCst);
+            if self.checkpoint_calls_tool {
+                return Ok(stream::iter(vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: "checkpoint_maintenance_tool".into(),
+                        name: "checkpoint_noop".into(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: "{}".into(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ])
+                .boxed());
+            }
             let text = if self.malformed_summary {
                 "not a structured checkpoint"
             } else {
@@ -5885,6 +6118,16 @@ impl ModelProvider for SemanticCheckpointProvider {
     }
 }
 
+/// Whether this is the compaction call: the conversation's request plus one
+/// trailing instruction message.
+fn is_checkpoint_request(request: &ChatRequest) -> bool {
+    request.messages.last().is_some_and(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.starts_with(CONTEXT_CHECKPOINT_INSTRUCTION))
+        })
+    })
+}
+
 struct CheckpointNoopTool;
 
 #[async_trait]
@@ -5903,19 +6146,6 @@ impl Tool for CheckpointNoopTool {
 
     async fn execute(&self, _ctx: &ToolCtx, _args: Value) -> Result<ToolOutput> {
         Ok(ToolOutput::text("checkpoint tool result"))
-    }
-}
-
-/// What the host resolves for maintenance work. Deliberately not the
-/// conversation model, so a maintenance request is identifiable by its
-/// model alone.
-fn test_utility_model() -> UtilityModel {
-    UtilityModel {
-        provider: None,
-        model: "utility-model".into(),
-        reasoning_model: false,
-        reasoning_effort: None,
-        context_window: 3_000,
     }
 }
 
@@ -6000,6 +6230,7 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         foreground_calls: foreground_calls.clone(),
         malformed_summary: false,
         tool_first: true,
+        checkpoint_calls_tool: false,
     });
     let agent = Agent::new(
         provider,
@@ -6008,7 +6239,6 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         AgentConfig {
             model: "small-context-model".into(),
             context_window: 3_000,
-            utility_model: Some(test_utility_model()),
             compaction: test_compaction_policy(),
             ..Default::default()
         },
@@ -6069,35 +6299,24 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
     );
 
     let requests = requests.lock().unwrap();
-    let maintenance = requests
+    let checkpoint_request = requests
         .iter()
-        .find(|request| request.system.as_deref() == Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT))
-        .expect("one maintenance request");
-    assert!(maintenance.tools.is_empty());
-    assert!(maintenance.images.is_empty());
-    // The call constrains its own output, and the schema it sends has to
-    // survive the conversion every adapter runs it through — a payload field
-    // that cannot be expressed strictly would fail every checkpoint call
-    // rather than degrade to prose.
-    let Some(crate::provider::ResponseFormat::JsonSchema { name, schema }) =
-        &maintenance.response_format
-    else {
-        panic!("the checkpoint call asks for a constrained payload");
-    };
-    assert_eq!(name, "context_checkpoint");
-    assert!(
-        crate::tool::strict_json_schema(schema, crate::tool::OptionalProperties::AcceptNull)
-            .is_some(),
-        "the checkpoint payload schema has a strict form: {schema}"
+        .find(|request| is_checkpoint_request(request))
+        .expect("one checkpoint request");
+    assert_eq!(
+        checkpoint_request.model, "small-context-model",
+        "the checkpoint call runs on the conversation's model, on its route"
     );
-    let maintenance_debug = format!("{:?}", maintenance.messages);
-    assert!(maintenance_debug.contains("OLD PREFIX"));
-    assert!(!maintenance_debug.contains("RECENT USER"));
-    assert!(!maintenance_debug.contains(CHECKPOINT_CONTEXT_PREFIX));
+    // Both are expressed by editing the tool array on the Messages API, so
+    // either would throw away the cache this call exists to read.
+    assert!(checkpoint_request.response_format.is_none());
+    assert!(checkpoint_request.tool_choice.is_none());
+    let checkpoint_debug = format!("{:?}", checkpoint_request.messages);
+    assert!(checkpoint_debug.contains("OLD PREFIX"));
 
     let foreground = requests
         .iter()
-        .filter(|request| request.system.as_deref() != Some(CONTEXT_CHECKPOINT_SYSTEM_PROMPT))
+        .filter(|request| !is_checkpoint_request(request))
         .collect::<Vec<_>>();
     assert!(foreground.iter().all(|request| request.messages.iter().any(
             |message| message.content.iter().any(
@@ -6166,6 +6385,7 @@ async fn compacting_on_request_ignores_the_threshold_and_steers_the_summary() {
         foreground_calls: Arc::new(AtomicUsize::new(0)),
         malformed_summary: false,
         tool_first: false,
+        checkpoint_calls_tool: false,
     });
     // A window this chat comes nowhere near filling: the automatic pass would
     // decline, so a checkpoint here is the request itself acting as the trigger.
@@ -6176,7 +6396,6 @@ async fn compacting_on_request_ignores_the_threshold_and_steers_the_summary() {
         AgentConfig {
             model: "large-context-model".into(),
             context_window: 1_000_000,
-            utility_model: Some(test_utility_model()),
             compaction: CompactionPolicy {
                 threshold_fraction: 0.75,
                 target_fraction: 0.0001,
@@ -6189,7 +6408,7 @@ async fn compacting_on_request_ignores_the_threshold_and_steers_the_summary() {
 
     let (tx, rx) = unbounded();
     let created = agent
-        .compact_now(chat.id, Some("the rollout date"), &tx)
+        .compact_now(&chat, Some("the rollout date"), &tx)
         .await
         .unwrap();
     drop(tx);
@@ -6211,17 +6430,25 @@ async fn compacting_on_request_ignores_the_threshold_and_steers_the_summary() {
         "the caller sees the same pair a turn's compaction reports: {events:?}"
     );
     let requests = requests.lock().unwrap();
-    let system = requests[0]
-        .system
-        .clone()
-        .expect("the maintenance call carries its instructions");
     assert!(
-        system.starts_with(CONTEXT_CHECKPOINT_SYSTEM_PROMPT),
+        is_checkpoint_request(&requests[0]),
         "the standing instructions survive the focus line"
     );
-    assert!(system.contains("the rollout date"));
+    let ContentBlock::Text { text } = &requests[0]
+        .messages
+        .last()
+        .expect("the call carries its instructions")
+        .content[0]
+    else {
+        panic!("the instruction is one text block");
+    };
+    assert!(text.contains("the rollout date"));
 }
 
+/// A checkpoint the host cannot parse must cost the turn nothing — and the
+/// declined attempt is also where the cache contract is legible: the summary
+/// wrote no checkpoint, so the step that follows sends the exact prefix the
+/// checkpoint call was built from.
 #[tokio::test]
 async fn malformed_checkpoint_summary_fails_open_to_deterministic_reduction() {
     let (store, chat, _workspace) = cancel_test_chat().await;
@@ -6231,18 +6458,18 @@ async fn malformed_checkpoint_summary_fails_open_to_deterministic_reduction() {
     let foreground_calls = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(
         Arc::new(SemanticCheckpointProvider {
-            requests,
+            requests: requests.clone(),
             summary_calls: summary_calls.clone(),
             foreground_calls: foreground_calls.clone(),
             malformed_summary: true,
             tool_first: true,
+            checkpoint_calls_tool: false,
         }),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(ToolRegistry::new().with(Box::new(CheckpointNoopTool))),
         store.clone(),
         AgentConfig {
             model: "small-context-model".into(),
             context_window: 3_000,
-            utility_model: Some(test_utility_model()),
             compaction: test_compaction_policy(),
             ..Default::default()
         },
@@ -6271,6 +6498,220 @@ async fn malformed_checkpoint_summary_fails_open_to_deterministic_reduction() {
             .any(|event| matches!(event, AgentEvent::CompactionFinished { compacted: false })),
         "a compaction that produced nothing still closes its status"
     );
+
+    // The cache contract: everything the provider hashes before the appended
+    // instruction — tools, then system, then messages — is what the step goes
+    // on to send. A field that drifts here is a full-price read of the whole
+    // transcript, which no test downstream would notice. Asserted as whole-
+    // struct equality rather than field by field, because the hazard is a
+    // *new* `ChatRequest` field the compaction call sets differently — a
+    // hand-written field list cannot see one arrive.
+    let requests = requests.lock().unwrap();
+    assert!(is_checkpoint_request(&requests[0]));
+    let (checkpoint_request, step) = (&requests[0], &requests[1]);
+    assert!(!is_checkpoint_request(step));
+    let mut expected = step.clone();
+    expected.messages.push(ChatMessage::text(
+        Role::User,
+        CONTEXT_CHECKPOINT_INSTRUCTION,
+    ));
+    // The output cap is the one deliberate difference: it is not part of the
+    // hashed prefix, so the checkpoint may size it for its own payload.
+    expected.max_tokens = Some(CONTEXT_CHECKPOINT_MAX_OUTPUT_TOKENS);
+    // Named separately only because whole-struct inequality reads poorly on
+    // the two fields most likely to break: the tool array gates the entire
+    // cache, and `OneShot` reads as natural for a maintenance call but would
+    // silently discard the saving this whole design exists for.
+    assert_eq!(checkpoint_request.tools, step.tools);
+    assert_eq!(checkpoint_request.prompt_cache, step.prompt_cache);
+    assert_eq!(*checkpoint_request, expected);
+}
+
+/// The compaction call inherits the chat's reasoning, and thinking tokens bill
+/// against `max_tokens`. A cap sized for the payload alone would let thinking
+/// eat it, stopping the answer mid-JSON at `MaxTokens` — which parses as
+/// nothing, so the chat would never compact while paying for a whole-transcript
+/// call every time the boundary advanced. The cap is bounded from the other
+/// side too: a chat whose own `max_tokens` is lower sends that, because a model
+/// declaring a lower output ceiling rejects the larger request outright and
+/// fail-open would hide it.
+#[tokio::test]
+async fn the_checkpoint_output_cap_leaves_room_for_the_chat_s_reasoning() {
+    let (store, chat, _workspace) = cancel_test_chat().await;
+    append_semantic_checkpoint_history(&store, chat.id).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(SemanticCheckpointProvider {
+            requests: requests.clone(),
+            summary_calls: Arc::new(AtomicUsize::new(0)),
+            foreground_calls: Arc::new(AtomicUsize::new(0)),
+            malformed_summary: false,
+            tool_first: false,
+            checkpoint_calls_tool: false,
+        }),
+        Arc::new(ToolRegistry::new()),
+        store.clone(),
+        AgentConfig {
+            model: "reasoning-model".into(),
+            context_window: 3_000,
+            reasoning_model: true,
+            reasoning_effort: Some(crate::model::ReasoningEffort::High),
+            compaction: test_compaction_policy(),
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    agent.run_turn(&chat, "continue", &tx).await.unwrap();
+    drop(tx);
+    let _: Vec<_> = rx.collect().await;
+
+    {
+        let requests = requests.lock().unwrap();
+        let checkpoint_request = requests
+            .iter()
+            .find(|request| is_checkpoint_request(request))
+            .expect("the transcript crossed the threshold and compacted");
+        // The reasoning parameters ride along deliberately: nulling them would
+        // break the byte-identical prefix the whole design depends on, so the
+        // cap is what has to absorb them.
+        assert!(checkpoint_request.reasoning_model);
+        assert_eq!(
+            checkpoint_request.reasoning_effort,
+            Some(crate::model::ReasoningEffort::High)
+        );
+        // A conforming payload may legally reach MAX_CONTEXT_CHECKPOINT_BYTES
+        // of JSON. At a conservative three bytes per token that is the floor
+        // the cap must clear before a single thinking token is spent, so it has
+        // to clear it with room over — unused output tokens cost nothing, and
+        // `max_tokens` is outside the hashed prefix, so there is nothing to
+        // trade against.
+        let payload_tokens = (crate::MAX_CONTEXT_CHECKPOINT_BYTES / 3) as u32;
+        assert!(
+            checkpoint_request
+                .max_tokens
+                .is_some_and(|cap| cap >= payload_tokens * 2),
+            "the checkpoint cap {:?} leaves no reasoning allowance over a {payload_tokens}-token payload",
+            checkpoint_request.max_tokens,
+        );
+    }
+
+    // The other direction: generous is free to bill but not free to *send*.
+    // Custom and gateway models declare output ceilings well below this one and
+    // reject a request that exceeds theirs before writing a token — a rejection
+    // fail-open swallows, leaving a chat that silently never compacts. So the
+    // checkpoint's own cap is a ceiling, clamped to the chat's when it has one.
+    let (store, chat, _workspace) = cancel_test_chat().await;
+    append_semantic_checkpoint_history(&store, chat.id).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(SemanticCheckpointProvider {
+            requests: requests.clone(),
+            summary_calls: Arc::new(AtomicUsize::new(0)),
+            foreground_calls: Arc::new(AtomicUsize::new(0)),
+            malformed_summary: false,
+            tool_first: false,
+            checkpoint_calls_tool: false,
+        }),
+        Arc::new(ToolRegistry::new()),
+        store.clone(),
+        AgentConfig {
+            model: "low-output-ceiling-model".into(),
+            context_window: 3_000,
+            max_tokens: Some(8_192),
+            compaction: test_compaction_policy(),
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    agent.run_turn(&chat, "continue", &tx).await.unwrap();
+    drop(tx);
+    let _: Vec<_> = rx.collect().await;
+
+    let requests = requests.lock().unwrap();
+    let checkpoint_request = requests
+        .iter()
+        .find(|request| is_checkpoint_request(request))
+        .expect("the transcript crossed the threshold and compacted");
+    assert_eq!(checkpoint_request.max_tokens, Some(8_192));
+}
+
+/// The compaction call carries the conversation's whole tool array and sends no
+/// `tool_choice`, so a model may answer it with a tool call. Nothing may run:
+/// the host asked for a summary, not for work, and a maintenance call is not a
+/// step the turn can dispatch from.
+#[tokio::test]
+async fn a_checkpoint_answered_with_a_tool_call_runs_nothing_and_fails_open() {
+    let (store, chat, _workspace) = cancel_test_chat().await;
+    append_semantic_checkpoint_history(&store, chat.id).await;
+    let summary_calls = Arc::new(AtomicUsize::new(0));
+    let foreground_calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(SemanticCheckpointProvider {
+            requests: requests.clone(),
+            summary_calls: summary_calls.clone(),
+            foreground_calls: foreground_calls.clone(),
+            malformed_summary: false,
+            tool_first: false,
+            checkpoint_calls_tool: true,
+        }),
+        Arc::new(ToolRegistry::new().with(Box::new(CheckpointNoopTool))),
+        store.clone(),
+        AgentConfig {
+            model: "small-context-model".into(),
+            context_window: 3_000,
+            compaction: test_compaction_policy(),
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = unbounded();
+    agent.run_turn(&chat, "continue", &tx).await.unwrap();
+    drop(tx);
+    let events = rx.collect::<Vec<_>>().await;
+
+    // The premise, not a detail: a tool call is only possible because the
+    // maintenance request advertises the conversation's tools and constrains
+    // nothing. Drop the tools from it and this test keeps passing while
+    // covering nothing.
+    {
+        let requests = requests.lock().unwrap();
+        let checkpoint_request = requests
+            .iter()
+            .find(|request| is_checkpoint_request(request))
+            .expect("the transcript crossed the threshold and compacted");
+        assert!(
+            !checkpoint_request.tools.is_empty(),
+            "the checkpoint call carries the conversation's tool array"
+        );
+        assert!(checkpoint_request.tool_choice.is_none());
+    }
+    // The fence: one maintenance call for the turn, however it ended.
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(foreground_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallStarted { .. } | AgentEvent::ToolCallCompleted { .. }
+        )),
+        "the maintenance call's tool call reached no dispatcher: {events:?}"
+    );
+    assert!(store
+        .get_context_checkpoint(chat.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::CompactionFinished { compacted: false })));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. })),
+        "the foreground turn still answers on deterministic reduction"
+    );
 }
 
 /// The trigger is a fraction of the model's window, so the same history that
@@ -6290,13 +6731,13 @@ async fn model_window_change_recalculates_the_checkpoint_threshold() {
             foreground_calls: Arc::new(AtomicUsize::new(0)),
             malformed_summary: false,
             tool_first: false,
+            checkpoint_calls_tool: false,
         }),
         Arc::new(ToolRegistry::new()),
         store.clone(),
         AgentConfig {
             model: "large-context-model".into(),
             context_window: 50_000,
-            utility_model: Some(test_utility_model()),
             compaction: test_compaction_policy(),
             ..Default::default()
         },
@@ -6324,13 +6765,13 @@ async fn model_window_change_recalculates_the_checkpoint_threshold() {
             foreground_calls: Arc::new(AtomicUsize::new(0)),
             malformed_summary: false,
             tool_first: false,
+            checkpoint_calls_tool: false,
         }),
         Arc::new(ToolRegistry::new()),
         store.clone(),
         AgentConfig {
             model: "small-context-model".into(),
             context_window: 3_000,
-            utility_model: Some(test_utility_model()),
             compaction: test_compaction_policy(),
             ..Default::default()
         },
@@ -6345,8 +6786,8 @@ async fn model_window_change_recalculates_the_checkpoint_threshold() {
     assert_eq!(small_summary_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         small_requests.lock().unwrap()[0].model,
-        "utility-model",
-        "maintenance runs on the utility model, not the conversation's"
+        "small-context-model",
+        "compaction runs on the conversation's model, whose cache it reads"
     );
     assert_eq!(
         store

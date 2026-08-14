@@ -785,6 +785,9 @@ impl TurnWorker {
         // Resolved per turn, not at boot, so enabling a provider takes effect on
         // the next turn. `None` is not a failure: background maintenance is
         // skipped rather than run on the model the user picked for talking.
+        // Compaction is deliberately not among that work — it runs on the
+        // conversation's own model so it can read the conversation's prompt
+        // cache — so this only feeds the titler and the approval judge.
         let utility_model = if self.resolver.enforces_model_registry() {
             crate::model_roles::resolve_utility_model(
                 &*self.store,
@@ -858,7 +861,6 @@ impl TurnWorker {
             )));
             let mut heartbeat_open = true;
             let mut config = surface.agent_config.clone();
-            config.utility_model = utility_model.clone();
             config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
             config.max_steps = remaining_steps;
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {

@@ -5,9 +5,10 @@ use configuration::put_json;
 /// A provider that answers the compaction call with a real checkpoint payload
 /// and everything else with one short line.
 ///
-/// The two are told apart by the shape of the request rather than by its
-/// prompt: maintenance is the only call that carries a response format and no
-/// tools, and the prompt itself is core's business.
+/// Compaction sends the conversation's own request with one instruction
+/// message appended, so the trailing message is what tells the two apart. The
+/// wording of that instruction is core's business; this matches the one phrase
+/// it is built around.
 struct CheckpointProvider;
 
 #[async_trait]
@@ -17,7 +18,11 @@ impl ModelProvider for CheckpointProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let maintenance = request.response_format.is_some() && request.tools.is_empty();
+        let maintenance = request.messages.last().is_some_and(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("inert semantic checkpoint"))
+            })
+        });
         let text = if maintenance {
             r#"{"version":2,"original_requests":[],"confirmed_decisions":["Ship the migration."],"unresolved_questions":[],"task_state":[],"source_identities":[],"output_identities":[],"conclusions":[]}"#
         } else {
@@ -38,7 +43,7 @@ impl ModelProvider for CheckpointProvider {
     }
 }
 
-/// Give the install a credentialed provider, so a utility model resolves.
+/// Give the install a credentialed provider, so the chat's model resolves.
 async fn credential_a_provider(router: &Router, bearer: &str) {
     let response = put_json(
         router,
@@ -241,8 +246,11 @@ async fn compaction_focus_is_bounded_and_the_chat_must_exist() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// Compaction resolves the chat's own model and writes its summary there, so
+/// the route requires no separately configured maintenance model: an install
+/// that has none still gets an ordinary answer.
 #[tokio::test(flavor = "multi_thread")]
-async fn compaction_without_a_utility_model_is_refused_rather_than_reported_empty() {
+async fn compaction_needs_no_separately_configured_maintenance_model() {
     let (router, token, _store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
@@ -254,7 +262,7 @@ async fn compaction_without_a_utility_model_is_refused_rather_than_reported_empt
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let info: AgentErrorInfo = json_body(response).await;
-    assert_eq!(info.kind, "compaction_utility_model_unavailable");
+    assert_eq!(response.status(), StatusCode::OK);
+    let run: serde_json::Value = json_body(response).await;
+    assert_eq!(run["compacted"], false);
 }

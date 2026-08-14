@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
     input_schema_for, AgentError, ChatId, ChatMessage, ChatRequest, Message, ModelProvider,
-    ProviderEvent, ResponseFormat, Result, Role, StopReason, Store, UtilityModel,
+    PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, StopReason, Store, UtilityModel,
 };
 
 use crate::bus::{ChatMetadataNotice, EventBus};
@@ -294,6 +294,9 @@ async fn request_title(
         temperature: None,
         reasoning_effort: utility.reasoning_effort,
         response_format: Some(ChatTitleProposal::response_format()),
+        // One call, one prompt nothing else re-sends: cache writes here would
+        // be a premium paid for entries that expire unread.
+        prompt_cache: PromptCacheMode::OneShot,
         ..Default::default()
     };
     let mut stream = provider.stream(request).await?;

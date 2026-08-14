@@ -56,6 +56,8 @@ pub struct CompactionRun {
 /// `404` for an unknown chat, `409` while a turn is running (compaction rewrites
 /// what the next model call sees, so it cannot run under one), `400` for focus
 /// text that is unusable, and `200` with `compacted` either way otherwise.
+/// The summary is written by the chat's own model, so no separate maintenance
+/// model has to be configured for this to work.
 pub async fn post_compact(
     State(state): State<AppState>,
     store: ScopedStore,
@@ -90,33 +92,22 @@ pub async fn post_compact(
             crate::providers::apply_free_form_model(&mut config, model, chat.reasoning_effort)?;
         }
     }
-    // The maintenance call runs on the host's utility model, exactly as the
-    // automatic pass does. Without one there is nothing to compact with, and
-    // saying so beats reporting an empty success.
-    config.utility_model = crate::model_roles::resolve_utility_model(
-        &*state.store,
-        &*state.secrets,
-        &*state.provisioned_policy,
-        &*state.os_policy,
-    )
-    .await?;
-    if config.utility_model.is_none() {
-        return Err(ServerError::unprocessable_kind(
-            "compaction_utility_model_unavailable",
-            "no utility model is configured, so there is nothing to summarize this chat with",
-        ));
-    }
     config.compaction = super::read_compaction_policy(&*state.store).await?;
 
     let agent = Agent::new(
         state.resolver.resolve().await,
-        // Compaction sends no tools; an empty registry keeps that explicit.
+        // Nothing is dispatched here, so the registry is empty. That does cost
+        // the prompt cache: the checkpoint call rides the conversation's own
+        // request shape, and a turn's request advertises the turn's tools. An
+        // on-demand compaction therefore starts cold more often than the
+        // in-turn pass does — see
+        // `docs/decisions/0015-compaction-rides-the-conversation-cache.md`.
         std::sync::Arc::new(ToolRegistry::new()),
         state.store.clone(),
         config,
     );
     let (sender, mut receiver) = mpsc::unbounded();
-    let compacted = agent.compact_now(id, focus.as_deref(), &sender).await?;
+    let compacted = agent.compact_now(&chat, focus.as_deref(), &sender).await?;
     drop(sender);
 
     // Journaled after the fact rather than streamed: the pass is short, and the

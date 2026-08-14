@@ -3,9 +3,12 @@
 //! A role names a job the product needs a model for, so "use something cheap
 //! for this" has somewhere to live. [`ModelRole::Chat`] is the model a
 //! foreground turn runs on — the user's choice, unchanged by this module.
-//! [`ModelRole::Utility`] is for work the user did not ask for: compacting a
-//! transcript today, and other maintenance later. Two roles is deliberate;
-//! adding a third is an entry in the tables below rather than a refactor.
+//! [`ModelRole::Utility`] is for work the user did not ask for: naming a chat
+//! and judging an approval today, and other maintenance later. Compacting a
+//! transcript is deliberately not one of them — it runs on the conversation's
+//! own model so it can read that conversation's prompt cache (decision 0015).
+//! Two roles is deliberate; adding a third is an entry in the tables below
+//! rather than a refactor.
 //!
 //! Each role's explicit selection is stored under `model.<role>`, matching the
 //! `provider.<kind>` convention — except `chat`, whose selection has lived under
@@ -22,9 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use tidebreak_core::{
-    AgentError, ProviderId, ReasoningEffort, Result, SecretProvider, Store, UtilityModel,
-};
+use tidebreak_core::{ProviderId, ReasoningEffort, Result, SecretProvider, Store, UtilityModel};
 
 use crate::providers::{self, ResolvedModelPolicy};
 
@@ -109,18 +110,19 @@ impl ModelRole {
     pub fn reasoning_effort(self) -> Option<ReasoningEffort> {
         match self {
             ModelRole::Chat => None,
-            // Compaction is summarization of text already written: buy speed,
-            // not thought. Models that reject the level clamp up or drop it.
+            // Maintenance work reads text already written and answers in a
+            // fixed shape: buy speed, not thought. Models that reject the level
+            // clamp up or drop it.
             ModelRole::Utility => Some(ReasoningEffort::None),
         }
     }
 
     /// Whether `model` carries the capabilities this role requires.
     ///
-    /// Foreground chat accepts every selectable model. Utility work emits a
-    /// strict checkpoint schema, so a model that cannot enforce that response
-    /// shape is skipped instead of letting a provider rejection silently turn
-    /// compaction into `None`.
+    /// Foreground chat accepts every selectable model. Utility work constrains
+    /// its output with a strict schema, so a model that cannot enforce that
+    /// response shape is skipped instead of letting a provider rejection
+    /// silently turn the maintenance call into `None`.
     pub fn supports_model(self, model: &ResolvedModelPolicy) -> bool {
         match self {
             ModelRole::Chat => true,
@@ -292,10 +294,13 @@ async fn usable_policy(
         .then_some(policy))
 }
 
-/// Resolve the `utility` role into the shape the agent carries for one turn.
+/// Resolve the `utility` role into the shape its callers carry.
 ///
-/// `None` means there is no utility model, and the agent skips maintenance work
-/// instead of billing it to the conversation's model.
+/// The consumers are the host's own small side-calls — chat titling and the
+/// approval judge. The agent no longer carries a utility model: compaction runs
+/// on the conversation's own request. `None` means there is no utility model,
+/// and those callers skip their work rather than billing it to the
+/// conversation's model.
 pub async fn resolve_utility_model(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -316,8 +321,6 @@ pub async fn resolve_utility_model(
         reasoning_effort: role
             .reasoning_effort()
             .and_then(|effort| effort.clamp_to(&policy.reasoning_efforts)),
-        context_window: usize::try_from(policy.context_window)
-            .map_err(|_| AgentError::config("model context window is unsupported"))?,
     }))
 }
 
