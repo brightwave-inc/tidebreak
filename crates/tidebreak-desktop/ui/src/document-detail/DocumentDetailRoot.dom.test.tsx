@@ -266,6 +266,7 @@ describe("DocumentDetailRoot", () => {
     );
 
     expect(await screen.findByText("Subject: quarterly numbers")).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Extracted text" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
     // Nothing is going to draw those bytes, so nothing should pull them over.
     expect(client.getChatDocumentFile).not.toHaveBeenCalled();
@@ -287,6 +288,7 @@ describe("DocumentDetailRoot", () => {
     );
 
     expect(await screen.findByText("Ownership moves.")).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Extracted text" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
     expect(client.getChatDocumentFile).not.toHaveBeenCalled();
   });
@@ -414,10 +416,9 @@ describe("DocumentDetailRoot", () => {
       locator: { kind: "lines", start: 3, end: 3 },
     });
     await openCitation(
-      // A source whose original view could be drawn, but cannot show a span:
-      // the citation lands on the extracted text, where the passage is.
       detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
       "cite-1",
+      CITED_CONTENT,
     );
 
     await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
@@ -432,19 +433,20 @@ describe("DocumentDetailRoot", () => {
   it("opens the same source at the top when no citation led there", async () => {
     await openPanel(
       detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      vi.fn(),
+      CITED_CONTENT,
     );
 
-    expect(
-      await screen.findByRole("tab", { name: "Original document", selected: true }),
-    ).toBeVisible();
+    expect(await screen.findByText(/Revenue rose 12%/)).toBeVisible();
     expect(document.querySelector("mark")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Extracted text" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Original document" })).toBeNull();
   });
 
   const MARKDOWN_CONTENT =
     "# Café notes\n\nQuarter one was flat.\nRevenue rose **12%** in the second quarter.\n";
 
   it("marks the cited line in a rendered markdown original", async () => {
-    const user = userEvent.setup();
     seedTranscript({
       id: "cite-3",
       locator: { kind: "lines", start: 4, end: 4 },
@@ -459,7 +461,6 @@ describe("DocumentDetailRoot", () => {
       MARKDOWN_CONTENT,
     );
 
-    await user.click(await screen.findByRole("tab", { name: "Original document" }));
     await screen.findByText(/Quarter one was flat/);
 
     // The passage spans an emphasized word, which is three places in the
@@ -475,7 +476,6 @@ describe("DocumentDetailRoot", () => {
   });
 
   it("marks the cited line in an original drawn as plain text", async () => {
-    const user = userEvent.setup();
     seedTranscript({
       id: "cite-4",
       locator: { kind: "lines", start: 3, end: 3 },
@@ -485,8 +485,6 @@ describe("DocumentDetailRoot", () => {
       "cite-4",
       CITED_CONTENT,
     );
-
-    await user.click(await screen.findByRole("tab", { name: "Original document" }));
 
     await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
     const marks = Array.from(document.querySelectorAll("mark"));
@@ -521,12 +519,10 @@ describe("DocumentDetailRoot", () => {
     expect(await screen.findByText("Page 5")).toBeVisible();
   });
 
-  // The panel is already open at a citation when the next one is clicked, and
-  // two citations into one source usually want the same view — so the view a
-  // citation asks for cannot tell the second click from the first. A reader who
-  // had switched views in between used to stay where they were, and the second
-  // citation landed nowhere.
-  it("lands a second citation into a source the reader had switched views on", async () => {
+  // The panel is already open at a citation when the next one is clicked.
+  // The citation id is what tells the second click from the first; a reader
+  // who had paged away used to stay where they were.
+  it("lands a second citation into a source the reader had left", async () => {
     const user = userEvent.setup();
     seedTranscript(
       { id: "cite-6", locator: { kind: "page", page: 2 } },
@@ -539,36 +535,12 @@ describe("DocumentDetailRoot", () => {
     );
 
     expect(await screen.findByText("Page 2")).toBeVisible();
-    await user.click(screen.getByRole("tab", { name: "Extracted text" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(await screen.findByText("Page 3")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Click the second citation" }));
 
-    expect(
-      await screen.findByRole("tab", { name: "Original document", selected: true }),
-    ).toBeVisible();
     expect(await screen.findByText("Page 7")).toBeVisible();
-  });
-
-  it("draws the original from cache when the reader flips views and back", async () => {
-    const user = userEvent.setup();
-    const { client } = await openPanel(
-      detail({
-        media_type: "text/markdown",
-        title: "Report.md",
-        content: "The text of record.",
-        readable: true,
-      }),
-      vi.fn(),
-      "# Quarterly report\n",
-    );
-
-    expect(await screen.findByText("Quarterly report")).toBeVisible();
-    await user.click(screen.getByRole("tab", { name: "Extracted text" }));
-    expect(await screen.findByText("The text of record.")).toBeVisible();
-    await user.click(screen.getByRole("tab", { name: "Original document" }));
-
-    expect(await screen.findByText("Quarterly report")).toBeVisible();
-    expect(client.getChatDocumentFile).toHaveBeenCalledTimes(1);
   });
 
   it("says so when a structured source will not parse", async () => {
