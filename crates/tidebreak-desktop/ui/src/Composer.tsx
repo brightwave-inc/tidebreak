@@ -1044,6 +1044,16 @@ export function Composer({
           {/* The permission mode sits with the send cluster: it is what the
               next turn will be allowed to do, not another way to prepare it. */}
           {permissionMenu}
+          {/* The ring reads as status, so it sits ahead of the two controls
+              that act on the draft: it answers how much room is left for the
+              next turn before you reach for the mic or send. */}
+          {contextUsage && (
+            <ContextUsageIndicator
+              usage={contextUsage.usage}
+              contextWindow={contextUsage.contextWindow}
+              modelName={contextUsage.modelName}
+            />
+          )}
           {/* The mic sits immediately before send: both act on the draft, so
               they belong in the same cluster, apart from the tools and
               model controls that only set the turn up. */}
@@ -1086,15 +1096,6 @@ export function Composer({
                 <Mic size={15} />
               </Button>
             </WithTooltip>
-          )}
-          {/* The ring sits beside send: it answers how much room is left for
-              the next turn, so it belongs with the control that spends it. */}
-          {contextUsage && (
-            <ContextUsageIndicator
-              usage={contextUsage.usage}
-              contextWindow={contextUsage.contextWindow}
-              modelName={contextUsage.modelName}
-            />
           )}
           {active ? (
             <>
