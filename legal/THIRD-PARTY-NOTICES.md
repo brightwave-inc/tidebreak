@@ -6655,7 +6655,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/d3/d3-time-format.git
 - License text: `LICENSE` ([L-6019bf345195](#l-6019bf345195))
 
-### date-fns 4.1.0
+### date-fns 4.4.0
 
 - License: `MIT`
 - Repository: https://github.com/date-fns/date-fns
@@ -7441,7 +7441,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/plotly/plotly.js.git
 - License text: `LICENSE` ([L-2245817910c2](#l-2245817910c2))
 
-### postcss 8.5.23
+### postcss 8.5.26
 
 - License: `MIT`
 - Repository: postcss/postcss
