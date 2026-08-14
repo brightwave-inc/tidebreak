@@ -834,23 +834,49 @@ describe("reasoning presentation", () => {
     ]);
   });
 
-  it("opens a bubble for reasoning that follows tool activity", () => {
+  it("keeps post-tool reasoning on the existing assistant bubble", () => {
     const { state } = play([
       TURN,
       { type: "tool_call_started", call_id: "c", name: "search" },
       { type: "reasoning_delta", text: "the search found nothing" },
     ]);
-    // The empty bubble the turn opened, the call, then the reasoning that came
-    // after it — reasoning read in journal order, not hoisted above the call.
+    // The snapshot hangs the whole turn's reasoning on one assistant
+    // message. Opening a second bubble here is what made reload relocate it.
     expect(state.messages.map((message) => message.role)).toEqual([
       "assistant",
       "tool",
-      "assistant",
     ]);
-    expect(state.messages[2]).toEqual(
+    expect(state.messages[0]).toEqual(
       expect.objectContaining({
         text: "",
         reasoning: "the search found nothing",
+      }),
+    );
+  });
+
+  it("moves the turn's reasoning onto the latest assistant after more text", () => {
+    const { state } = play([
+      TURN,
+      { type: "reasoning_delta", text: "first look" },
+      { type: "text_delta", text: "trying search" },
+      { type: "tool_call_started", call_id: "c", name: "search" },
+      { type: "reasoning_delta", text: " then nothing" },
+      { type: "text_delta", text: "done" },
+    ]);
+    const assistants = state.messages.filter(
+      (message) => message.role === "assistant",
+    );
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]).toEqual(
+      expect.objectContaining({
+        text: "trying search",
+        reasoning: undefined,
+      }),
+    );
+    expect(assistants[1]).toEqual(
+      expect.objectContaining({
+        text: "done",
+        reasoning: "first look then nothing",
       }),
     );
   });
