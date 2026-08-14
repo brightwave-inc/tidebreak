@@ -45,10 +45,12 @@ describe("composer draft attachments", () => {
     const store = useComposerDrafts.getState();
     store.setImages("chat-1", [READY_IMAGE, QUEUED_IMAGE]);
     store.setFiles("chat-1", [IMPORTED_FILE]);
+    store.setFolders("chat-1", ["root-1"]);
 
     // A fresh store is what the next load of the page gets.
     const restored = createComposerDraftStore().getState().attachments["chat-1"];
     expect(restored.files).toEqual([IMPORTED_FILE]);
+    expect(restored.folders).toEqual(["root-1"]);
     // The published image re-sends as-is; the queued one was a promise to
     // move bytes no storage can hold, so no chip comes back for it.
     expect(restored.images).toHaveLength(1);
@@ -60,6 +62,19 @@ describe("composer draft attachments", () => {
       // format and geometry.
       previewUrl: null,
     });
+  });
+
+  it("restores draft folder chips without implying a standing grant", () => {
+    const store = useComposerDrafts.getState();
+    store.setFolders("chat-1", ["root-1", "root-2"]);
+
+    const restored = createComposerDraftStore().getState().attachments["chat-1"];
+    expect(restored.folders).toEqual(["root-1", "root-2"]);
+    // A connected folder that was never put on this draft does not come back
+    // as a chip — send already consumed the strip.
+    expect(
+      createComposerDraftStore().getState().attachments["chat-2"],
+    ).toBeUndefined();
   });
 
   it("forgets text and attachments together, in the session too", () => {

@@ -95,6 +95,14 @@ const sessionDeps = {
 const chatListActions = useChatListStore.getState();
 const composerDraftActions = useComposerDrafts.getState();
 const firstMessageActions = useFirstMessage.getState();
+
+function rememberComposerFolder(chatId: string, rootId: string) {
+  const current =
+    useComposerDrafts.getState().attachments[chatId]?.folders ?? [];
+  if (current.includes(rootId)) return;
+  composerDraftActions.setFolders(chatId, [...current, rootId]);
+}
+
 const { signal: signalRefresh } = useRefreshSignals.getState();
 const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
 
@@ -119,7 +127,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const busy = useChatSessionStore((session) => session.busy);
   const lastTurnUsage = useChatSessionStore((session) => session.lastTurnUsage);
   const [hydrated, setHydrated] = useState(false);
-  const files = useComposerAttachments(chatId).files;
+  const composerAttachments = useComposerAttachments(chatId);
+  const files = composerAttachments.files;
+  const pendingFolderIds = composerAttachments.folders;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const images = useImageAttachments(client, chatId);
@@ -379,6 +389,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         ),
       () => {
         setComposerDraft("");
+        composerDraftActions.setFolders(chatId, []);
         voice.resetInputUsed();
       },
     );
@@ -512,6 +523,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         images.clear();
         setComposerFiles(() => []);
         composerDraftActions.setSkills(chatId, []);
+        composerDraftActions.setFolders(chatId, []);
         voice.resetInputUsed();
       }
     } catch (err) {
@@ -685,11 +697,24 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           }}
           folders={{
             items: folders.items,
+            pendingIds: pendingFolderIds,
             approved: folders.approved,
             working: folders.working,
             error: folders.error,
-            onAttach: nativeHost ? folders.attach : undefined,
-            onConnect: nativeHost ? folders.connectApproved : undefined,
+            onAttach: nativeHost
+              ? () => {
+                  void folders.attach().then((connected) => {
+                    if (connected) rememberComposerFolder(chatId, connected.rootId);
+                  });
+                }
+              : undefined,
+            onConnect: nativeHost
+              ? (rootId) => {
+                  void folders.connectApproved(rootId).then((connected) => {
+                    if (connected) rememberComposerFolder(chatId, connected.rootId);
+                  });
+                }
+              : undefined,
             onRemove: folders.remove,
           }}
           voice={{

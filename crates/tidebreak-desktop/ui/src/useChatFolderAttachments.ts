@@ -39,8 +39,8 @@ export type ChatFolderAttachments = {
   approved: ConnectedFolder[];
   working: boolean;
   error: string | null;
-  attach: () => void;
-  connectApproved: (rootId: string) => void;
+  attach: () => Promise<ConnectedFolder | null>;
+  connectApproved: (rootId: string) => Promise<ConnectedFolder | null>;
   remove: (rootId: string) => void;
 };
 
@@ -98,11 +98,11 @@ export function useChatFolderAttachments(
     };
   }, [chat?.id, chat?.project_id, nativeHost, folderAccess]);
 
-  async function attach() {
-    if (!chat || !nativeHost || working) return;
+  async function attach(): Promise<ConnectedFolder | null> {
+    if (!chat || !nativeHost || working) return null;
     if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.connectFolder)) {
       setError(PICKER_BUSY_MESSAGE);
-      return;
+      return null;
     }
     setWorking(true);
     setError(null);
@@ -111,8 +111,10 @@ export function useChatFolderAttachments(
       if (connected) {
         useRefreshSignals.getState().signal("folderAccess");
       }
+      return connected;
     } catch (reason) {
       setError(String(reason));
+      return null;
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.connectFolder);
       setWorking(false);
@@ -127,8 +129,10 @@ export function useChatFolderAttachments(
    * grant is the host's to make either way — this only spares the reader
    * finding a folder they have already chosen once.
    */
-  async function connectApproved(rootId: string) {
-    if (!chat || !nativeHost || working) return;
+  async function connectApproved(
+    rootId: string,
+  ): Promise<ConnectedFolder | null> {
+    if (!chat || !nativeHost || working) return null;
     setWorking(true);
     setError(null);
     try {
@@ -136,8 +140,10 @@ export function useChatFolderAttachments(
       if (connected) {
         useRefreshSignals.getState().signal("folderAccess");
       }
+      return connected;
     } catch (reason) {
       setError(String(reason));
+      return null;
     } finally {
       setWorking(false);
     }
@@ -162,8 +168,8 @@ export function useChatFolderAttachments(
     approved,
     working,
     error,
-    attach: () => void attach(),
-    connectApproved: (rootId) => void connectApproved(rootId),
+    attach,
+    connectApproved,
     remove: (rootId) => void remove(rootId),
   };
 }

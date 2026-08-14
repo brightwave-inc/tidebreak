@@ -202,6 +202,13 @@ export type ComposerFolders = {
    * through the picker.
    */
   approved?: readonly ConnectedFolder[];
+  /**
+   * Root ids this draft is presenting as context. Standing grants stay on
+   * `items` (and on the chat); send clears this list so the chips leave with
+   * the message. Absent means every connected folder is a chip — tests and
+   * surfaces that do not distinguish a draft from a grant.
+   */
+  pendingIds?: readonly string[];
   working: boolean;
   error: string | null;
   onAttach?: () => void;
@@ -209,6 +216,16 @@ export type ComposerFolders = {
   onConnect?: (rootId: string) => void;
   onRemove: (rootId: string) => void;
 };
+
+/** The folder chips this draft is holding. Standing grants are not chips. */
+export function composerFolderChips(
+  folders: ComposerFolders,
+): ChatFolderAccess[] {
+  if (folders.pendingIds === undefined) return folders.items;
+  if (folders.pendingIds.length === 0) return [];
+  const pending = new Set(folders.pendingIds);
+  return folders.items.filter((folder) => pending.has(folder.rootId));
+}
 
 export type ComposerVoice = {
   available: boolean;
@@ -406,6 +423,7 @@ export function Composer({
   }, [resetKey]);
 
   const invokedSkills = slash?.invoked ?? [];
+  const folderChips = folders ? composerFolderChips(folders) : [];
   const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
   /** What a pick can still reach, given what this message already carries. */
   const libraryOptions = availableSlashOptions(slash?.options ?? [], invokedSkills, {
@@ -870,12 +888,12 @@ export function Composer({
           ))}
         </ul>
       )}
-      {folders && folders.items.length > 0 && (
+      {folderChips.length > 0 && folders && (
         <ul
           className="m-0 flex list-none flex-wrap gap-2 p-0"
           aria-label="Attached folders"
         >
-          {folders.items.map((folder) => (
+          {folderChips.map((folder) => (
             <FolderAttachmentChip
               key={folder.rootId}
               folder={folder}
