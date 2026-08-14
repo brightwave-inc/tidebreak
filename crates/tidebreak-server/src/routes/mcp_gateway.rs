@@ -238,8 +238,9 @@ pub async fn post_gateway_sign_out(
 /// session is stored; the renderer only asks while signed in.
 pub async fn get_gateway_apps(
     State(state): State<AppState>,
+    auth: AuthContext,
 ) -> Result<Json<crate::gateway_runtime::GatewayApps>, ServerError> {
-    Ok(Json(state.gateway.apps().await?))
+    Ok(Json(state.gateway.apps(&auth.principal.owner_id()).await?))
 }
 
 /// `POST /gateway/models/sync` — the settings page's explicit "sync with the

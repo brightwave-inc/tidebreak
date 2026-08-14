@@ -295,7 +295,7 @@ impl GatewayRuntime {
     /// The entitled connected apps, fetched live from the gateway with the
     /// stored session. Managed-only, like the whole sign-in surface; a
     /// gateway without the JSON apps surface reports `supported: false`.
-    pub(crate) async fn apps(&self) -> Result<GatewayApps> {
+    pub(crate) async fn apps(&self, owner: &tidebreak_core::OwnerId) -> Result<GatewayApps> {
         let connection = self.managed_connection().await?;
         let Some(apps) = Self::entitled_apps(&connection).await? else {
             return Ok(GatewayApps {
@@ -310,7 +310,7 @@ impl GatewayRuntime {
         // grant table leaves the counts at zero rather than failing the list.
         let mut used_by: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        match self.store.list_live_app_grants().await {
+        match self.store.list_live_app_grants_scoped(owner).await {
             Ok(grants) => {
                 for grant in grants {
                     for binding in &grant.bindings {
@@ -1639,13 +1639,22 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::extract::{Form, State};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, Request};
     use axum::response::{IntoResponse, Json, Response};
     use axum::routing::{get, post};
-    use axum::Router as AxumRouter;
+    use axum::{Extension, Router as AxumRouter};
     use futures::StreamExt;
     use serde_json::{json, Value};
-    use tidebreak_core::{ChatMessage, ChatRequest, DbStore, ModelProvider, ProviderId, Role};
+    use tidebreak_core::id::{AppId, AppRevisionId};
+    use tidebreak_core::local_app::{
+        AppGatewayOperationsGrantBinding, AppGrant, AppGrantBinding, AppManifest, CreateApp,
+        NewAppRevision,
+    };
+    use tidebreak_core::{
+        AgentConfig, ChatMessage, ChatRequest, Config, DbStore, ModelProvider, OwnerId, ProviderId,
+        Role, ToolRegistry,
+    };
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -2812,7 +2821,10 @@ mod tests {
         let base = format!("http://{address}");
         let (runtime, _store, _directory) = signed_in_runtime(&base).await;
 
-        let apps = runtime.apps().await.unwrap();
+        let apps = runtime
+            .apps(&tidebreak_core::OwnerId::local())
+            .await
+            .unwrap();
         assert!(apps.supported);
         assert_eq!(apps.apps.len(), 1);
         assert_eq!(
@@ -2822,12 +2834,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_apps_route_scopes_used_by_count_to_the_authenticated_principal() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway).await;
+        let base = format!("http://{address}");
+        let (runtime, store, directory) = signed_in_runtime(&base).await;
+        let alice = OwnerId::new("user:alice").unwrap();
+        let app_id = AppId::new();
+        store
+            .create_app_scoped(
+                &alice,
+                &CreateApp {
+                    id: app_id,
+                    revision: NewAppRevision {
+                        id: AppRevisionId::new(),
+                        manifest: AppManifest {
+                            name: "Alice gateway app".into(),
+                            bindings: Vec::new(),
+                        },
+                        byte_len: 1,
+                        sha256: [0; 32],
+                        turn_id: None,
+                        producing_run_id: None,
+                        chat_id: None,
+                        created_at: chrono::Utc::now(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .put_app_grant_scoped(
+                &alice,
+                &AppGrant {
+                    app_id,
+                    bindings: vec![AppGrantBinding::GatewayOperations(
+                        AppGatewayOperationsGrantBinding {
+                            gateway_app: "app-1".into(),
+                            operation_ids: vec!["list".into()],
+                            fingerprint: [1; 32],
+                        },
+                    )],
+                    created_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+
+        struct RouteTestResolver;
+
+        #[async_trait]
+        impl crate::resolver::ProviderResolver for RouteTestResolver {
+            async fn resolve(&self) -> Arc<dyn ModelProvider> {
+                Arc::new(crate::provider::UnconfiguredProvider)
+            }
+        }
+
+        let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
+        let chatgpt = Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        );
+        let state = crate::state::AppState::with_gateway_runtime(
+            Config::desktop(directory.path()),
+            store,
+            Arc::new(RouteTestResolver),
+            secrets,
+            Arc::new(ToolRegistry::new()),
+            AgentConfig::default(),
+            uuid::Uuid::new_v4(),
+            runtime,
+            chatgpt,
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        )
+        .unwrap();
+
+        async fn count_for(
+            state: crate::state::AppState,
+            principal: crate::principal::Principal,
+        ) -> usize {
+            let response = AxumRouter::new()
+                .route("/gateway/apps", get(crate::routes::get_gateway_apps))
+                .with_state(state)
+                .layer(Extension(crate::principal::AuthContext {
+                    principal,
+                    client_executor: false,
+                }))
+                .oneshot(
+                    Request::builder()
+                        .uri("/gateway/apps")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()["apps"][0]["used_by_app_count"]
+                .as_u64()
+                .unwrap() as usize
+        }
+
+        let alice_count = count_for(
+            state.clone(),
+            crate::principal::Principal::User {
+                id: crate::principal::UserId::new("alice").unwrap(),
+                role: crate::principal::Role::Member,
+            },
+        )
+        .await;
+        let bob_count = count_for(
+            state,
+            crate::principal::Principal::User {
+                id: crate::principal::UserId::new("bob").unwrap(),
+                role: crate::principal::Role::Member,
+            },
+        )
+        .await;
+
+        assert_eq!(alice_count, 1);
+        assert_eq!(bob_count, 0);
+    }
+
+    #[tokio::test]
     async fn apps_from_a_catalogless_gateway_carry_no_readiness() {
         let address = serve(Arc::new(FakeGateway::default())).await;
         let base = format!("http://{address}");
         let (runtime, _store, _directory) = signed_in_runtime(&base).await;
 
-        let apps = runtime.apps().await.unwrap();
+        let apps = runtime
+            .apps(&tidebreak_core::OwnerId::local())
+            .await
+            .unwrap();
         assert!(apps.supported);
         assert_eq!(apps.apps.len(), 1);
         assert_eq!(apps.apps[0].connection, None);
@@ -3954,7 +4095,10 @@ mod tests {
             "{error}"
         );
         assert!(runtime.sync_models().await.is_err());
-        assert!(runtime.apps().await.is_err());
+        assert!(runtime
+            .apps(&tidebreak_core::OwnerId::local())
+            .await
+            .is_err());
         assert!(runtime.sign_out().await.is_err());
     }
 
