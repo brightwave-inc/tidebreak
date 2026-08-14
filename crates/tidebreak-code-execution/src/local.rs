@@ -488,17 +488,21 @@ impl CodeExecutionProvider for LocalExecutionProvider {
         )
         .await;
         match result {
-            Ok(mut response) => {
+            Ok(response) => {
                 #[cfg(target_os = "macos")]
-                annotate_seatbelt_access_denial(
-                    &workspace,
-                    &env_home,
-                    document_scripts_dir.as_deref(),
-                    shared_package_cache.as_deref(),
-                    managed_node_dir.as_deref(),
-                    &folder_grants,
-                    &mut response,
-                );
+                let response = {
+                    let mut response = response;
+                    annotate_seatbelt_access_denial(
+                        &workspace,
+                        &env_home,
+                        document_scripts_dir.as_deref(),
+                        shared_package_cache.as_deref(),
+                        managed_node_dir.as_deref(),
+                        &folder_grants,
+                        &mut response,
+                    );
+                    response
+                };
                 finish_execution(
                     &receipt_path,
                     &ExecutionReceipt::Completed {

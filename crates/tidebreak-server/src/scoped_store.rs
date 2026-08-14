@@ -32,11 +32,11 @@ use tidebreak_core::{
     AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot,
     ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome,
     DocumentId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
-    JournaledTurnOutcome, MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId,
-    PendingPlanApproval, PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
-    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
-    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
+    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
+    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
+    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
+    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
     TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
 };
 

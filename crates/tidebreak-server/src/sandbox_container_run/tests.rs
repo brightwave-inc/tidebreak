@@ -23,6 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
+use sea_orm::ConnectOptions;
 use tidebreak_core::{
     AdmitSandboxAgentRunOutcome, AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation,
     AgentRunId, AgentRunStatus, CallId, CancelToken, Chat, ChatId, ChatRequest, DbStore,
@@ -979,15 +980,21 @@ impl SandboxBackend for HeldProvisionBackend {
 // --- Store / admission fixture ------------------------------------------------
 
 async fn store() -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
+    store_with_pool(None).await
+}
+
+async fn store_with_pool(
+    max_connections: Option<u32>,
+) -> (tempfile::TempDir, Arc<dyn Store>, Chat) {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
+    let mut options = ConnectOptions::new(url);
+    if let Some(max_connections) = max_connections {
+        options
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(120));
+    }
+    let store: Arc<dyn Store> = Arc::new(DbStore::connect_with_options(options).await.unwrap());
     let chat = Chat {
         id: ChatId::new(),
         project_id: None,
@@ -1313,8 +1320,22 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         ]));
         let resolver = Arc::new(FixedResolver(provider.clone()));
 
-        let runner =
-            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config());
+        // Prompt durable-cancellation polling is covered by the cancellation
+        // tests below. This case deliberately performs all eight model steps,
+        // so keep its lease alive without adding a 250 ms heartbeat contender
+        // to the same SQLite pool while the full server suite runs in parallel.
+        // The exact fence checks at each provider operation remain active.
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            resolver,
+            SandboxContainerRunConfig {
+                lease: Duration::from_secs(120),
+                heartbeat: Duration::from_secs(30),
+                durable_fence_interval: Duration::from_secs(30),
+                ..fast_config()
+            },
+        );
         let outcome = runner
             .drive(run_id)
             .await
@@ -1605,8 +1626,13 @@ async fn the_sweep_revokes_tokens_for_lapsed_and_reaped_runs() {
 /// what closes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let (_dir, store, chat) = store().await;
+    // This path intentionally drives the sandbox through its full step budget.
+    // Under the parallel server suite, the nested runtime and durable writes can
+    // spend most of the ordinary 30-second guard waiting for scheduler time even
+    // though the same flow completes immediately in isolation. Keep a hard
+    // bound while leaving enough headroom for the integration-heavy suite.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (_dir, store, chat) = store_with_pool(Some(32)).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
 
         let backend = MockBackend::spawning();

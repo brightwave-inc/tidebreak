@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
+    EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -61,8 +61,8 @@ use crate::storage::{
     OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PromoteQueuedTurnOutcome,
     RecordAgentRunModelStepOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ResolveSandboxToolCallOutcome,
-    ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveToolCallOutcome,
+    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
+    ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
     ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, Store,
     SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
@@ -104,7 +104,16 @@ impl DbStore {
     /// created if missing, include `?mode=rwc` (e.g.
     /// `sqlite:///path/tidebreak.db?mode=rwc`).
     pub async fn connect(url: &str) -> Result<Self> {
-        let conn = Database::connect(url).await.map_err(store_err)?;
+        Self::connect_with_options(ConnectOptions::new(url)).await
+    }
+
+    /// Connect with explicit SeaORM pool options and run migrations.
+    ///
+    /// Most callers should use [`Self::connect`]. This constructor is for
+    /// hosts and integration fixtures that need deliberate pool sizing or
+    /// timeout policy rather than SeaORM's defaults.
+    pub async fn connect_with_options(options: ConnectOptions) -> Result<Self> {
+        let conn = Database::connect(options).await.map_err(store_err)?;
         // WAL lets a reader (e.g. the UI listing chats) proceed concurrently
         // with a writer (a turn appending messages). SQLite-only; it's a
         // persistent, file-level setting, so running it once at connect suffices.

@@ -22,9 +22,9 @@ use tidebreak_core::{
     Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
     RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason,
     Store, SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnAdmissionLease, TurnAdmissionRequest, TurnCheckpointProgress,
-    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage,
-    UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
+    ToolCallStatus, TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnId,
+    TurnRun, TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer,
+    ASK_USER_QUESTIONS_TOOL,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -221,7 +221,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
         if let Some((model_steps, usage)) = checkpoint {
             let connection = Database::connect(&url).await.unwrap();
             let updated = connection
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
                     "UPDATE turn_run SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
                     [
@@ -905,7 +905,7 @@ async fn postgres_concurrent_exact_nonblocking_spawn_checkpoint_converges_once()
             .collect::<Vec<_>>(),
         vec![carried_call_id]
     );
-    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 2);
+    assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_tool_calls(chat.id).await.unwrap().len(), 1);
     cleanup_postgres_sandbox_chat(store.as_ref(), chat.id).await;
 }

@@ -15,6 +15,13 @@ function run(overrides: Partial<AgentRun> = {}): AgentRun {
     execution_location: "container",
     code_execution_provider: "local",
     status: "failed",
+    model_steps: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
     task: "Summarize the quarterly report",
     started_at: "2026-08-01T10:00:00Z",
     finished_at: "2026-08-01T10:04:00Z",
