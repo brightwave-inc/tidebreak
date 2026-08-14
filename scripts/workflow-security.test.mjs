@@ -1415,7 +1415,7 @@ test("GitHub release downloads are copied from the hosted release", () => {
 
   assert.match(
     readFileSync(repositoryFile("README.md"), "utf8"),
-    /releases\/latest\/download\/Tidebreak-macos-(?:universal|apple-silicon)\.dmg/,
+    /releases\/latest\/download\/Tidebreak-macos-universal\.dmg/,
     "the README download link must match the published asset name",
   );
 });
@@ -1547,6 +1547,7 @@ test("universal macOS release and staging packages contain both slices", () => {
   }
 
   for (const job of [releaseBuild, stagingBuild]) {
+    assert.match(job, /timeout-minutes: 90/);
     assert.match(job, /lipo -archs "\$app_path\/Contents\/MacOS\/\$executable"/);
     assert.match(job, /\$binary_arches" = \*arm64\*/);
     assert.match(job, /\$binary_arches" = \*x86_64\*/);

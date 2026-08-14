@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-apple-silicon.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
 </p>
 
 ---

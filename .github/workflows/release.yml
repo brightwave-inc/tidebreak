@@ -384,6 +384,7 @@ jobs:
         && needs.prepare_macos.result == 'success'
       }}
     runs-on: macos-latest
+    timeout-minutes: 90
     environment:
       name: desktop-production
       url: https://downloads.brightwave.io/tidebreak/manifest.json
