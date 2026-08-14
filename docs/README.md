@@ -1,56 +1,84 @@
-# Tidebreak documentation
+# Maintainer documentation
 
-Project documentation, versioned alongside the code.
+This directory explains how Tidebreak is built, which contracts the code must
+preserve, how releases and deployments work, and which product directions are
+deliberately parked. It is versioned with the implementation and written for
+contributors and operators.
 
-- [The crates](crates.md) — what each crate in the workspace is and does, and how
-  they fit together.
-- [How Tidebreak works](how-tidebreak-works.md) — a plain-language maintainer tour
-  of the product, runtime, state machines, document model, and unfinished edges.
-- [Model providers and cross-provider replay](model-providers.md) — provider
-  tiers, mid-conversation switching, and the flatten-on-switch rule.
-- [Host access and connected folders](host-access.md) — how projects and
-  conversations receive user-approved access to folders on the host machine.
-- [Agent runs and sandboxed background work](agent-runs.md) — the shared
-  foreground/background loop, depth-one agent hierarchy, durable waits, and
-  bounded sandbox scheduling plan.
-- [Foreground agent operating prompt](agent-operating-prompt.md) — deterministic
-  capability composition, trust boundaries, versioning, and extension rules.
-- [Durable user questions](user-questions.md) — foreground-only structured
-  clarification with exact wait/resume behavior across reload and restart.
-- [Tool architecture and roadmap](tools.md) — the current tool surface,
-  foreground/sandbox split, provider boundaries, and web-search plan.
-- [Wire types](wire-types.md) — generating the desktop's TypeScript from the Rust
-  serde definitions, and what is deliberately still hand-written.
-- [Web search configuration](web-search.md) — the local host-owned Exa/Tavily
-  selection boundary and its current no-tool state.
+User-facing guides live in [`docs-site/content/docs/`](../docs-site/content/docs)
+and publish to [tidebreak.sh/docs](https://www.tidebreak.sh/docs/). The product
+overview and launch copy belong to the separate
+[`brightwave-inc/tidebreak-site`](https://github.com/brightwave-inc/tidebreak-site)
+repository. Keep those surfaces focused rather than copying the same product
+explanation everywhere.
+
+Some pages below describe a current contract; others describe a staged or
+parked design. A design page should say its status near the top. Numbered
+decision records are the authority when later implementation choices depend on
+an accepted boundary.
+
+## Start here
+
+- [How Tidebreak works](how-tidebreak-works.md) — end-to-end tour of startup,
+  turns, tools, files, durability, clients, and the main reliability rules.
+- [The Tidebreak crates](crates.md) — workspace dependency direction and the
+  responsibility of each crate.
+- [Decision records](decisions) — accepted boundaries, rejected alternatives,
+  and the conditions under which a decision should be revisited.
+
+## Agent runtime and product contracts
+
+- [Foreground agent operating prompt](agent-operating-prompt.md) — capability
+  composition, trust boundaries, diagnostics, and extension rules.
+- [Agent runs and background work](agent-runs.md) — execution hierarchy,
+  delegation, durable waits, scheduling, and supervision.
+- [Durable user questions](user-questions.md) — structured clarification and
+  exact wait/resume behavior.
+- [Conversation outputs](deliverables.md) — output publication, versioning,
+  restore, delete, and background-agent artifacts.
+- [Host access and connected folders](host-access.md) — the brokered boundary
+  between a conversation and user-approved host files.
+- [Folder bindings for local apps](folder-bindings.md) — app-specific folder
+  consent, fingerprints, and dispatch enforcement.
+- [Local apps](local-apps.md) — generated app records, sandboxed rendering,
+  invocation consent, and publishing ownership.
+
+## Tools, execution, and integrations
+
+- [Tool architecture](tools.md) — built-in tool registration, renderer
+  vocabulary, foreground and sandbox surfaces, and reliability rules.
 - [Code execution](code-execution.md) — the provider-neutral `exec` contract,
-  native local sandbox, configuration boundary, and managed-provider extension
-  path.
-- [Execution providers and sandbox-resident agent runs](sandbox-providers.md) —
-  the run-tier/execution-provider split, reachability and credential
-  invariants, and the phased route to detached background agent runs.
-- [Connected apps](connected-apps.md) — the umbrella record for outside
-  integrations: MCP servers as one kind, the planned REST kind with its
-  governed local executor, and the promotion-compatible binding vocabulary.
-- [Local apps](local-apps.md) — agent-generated mini-apps in the profile:
-  sandboxed frame rendering, manifest-pinned tool invocation with durable
-  consent, and how sharing is registered here but published at the gateway.
-- [The Tidebreak ↔ model gateway boundary](gateway-boundary.md) — how a profile
-  becomes gateway-managed (pairing, policy tiers, sessions) and what crosses
-  the wire once it is.
-- [OS-managed policy (MDM)](managed-policy.md) — the per-platform artifacts an
-  administrator deploys to point Tidebreak at a managed model gateway.
-- [Releases and versioning](releases.md) — semantic PR titles, native release
-  drafts, tag-derived macOS builds, and the deliberate path to `1.0.0`.
-- [What comes after v1](deferred.md) — the deliberately parked product scope,
-  the v1 finishing work that remains actionable, and the conditions that bring
-  future capabilities forward.
-- [Decision records](decisions) — numbered records of decisions later work has
-  to live with, each stating what was chosen, what was rejected, and what would
-  cause it to be revisited.
+  network policy, workspaces, local backends, and managed backends.
+- [Execution providers and sandbox-resident runs](sandbox-providers.md) — the
+  parked design for detached runs, credential separation, admission, and the
+  sandbox-agent protocol.
+- [Web search](web-search.md) — search backends, page extraction, source
+  publication, and the local configuration boundary.
+- [Connected apps](connected-apps.md) — shared records and authorization for
+  external integrations.
+- [External MCP servers](mcp-servers.md) — desktop and headless configuration,
+  health, refresh, approvals, and MCP App views.
+- [Tested and community MCP servers](mcp-tested-servers.md) — what a curated
+  listing claims and how entries are maintained.
+- [Model providers and cross-provider replay](model-providers.md) — provider
+  tiers, switching routes mid-conversation, and flatten-on-switch.
 
-More to come as the product surfaces land (running locally, API reference, and
-writing tools).
+## Interfaces, deployment, and operations
 
-For API-level docs, `cargo doc --open` renders the module documentation straight
-from the source.
+- [Wire types](wire-types.md) — generating the desktop TypeScript contract from
+  Rust serde types and checking it in CI.
+- [Self-hosting](self-hosting.md) — deployment profile, token roles, Compose,
+  reverse proxies, backup, and upgrades.
+- [Tidebreak ↔ model gateway boundary](gateway-boundary.md) — managed-profile
+  pairing, authentication, policy tiers, and wire responsibilities.
+- [OS-managed policy](managed-policy.md) — macOS, Windows, and Linux policy
+  artifacts plus the developer toggle.
+- [Releases and versioning](releases.md) — semantic PR titles, release
+  automation, packaging, staging, and the path to 1.0.
+
+## Planning
+
+- [What comes after v1](deferred.md) — canonical home for intentionally parked
+  product scope and the conditions that would bring it forward.
+
+For API-level documentation, run `cargo doc --open`.
