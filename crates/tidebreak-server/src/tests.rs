@@ -991,6 +991,9 @@ impl Store for PauseTerminalStore {
     async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::TurnRun>> {
         self.inner.list_turn_runs(chat_id).await
     }
+    async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::QueuedTurn>> {
+        self.inner.list_queued_turns(chat_id).await
+    }
     // Hooked here rather than on `accept_turn`, because the trait's plain
     // `accept_turn` delegates to this one — overriding only the former would
     // leave a turn carrying attachments bypassing the pause entirely.

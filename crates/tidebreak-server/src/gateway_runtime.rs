@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store};
 use tidebreak_router::{BearerTokenSource, ModelRouteLease};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
 
 use crate::providers::{self, CustomModelConfig};
 
@@ -50,11 +50,15 @@ pub(crate) struct GatewayRuntime {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// One connection per configured base URL; rebuilt when the URL changes.
     cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
-    /// One complete entitled-model sync at a time, from the first policy and
-    /// snapshot read through the fetch and durable write. Serializing only the
-    /// write tail lets an older, slower HTTP response overwrite a newer
-    /// catalog, so the network round-trip deliberately lives inside this lock.
-    model_sync: Arc<Mutex<()>>,
+    /// Shared by every request-leg route lease and every local mutation of
+    /// gateway execution authority. Request setup takes a read lease through
+    /// dispatch; catalog sync, sign-out, deprovision, and session replacement
+    /// take the write side. A writer therefore runs either before a leg
+    /// validates and mints its bearer or after that leg has dispatched, never
+    /// in the security-sensitive gap between them. Catalog sync deliberately
+    /// keeps the write side across its fetch so older responses cannot commit
+    /// after newer ones.
+    model_sync: Arc<RwLock<()>>,
     /// The one in-flight browser sign-in, if any.
     sign_in: Mutex<SignInProgress>,
     /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
@@ -185,7 +189,7 @@ impl GatewayRuntime {
             provisioned_policy,
             os_policy,
             cached: Mutex::new(None),
-            model_sync: Arc::new(Mutex::new(())),
+            model_sync: Arc::new(RwLock::new(())),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
             pending_pairing: Mutex::new(None),
@@ -561,12 +565,32 @@ impl GatewayRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             let finished = pending.finish(SIGN_IN_TIMEOUT).await;
-            // Hold the state lock across the generation check and every
-            // effect: `sign_out` bumps the generation and revokes under this
-            // same lock, so a completion racing a sign-out either observes
-            // the bump here and abandons, or finishes entirely before the
-            // sign-out proceeds — a signed-out session can never be
-            // resurrected between check and store.
+            let session = match finished {
+                Ok(session) => session,
+                Err(error) => {
+                    let mut sign_in = runtime.sign_in.lock().await;
+                    if runtime
+                        .sign_in_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == generation
+                    {
+                        *sign_in = SignInProgress::Failed {
+                            message: error.to_string(),
+                        };
+                    }
+                    return;
+                }
+            };
+
+            // Lock order for every locally controlled authority mutation is
+            // model authority -> pairing (when policy may move) -> sign-in
+            // state. The write lease waits for already-authorized request legs
+            // to dispatch, then excludes new ones through the policy commit,
+            // old-session retirement, and new-session store. Acquiring the
+            // pairing lock before sign-in state also matches registration and
+            // deprovision, avoiding the former sign-in/pairing inversion.
+            let _authority = runtime.lock_model_authority_mutation().await;
+            let _pairing = crate::pairing::lock_pairing_mutation().await;
             let mut sign_in = runtime.sign_in.lock().await;
             if runtime
                 .sign_in_generation
@@ -575,62 +599,54 @@ impl GatewayRuntime {
             {
                 return;
             }
-            *sign_in = match finished {
-                Ok(session) => {
-                    // A pairing commits before its session persists: if the
-                    // provision cannot be written (an MDM push claimed the
-                    // profile mid-flow), no session lands on a profile the
-                    // pairing's gateway does not manage. The generation
-                    // being current is what proves the pairing was neither
-                    // dismissed nor replaced while the browser flow ran —
-                    // both bump it under this same lock.
-                    let committed = match &pairing {
-                        Some(pending) => runtime.commit_pairing(pending).await,
-                        None => Ok(()),
-                    };
-                    let stored = match committed {
-                        Ok(()) => connection.store_session(&session).await,
-                        Err(error) => Err(error),
-                    };
-                    match stored {
-                        Ok(()) => {
-                            // Best-effort: a failed first sync leaves an
-                            // explicit refresh affordance, not a failed
-                            // sign-in — but say so in the log, or support
-                            // cannot tell an empty model list from a sync
-                            // that never ran.
-                            if let Err(error) = runtime.sync_models().await {
-                                tracing::warn!(
-                                    "gateway model sync after sign-in failed \
-                                     (the background sync will retry): {}",
-                                    error.message()
-                                );
-                            }
-                            // Likewise: mount-by-default must never fail a
-                            // sign-in, and the background sync retries it.
-                            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
-                                tracing::warn!(
-                                    "gateway endpoint auto-mount after sign-in failed \
-                                     (the background sync will retry): {error}"
-                                );
-                            }
-                            // The `create_app` roster's gateway section reads
-                            // through this same session, so a fresh sign-in
-                            // has to republish it — otherwise the door keeps
-                            // telling the model there is no gateway session
-                            // until something unrelated rebuilds the registry.
-                            mcp.refresh_connected_app_roster().await;
-                            SignInProgress::Idle
-                        }
-                        Err(error) => SignInProgress::Failed {
-                            message: error.to_string(),
-                        },
-                    }
-                }
-                Err(error) => SignInProgress::Failed {
-                    message: error.to_string(),
-                },
+
+            // A pairing commits before its session persists: if the provision
+            // cannot be written (an MDM push claimed the profile mid-flow), no
+            // session lands on a profile the pairing's gateway does not manage.
+            let committed = match &pairing {
+                Some(pending) => runtime.commit_pairing_locked(pending).await,
+                None => Ok(()),
             };
+            let stored = match committed {
+                Ok(()) => connection.store_session(&session).await,
+                Err(error) => Err(error),
+            };
+            let stored = match stored {
+                Ok(()) => {
+                    *sign_in = SignInProgress::Idle;
+                    true
+                }
+                Err(error) => {
+                    *sign_in = SignInProgress::Failed {
+                        message: error.to_string(),
+                    };
+                    false
+                }
+            };
+            drop(sign_in);
+            drop(_pairing);
+            drop(_authority);
+
+            if !stored {
+                return;
+            }
+            // These are post-commit refreshes, not authority mutations. Run
+            // them after releasing the writer so healthy inference is not
+            // serialized behind model and endpoint network reads.
+            if let Err(error) = runtime.sync_models().await {
+                tracing::warn!(
+                    "gateway model sync after sign-in failed \
+                     (the background sync will retry): {}",
+                    error.message()
+                );
+            }
+            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
+                tracing::warn!(
+                    "gateway endpoint auto-mount after sign-in failed \
+                     (the background sync will retry): {error}"
+                );
+            }
+            mcp.refresh_connected_app_roster().await;
         });
         Ok(authorization_url)
     }
@@ -638,8 +654,8 @@ impl GatewayRuntime {
     /// Commit the pairing a finishing sign-in consented to, then clear it.
     /// Runs from the exchange task with the sign-in state lock held, so it
     /// cannot interleave with a dismissal or re-registration.
-    async fn commit_pairing(&self, pending: &PendingPairing) -> Result<()> {
-        crate::pairing::commit_signed_in_pairing(
+    async fn commit_pairing_locked(&self, pending: &PendingPairing) -> Result<()> {
+        crate::pairing::commit_signed_in_pairing_locked(
             &*self.provisioned_policy,
             &*self.os_policy,
             self.secrets.clone(),
@@ -652,11 +668,45 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Take the exclusive side of the request-leg authority fence.
+    ///
+    /// Callers that also need the pairing or sign-in locks must take them
+    /// after this guard, in that order. The owned guard lets pairing code hold
+    /// the fence across its compare-and-swap and session retirement without
+    /// exposing the lock itself.
+    pub(crate) async fn lock_model_authority_mutation(&self) -> OwnedRwLockWriteGuard<()> {
+        self.model_sync.clone().write_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn commit_signed_in_pairing_for_test(
+        &self,
+        mcp: &crate::mcp_config::McpRuntime,
+        base_url: &str,
+        replaces: Option<&str>,
+    ) -> Result<()> {
+        let _authority = self.lock_model_authority_mutation().await;
+        let _pairing = crate::pairing::lock_pairing_mutation().await;
+        let _sign_in = self.sign_in.lock().await;
+        crate::pairing::commit_signed_in_pairing_locked(
+            &*self.provisioned_policy,
+            &*self.os_policy,
+            self.secrets.clone(),
+            mcp,
+            base_url,
+            replaces,
+        )
+        .await
+    }
+
     /// Revoke the session (best-effort at the gateway), clear local state, and
     /// drop the synced model snapshot. Managed-only, like sign-in.
     pub(crate) async fn sign_out(&self) -> Result<()> {
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
-        let base_url = require_managed(&policy)?;
+        // Authority is always outermost: an already-authorized request leg
+        // dispatches before this writer proceeds, while a later leg observes
+        // the cleared session and snapshot. The sign-in state lock nests
+        // inside it, matching sign-in completion.
+        let _model_sync = self.lock_model_authority_mutation().await;
         // Take the state lock for the whole operation and invalidate any
         // pending browser flow before revoking anything: an exchange that
         // completes during the revoke round-trip serializes behind this lock
@@ -665,11 +715,8 @@ impl GatewayRuntime {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Each provider HTTP leg validates its selector and mints its bearer
-        // while holding this same short-lived lock. Sign-out therefore happens
-        // either before that leg (which fails closed) or after dispatch, never
-        // between authorization and the request.
-        let _model_sync = self.model_sync.lock().await;
+        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let base_url = require_managed(&policy)?;
         self.connection_at(base_url.clone())
             .await?
             .sign_out()
@@ -721,7 +768,10 @@ impl GatewayRuntime {
     /// revoked (best-effort) and cleared (unconditionally). Thin wrapper so
     /// callers without the secrets handle can reach
     /// [`retire_superseded_gateway_session`].
-    pub(crate) async fn retire_session_for_current_policy(&self) -> Result<()> {
+    pub(crate) async fn retire_session_for_current_policy(
+        &self,
+        _authority: &OwnedRwLockWriteGuard<()>,
+    ) -> Result<()> {
         let policy = self.policy()?;
         retire_superseded_gateway_session(self.secrets.clone(), &policy).await
     }
@@ -806,7 +856,7 @@ impl GatewayRuntime {
         // The lock covers the fetch, not merely the write tail. Otherwise two
         // callers can start from the same ETag and commit in response order,
         // allowing an older response to replace a newer catalog.
-        let _sync = self.model_sync.lock().await;
+        let _sync = self.model_sync.write().await;
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let base_url = require_managed(&policy)?;
         let connection = self.connection_at(base_url.clone()).await?;
@@ -1460,7 +1510,7 @@ struct GatewayTokenSource {
     store: Arc<dyn Store>,
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    model_sync: Arc<Mutex<()>>,
+    model_sync: Arc<RwLock<()>>,
 }
 
 #[async_trait]
@@ -1474,7 +1524,7 @@ impl BearerTokenSource for GatewayTokenSource {
     }
 
     async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
-        let guard = self.model_sync.clone().lock_owned().await;
+        let guard = self.model_sync.clone().read_owned().await;
         let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
         let Some(snapshot) = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?
         else {
@@ -2105,7 +2155,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_catalog_response_cannot_commit_after_sign_out() {
+    async fn request_route_setups_share_read_leases_while_catalog_sync_waits() {
+        let gateway = Arc::new(FakeGateway::default());
+        *gateway.catalog.lock().unwrap() = Some(sample_catalog());
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let (runtime, store, _directory) = signed_in_runtime(&base).await;
+        runtime.sync_models().await.unwrap();
+
+        let policy = runtime.policy().unwrap();
+        let snapshot = providers::gateway_snapshot_for_policy(&*store, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+        let frozen = providers::gateway_execution_policy(&snapshot, "model_gateway::sample-claude")
+            .unwrap()
+            .route_model;
+        let source = runtime.route_token_source().await.unwrap();
+
+        let first = source
+            .lease_model_route(&frozen)
+            .await
+            .unwrap()
+            .expect("first request setup receives a route lease");
+        let second =
+            tokio::time::timeout(Duration::from_secs(1), source.lease_model_route(&frozen))
+                .await
+                .expect("a second request setup must not serialize behind the first")
+                .unwrap()
+                .expect("second request setup receives the same live route lease");
+
+        let mut writer = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sync_models().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writer)
+                .await
+                .is_err(),
+            "catalog mutation must wait while request legs hold read leases"
+        );
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 0);
+
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writer)
+                .await
+                .is_err(),
+            "every active request leg must release before the writer proceeds"
+        );
+        drop(second);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), writer)
+                .await
+                .expect("catalog sync proceeds after both dispatch leases end")
+                .unwrap()
+                .unwrap(),
+            2
+        );
+        assert_eq!(gateway.catalog_not_modified.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sign_out_waits_for_catalog_sync_then_clears_its_commit() {
         let gateway = Arc::new(FakeGateway::default());
         *gateway.catalog.lock().unwrap() = Some(sample_catalog());
         let address = serve(gateway).await;
@@ -2126,15 +2238,35 @@ mod tests {
             async move { runtime.sync_models().await }
         });
         pause.arrived.notified().await;
-        runtime.sign_out().await.unwrap();
+        let mut sign_out = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.sign_out().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut sign_out)
+                .await
+                .is_err(),
+            "sign-out must wait for the in-flight catalog writer instead of deadlocking it"
+        );
         pause.release.notify_one();
+        assert_eq!(sync.await.unwrap().unwrap(), 2);
+        tokio::time::timeout(Duration::from_secs(2), sign_out)
+            .await
+            .expect("sign-out proceeds after catalog sync releases the writer")
+            .unwrap()
+            .unwrap();
 
-        let error = sync
+        let policy = runtime.policy().unwrap();
+        assert!(providers::gateway_models(&*store, &policy)
             .await
             .unwrap()
-            .expect_err("a response authorized by the signed-out session must be stale");
-        assert_eq!(error.kind(), "gateway_changed");
-        assert!(providers::read_gateway_snapshot(&*store)
+            .is_empty());
+        assert!(runtime
+            .connection()
+            .await
+            .unwrap()
+            .unwrap()
+            .stored_credentials()
             .await
             .unwrap()
             .is_none());

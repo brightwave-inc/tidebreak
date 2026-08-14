@@ -43,6 +43,58 @@ async fn approval_call_ids(store: &Arc<dyn Store>, chat: ChatId) -> Vec<CallId> 
         .collect()
 }
 
+async fn test_app_with_skills(
+    provider: Arc<dyn ModelProvider>,
+) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("skill-retry.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let secrets = Arc::new(MemSecrets::default());
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(provider)),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    state.code_execution = Some(Arc::new(
+        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            store.clone(),
+            secrets,
+            dir.path().join("scratch"),
+        )
+        .with_skills(Some(root.join("skills"))),
+    ));
+    let token = state.token.clone();
+    spawn_turn_worker(&state);
+    (app(state), token, store, dir)
+}
+
+async fn post_message_body(
+    router: &Router,
+    bearer: &str,
+    chat: ChatId,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{chat}/messages"))
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn wait_for_approvals(store: &Arc<dyn Store>, chat: ChatId, count: usize) -> Vec<CallId> {
     for _ in 0..500 {
         let ids = approval_call_ids(store, chat).await;
@@ -856,7 +908,7 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
     let turn_id = TurnId::new();
     let first_router = router.clone();
     let first_bearer = bearer.clone();
-    let first = tokio::spawn(async move {
+    let mut first = tokio::spawn(async move {
         send_message_with_id(
             &first_router,
             &first_bearer,
@@ -866,25 +918,308 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .expect("first request reached acceptance");
+    let first_status = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            () = entered.notified() => None,
+            status = &mut first => Some(status.expect("first request task joined")),
+        }
+    })
+    .await
+    .expect("first request reached an acceptance decision");
+    assert_eq!(
+        first_status, None,
+        "first request completed before the injected acceptance pause"
+    );
 
     store
         .set_setting("model", &serde_json::json!("model-after"))
         .await
         .unwrap();
+
+    let retry_router = router.clone();
+    let retry_bearer = bearer.clone();
+    let mut retry = tokio::spawn(async move {
+        send_message_with_id(
+            &retry_router,
+            &retry_bearer,
+            chat.id,
+            turn_id,
+            "same request",
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut retry)
+            .await
+            .is_err(),
+        "the exact retry must wait for the first acceptance decision"
+    );
+
+    release.notify_one();
     assert_eq!(
-        send_message_with_id(&router, &bearer, chat.id, turn_id, "same request").await,
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first acceptance completed after release")
+            .unwrap(),
         StatusCode::ACCEPTED
     );
-    release.notify_one();
-    assert_eq!(first.await.unwrap(), StatusCode::ACCEPTED);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), retry)
+            .await
+            .expect("retry completed after the first acceptance")
+            .unwrap(),
+        StatusCode::ACCEPTED
+    );
     assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     gate.notify_one();
     wait_for_turn(&store, chat.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_accepted_retry_survives_invoked_skill_becoming_unavailable() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) =
+        test_app_with_skills(Arc::new(GatedProvider { gate: gate.clone() })).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    let request = serde_json::json!({
+        "turn_id": turn_id,
+        "content": "build the deck",
+        "invoked_skills": ["presentations"],
+    });
+
+    assert_eq!(
+        post_message_body(&router, &bearer, chat.id, request.clone())
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    store
+        .set_setting(
+            crate::plugin_state::PLUGIN_ENABLE_STATE_SETTING,
+            &serde_json::json!({"skills": {"presentations": false}}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        post_message_body(&router, &bearer, chat.id, request)
+            .await
+            .status(),
+        StatusCode::ACCEPTED,
+        "an exact accepted retry must not revalidate mutable skill state"
+    );
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "turn_id": turn_id,
+                "content": "build the deck",
+                "invoked_skills": ["charts"],
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "the same accepted id cannot name a different skill identity"
+    );
+    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
+
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_queued_retry_survives_invoked_skill_becoming_unavailable() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) =
+        test_app_with_skills(Arc::new(GatedProvider { gate: gate.clone() })).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "blocking turn").await,
+        StatusCode::ACCEPTED
+    );
+
+    let queued_id = TurnId::new();
+    let queued_request = serde_json::json!({
+        "turn_id": queued_id,
+        "content": "build the queued deck",
+        "invoked_skills": ["presentations"],
+        "queue": true,
+    });
+    assert_eq!(
+        post_message_body(&router, &bearer, chat.id, queued_request.clone())
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    store
+        .set_setting(
+            crate::plugin_state::PLUGIN_ENABLE_STATE_SETTING,
+            &serde_json::json!({"skills": {"presentations": false}}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        post_message_body(&router, &bearer, chat.id, queued_request)
+            .await
+            .status(),
+        StatusCode::ACCEPTED,
+        "an exact queued retry must not revalidate mutable skill state"
+    );
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "turn_id": queued_id,
+                "content": "different queued input",
+                "invoked_skills": ["presentations"],
+                "queue": true,
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(store.list_queued_turns(chat.id).await.unwrap().len(), 1);
+
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retrying_a_later_queued_turn_never_bypasses_fifo() {
+    let gate = Arc::new(Notify::new());
+    let (router, token, store, _dir) =
+        test_app_with(Arc::new(GatedProvider { gate: gate.clone() })).await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let blocking_id = TurnId::new();
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, blocking_id, "blocking turn",).await,
+        StatusCode::ACCEPTED
+    );
+
+    let first_queued = TurnId::new();
+    let second_queued = TurnId::new();
+    for (turn_id, content) in [
+        (first_queued, "first queued"),
+        (second_queued, "second queued"),
+    ] {
+        assert_eq!(
+            post_message_body(
+                &router,
+                &bearer,
+                chat.id,
+                serde_json::json!({
+                    "turn_id": turn_id,
+                    "content": content,
+                    "queue": true,
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    gate.notify_one();
+    wait_for_turn(&store, chat.id).await;
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "turn_id": second_queued,
+                "content": "second queued",
+                "queue": false,
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+
+    let turns = store.list_turn_runs(chat.id).await.unwrap();
+    assert_eq!(turns.len(), 1, "retry traffic must not promote queued work");
+    assert_eq!(turns[0].id, blocking_id);
+    let queued = store.list_queued_turns(chat.id).await.unwrap();
+    assert_eq!(
+        queued.iter().map(|turn| turn.id).collect::<Vec<_>>(),
+        [first_queued, second_queued],
+        "the FIFO queue must remain unchanged"
+    );
+}
+
+#[tokio::test]
+async fn queued_retry_compares_attachment_identity_before_blob_resolution() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let queued_id = TurnId::new();
+    let attachment_id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    store
+        .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
+            id: queued_id,
+            chat_id: chat.id,
+            content: "queued image".into(),
+            attachments: vec![attachment_id],
+            file_attachments: Vec::new(),
+            invoked_skills: Vec::new(),
+            voice_input_used: false,
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "turn_id": queued_id,
+                "content": "queued image",
+                "attachments": [attachment_id],
+                "queue": true,
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED,
+        "the exact durable retry must not require the blob to resolve again"
+    );
+    assert_eq!(
+        post_message_body(
+            &router,
+            &bearer,
+            chat.id,
+            serde_json::json!({
+                "turn_id": queued_id,
+                "content": "queued image",
+                "attachments": [uuid::Uuid::new_v4()],
+                "queue": true,
+            }),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "a queued id cannot silently change image identity"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
