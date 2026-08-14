@@ -128,4 +128,54 @@ describe("projectWorkbookForReadOnlyDisplay", () => {
       D3: { dataBar: { color: "#2979ff", widthPercent: 100 } },
     });
   });
+
+  it("reads Excel packaging parts that start with a UTF-8 BOM", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      `<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Model" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      `\uFEFF<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/></Relationships>`,
+    );
+    zip.file(
+      "xl/worksheets/sheet1.xml",
+      `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>SUM(B1:B3)</f><v>42</v></c></row></sheetData></worksheet>`,
+    );
+
+    const NativeParser = globalThis.DOMParser;
+    // jsdom accepts a leading U+FEFF; the desktop webview does not.
+    class WebKitLikeParser {
+      parseFromString(xml: string, type: DOMParserSupportedType) {
+        if (xml.startsWith("\uFEFF")) {
+          return new NativeParser().parseFromString(
+            "<parsererror>XML declaration allowed only at the start of the document</parsererror>",
+            "application/xml",
+          );
+        }
+        return new NativeParser().parseFromString(xml, type);
+      }
+    }
+    globalThis.DOMParser = WebKitLikeParser as typeof DOMParser;
+    try {
+      const source = await zip.generateAsync({ type: "arraybuffer" });
+      const projection = await projectWorkbookForReadOnlyDisplay(source);
+      expect(projection.formulasBySheet).toEqual({ 0: { A1: "=SUM(B1:B3)" } });
+    } finally {
+      globalThis.DOMParser = NativeParser;
+    }
+  });
+
+  it("keeps the original workbook when a package part cannot be parsed", async () => {
+    const zip = new JSZip();
+    zip.file("xl/styles.xml", "not-xml");
+    const source = await zip.generateAsync({ type: "arraybuffer" });
+
+    const projection = await projectWorkbookForReadOnlyDisplay(source);
+
+    expect(projection.data).toBe(source);
+    expect(projection.formulasBySheet).toEqual({});
+    expect(projection.conditionalStylesBySheet).toEqual({});
+  });
 });

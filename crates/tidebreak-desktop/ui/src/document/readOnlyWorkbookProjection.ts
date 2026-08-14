@@ -38,12 +38,20 @@ export interface ReadOnlyWorkbookProjection {
 export async function projectWorkbookForReadOnlyDisplay(
   source: ArrayBuffer,
 ): Promise<ReadOnlyWorkbookProjection> {
+  try {
+    return await projectWorkbookDisplayCopy(source);
+  } catch {
+    // The display copy is an enhancement. A part the browser XML parser
+    // rejects must not block reading the original workbook.
+    return emptyProjection(source);
+  }
+}
+
+async function projectWorkbookDisplayCopy(
+  source: ArrayBuffer,
+): Promise<ReadOnlyWorkbookProjection> {
   if (!isZip(source)) {
-    return {
-      conditionalStylesBySheet: {},
-      data: source,
-      formulasBySheet: {},
-    };
+    return emptyProjection(source);
   }
 
   const zip = await JSZip.loadAsync(source);
@@ -580,11 +588,22 @@ function resolveZipPath(baseFile: string, target: string): string {
 }
 
 function parseXml(xml: string, path: string): XMLDocument {
-  const document = new DOMParser().parseFromString(xml, "application/xml");
+  // JSZip decodes a UTF-8 BOM into U+FEFF. WebKit then treats that mark as
+  // content before `<?xml` and refuses the part (`XML declaration allowed
+  // only at the start of the document`). Excel's packaging often writes a
+  // BOM on `[Content_Types].xml` and every `.rels` file.
+  const document = new DOMParser().parseFromString(
+    xml.replace(/^\uFEFF+/, ""),
+    "application/xml",
+  );
   if (document.getElementsByTagName("parsererror").length > 0) {
     throw new Error(`Could not parse ${path}`);
   }
   return document;
+}
+
+function emptyProjection(data: ArrayBuffer): ReadOnlyWorkbookProjection {
+  return { conditionalStylesBySheet: {}, data, formulasBySheet: {} };
 }
 
 function localElements(document: Document | Element, name: string): Element[] {
