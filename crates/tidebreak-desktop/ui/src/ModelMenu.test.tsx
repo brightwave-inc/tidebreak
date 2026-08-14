@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   firstAvailableModel,
+  matchingModels,
   ModelMenu,
   ModelToolCapabilityChip,
   notConnectedProviders,
@@ -174,6 +175,9 @@ describe("visibleModelGroups", () => {
       "openai::gpt-4o",
     );
     expect(groups.map((group) => group.provider)).toEqual(["openai", "anthropic"]);
+    expect(groups[0].models.map((model) => model.key)).toEqual([
+      "openai::gpt-4o",
+    ]);
   });
 
   it("keeps a partially available provider intact", () => {
@@ -197,6 +201,28 @@ describe("visibleModelGroups", () => {
     expect(anthropic?.models.map((model) => model.key)).toEqual([
       MODELS[0].key,
       HAIKU.key,
+    ]);
+  });
+});
+
+describe("matchingModels", () => {
+  const gatewayClaude: ModelInfo = {
+    ...MODELS[0],
+    key: "model_gateway::claude-sonnet-4",
+    provider: "model_gateway",
+    vendor: "anthropic",
+  };
+
+  it("matches model, serving-provider, and vendor text across groups", () => {
+    const groups = visibleModelGroups([MODELS[1], gatewayClaude], null);
+    expect(matchingModels(groups, "gpt").map((model) => model.key)).toEqual([
+      "openai::gpt-4o",
+    ]);
+    expect(matchingModels(groups, "gateway").map((model) => model.key)).toEqual([
+      gatewayClaude.key,
+    ]);
+    expect(matchingModels(groups, "anthropic").map((model) => model.key)).toEqual([
+      gatewayClaude.key,
     ]);
   });
 });
@@ -359,6 +385,14 @@ describe("ProviderIcon", () => {
     );
     expect(throughGateway).toBe(throughCompatible);
     expect(throughGateway).not.toBe(unbranded);
+  });
+
+  it("uses a route-neutral mark for an unmatched gateway model", () => {
+    const gateway = renderToStaticMarkup(
+      <ProviderIcon provider="model_gateway" />,
+    );
+    expect(gateway).toContain("lucide-network");
+    expect(gateway).not.toContain("lucide-lock-open");
   });
 });
 
