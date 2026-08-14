@@ -109,4 +109,25 @@ describe("FirstTaskWalkthrough", () => {
       document.activeElement as HTMLElement | null,
     );
   });
+
+  it("does not turn a click on the highlighted control into a permanent skip", async () => {
+    const onClose = vi.fn();
+    render(<WalkthroughHarness onClose={onClose} />);
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    const target = screen.getByText("Model");
+    fireEvent.pointerDown(target);
+    fireEvent.mouseDown(target);
+    fireEvent.pointerUp(target);
+    fireEvent.mouseUp(target);
+    fireEvent.click(target);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(FIRST_TASK_WALKTHROUGH_KEY)).toBeNull();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("1 of 4").parentElement?.parentElement).toHaveAttribute(
+      "aria-live",
+      "polite",
+    );
+  });
 });

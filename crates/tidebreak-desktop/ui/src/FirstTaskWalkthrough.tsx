@@ -185,6 +185,7 @@ export function FirstTaskWalkthrough({
       )}
       <DialogContent
         withCloseButton={false}
+        onInteractOutside={(event) => event.preventDefault()}
         overlayClassName="z-[100] bg-black/45"
         className="z-[102] block max-w-none translate-x-0 translate-y-0 gap-0 rounded-xl border-border bg-popover p-4 text-popover-foreground shadow-xl duration-0 data-[state=closed]:animate-none data-[state=open]:animate-none"
         style={{
@@ -198,18 +199,20 @@ export function FirstTaskWalkthrough({
             : "translateY(-50%)",
         }}
       >
-        <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-          <span>Set up your first task</span>
-          <span>
-            {stepIndex + 1} of {STEPS.length}
-          </span>
+        <div aria-live="polite" aria-atomic="true">
+          <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span>Set up your first task</span>
+            <span>
+              {stepIndex + 1} of {STEPS.length}
+            </span>
+          </div>
+          <DialogTitle className="mt-3 text-base tracking-[-0.01em]">
+            {step.title}
+          </DialogTitle>
+          <DialogDescription className="mt-1.5 leading-relaxed">
+            {step.body}
+          </DialogDescription>
         </div>
-        <DialogTitle className="mt-3 text-base tracking-[-0.01em]">
-          {step.title}
-        </DialogTitle>
-        <DialogDescription className="mt-1.5 leading-relaxed">
-          {step.body}
-        </DialogDescription>
         <div className="mt-4 flex items-center gap-2">
           <Button
             type="button"
