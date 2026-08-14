@@ -438,6 +438,17 @@ pub struct QueuedTurn {
 impl QueuedTurn {
     /// Maximum queued messages one chat may hold.
     pub const MAX_PER_CHAT: usize = 32;
+
+    /// Exact caller payload identity, excluding queue-assigned metadata.
+    pub fn same_request(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.chat_id == other.chat_id
+            && self.content == other.content
+            && self.attachments == other.attachments
+            && self.file_attachments == other.file_attachments
+            && self.invoked_skills == other.invoked_skills
+            && self.voice_input_used == other.voice_input_used
+    }
 }
 
 /// One durably accepted steering instruction for an active turn.

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{stream::BoxStream, StreamExt};
+use futures::stream::BoxStream;
 
 use tidebreak_core::error::{AgentError, Result};
 use tidebreak_core::provider::{ChatRequest, ModelProvider, ProviderEvent, ProviderId};
@@ -47,8 +47,15 @@ pub trait BearerTokenSource: Send + Sync {
         None
     }
 
+    /// Whether every HTTP request through this source must carry a live model
+    /// route lease. Ordinary rotating credentials return false; managed Model
+    /// Gateway sources return true.
+    fn requires_model_route_lease(&self) -> bool {
+        false
+    }
+
     /// Validate a host-only model selector against live route authority and
-    /// lease its provider wire id through the complete provider stream.
+    /// lease its provider wire id through one HTTP request setup.
     async fn lease_model_route(&self, _route_model: &str) -> Result<Option<ModelRouteLease>> {
         Ok(None)
     }
@@ -87,6 +94,35 @@ impl ModelRouteLease {
     pub fn wire_model(&self) -> &str {
         &self.wire_model
     }
+}
+
+/// Mint one request credential under the same short-lived route claim that
+/// validates its host execution selector.
+///
+/// Adapters call this immediately before every HTTP leg. The returned lease
+/// must stay alive until that request has been dispatched; Anthropic therefore
+/// repeats the call for each `pause_turn` continuation.
+pub(crate) async fn authorize_bearer_request(
+    source: &dyn BearerTokenSource,
+    route_model: &str,
+    wire_model: &str,
+    conversation: Option<tidebreak_core::id::ChatId>,
+) -> Result<(String, Option<ModelRouteLease>)> {
+    let lease = source.lease_model_route(route_model).await?;
+    if source.requires_model_route_lease() && lease.is_none() {
+        return Err(AgentError::config(format!(
+            "provider no longer serves model `{route_model}`"
+        )));
+    }
+    if let Some(lease) = lease.as_ref() {
+        if lease.wire_model() != wire_model {
+            return Err(AgentError::config(format!(
+                "provider changed the route for model `{route_model}`"
+            )));
+        }
+    }
+    let token = source.bearer_token_for(conversation).await?;
+    Ok((token, lease))
 }
 
 /// Which concrete adapter a [`Route`] builds.
@@ -385,21 +421,12 @@ impl ModelProvider for Router {
         // The route hint is host policy, not provider wire data. Adapters keep
         // it only to gate provider-native reasoning/tool replay; their request
         // builders enumerate wire fields explicitly and never serialize it.
-        let stream = adapter.stream(req).await?;
-        let Some(route_lease) = route_lease else {
-            return Ok(stream);
-        };
-        Ok(Box::pin(async_stream::stream! {
-            // An adapter may issue later HTTP legs while this stream is
-            // consumed (Anthropic `pause_turn` continuations). Keep the live
-            // route claim through the complete provider stream so catalog
-            // replacement cannot retarget any leg of one execution.
-            let _route_lease = route_lease;
-            let mut stream = stream;
-            while let Some(event) = stream.next().await {
-                yield event;
-            }
-        }))
+        // The concrete gateway adapter obtains its own request-scoped lease
+        // immediately before HTTP dispatch, and repeats that authorization for
+        // any provider-managed continuation. Drop this router-level proof first
+        // so a non-reentrant authority lock cannot deadlock the adapter.
+        drop(route_lease);
+        adapter.stream(req).await
     }
 }
 
@@ -585,6 +612,7 @@ fn fnv1a64(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt as _;
     #[cfg(feature = "xai")]
     use serde_json::json;
     use tidebreak_core::provider::{
@@ -770,6 +798,8 @@ mod tests {
     struct LiveRouteSource {
         routes: std::sync::Mutex<HashMap<String, String>>,
         active_leases: Arc<std::sync::atomic::AtomicUsize>,
+        lease_calls: std::sync::atomic::AtomicUsize,
+        token_calls: std::sync::atomic::AtomicUsize,
     }
 
     struct ActiveLease(Arc<std::sync::atomic::AtomicUsize>);
@@ -782,7 +812,13 @@ mod tests {
 
     #[async_trait]
     impl BearerTokenSource for LiveRouteSource {
+        fn requires_model_route_lease(&self) -> bool {
+            true
+        }
+
         async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {
+            self.lease_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self
                 .routes
                 .lock()
@@ -797,7 +833,11 @@ mod tests {
         }
 
         async fn bearer_token(&self) -> Result<String> {
-            Ok("mg_at_x".into())
+            let call = self
+                .token_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            Ok(format!("mg_at_{call}"))
         }
     }
 
@@ -1384,7 +1424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frozen_gateway_lease_covers_anthropic_pause_turn_continuations() {
+    async fn anthropic_pause_turn_reauthorizes_every_gateway_leg() {
         use axum::body::Body;
         use axum::extract::State;
         use axum::response::IntoResponse;
@@ -1442,19 +1482,112 @@ mod tests {
             authority
                 .active_leases
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the route lease must survive initial HTTP request setup"
+            0,
+            "a completed HTTP setup must not serialize unrelated gateway streams"
+        );
+        assert_eq!(
+            authority
+                .token_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
 
         let events = stream.collect::<Vec<_>>().await;
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            authority
+                .token_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the continuation must mint a fresh bearer"
+        );
+        assert_eq!(
+            authority
+                .lease_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the router and both HTTP legs must validate the frozen selector"
+        );
         assert!(matches!(events.last(), Some(ProviderEvent::Stop { .. })));
         assert_eq!(
             authority
                 .active_leases
                 .load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "the route lease is released only after every provider HTTP leg finishes"
+            "each request-scoped lease is released after that HTTP leg is dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_pause_turn_refuses_a_revoked_gateway_continuation() {
+        use axum::body::Body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        async fn respond(
+            State(requests): State<Arc<std::sync::atomic::AtomicUsize>>,
+        ) -> impl IntoResponse {
+            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                [("content-type", "text/event-stream")],
+                Body::from(
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"pause_turn\"}}\n\n",
+                ),
+            )
+        }
+
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .fallback(post(respond))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let frozen = "__tidebreak_gateway_v1.deployment.installation.route";
+        let wire = "claude-opus-5";
+        let authority = Arc::new(LiveRouteSource::default());
+        authority
+            .routes
+            .lock()
+            .unwrap()
+            .insert(frozen.into(), wire.into());
+        let mut route = route(
+            RouteKind::ModelGateway,
+            "",
+            &[frozen],
+            Some(&format!("http://{address}/compat/anthropic")),
+        );
+        route.token_source = Some(authority.clone());
+        route.model_rewrites.insert(frozen.into(), wire.into());
+        let router = Router::build(vec![route]);
+
+        let stream = router
+            .stream(ChatRequest {
+                provider: Some(ProviderId::new("model_gateway")),
+                model: frozen.into(),
+                vendor_web_search: Some(VendorWebSearch { max_uses: 1 }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        authority.routes.lock().unwrap().remove(frozen);
+
+        let events = stream.collect::<Vec<_>>().await;
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "revocation before continuation must prevent its HTTP request"
+        );
+        assert!(matches!(events.last(), Some(ProviderEvent::Failed { .. })));
+        assert_eq!(
+            authority
+                .token_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a rejected continuation must not mint another bearer"
         );
     }
 }

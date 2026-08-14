@@ -298,6 +298,7 @@ pub async fn post_message(
             "message content must be non-empty and contain no NUL characters",
         ));
     }
+    let _admission = state.active_turns.serialize_admission(body.turn_id).await;
     let chat = store.require_chat(id).await?;
 
     // An ambiguous HTTP retry names only its turn and content, not the resolved
@@ -385,21 +386,34 @@ pub async fn post_message(
         }
         AcceptTurnOutcome::ChatBusy(active) => {
             if body.queue {
-                store
-                    .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
-                        id: body.turn_id,
-                        chat_id: id,
-                        content: body.content.clone(),
-                        attachments: body.attachments.clone(),
-                        file_attachments: body.file_attachments.clone(),
-                        invoked_skills: body.invoked_skills.clone(),
-                        voice_input_used: body.voice_input_used,
-                        // Assigned durably at insert; echoes back in the row.
-                        position: 0,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                    })
-                    .await?;
+                let queued = tidebreak_core::QueuedTurn {
+                    id: body.turn_id,
+                    chat_id: id,
+                    content: body.content.clone(),
+                    attachments: body.attachments.clone(),
+                    file_attachments: body.file_attachments.clone(),
+                    invoked_skills: body.invoked_skills.clone(),
+                    voice_input_used: body.voice_input_used,
+                    position: 0,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                if let Some(existing) = state
+                    .store
+                    .list_queued_turns(id)
+                    .await?
+                    .into_iter()
+                    .find(|existing| existing.id == body.turn_id)
+                {
+                    if existing.same_request(&queued) {
+                        return Ok(StatusCode::ACCEPTED);
+                    }
+                    return Err(ServerError::conflict(format!(
+                        "turn {} was already queued with different input",
+                        body.turn_id
+                    )));
+                }
+                store.enqueue_queued_turn(&queued).await?;
                 return Ok(StatusCode::ACCEPTED);
             }
             Err(ServerError::conflict(format!(

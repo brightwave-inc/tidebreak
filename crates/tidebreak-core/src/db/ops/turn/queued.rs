@@ -59,11 +59,11 @@ pub(in crate::db) async fn enqueue_turn(
         // An ambiguous retry of the same enqueue is the row it made.
         let existing = queued_turn_from_model(existing)?;
         transaction.commit().await.map_err(store_err)?;
-        if existing.chat_id == queued.chat_id && existing.content == queued.content {
+        if existing.same_request(queued) {
             return Ok(existing);
         }
         return Err(AgentError::Store(
-            "queued turn id was already used with different content".into(),
+            "queued turn id was already used with different request data".into(),
         ));
     }
     let count = entities::queued_turn::Entity::find()

@@ -68,8 +68,9 @@ their ordinary provider-qualified key. A gateway execution key contains:
 The gateway key is an internal, versioned selector rather than the model id sent
 on the wire. The configured router claims that selector only while its current
 policy-matched snapshot produces the same digests. At request time it obtains a
-live route lease that serializes catalog replacement through the complete
-provider stream, including any adapter-managed continuation requests.
+live route lease that serializes catalog replacement through one HTTP request
+setup. Adapters repeat that authorization for every provider-managed
+continuation request.
 The host execution selector remains on the normalized request for native replay
 gating, while a separate non-serialized wire-model field carries the
 deployment-local id into the provider body. The internal selector is never sent
@@ -84,9 +85,10 @@ The worker resolves the persisted execution key only to recover the admitted
 capability policy. The router is the final enforcement boundary: before sending
 a gateway request, the route set must claim the exact frozen selector and its
 live route authority must revalidate that selector against the current snapshot.
-The lease is held until the adapter's provider stream ends, so a sync cannot
-replace the catalog between validation and any HTTP leg, including Anthropic
-`pause_turn` continuations. Managed policy must
+Each request-scoped lease is held until that HTTP leg is dispatched, so a sync
+cannot replace the catalog between validation and dispatch. Anthropic
+`pause_turn` continuations revalidate the frozen selector and mint a fresh
+installation-pinned bearer before every leg. Managed policy must
 therefore still point to the recorded deployment and the current policy-matched
 catalog must contain the recorded local id with the same upstream identity,
 protocol, and fingerprint. An unrelated catalog update may proceed; reuse or
@@ -165,10 +167,11 @@ capabilities and cannot satisfy canonical equivalence until the gateway fixes
 its provenance. Opaque custom gateway models remain usable when selected by
 their explicit gateway key, provided their frozen route still matches.
 
-Catalog sync and gateway provider streams share a route-lease lock. A slow
-catalog fetch may briefly delay a new gateway request, and an in-flight stream
-may delay snapshot commit; neither operation may observe or dispatch a
-half-changed route, including across adapter-managed continuation requests.
+Catalog sync and gateway HTTP request setup share a route-lease lock. A slow
+catalog fetch may briefly delay a new gateway request, and request setup may
+briefly delay snapshot commit; long-lived response streams do not serialize
+other inference. No provider-managed continuation may dispatch without a fresh
+route lease and bearer.
 
 Revisit this decision if the gateway protocol itself provides a globally stable,
 cryptographically bound deployment/model revision that can replace Tidebreak's

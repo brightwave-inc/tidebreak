@@ -665,6 +665,11 @@ impl GatewayRuntime {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Each provider HTTP leg validates its selector and mints its bearer
+        // while holding this same short-lived lock. Sign-out therefore happens
+        // either before that leg (which fails closed) or after dispatch, never
+        // between authorization and the request.
+        let _model_sync = self.model_sync.lock().await;
         self.connection_at(base_url.clone())
             .await?
             .sign_out()
@@ -1462,6 +1467,10 @@ struct GatewayTokenSource {
 impl BearerTokenSource for GatewayTokenSource {
     fn binding_id(&self) -> Option<&str> {
         Some(&self.installation_id)
+    }
+
+    fn requires_model_route_lease(&self) -> bool {
+        true
     }
 
     async fn lease_model_route(&self, route_model: &str) -> Result<Option<ModelRouteLease>> {

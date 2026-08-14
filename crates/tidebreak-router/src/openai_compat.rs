@@ -128,10 +128,21 @@ impl ModelProvider for OpenAiCompatProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let api_key = match &self.token_source {
-            Some(source) => source.bearer_token_for(req.conversation).await?,
-            None => self.api_key.clone(),
+        let authorization = match &self.token_source {
+            Some(source) => Some(
+                crate::router::authorize_bearer_request(
+                    &**source,
+                    &req.model,
+                    req.wire_model(),
+                    req.conversation,
+                )
+                .await?,
+            ),
+            None => None,
         };
+        let api_key = authorization
+            .as_ref()
+            .map_or(self.api_key.as_str(), |(token, _lease)| token.as_str());
 
         let mut request = self
             .client
@@ -152,6 +163,7 @@ impl ModelProvider for OpenAiCompatProvider {
             // tenant-identifying parts; `AgentError` strings reach the client
             // via TurnFailed. Only the fact of a failed request surfaces.
             .map_err(|_| AgentError::Provider(format!("{} request failed", self.provider_id)))?;
+        drop(authorization);
 
         let status = response.status();
         if !status.is_success() {
