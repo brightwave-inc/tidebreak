@@ -4,18 +4,29 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-const Select = SelectPrimitive.Root;
+type SelectProps = React.ComponentPropsWithoutRef<typeof SelectPrimitive.Root> & {
+  modal?: boolean;
+};
+
+function Select({ modal: _modal, ...props }: SelectProps) {
+  return <SelectPrimitive.Root {...props} />;
+}
 const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
+type SelectTriggerProps = React.ComponentPropsWithoutRef<
+  typeof SelectPrimitive.Trigger
+> & { size?: "default" | "sm" };
+
 const SelectTrigger = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
->(({ className, children, ...props }, ref) => (
+  SelectTriggerProps
+>(({ className, children, size = "default", ...props }, ref) => (
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
       "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      size === "sm" && "h-8 px-2 py-1 text-xs",
       className,
     )}
     {...props}
@@ -59,13 +70,14 @@ SelectScrollDownButton.displayName = SelectPrimitive.ScrollDownButton.displayNam
 type SelectContentProps = React.ComponentPropsWithoutRef<
   typeof SelectPrimitive.Content
 > & {
+  alignItemWithTrigger?: boolean;
   scrollButtons?: boolean;
 };
 
 const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
   SelectContentProps
->(({ className, children, position = "popper", scrollButtons = true, ...props }, ref) => (
+>(({ className, children, position = "popper", alignItemWithTrigger: _alignItemWithTrigger, scrollButtons = true, ...props }, ref) => (
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}

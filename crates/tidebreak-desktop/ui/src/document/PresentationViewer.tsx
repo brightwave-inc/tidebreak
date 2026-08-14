@@ -1,15 +1,7 @@
 /**
- * The presentation viewer: the original deck converted to PDF and drawn with
- * the PDF engine, behind a thin strip saying so.
- *
- * The conversion needs LibreOffice. On macOS the app installs its own copy
- * the first time a preview needs one — visibly and cancellably, with a
- * determinate download bar — an exact pinned version the host verifies
- * against a pinned digest before unpacking. A failed or cancelled install
- * turns into the install hint with the reason and an explicit retry; nothing
- * re-downloads on its own. Platforms without a managed install keep the
- * install-it-yourself hint, and a failed conversion gets its own card so a
- * corrupt file never reads as a broken app.
+ * PPTX files render directly with Extend's local viewer. Legacy PPT/ODP files,
+ * plus PPTX files the native parser rejects, retain the existing LibreOffice
+ * conversion path. Source bytes stay immutable in either path.
  */
 import {
   FileSpreadsheetIcon,
@@ -18,8 +10,14 @@ import {
 } from "lucide-react";
 import { lazy, useEffect, useMemo, useRef, useState } from "react";
 
+import { PptxViewerPreview } from "@/components/extend/pptx-viewer";
+import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import {
+  LIGHT_DOCUMENT_SURFACE,
+  useSecureViewerLinks,
+} from "@/document/extendViewerSurface";
 import {
   cancelPresentationConverterInstall,
   ConverterMissingError,
@@ -28,6 +26,7 @@ import {
   officePdfSource,
   type ConverterInstallProgress,
 } from "@/document/officePdf";
+import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
 import {
   useFileDownload,
   type FileBytesSource,
@@ -39,6 +38,9 @@ const PdfViewer = lazy(() =>
   import("@/document/PdfViewer").then((m) => ({ default: m.PdfViewer })),
 );
 
+const PPTX_MEDIA_TYPE =
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
 interface Props {
   /** The original presentation's bytes. */
   source: FileBytesSource;
@@ -47,6 +49,16 @@ interface Props {
 }
 
 export function PresentationViewer({ source, mediaType, className }: Props) {
+  if (mediaType === PPTX_MEDIA_TYPE) {
+    return (
+      <DirectPresentationViewer
+        source={source}
+        mediaType={mediaType}
+        className={className}
+      />
+    );
+  }
+
   return (
     <ConvertedOfficeViewer
       source={source}
@@ -54,6 +66,83 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
       kind="presentation"
       className={className}
     />
+  );
+}
+
+function DirectPresentationViewer({ source, mediaType, className }: Props) {
+  const [renderFailed, setRenderFailed] = useState(false);
+
+  useEffect(() => setRenderFailed(false), [source.cacheKey]);
+
+  if (renderFailed) {
+    return (
+      <ConvertedOfficeViewer
+        source={source}
+        mediaType={mediaType}
+        kind="presentation"
+        className={className}
+      />
+    );
+  }
+
+  return (
+    <DirectPresentationSurface
+      source={source}
+      className={className}
+      onRenderFailure={() => setRenderFailed(true)}
+    />
+  );
+}
+
+function DirectPresentationSurface({
+  source,
+  className,
+  onRenderFailure,
+}: Pick<Props, "source" | "className"> & { onRenderFailure: () => void }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const file = useLocalDocumentUrl(source);
+  useSecureViewerLinks(containerRef);
+
+  return (
+    <div
+      ref={containerRef}
+      className={cn(
+        "relative flex min-h-0 flex-col overflow-hidden",
+        className,
+        LIGHT_DOCUMENT_SURFACE,
+      )}
+    >
+      {file.error ? (
+        <div className="flex min-h-64 grow items-center justify-center text-sm text-muted-foreground">
+          This presentation could not be loaded.
+        </div>
+      ) : !file.objectUrl ? (
+        file.progress ? (
+          <div className="relative min-h-0 grow">
+            <FileDownloadProgressIndicator progress={file.progress} />
+          </div>
+        ) : (
+          <div className="flex min-h-64 grow items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2Icon className="size-4 animate-spin" />
+            Loading presentation…
+          </div>
+        )
+      ) : (
+        <div className="min-h-0 grow overflow-hidden rounded-md border bg-white shadow-xs">
+          <PptxViewerPreview
+            className="h-full min-h-0"
+            defaultThumbnailSidebarOpen
+            defaultZoom={100}
+            fileName="presentation.pptx"
+            onError={onRenderFailure}
+            showDownload={false}
+            showToolbar
+            showUpload={false}
+            src={file.objectUrl}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -136,12 +225,7 @@ export function ConvertedOfficeViewer({
   }
 
   return (
-    <div className="flex min-h-0 grow flex-col">
-      <p className="shrink-0 px-4 pt-2 text-xs text-muted-foreground">
-        Converted PDF preview — Save as… exports the original file.
-      </p>
-      <PdfViewer source={pdfSource} className={cn("min-h-0", className)} />
-    </div>
+    <PdfViewer source={pdfSource} className={cn("min-h-0", className)} />
   );
 }
 
