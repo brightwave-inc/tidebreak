@@ -332,18 +332,54 @@ eval "$cmd"
     #[tokio::test]
     async fn relative_path_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
+        let empty_path = dir.path().join("empty-path");
+        std::fs::create_dir(&empty_path).unwrap();
         let shell = dir.path().join("shell");
-        write_profile_shim(
+        // Dedicated shim: honor `-ilc`/`-c`, then replace `command -v` with a
+        // hardcoded relative path. Do not eval the host `command` builtin or
+        // inherit PATH — both vary across runners.
+        write_exec(
             &shell,
-            r#"command() { if [ "$1" = -v ]; then echo claude; return 0; fi; }"#,
+            r#"#!/bin/sh
+cmd=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) shift; cmd=$1; break ;;
+    -*c)
+      rest=${1#*c}
+      shift
+      if [ -n "$rest" ]; then cmd=$rest; else cmd=$1; fi
+      break
+      ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+# Never invoke the host `command` builtin: rewrite the probe's
+# `command -v claude || true` to a relative path we control.
+prefix="${cmd%%command -v *}"
+suffix="${cmd#*command -v claude || true}"
+eval "$prefix"
+printf '%s\n' "claude"
+eval "true$suffix"
+"#,
         );
         let host = HostEnv {
-            shell,
-            env: Vec::new(),
-            clear_env: false,
+            shell: shell.clone(),
+            env: vec![
+                ("SHELL".into(), shell.as_os_str().to_owned()),
+                ("PATH".into(), empty_path.as_os_str().to_owned()),
+            ],
+            clear_env: true,
         };
         let err = resolve_binary(&host, "claude").await.unwrap_err();
-        assert!(matches!(err, ProbeError::RelativePath { .. }));
+        match err {
+            ProbeError::RelativePath { name, path } => {
+                assert_eq!(name, "claude");
+                assert_eq!(path, "claude");
+            }
+            other => panic!("expected RelativePath, got {other:?}"),
+        }
     }
 
     #[tokio::test]
