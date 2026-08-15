@@ -52,7 +52,7 @@ const MAX_WRITTEN_FILE_BYTES: u64 = 16 * 1_024 * 1_024;
 // system default, so a descriptor leak dies quickly.
 const MAX_OPEN_FILES: u64 = 512;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const SANDBOX_PATH_DENIED_CODE: &str = "sandbox_path_denied";
 #[cfg(target_os = "macos")]
 const DENIED_READ_ROOTS: &[&str] = &[
@@ -431,7 +431,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
                 provider: CodeExecutionProviderKind::Local,
                 exit_code: Some(126),
                 stdout: String::new(),
-                stderr: sandbox_path_denied_message(&folder_grants),
+                stderr: sandbox_path_denied_message(!folder_grants.is_empty()),
                 timed_out: false,
                 output_truncated: false,
                 duration_ms: 0,
@@ -1205,7 +1205,7 @@ fn annotate_seatbelt_access_denial(
     // the child before a successful exit, so normalize both channels before
     // the response is persisted or exposed to a model.
     response.stdout.clear();
-    response.stderr = sandbox_path_denied_message(folder_grants);
+    response.stderr = sandbox_path_denied_message(!folder_grants.is_empty());
 }
 
 #[cfg(target_os = "macos")]
@@ -1496,15 +1496,15 @@ fn resolve_existing_path_prefix(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-#[cfg(target_os = "macos")]
-fn sandbox_path_denied_message(folder_grants: &[CanonicalExecFolderGrant]) -> String {
-    let connected = if folder_grants.is_empty() {
-        "no connected folders are currently available"
-    } else {
+#[cfg(any(target_os = "macos", test))]
+fn sandbox_path_denied_message(has_connected_folders: bool) -> String {
+    let connected = if has_connected_folders {
         "connected folders are available"
+    } else {
+        "no connected folders are currently available"
     };
     format!(
-        "{SANDBOX_PATH_DENIED_CODE}: the requested path is outside the local execution sandbox; available capabilities: the private chat workspace (use paths relative to '.') and {connected}; recovery: attach or copy the file into the chat workspace, or connect its containing folder, then retry with a workspace-relative or connected-folder path"
+        "{SANDBOX_PATH_DENIED_CODE}: the requested path is outside the local execution sandbox; this is a path/capability error, not a safety refusal; available capabilities: the private chat workspace (use paths relative to '.') and {connected}; recovery: attach or copy the file into the chat workspace, or connect its containing folder, then retry with a workspace-relative or connected-folder path; if you cannot recover, tell the user what access is missing"
     )
 }
 
@@ -1751,6 +1751,58 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::{ExecutionId, ExecutionWorkspaceId};
 
+    #[test]
+    fn sandbox_path_denied_message_teaches_attach_or_connect_folder_recovery() {
+        let without_grants = sandbox_path_denied_message(false);
+        assert!(
+            without_grants.starts_with(SANDBOX_PATH_DENIED_CODE),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("path/capability error"),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("not a safety refusal"),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("no connected folders are currently available"),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("attach or copy"),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("connect its containing folder"),
+            "{without_grants}"
+        );
+        assert!(
+            without_grants.contains("tell the user what access is missing"),
+            "{without_grants}"
+        );
+
+        let with_grants = sandbox_path_denied_message(true);
+        assert!(
+            with_grants.contains("connected folders are available"),
+            "{with_grants}"
+        );
+        assert!(
+            !with_grants.contains("no connected folders are currently available"),
+            "{with_grants}"
+        );
+        assert!(with_grants.contains("attach or copy"), "{with_grants}");
+        assert!(
+            with_grants.contains("connect its containing folder"),
+            "{with_grants}"
+        );
+        assert!(
+            with_grants.contains("tell the user what access is missing"),
+            "{with_grants}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     fn request(workspace: &str, execution: &str, script: &str) -> CodeExecutionRequest {
         CodeExecutionRequest::new(
@@ -1781,11 +1833,6 @@ mod tests {
         let connected_path = fs::canonicalize(connected_path).unwrap();
         let grants =
             vec![ExecFolderGrant::new(&connected_path, ExecFolderAccess::ReadOnly).unwrap()];
-        let canonical_grants = canonicalize_folder_grants(&grants).unwrap();
-        let rendered = sandbox_path_denied_message(&canonical_grants);
-        assert!(rendered.contains("connected folders are available"));
-        assert!(!rendered.contains("sentinel-connected-folder-do-not-leak"));
-        assert!(!rendered.contains(&connected_path.display().to_string()));
 
         let denied_path = "/tmp/sentinel-denied-path-do-not-leak.md";
         let denied = CodeExecutionRequest::new(

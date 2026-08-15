@@ -62,9 +62,15 @@ impl Tool for ExecTool {
             description: "Run one executable with an argument vector in the configured isolated \
                           execution provider. No shell parses the arguments unless you explicitly \
                           invoke a shell. The local provider runs directly in the chat's private \
-                          scratch and blocks network and user-data access outside it plus any \
-                          current host-resolved folder grants listed in the operating context; \
-                          folder paths are host state, never tool arguments. Managed cloud \
+                          scratch plus any current host-resolved folder grants listed in the \
+                          operating context; folder paths are host state, never tool arguments. A \
+                          local result whose stderr starts with sandbox_path_denied is a failed \
+                          exec: a path/capability error (the path is outside those roots), not a \
+                          safety refusal. Recover by attaching or copying the file into the chat \
+                          workspace, or connecting its containing folder, then retry with a \
+                          workspace-relative or connected-folder path; if you cannot recover, \
+                          tell the user what access is missing instead of ending the turn. \
+                          Managed cloud \
                           sandboxes (E2B, Daytona) see ONLY the scratch paths you list in the \
                           'files' argument, plus whatever earlier commands in the same sandbox \
                           session created. List every file or directory the command reads — \
@@ -411,6 +417,16 @@ mod tests {
         assert!(spec.description.contains(".tidebreak/exec-scripts"));
         assert!(spec.description.contains("render_pdf.py"));
         assert!(spec.description.contains("analyze_xlsx.py"));
+        assert!(spec.description.contains("sandbox_path_denied"));
+        assert!(spec.description.contains("path/capability error"));
+        assert!(spec.description.contains("not a safety refusal"));
+        assert!(spec.description.contains("attaching or copying"));
+        assert!(spec
+            .description
+            .contains("connecting its containing folder"));
+        assert!(spec
+            .description
+            .contains("tell the user what access is missing"));
     }
 
     struct TimedOutProvider;
