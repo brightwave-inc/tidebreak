@@ -2,6 +2,8 @@
 
 use std::net::TcpListener;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +11,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -27,12 +30,13 @@ const AUTO_FLAG: &str = "--auto";
 /// Live opencode session: one `serve` child for the session lifetime.
 pub struct OpencodeSession {
     spec: SessionSpec,
-    resume_ref: Option<String>,
-    child: Option<Child>,
+    resume_ref: Mutex<Option<String>>,
+    child: AsyncMutex<Option<Child>>,
+    child_pid: AtomicU32,
     base_url: String,
     client: reqwest::Client,
-    parser: OpencodeStreamParser,
-    events: Option<mpsc::UnboundedReceiver<String>>,
+    parser: Mutex<OpencodeStreamParser>,
+    events: AsyncMutex<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
 impl OpencodeSession {
@@ -40,12 +44,13 @@ impl OpencodeSession {
         let resume_ref = spec.resume_ref.clone();
         Self {
             spec,
-            resume_ref,
-            child: None,
+            resume_ref: Mutex::new(resume_ref),
+            child: AsyncMutex::new(None),
+            child_pid: AtomicU32::new(0),
             base_url: String::new(),
             client: reqwest::Client::new(),
-            parser: OpencodeStreamParser::new(),
-            events: None,
+            parser: Mutex::new(OpencodeStreamParser::new()),
+            events: AsyncMutex::new(None),
         }
     }
 }
@@ -154,7 +159,10 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, Harness
         .stderr
         .take()
         .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-    session.child = Some(child);
+    if let Some(pid) = child.id() {
+        session.child_pid.store(pid, Ordering::SeqCst);
+    }
+    *session.child.lock().await = Some(child);
     tokio::spawn(async move {
         let _ = drain_capped(stdout, MAX_STDERR_BYTES).await;
     });
@@ -195,7 +203,7 @@ impl OpencodeSession {
         }
     }
 
-    async fn subscribe_events(&mut self) -> Result<(), HarnessError> {
+    async fn subscribe_events(&self) -> Result<(), HarnessError> {
         let url = format!("{}/event", self.base_url);
         let response = self
             .client
@@ -231,12 +239,13 @@ impl OpencodeSession {
                 }
             }
         });
-        self.events = Some(rx);
+        *self.events.lock().await = Some(rx);
         Ok(())
     }
 
-    async fn open_or_resume_session(&mut self) -> Result<(), HarnessError> {
-        if let Some(resume) = self.resume_ref.clone() {
+    async fn open_or_resume_session(&self) -> Result<(), HarnessError> {
+        let resume = self.resume_ref.lock().expect("opencode resume").clone();
+        if let Some(resume) = resume {
             let path = format!("/session/{resume}");
             let url = format!("{}{path}", self.base_url);
             let query = self.directory_query();
@@ -264,14 +273,14 @@ impl OpencodeSession {
             )));
         }
         if let Some(id) = parsed.get("id").and_then(Value::as_str) {
-            self.resume_ref = Some(id.to_owned());
+            *self.resume_ref.lock().expect("opencode resume") = Some(id.to_owned());
         }
         self.emit_http_in(path, status, parsed).await;
         Ok(())
     }
 
     async fn http(
-        &mut self,
+        &self,
         method: &str,
         path: &str,
         url: &str,
@@ -311,7 +320,7 @@ impl OpencodeSession {
         Ok((status, parsed))
     }
 
-    async fn emit_http_out(&mut self, method: &str, path: &str, body: Option<Value>) {
+    async fn emit_http_out(&self, method: &str, path: &str, body: Option<Value>) {
         let line = serde_json::to_string(&json!({
             "dir": "out",
             "msg": { "kind": "http", "method": method, "path": path, "body": body }
@@ -320,7 +329,7 @@ impl OpencodeSession {
         self.emit_parsed(&line).await;
     }
 
-    async fn emit_http_in(&mut self, path: &str, status: u16, body: Value) {
+    async fn emit_http_in(&self, path: &str, status: u16, body: Value) {
         let line = serde_json::to_string(&json!({
             "dir": "in",
             "msg": { "kind": "http", "status": status, "path": path, "body": body }
@@ -329,22 +338,22 @@ impl OpencodeSession {
         self.emit_parsed(&line).await;
     }
 
-    async fn emit_parsed(&mut self, line: &str) -> Vec<HarnessEvent> {
-        let events = self.parser.push_line(line);
+    async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
+        let events = self.parser.lock().expect("opencode parser").push_line(line);
         for event in &events {
             if let HarnessEvent::SessionStarted {
                 resume_ref: Some(resume),
                 ..
             } = event
             {
-                self.resume_ref = Some(resume.clone());
+                *self.resume_ref.lock().expect("opencode resume") = Some(resume.clone());
             }
             self.spec.sink.emit(event.clone()).await;
         }
         events
     }
 
-    async fn emit_sse_events(&mut self, event: &str) -> Vec<HarnessEvent> {
+    async fn emit_sse_events(&self, event: &str) -> Vec<HarnessEvent> {
         let Ok(parsed) = serde_json::from_str::<Value>(event) else {
             return Vec::new();
         };
@@ -356,12 +365,15 @@ impl OpencodeSession {
         self.emit_parsed(&line).await
     }
 
-    async fn read_until_terminal_turn(&mut self) -> Result<(), HarnessError> {
+    async fn read_until_terminal_turn(&self) -> Result<(), HarnessError> {
         loop {
-            let Some(rx) = self.events.as_mut() else {
-                return Err(HarnessError::Other("event stream is not connected".into()));
+            let event = {
+                let mut slot = self.events.lock().await;
+                let Some(rx) = slot.as_mut() else {
+                    return Err(HarnessError::Other("event stream is not connected".into()));
+                };
+                rx.recv().await
             };
-            let event = rx.recv().await;
             let Some(event) = event else {
                 return Err(HarnessError::Other(
                     "engine event stream closed before the turn finished".into(),
@@ -387,8 +399,9 @@ impl OpencodeSession {
 
 #[async_trait]
 impl HarnessSession for OpencodeSession {
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError> {
-        let Some(session_id) = self.resume_ref.clone() else {
+    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+        let session_id = self.resume_ref.lock().expect("opencode resume").clone();
+        let Some(session_id) = session_id else {
             return Err(HarnessError::Other("session has no resume ref".into()));
         };
         let path = format!("/session/{session_id}/prompt_async");
@@ -408,7 +421,7 @@ impl HarnessSession for OpencodeSession {
     }
 
     async fn decide(
-        &mut self,
+        &self,
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
@@ -435,8 +448,9 @@ impl HarnessSession for OpencodeSession {
         Ok(())
     }
 
-    async fn interrupt(&mut self) -> Result<(), HarnessError> {
-        if let Some(session_id) = self.resume_ref.clone() {
+    async fn interrupt(&self) -> Result<(), HarnessError> {
+        let session_id = self.resume_ref.lock().expect("opencode resume").clone();
+        if let Some(session_id) = session_id {
             let path = format!("/session/{session_id}/abort");
             let url = format!("{}{path}", self.base_url);
             let query = self.directory_query();
@@ -450,40 +464,42 @@ impl HarnessSession for OpencodeSession {
                 }
             }
         }
-        let Some(child) = self.child.as_mut() else {
-            return Ok(());
-        };
-        if let Some(pid) = child.id() {
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        if pid != 0 {
             signal_interrupt(pid);
         }
+        let mut slot = self.child.lock().await;
+        let Some(child) = slot.as_mut() else {
+            return Ok(());
+        };
         match timeout(Duration::from_secs(2), child.wait()).await {
             Ok(Ok(_)) => {
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
             Ok(Err(err)) => Err(err.into()),
             Err(_) => {
                 warn!("engine did not exit after SIGINT; killing");
                 child.kill().await?;
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
         }
     }
 
     fn resume_ref(&self) -> Option<String> {
-        self.resume_ref.clone()
+        self.resume_ref.lock().expect("opencode resume").clone()
     }
 
     fn child_pid(&self) -> Option<i64> {
-        self.child
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .map(i64::from)
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        (pid != 0).then_some(i64::from(pid))
     }
 
-    async fn shutdown(mut self: Box<Self>) -> Result<(), HarnessError> {
-        if let Some(mut child) = self.child.take() {
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
         Ok(())

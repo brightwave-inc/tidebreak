@@ -59,6 +59,14 @@ async fn code_app_with(
 }
 
 fn approval_script() -> Vec<HarnessEvent> {
+    write_approval_script("toolu_scripted", "hello")
+}
+
+fn oversized_write_approval_script() -> Vec<HarnessEvent> {
+    write_approval_script("toolu_oversized", &"x".repeat(20 * 1024))
+}
+
+fn write_approval_script(call_id: &str, content: &str) -> Vec<HarnessEvent> {
     vec![
         HarnessEvent::SessionStarted {
             harness_kind: HarnessKind::ClaudeCode,
@@ -68,12 +76,12 @@ fn approval_script() -> Vec<HarnessEvent> {
         HarnessEvent::TurnStarted,
         HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef {
-                call_id: "toolu_scripted".into(),
+                call_id: call_id.into(),
             },
             raw: serde_json::json!({
                 "tool_name": "Write",
-                "input": { "file_path": "/workspace/probe.txt", "content": "hello" },
-                "tool_use_id": "toolu_scripted"
+                "input": { "file_path": "/workspace/probe.txt", "content": content },
+                "tool_use_id": call_id
             }),
         },
         HarnessEvent::AssistantDelta {
@@ -1869,6 +1877,93 @@ async fn pending_approval_survives_restart_and_is_decidable() {
     assert_eq!(decided.status(), reqwest::StatusCode::OK);
     let seen = observed.observed_decisions();
     assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, ApprovalDecision::Approve);
+}
+
+#[tokio::test]
+async fn oversized_write_approval_is_still_decidable() {
+    let adapter =
+        ScriptedAdapter::new(oversized_write_approval_script()).with_approvals(CapLevel::Supported);
+    let observed = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = json_id(&session).to_owned();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+
+    let raw = approval["harness_raw_json"].as_str().unwrap_or("");
+    let stored: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(stored["truncated"], true);
+    assert_eq!(stored["call_id"], "toolu_oversized");
+    assert!(stored.get("tool_use_id").is_none());
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+
+    let finished = turn.await.unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let seen = observed.observed_decisions();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "toolu_oversized");
     assert_eq!(seen[0].1, ApprovalDecision::Approve);
 }
 

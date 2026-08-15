@@ -34,6 +34,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
+import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
 import {
   fenceReasonText,
@@ -73,6 +74,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,12 +108,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     };
   }, [client, workspaceId]);
 
-  async function startSession(harness: HarnessKind) {
+  async function startSession(harness: HarnessKind, permissionMode: CodePermissionMode) {
     setStarting(true);
     try {
       const created = await client.createCodeSession(workspaceId, {
         harness,
-        permission_mode: "ask",
+        permission_mode: permissionMode,
       });
       catalog.rememberSession(created);
       setSession(created);
@@ -280,22 +282,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             {!session && workspace?.status === "active" && (
-              <div className="flex flex-col gap-2 px-4 py-6">
-                <p className="text-sm">Start an Ask-mode session on this workspace.</p>
-                <div className="flex flex-wrap gap-2">
-                  {readyHarnesses.map((entry) => (
-                    <Button
-                      key={entry.kind}
-                      type="button"
-                      size="sm"
-                      disabled={starting}
-                      onClick={() => void startSession(entry.kind)}
-                    >
-                      {HARNESS_LABELS[entry.kind]}
-                    </Button>
-                  ))}
-                </div>
-              </div>
+              <StartSessionPrompt
+                harnesses={readyHarnesses}
+                starting={starting}
+                selectedMode={createMode}
+                onSelectMode={setCreateMode}
+                onStart={(harness, mode) => void startSession(harness, mode)}
+              />
             )}
             {session && (
               <CodeSessionPane

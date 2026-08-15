@@ -95,7 +95,7 @@ impl LiveSink {
             session_id: self.session_id,
             turn_id,
             kind: kind_from_raw(raw),
-            harness_raw: cap_raw(raw),
+            harness_raw: persist_harness_raw(&harness_ref.call_id, raw),
             state: CodeApprovalState::Pending,
             feedback: None,
             requested_at: Utc::now(),
@@ -119,7 +119,6 @@ impl LiveSink {
             },
         )
         .await;
-        let _ = harness_ref;
     }
 }
 
@@ -631,12 +630,32 @@ async fn apply_side_effects(
 
 const MAX_HARNESS_RAW_BYTES: usize = 16 * 1024;
 
+/// Size-capped preview plus `call_id` as a sibling. Decide reads `call_id`,
+/// never the preview: a Write/Edit payload larger than the cap would otherwise
+/// truncate `tool_use_id` away and leave the row undecidable.
+fn persist_harness_raw(call_id: &str, raw: &serde_json::Value) -> serde_json::Value {
+    let mut stored = match cap_raw(raw) {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("payload".to_owned(), other);
+            map
+        }
+    };
+    stored.insert(
+        "call_id".to_owned(),
+        serde_json::Value::String(call_id.to_owned()),
+    );
+    serde_json::Value::Object(stored)
+}
+
 fn cap_raw(raw: &serde_json::Value) -> serde_json::Value {
     let rendered = raw.to_string();
     if rendered.len() <= MAX_HARNESS_RAW_BYTES {
         return raw.clone();
     }
-    serde_json::json!({ "truncated": true, "preview": &rendered[..MAX_HARNESS_RAW_BYTES] })
+    let end = rendered.floor_char_boundary(MAX_HARNESS_RAW_BYTES);
+    serde_json::json!({ "truncated": true, "preview": &rendered[..end] })
 }
 
 fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
@@ -747,5 +766,40 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
 impl From<HarnessError> for WorkerError {
     fn from(err: HarnessError) -> Self {
         Self::Failed(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_raw_truncates_on_a_char_boundary() {
+        // `{"xx":"` is 7 bytes; a string of `é` (2 bytes each) then places a
+        // mid-character byte at MAX_HARNESS_RAW_BYTES. Slicing there panics.
+        let raw = serde_json::json!({ "xx": "é".repeat(MAX_HARNESS_RAW_BYTES) });
+        assert!(raw.to_string().len() > MAX_HARNESS_RAW_BYTES);
+        assert!(!raw.to_string().is_char_boundary(MAX_HARNESS_RAW_BYTES));
+        let capped = cap_raw(&raw);
+        assert_eq!(capped["truncated"], true);
+        let preview = capped["preview"].as_str().expect("preview is a string");
+        assert!(preview.len() <= MAX_HARNESS_RAW_BYTES);
+        assert!(preview.is_char_boundary(preview.len()));
+    }
+
+    #[test]
+    fn persist_harness_raw_keeps_call_id_when_the_payload_is_capped() {
+        let raw = serde_json::json!({
+            "tool_name": "Write",
+            "input": {
+                "file_path": "/workspace/big.txt",
+                "content": "x".repeat(MAX_HARNESS_RAW_BYTES + 64),
+            },
+            "tool_use_id": "toolu_oversized",
+        });
+        let stored = persist_harness_raw("toolu_oversized", &raw);
+        assert_eq!(stored["truncated"], true);
+        assert_eq!(stored["call_id"], "toolu_oversized");
+        assert!(stored.get("tool_use_id").is_none());
     }
 }

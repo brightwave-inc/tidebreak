@@ -20,6 +20,51 @@ import {
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto"];
 
+export function PermissionModePicker({
+  value,
+  availableModes = MODES,
+  unavailableReason = PERMISSION_MODE_UNAVAILABLE_REASON,
+  onChange,
+}: {
+  value: CodePermissionMode;
+  availableModes?: readonly CodePermissionMode[];
+  unavailableReason?: string;
+  onChange?: (mode: CodePermissionMode) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" data-testid="permission-modes">
+      {MODES.map((mode) => {
+        const available = availableModes.includes(mode);
+        const selected = value === mode;
+        return (
+          <button
+            key={mode}
+            type="button"
+            disabled={!available}
+            title={
+              available
+                ? PERMISSION_MODE_LABELS[mode]
+                : `${PERMISSION_MODE_LABELS[mode]}: ${unavailableReason}`
+            }
+            aria-pressed={selected}
+            onClick={() => available && onChange?.(mode)}
+            className={cn(
+              "rounded-full border px-2.5 py-0.5 text-xs font-medium",
+              selected && "border-foreground bg-muted",
+              !available && "cursor-not-allowed opacity-50",
+            )}
+          >
+            {PERMISSION_MODE_LABELS[mode]}
+            {!available && (
+              <span className="sr-only">{unavailableReason}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function CodeComposer({
   disabled,
   running,
@@ -73,36 +118,12 @@ export function CodeComposer({
 
   return (
     <div className="flex flex-col gap-2 border-t px-4 py-3">
-      <div className="flex flex-wrap items-center gap-1.5" data-testid="permission-modes">
-        {MODES.map((mode) => {
-          const available = availableModes.includes(mode);
-          const selected = permissionMode === mode;
-          return (
-            <button
-              key={mode}
-              type="button"
-              disabled={!available}
-              title={
-                available
-                  ? PERMISSION_MODE_LABELS[mode]
-                  : `${PERMISSION_MODE_LABELS[mode]}: ${unavailableReason}`
-              }
-              aria-pressed={selected}
-              onClick={() => available && onPermissionMode?.(mode)}
-              className={cn(
-                "rounded-full border px-2.5 py-0.5 text-xs font-medium",
-                selected && "border-foreground bg-muted",
-                !available && "cursor-not-allowed opacity-50",
-              )}
-            >
-              {PERMISSION_MODE_LABELS[mode]}
-              {!available && (
-                <span className="sr-only">{unavailableReason}</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+      <PermissionModePicker
+        value={permissionMode}
+        availableModes={availableModes}
+        unavailableReason={unavailableReason}
+        onChange={onPermissionMode}
+      />
       <div className="flex items-end gap-2">
         <Textarea
           rows={2}

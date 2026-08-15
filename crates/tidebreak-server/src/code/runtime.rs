@@ -844,13 +844,13 @@ impl CodeRuntime {
         }
         let call_id = approval
             .harness_raw
-            .get("tool_use_id")
+            .get("call_id")
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .to_owned();
         if call_id.is_empty() {
             return Err(ServerError::internal(
-                "approval row is missing a harness tool_use_id",
+                "approval row is missing a harness call_id",
             ));
         }
         let handle = self.require_worker(approval.session_id)?;

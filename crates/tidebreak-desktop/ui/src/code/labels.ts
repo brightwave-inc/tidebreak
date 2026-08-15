@@ -1,4 +1,5 @@
 import type {
+  CapLevel,
   CodePermissionMode,
   CodeSessionLifecycle,
   CodeWorkspaceStatus,
@@ -65,4 +66,26 @@ export function isHarnessReady(entry: {
   authenticated?: boolean;
 }): boolean {
   return entry.found && entry.authenticated !== false;
+}
+
+/** Ask/Auto need a structured approval channel. Plan does not. */
+export function harnessHonorsStructuredApprovals(
+  structuredApprovals: CapLevel | undefined,
+): boolean {
+  return structuredApprovals === "supported";
+}
+
+/** Create default: Ask when the doctor says the harness can honor it, else Plan. */
+export function defaultCreatePermissionMode(
+  structuredApprovals: CapLevel | undefined,
+): CodePermissionMode {
+  return harnessHonorsStructuredApprovals(structuredApprovals) ? "ask" : "plan";
+}
+
+export function createPermissionModes(
+  structuredApprovals: CapLevel | undefined,
+): CodePermissionMode[] {
+  return harnessHonorsStructuredApprovals(structuredApprovals)
+    ? ["plan", "ask", "auto"]
+    : ["plan"];
 }
