@@ -58,3 +58,50 @@ describe("retry after a failed submit", () => {
     });
   });
 });
+
+describe("accepted turn after the socket already painted", () => {
+  it("inserts the prompt above the streamed assistant reply", async () => {
+    const store = createCodeSessionStore();
+    const deps = {
+      nextId: () => "streamed",
+      now: () => "2026-08-15T12:00:02.000Z",
+    };
+    store.getState().applyEvent(
+      { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+      deps,
+    );
+    store.getState().applyEvent(
+      { seq: 2, event: { type: "assistant_delta", text: "README.md" } },
+      deps,
+    );
+    store.getState().applyEvent(
+      {
+        seq: 3,
+        event: {
+          type: "turn_completed",
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+      deps,
+    );
+    await submitAcceptedTurn(store.getState().update, async () => ({
+      ...TURN,
+      status: "completed",
+    }));
+    expect(store.getState().items.map((item) => item.kind)).toEqual([
+      "user",
+      "assistant",
+      "turn_boundary",
+    ]);
+    expect(store.getState().items[0]).toMatchObject({
+      kind: "user",
+      turnId: "turn-1",
+      text: "list the files",
+    });
+  });
+});

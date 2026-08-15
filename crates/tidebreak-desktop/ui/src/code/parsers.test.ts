@@ -4,6 +4,7 @@ import {
   liveCodeSession,
   parseCodeSession,
   parseCodeSessionList,
+  parseCodeTurn,
   parseCodeTurnList,
 } from "./parsers";
 
@@ -48,10 +49,23 @@ const TURN = {
   ended_at: "2026-08-15T12:00:02.000Z",
 };
 
+const USAGE = {
+  input_tokens: 12,
+  output_tokens: 3,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
 describe("parseCodeTurnList", () => {
   it("accepts GET /code/sessions/{id}/turns", () => {
     expect(parseCodeTurnList([TURN])).toEqual([TURN]);
     expect(parseCodeTurnList([])).toEqual([]);
+  });
+
+  it("keeps optional usage on a completed turn", () => {
+    const withUsage = { ...TURN, usage: USAGE };
+    expect(parseCodeTurn(withUsage)).toEqual(withUsage);
+    expect(parseCodeTurnList([withUsage])).toEqual([withUsage]);
   });
 
   it("rejects a non-array or a row the turn parser would drop", () => {

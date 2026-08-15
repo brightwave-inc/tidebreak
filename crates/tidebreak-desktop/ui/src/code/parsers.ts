@@ -285,6 +285,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "ordinal",
       "status",
       "user_input",
+      "usage",
       "checkpoint_ref",
       "started_at",
       "ended_at",
@@ -300,6 +301,9 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   ) {
     return null;
   }
+  const usage =
+    value.usage === undefined ? undefined : parseUsage(value.usage);
+  if (value.usage !== undefined && !usage) return null;
   return {
     id: value.id,
     session_id: value.session_id,
@@ -307,6 +311,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     status: value.status,
     user_input: value.user_input,
     started_at: value.started_at,
+    ...(usage ? { usage } : {}),
     ...(value.checkpoint_ref !== undefined
       ? { checkpoint_ref: value.checkpoint_ref }
       : {}),

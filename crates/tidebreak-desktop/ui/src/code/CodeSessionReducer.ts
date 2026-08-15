@@ -146,7 +146,7 @@ export function applyAcceptedTurn(
     ? state.items.map((item) =>
         item.kind === "user" && item.turnId === turn.id ? user : item,
       )
-    : [...state.items, user];
+    : insertUserBeforeTurn(state.items, user, turn.id);
   const running = turn.status === "running";
   return {
     ...state,
@@ -173,7 +173,7 @@ export function hydrateCodeTurns(
           turnId: turn.id,
           status: turn.status,
           durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
-          usage: null,
+          usage: turn.usage ?? null,
           error: null,
         }),
       };
@@ -416,6 +416,18 @@ function finalizeStreaming(
   return items.map((item) =>
     item.kind === kind && item.streaming ? { ...item, streaming: false } : item,
   );
+}
+
+function insertUserBeforeTurn(
+  items: CodeTranscriptItem[],
+  user: Extract<CodeTranscriptItem, { kind: "user" }>,
+  turnId: string,
+): CodeTranscriptItem[] {
+  const index = items.findIndex(
+    (item) => "turnId" in item && item.turnId === turnId,
+  );
+  if (index === -1) return [...items, user];
+  return [...items.slice(0, index), user, ...items.slice(index)];
 }
 
 function upsertTurnBoundary(

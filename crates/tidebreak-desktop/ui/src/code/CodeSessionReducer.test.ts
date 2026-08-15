@@ -231,6 +231,45 @@ describe("hydrate then replay", () => {
     expect(replayed.state.lifecycle).toBe("idle");
   });
 
+  it("shows prompts from a snapshot that includes usage", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, usage: NO_USAGE },
+    ]);
+    expect(hydrated.items[0]).toMatchObject({
+      kind: "user",
+      turnId: "t1",
+      text: "list the files",
+    });
+    expect(hydrated.items[1]).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      usage: NO_USAGE,
+    });
+  });
+
+  it("places an accepted user item above that turn's already-streamed reply", () => {
+    const streamed = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "assistant_delta", text: "README.md" },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+    const accepted = applyAcceptedTurn(streamed.state, {
+      ...SNAPSHOT_TURN,
+      status: "completed",
+      usage: NO_USAGE,
+    });
+    expect(accepted.items.map((item) => item.kind)).toEqual([
+      "user",
+      "assistant",
+      "turn_boundary",
+    ]);
+    expect(accepted.items[0]).toMatchObject({
+      kind: "user",
+      turnId: "t1",
+      text: "list the files",
+    });
+  });
+
   it("converges a live accept with hydrate on the same turn id", () => {
     const accepted = applyAcceptedTurn(initialCodeSessionState(), {
       ...SNAPSHOT_TURN,
