@@ -21,6 +21,9 @@ import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
+import { CodeHome } from "./code/CodeHome";
+import { CodeRepoPage } from "./code/CodeRepoPage";
+import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -199,6 +202,34 @@ function ProjectRouteComponent() {
   );
 }
 
+const codeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code",
+  component: CodeHome,
+});
+
+const codeRepoRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/r/$repoId",
+  component: CodeRepoRouteComponent,
+});
+
+function CodeRepoRouteComponent() {
+  const { repoId } = codeRepoRoute.useParams();
+  return <CodeRepoPage key={repoId} repoId={repoId} />;
+}
+
+const codeWorkspaceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/w/$workspaceId",
+  component: CodeWorkspaceRouteComponent,
+});
+
+function CodeWorkspaceRouteComponent() {
+  const { workspaceId } = codeWorkspaceRoute.useParams();
+  return <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />;
+}
+
 export const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -277,6 +308,9 @@ export const routeTree = rootRoute.addChildren([
   chatRoute,
   projectRoute,
   projectChatRoute,
+  codeRoute,
+  codeRepoRoute,
+  codeWorkspaceRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,

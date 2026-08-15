@@ -60,12 +60,30 @@ export async function renderWithRouter(
     path: "voice-transcription",
     component: () => <>{ui}</>,
   });
+  const codeRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code",
+    component: () => <>{ui}</>,
+  });
+  const codeRepoRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/r/$repoId",
+    component: () => <>{ui}</>,
+  });
+  const codeWorkspaceRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/w/$workspaceId",
+    component: () => <>{ui}</>,
+  });
 
   const router = createRouter({
     routeTree: rootRoute.addChildren([
       homeRoute,
       chatRoute,
       appDetailRoute,
+      codeRoute,
+      codeRepoRoute,
+      codeWorkspaceRoute,
       settingsRoute.addChildren([webSearchSettingsRoute, voiceSettingsRoute]),
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),

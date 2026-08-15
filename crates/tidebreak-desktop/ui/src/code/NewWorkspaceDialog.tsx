@@ -1,0 +1,183 @@
+import { useEffect, useState, type FormEvent } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { toast } from "sonner";
+
+import type { CodeRepoSnapshot, HarnessKind } from "../api/types";
+import { useApp } from "@/AppContext";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { friendlyErrorMessage } from "@/lib/utils";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { HARNESS_LABELS, isHarnessReady } from "./labels";
+
+/**
+ * Create a workspace and its first Plan-mode session, then open it.
+ *
+ * Ask and Auto are refused by the server in this phase, so the dialog does
+ * not offer them. The harness picker is the doctor: only engines that are
+ * installed (and signed in, when the doctor knows) can be chosen.
+ */
+
+export function NewWorkspaceDialog({
+  open,
+  onOpenChange,
+  repos,
+  defaultRepoId,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  repos: CodeRepoSnapshot[];
+  defaultRepoId?: string;
+}) {
+  const navigate = useNavigate();
+  const { client } = useApp();
+  const doctor = useCodeCatalogStore((state) => state.doctor);
+  const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
+  const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
+  const [repoId, setRepoId] = useState(defaultRepoId ?? repos[0]?.id ?? "");
+  const [title, setTitle] = useState("");
+  const [baseRef, setBaseRef] = useState("");
+  const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [creating, setCreating] = useState(false);
+
+  const readyHarnesses =
+    doctor?.harnesses.filter((entry) => isHarnessReady(entry)) ?? [];
+
+  useEffect(() => {
+    if (!open) return;
+    setRepoId(defaultRepoId ?? repos[0]?.id ?? "");
+    setTitle("");
+    const selected = repos.find((repo) => repo.id === (defaultRepoId ?? repos[0]?.id));
+    setBaseRef(selected?.default_base_ref ?? "");
+    setHarness(readyHarnesses[0]?.kind ?? "claude_code");
+    // Reset against the dialog opening, not against doctor refreshes mid-open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultRepoId, repos]);
+
+  const selectedRepo = repos.find((repo) => repo.id === repoId);
+  const canCreate =
+    Boolean(repoId && title.trim() && selectedRepo && readyHarnesses.length > 0) &&
+    !creating;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!canCreate) return;
+    setCreating(true);
+    try {
+      const workspace = await client.createCodeWorkspace({
+        repo_id: repoId,
+        title: title.trim(),
+        base_ref: baseRef.trim() || undefined,
+      });
+      upsertWorkspace(workspace);
+      const session = await client.createCodeSession(workspace.id, {
+        harness,
+        permission_mode: "plan",
+      });
+      rememberSession(session);
+      onOpenChange(false);
+      await navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: workspace.id },
+      });
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "Could not create the workspace"));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={creating ? undefined : onOpenChange}>
+      <DialogContent className="max-w-md gap-5 p-5" aria-busy={creating}>
+        <DialogHeader>
+          <DialogTitle>New workspace</DialogTitle>
+          <DialogDescription>
+            One worktree and one Plan-mode session on the selected repo.
+          </DialogDescription>
+        </DialogHeader>
+        <form className="flex flex-col gap-3" onSubmit={submit}>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Repo</span>
+            <select
+              className="h-10 rounded-md border border-border bg-background px-3 text-sm"
+              value={repoId}
+              onChange={(event) => {
+                setRepoId(event.target.value);
+                const next = repos.find((repo) => repo.id === event.target.value);
+                if (next) setBaseRef(next.default_base_ref);
+              }}
+              disabled={creating || Boolean(defaultRepoId)}
+            >
+              {repos.map((repo) => (
+                <option key={repo.id} value={repo.id}>
+                  {repo.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Title</span>
+            <Input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              disabled={creating}
+              autoFocus
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Base ref</span>
+            <Input
+              value={baseRef}
+              onChange={(event) => setBaseRef(event.target.value)}
+              disabled={creating}
+              placeholder={selectedRepo?.default_base_ref}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Harness</span>
+            <select
+              className="h-10 rounded-md border border-border bg-background px-3 text-sm"
+              value={harness}
+              onChange={(event) => setHarness(event.target.value as HarnessKind)}
+              disabled={creating || readyHarnesses.length === 0}
+            >
+              {readyHarnesses.map((entry) => (
+                <option key={entry.kind} value={entry.kind}>
+                  {HARNESS_LABELS[entry.kind]}
+                  {entry.version ? ` ${entry.version}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Permission mode is Plan. Ask and Auto are {PERMISSION_UNAVAILABLE}.
+          </p>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+              disabled={creating}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canCreate}>
+              {creating ? "Creating…" : "Create"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const PERMISSION_UNAVAILABLE = "not yet available";

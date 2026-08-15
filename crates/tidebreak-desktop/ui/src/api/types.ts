@@ -100,6 +100,34 @@ import {
   type TranscriptImageAttachment as WireTranscriptImageAttachment,
   type TranscriptRole,
   type ToolApprovalKind,
+  type Attention as WireAttention,
+  type AttentionSource as WireAttentionSource,
+  type AttentionState as WireAttentionState,
+  type CapLevel as WireCapLevel,
+  type CodeEvent as WireCodeEvent,
+  type CodePermissionMode as WireCodePermissionMode,
+  type CodeRepoSnapshot as WireCodeRepoSnapshot,
+  type CodeSessionId as WireCodeSessionId,
+  type CodeSessionLifecycle as WireCodeSessionLifecycle,
+  type CodeSessionSnapshot as WireCodeSessionSnapshot,
+  type CodeTurnId as WireCodeTurnId,
+  type CodeTurnSnapshot as WireCodeTurnSnapshot,
+  type CodeTurnStatus as WireCodeTurnStatus,
+  type CodeUsage as WireCodeUsage,
+  type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
+  type FenceReason as WireFenceReason,
+  type HarnessCaps as WireHarnessCaps,
+  type HarnessDoctorEntry as WireHarnessDoctorEntry,
+  type HarnessDoctorReport as WireHarnessDoctorReport,
+  type HarnessKind as WireHarnessKind,
+  type HarnessNoticeLevel as WireHarnessNoticeLevel,
+  type HarnessTier as WireHarnessTier,
+  type RepoId as WireRepoId,
+  type SequencedCodeEventFrame as WireSequencedCodeEventFrame,
+  type ToolDetail as WireToolDetail,
+  type ToolOutcome as WireToolOutcome,
+  type WorkspaceId as WireWorkspaceId,
 } from "../generated/wire";
 
 export type {
@@ -931,3 +959,43 @@ export type FileDownloadProgress = {
   /** `loaded` over `total`, as 0–100. */
   percentage: number;
 };
+
+/** A registered local git repository. */
+export type CodeRepoSnapshot = WireCodeRepoSnapshot;
+export type RepoId = WireRepoId;
+
+/** One isolated worktree + branch on a repo. */
+export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;
+export type WorkspaceId = WireWorkspaceId;
+export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
+
+/** One durable conversation with an external coding engine. */
+export type CodeSessionSnapshot = WireCodeSessionSnapshot;
+export type CodeSessionId = WireCodeSessionId;
+export type CodeSessionLifecycle = WireCodeSessionLifecycle;
+export type CodePermissionMode = WireCodePermissionMode;
+export type FenceReason = WireFenceReason;
+export type Attention = WireAttention;
+export type AttentionState = WireAttentionState;
+export type AttentionSource = WireAttentionSource;
+
+/** One user→engine cycle. */
+export type CodeTurnSnapshot = WireCodeTurnSnapshot;
+export type CodeTurnId = WireCodeTurnId;
+export type CodeTurnStatus = WireCodeTurnStatus;
+export type CodeUsage = WireCodeUsage;
+
+/** Journaled engine event and the sequenced WebSocket frame that carries it. */
+export type CodeEvent = WireCodeEvent;
+export type SequencedCodeEventFrame = WireSequencedCodeEventFrame;
+export type ToolDetail = WireToolDetail;
+export type ToolOutcome = WireToolOutcome;
+export type HarnessNoticeLevel = WireHarnessNoticeLevel;
+
+/** Doctor report for every registered engine. */
+export type HarnessDoctorReport = WireHarnessDoctorReport;
+export type HarnessDoctorEntry = WireHarnessDoctorEntry;
+export type HarnessKind = WireHarnessKind;
+export type HarnessTier = WireHarnessTier;
+export type HarnessCaps = WireHarnessCaps;
+export type CapLevel = WireCapLevel;

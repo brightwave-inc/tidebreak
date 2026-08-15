@@ -77,6 +77,14 @@ import {
   type AgentRunTaskPlan,
   type PendingChatPrompt,
   type TaskPlan,
+  type CodePermissionMode,
+  type CodeRepoSnapshot,
+  type CodeSessionSnapshot,
+  type CodeTurnSnapshot,
+  type CodeWorkspaceSnapshot,
+  type HarnessDoctorReport,
+  type HarnessKind,
+  type SequencedCodeEventFrame,
 } from "./types";
 import {
   parseAgentActivityHistory,
@@ -92,6 +100,14 @@ import {
   parseSandboxAgentCancellation,
   parseTaskPlan,
 } from "./parsers";
+import {
+  parseCodeRepo,
+  parseCodeSession,
+  parseCodeTurn,
+  parseCodeWorkspace,
+  parseHarnessDoctorReport,
+  parseSequencedCodeEvent,
+} from "../code/parsers";
 
 const WS_HANDSHAKE = "tidebreak-v1";
 const WS_TOKEN_PREFIX = "tidebreak-token.";
@@ -139,23 +155,32 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly kind?: string,
   ) {
     super(message);
     this.name = "HttpError";
   }
 }
 
+/** Archive is refused until the reader confirms discarding leftover work. */
+export const ARCHIVE_FORCE_KINDS = new Set([
+  "uncommitted",
+  "uncommitted_and_unpushed",
+]);
+
 /** The server's own message for a failed response, or its status text. */
 async function throwIfNotOk(response: Response): Promise<void> {
   if (response.ok) return;
   let detail = response.statusText;
+  let kind: string | undefined;
   try {
-    const body = (await response.json()) as { message?: string };
+    const body = (await response.json()) as { message?: string; kind?: string };
     if (body.message) detail = body.message;
+    if (typeof body.kind === "string" && body.kind.length > 0) kind = body.kind;
   } catch {
     /* ignore */
   }
-  throw new HttpError(response.status, `${response.status}: ${detail}`);
+  throw new HttpError(response.status, `${response.status}: ${detail}`, kind);
 }
 
 export class ApiClient {
@@ -1576,4 +1601,247 @@ export class ApiClient {
     };
     return socket;
   }
+
+  async listCodeRepos(): Promise<CodeRepoSnapshot[]> {
+    const body = await this.json<unknown>("/code/repos", {
+      headers: this.headers(),
+    });
+    return parseList(body, parseCodeRepo, "code repos");
+  }
+
+  async createCodeRepo(body: {
+    path: string;
+    display_name?: string;
+    default_base_ref?: string;
+    branch_prefix?: string;
+    setup_script?: string;
+    archive_script?: string;
+  }): Promise<CodeRepoSnapshot> {
+    return requireParsed(
+      parseCodeRepo(
+        await this.json("/code/repos", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code repo",
+    );
+  }
+
+  async getCodeRepo(repoId: string): Promise<CodeRepoSnapshot> {
+    return requireParsed(
+      parseCodeRepo(
+        await this.json(`/code/repos/${encodeURIComponent(repoId)}`, {
+          headers: this.headers(),
+        }),
+      ),
+      "code repo",
+    );
+  }
+
+  async patchCodeRepo(
+    repoId: string,
+    body: {
+      display_name?: string;
+      default_base_ref?: string;
+      branch_prefix?: string;
+      setup_script?: string | null;
+      archive_script?: string | null;
+    },
+  ): Promise<CodeRepoSnapshot> {
+    return requireParsed(
+      parseCodeRepo(
+        await this.json(`/code/repos/${encodeURIComponent(repoId)}`, {
+          method: "PATCH",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code repo",
+    );
+  }
+
+  deleteCodeRepo(repoId: string): Promise<void> {
+    return this.json(`/code/repos/${encodeURIComponent(repoId)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  async getHarnessDoctor(): Promise<HarnessDoctorReport> {
+    return requireParsed(
+      parseHarnessDoctorReport(
+        await this.json("/code/harnesses", { headers: this.headers() }),
+      ),
+      "harness doctor",
+    );
+  }
+
+  async refreshHarnessDoctor(): Promise<HarnessDoctorReport> {
+    return requireParsed(
+      parseHarnessDoctorReport(
+        await this.json("/code/harnesses/refresh", {
+          method: "POST",
+          headers: this.headers(),
+        }),
+      ),
+      "harness doctor",
+    );
+  }
+
+  async listCodeWorkspaces(repoId?: string): Promise<CodeWorkspaceSnapshot[]> {
+    const query = repoId ? `?repo_id=${encodeURIComponent(repoId)}` : "";
+    const body = await this.json<unknown>(`/code/workspaces${query}`, {
+      headers: this.headers(),
+    });
+    return parseList(body, parseCodeWorkspace, "code workspaces");
+  }
+
+  async createCodeWorkspace(body: {
+    repo_id: string;
+    title?: string;
+    base_ref?: string;
+  }): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json("/code/workspaces", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code workspace",
+    );
+  }
+
+  async getCodeWorkspace(workspaceId: string): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json(`/code/workspaces/${encodeURIComponent(workspaceId)}`, {
+          headers: this.headers(),
+        }),
+      ),
+      "code workspace",
+    );
+  }
+
+  async archiveCodeWorkspace(
+    workspaceId: string,
+    force = false,
+  ): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/archive`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ force }),
+          },
+        ),
+      ),
+      "code workspace",
+    );
+  }
+
+  async createCodeSession(
+    workspaceId: string,
+    body: { harness: HarnessKind; permission_mode: CodePermissionMode },
+  ): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+        ),
+      ),
+      "code session",
+    );
+  }
+
+  async submitCodeTurn(
+    sessionId: string,
+    message: string,
+  ): Promise<CodeTurnSnapshot> {
+    return requireParsed(
+      parseCodeTurn(
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ message }),
+          },
+        ),
+      ),
+      "code turn",
+    );
+  }
+
+  interruptCodeSession(sessionId: string): Promise<void> {
+    return this.json(`/code/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  async reapCodeSession(sessionId: string): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/reap`, {
+          method: "POST",
+          headers: this.headers(),
+        }),
+      ),
+      "code session",
+    );
+  }
+
+  /** Open the per-session journal; auth via Sec-WebSocket-Protocol. */
+  openCodeEvents(
+    sessionId: string,
+    after: number,
+    onFrame: (frame: SequencedCodeEventFrame) => void,
+  ): WebSocket {
+    const url = `${this.baseUrl.replace(/^http/, "ws")}/code/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`;
+    const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
+    const socket = new WebSocket(url, protocols);
+    socket.onmessage = (msg) => {
+      try {
+        const frame = parseSequencedCodeEvent(JSON.parse(String(msg.data)));
+        if (frame) onFrame(frame);
+        else console.error("dropping malformed code event frame");
+      } catch (err) {
+        console.error("bad code event frame", err);
+      }
+    };
+    return socket;
+  }
+}
+
+function requireParsed<T>(value: T | null, label: string): T {
+  if (!value) throw new Error(`${label} response contains invalid data`);
+  return value;
+}
+
+function parseList<T>(
+  body: unknown,
+  parse: (value: unknown) => T | null,
+  label: string,
+): T[] {
+  if (!Array.isArray(body)) {
+    throw new Error(`${label} response is not an array`);
+  }
+  return body.map((item, index) => {
+    const parsed = parse(item);
+    if (!parsed) {
+      throw new Error(`${label} response contains invalid data at ${index}`);
+    }
+    return parsed;
+  });
 }
