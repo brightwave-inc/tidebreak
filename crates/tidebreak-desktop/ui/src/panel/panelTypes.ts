@@ -22,7 +22,11 @@ export type PanelContent =
   /** This conversation's background agents, as a table of runs. */
   | { type: "agents" }
   /** One background agent run, opened from the agents table or the transcript. */
-  | { type: "agent"; runId: string };
+  | { type: "agent"; runId: string }
+  /** Changed files in a code-mode workspace; `turnId` filters to one turn. */
+  | { type: "files"; turnId?: string }
+  /** Server-produced unified diff; `turnId`/`file` anchor within the tab. */
+  | { type: "diff"; turnId?: string; file?: string };
 
 export type PanelType = PanelContent["type"];
 

@@ -16,11 +16,13 @@ pub(crate) use sessions::{
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeRepoSnapshot, CodeSessionSnapshot, CodeTurnSnapshot, CodeWorkspaceSnapshot,
-    HarnessDoctorReport, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeFileChange, CodeRepoSnapshot, CodeSessionSnapshot, CodeTurnSnapshot, CodeWorkspaceDiff,
+    CodeWorkspaceFiles, CodeWorkspaceSnapshot, HarnessDoctorReport, QueuedCodeTurn,
+    SequencedCodeEventFrame,
 };
 pub(crate) use workspaces::{
-    archive_workspace, create_workspace, get_workspace, list_workspaces, patch_workspace,
+    archive_workspace, create_workspace, get_workspace, get_workspace_diff, list_workspace_files,
+    list_workspaces, patch_workspace,
 };
 
 use crate::code::CodeRuntime;

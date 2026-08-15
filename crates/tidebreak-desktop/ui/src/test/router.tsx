@@ -73,6 +73,13 @@ export async function renderWithRouter(
   const codeWorkspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
+    validateSearch: (search: Record<string, unknown>): PanelSearch => ({
+      tabs: typeof search.tabs === "string" ? search.tabs : undefined,
+      active: typeof search.active === "string" ? search.active : undefined,
+      fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+      left: typeof search.left === "string" ? search.left : undefined,
+      right: typeof search.right === "string" ? search.right : undefined,
+    }),
     component: () => <>{ui}</>,
   });
 

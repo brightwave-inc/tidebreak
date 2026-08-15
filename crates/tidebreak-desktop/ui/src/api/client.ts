@@ -81,6 +81,8 @@ import {
   type CodeRepoSnapshot,
   type CodeSessionSnapshot,
   type CodeTurnSnapshot,
+  type CodeWorkspaceDiff,
+  type CodeWorkspaceFiles,
   type CodeWorkspaceSnapshot,
   type HarnessDoctorReport,
   type HarnessKind,
@@ -107,6 +109,8 @@ import {
   parseCodeTurn,
   parseCodeTurnList,
   parseCodeWorkspace,
+  parseCodeWorkspaceDiff,
+  parseCodeWorkspaceFiles,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
 } from "../code/parsers";
@@ -1818,6 +1822,41 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(),
     });
+  }
+
+  async listCodeWorkspaceFiles(
+    workspaceId: string,
+    turnId?: string,
+  ): Promise<CodeWorkspaceFiles> {
+    const query = turnId ? `?turn=${encodeURIComponent(turnId)}` : "";
+    return requireParsed(
+      parseCodeWorkspaceFiles(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/files${query}`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code workspace files",
+    );
+  }
+
+  async getCodeWorkspaceDiff(
+    workspaceId: string,
+    opts: { turn?: string; file?: string } = {},
+  ): Promise<CodeWorkspaceDiff> {
+    const params = new URLSearchParams();
+    if (opts.turn) params.set("turn", opts.turn);
+    if (opts.file) params.set("file", opts.file);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return requireParsed(
+      parseCodeWorkspaceDiff(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/diff${query}`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code workspace diff",
+    );
   }
 
   async reapCodeSession(sessionId: string): Promise<CodeSessionSnapshot> {

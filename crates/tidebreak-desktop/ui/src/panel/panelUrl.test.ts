@@ -14,6 +14,13 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("permissions")).toEqual({ type: "permissions" });
     expect(parsePanelSegment("agents")).toEqual({ type: "agents" });
     expect(parsePanelSegment("agent.run-1")).toEqual({ type: "agent", runId: "run-1" });
+    expect(parsePanelSegment("files")).toEqual({ type: "files" });
+    expect(parsePanelSegment("files.turn-1")).toEqual({ type: "files", turnId: "turn-1" });
+    expect(parsePanelSegment("diff.t.turn-1.f.src%2Flib.rs")).toEqual({
+      type: "diff",
+      turnId: "turn-1",
+      file: "src/lib.rs",
+    });
     expect(parsePanelSegment("agent")).toBeNull();
     expect(parsePanelSegment("document.doc-1.cite-1")).toEqual({
       type: "document",
@@ -62,6 +69,11 @@ describe("panel URLs", () => {
       { type: "permissions" },
       { type: "agents" },
       { type: "agent", runId: "run-1" },
+      { type: "files" },
+      { type: "files", turnId: "turn-1" },
+      { type: "diff" },
+      { type: "diff", turnId: "turn-1" },
+      { type: "diff", turnId: "turn-1", file: "src/lib.rs" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
     }

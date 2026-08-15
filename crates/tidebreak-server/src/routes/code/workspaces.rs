@@ -8,8 +8,9 @@ use crate::state::AppState;
 
 use super::require_code;
 use super::types::{
-    ArchiveWorkspaceBody, CodeWorkspaceSnapshot, CreateWorkspaceBody, ListWorkspacesQuery,
-    PatchWorkspaceBody,
+    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspaceSnapshot, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
+    WorkspaceDiffQuery, WorkspaceFilesQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -76,4 +77,52 @@ pub async fn archive_workspace(
             .archive_workspace(id, body.force)
             .await?,
     )))
+}
+
+pub async fn list_workspace_files(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+    Query(query): Query<WorkspaceFilesQuery>,
+) -> Result<Json<CodeWorkspaceFiles>, ServerError> {
+    let (files, truncated, stat, turn_id) = require_code(&state)?
+        .workspace_files(id, query.turn)
+        .await?;
+    Ok(Json(CodeWorkspaceFiles {
+        files: files
+            .into_iter()
+            .map(|file| CodeFileChange {
+                path: file.path,
+                kind: file.kind,
+                insertions: file.insertions,
+                deletions: file.deletions,
+                previous_path: file.previous_path,
+            })
+            .collect(),
+        truncated,
+        stat,
+        turn_id,
+    }))
+}
+
+pub async fn get_workspace_diff(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+    Query(query): Query<WorkspaceDiffQuery>,
+) -> Result<Json<CodeWorkspaceDiff>, ServerError> {
+    let file = query
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let (diff, truncated, stat, turn_id) = require_code(&state)?
+        .workspace_diff(id, query.turn, file.as_deref())
+        .await?;
+    Ok(Json(CodeWorkspaceDiff {
+        diff,
+        truncated,
+        stat,
+        turn_id,
+        file,
+    }))
 }

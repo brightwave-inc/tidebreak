@@ -22,13 +22,23 @@ export function useLayoutState(): LayoutState {
 export function usePanelNav() {
   const navigate = useNavigate();
   const layout = useLayoutState();
-  const { chatId } = useParams({ strict: false }) as { chatId?: string };
+  const { chatId, workspaceId } = useParams({ strict: false }) as {
+    chatId?: string;
+    workspaceId?: string;
+  };
 
   function go(next: LayoutState) {
     // Panels live beside a conversation when there is one; outside any
     // conversation the home route hosts them (the Apps library), and its bare
-    // URL is the no-tabs collapse the same way a chat's is.
-    if (chatId) {
+    // URL is the no-tabs collapse the same way a chat's is. Code workspaces
+    // host the same strip beside their transcript.
+    if (workspaceId) {
+      void navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId },
+        search: searchFromLayout(next),
+      });
+    } else if (chatId) {
       void navigate({
         to: "/c/$chatId",
         params: { chatId },

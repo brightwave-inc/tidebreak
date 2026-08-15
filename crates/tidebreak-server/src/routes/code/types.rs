@@ -5,9 +5,9 @@ use ts_rs::TS;
 
 use tidebreak_core::{
     Attention, CapLevel, CodeEvent, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionLifecycle, CodeTurn, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-    FenceReason, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId,
-    WorkspaceId,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
+    Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind, HarnessTier,
+    PullRequestDigest, QuickAction, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -134,6 +134,9 @@ pub struct CodeTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub checkpoint_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diffstat: Option<Diffstat>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -150,6 +153,7 @@ impl From<CodeTurn> for CodeTurnSnapshot {
             user_input: turn.user_input,
             usage: turn.usage,
             checkpoint_ref: turn.checkpoint_ref,
+            diffstat: turn.diffstat,
             started_at: turn.started_at,
             ended_at: turn.ended_at,
         }
@@ -291,6 +295,59 @@ pub struct QueuedCodeTurn {
 pub struct ListWorkspacesQuery {
     #[serde(default)]
     pub repo_id: Option<RepoId>,
+}
+
+/// Query for `GET /code/workspaces/{id}/files`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceFilesQuery {
+    #[serde(default)]
+    pub turn: Option<CodeTurnId>,
+}
+
+/// Query for `GET /code/workspaces/{id}/diff`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceDiffQuery {
+    #[serde(default)]
+    pub turn: Option<CodeTurnId>,
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// One changed path in a workspace or turn file list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeFileChange {
+    pub path: String,
+    pub kind: FileChangeKind,
+    pub insertions: u32,
+    pub deletions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_path: Option<String>,
+}
+
+/// Bounded changed-file list for `GET /code/workspaces/{id}/files`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceFiles {
+    pub files: Vec<CodeFileChange>,
+    pub truncated: bool,
+    pub stat: Diffstat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<CodeTurnId>,
+}
+
+/// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceDiff {
+    pub diff: String,
+    pub truncated: bool,
+    pub stat: Diffstat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<CodeTurnId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub file: Option<String>,
 }
 
 /// Query for `GET /code/sessions/{id}/events`.

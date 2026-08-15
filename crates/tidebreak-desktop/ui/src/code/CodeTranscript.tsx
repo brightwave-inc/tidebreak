@@ -1,22 +1,28 @@
 import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 
-import type { CodeUsage, ToolDetail } from "../api/types";
+import type { ToolDetail } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
 import { ToolCardShell } from "@/ToolCardShell";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
+import { TurnReviewCard } from "./TurnReviewCard";
 
 /**
  * The code-session transcript: markdown for assistant text, tool-card chrome
  * for engine work, and visible harness notices.
  *
- * Approvals, diffs, and files stay out of this walking skeleton. What lands
- * here is the conversation a reader can follow from the journal alone.
+ * Approvals stay out of this surface. Turn boundaries open the Diff panel.
  */
 
-export function CodeTranscript({ items }: { items: CodeTranscriptItem[] }) {
+export function CodeTranscript({
+  items,
+  onOpenTurnDiff,
+}: {
+  items: CodeTranscriptItem[];
+  onOpenTurnDiff?: (turnId: string) => void;
+}) {
   if (items.length === 0) {
     return (
       <p className="text-muted-foreground px-4 py-8 text-sm">
@@ -27,13 +33,23 @@ export function CodeTranscript({ items }: { items: CodeTranscriptItem[] }) {
   return (
     <div className="flex flex-col gap-3 px-4 py-4">
       {items.map((item) => (
-        <TranscriptItem key={item.id} item={item} />
+        <TranscriptItem
+          key={item.id}
+          item={item}
+          onOpenTurnDiff={onOpenTurnDiff}
+        />
       ))}
     </div>
   );
 }
 
-function TranscriptItem({ item }: { item: CodeTranscriptItem }) {
+function TranscriptItem({
+  item,
+  onOpenTurnDiff,
+}: {
+  item: CodeTranscriptItem;
+  onOpenTurnDiff?: (turnId: string) => void;
+}) {
   switch (item.kind) {
     case "user":
       return (
@@ -62,11 +78,17 @@ function TranscriptItem({ item }: { item: CodeTranscriptItem }) {
       return <HarnessNotice level={item.level} message={item.message} />;
     case "turn_boundary":
       return (
-        <TurnBoundary
+        <TurnReviewCard
           status={item.status}
           durationMs={item.durationMs}
           usage={item.usage}
           error={item.error}
+          diffstat={item.diffstat}
+          onOpenDiff={
+            item.turnId && onOpenTurnDiff
+              ? () => onOpenTurnDiff(item.turnId as string)
+              : undefined
+          }
         />
       );
   }
@@ -149,37 +171,6 @@ export function HarnessNotice({
   );
 }
 
-function TurnBoundary({
-  status,
-  durationMs,
-  usage,
-  error,
-}: {
-  status: "completed" | "failed" | "interrupted";
-  durationMs: number | null;
-  usage: CodeUsage | null;
-  error: string | null;
-}) {
-  const label =
-    status === "completed"
-      ? "Turn completed"
-      : status === "failed"
-        ? "Turn failed"
-        : "Turn interrupted";
-  return (
-    <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-      <span className="font-medium">{label}</span>
-      {durationMs !== null && <span>{formatDuration(durationMs)}</span>}
-      {usage && (
-        <span>
-          {usage.input_tokens + usage.output_tokens} tokens
-        </span>
-      )}
-      {error && <span className="text-critical-foreground">{error}</span>}
-    </div>
-  );
-}
-
 function toolIcon(detail: ToolDetail) {
   switch (detail.kind) {
     case "command":
@@ -224,7 +215,4 @@ function toolDetailLine(detail: ToolDetail): string {
   }
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
+
