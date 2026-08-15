@@ -7055,6 +7055,21 @@ name = "tidebreak-egress"
 version = "0.0.0"
 
 [[package]]
+name = "tidebreak-harness"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tidebreak-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tidebreak-host-broker"
 version = "0.0.0"
 dependencies = [

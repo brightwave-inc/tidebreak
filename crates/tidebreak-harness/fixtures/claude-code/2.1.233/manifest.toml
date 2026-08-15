@@ -1,0 +1,42 @@
+harness = "claude-code"
+version = "2.1.233"
+date = "2026-08-15"
+observed_version_command = "claude --version"
+observed_version = "2.1.233 (Claude Code)"
+
+# Five scenarios captured from the real `claude` CLI v2.1.233 in print mode
+# (`-p --output-format stream-json --verbose --include-partial-messages`)
+# against a throwaway git repo. Exact original argv was not recorded with
+# the salvaged streams; the flags above are what `--help` on 2.1.233
+# documents for this mode. Model used for capture: claude-sonnet-5
+# (reported on every `system/init` line).
+
+scenarios = [
+  "plain-text",
+  "tool-use",
+  "permission-denied",
+  "resume",
+  "interrupt",
+]
+
+[redaction]
+notes = """
+Home paths were already absent (cwd is /workspace).
+messaging_socket_path rewritten to /tmp/redacted.sock.
+Thinking/tool signatures (long opaque blobs) replaced with REDACTED_SIGNATURE.
+No sk- / bearer / API-key material was present.
+Session ids kept: they are the resume handle the stream reports and the
+resume fixture must share the plain-text session id.
+apiKeySource remains the engine's own 'apiKeyHelper' token, not a secret.
+"""
+verified = [
+  "claude --version => 2.1.233 (Claude Code)",
+  "stream types: system, stream_event, assistant, user, result, control_response",
+  "system subtypes: hook_started, hook_response, init, status, thinking_tokens, permission_denied",
+]
+not_verified = [
+  "permission-prompt-tool / MCP approval channel (not in --help on 2.1.233; not captured)",
+  "mid-turn steering input",
+  "native file-change events",
+  "reasoning-level control flags",
+]

@@ -1,0 +1,87 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "341c3eb3-768b-4115-9e5c-712a4b6a75af"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "This"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " is a trivial read-and-summarize task — no planning needed. Let me just read the file directly."
+  },
+  {
+    "type": "assistant_message",
+    "text": "This is a trivial read-and-summarize task — no planning needed. Let me just read the file directly."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_019ykdV8Jr64h8Yd3HUjbsUF",
+    "name": "Read",
+    "detail": {
+      "kind": "file_read",
+      "path": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_019ykdV8Jr64h8Yd3HUjbsUF",
+    "outcome": "succeeded",
+    "preview": "1\tdemo\n2\t\n3\tA tiny fixture repository.\n4\t"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "This"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " is tr"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ivial — reading and summarizing a file doesn't warrant a plan. Exiting plan mode to just answer directly."
+  },
+  {
+    "type": "assistant_message",
+    "text": "This is trivial — reading and summarizing a file doesn't warrant a plan. Exiting plan mode to just answer directly."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_017AuzxLVziTF2LspoPma2Ek",
+    "name": "ExitPlanMode",
+    "detail": {
+      "kind": "other",
+      "summary": "ExitPlanMode"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_017AuzxLVziTF2LspoPma2Ek",
+    "outcome": "failed",
+    "preview": "<tool_use_error>Error: No such tool available: ExitPlanMode. ExitPlanMode is disabled for this session, in subagents as well as here.</tool_use_error>"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " README is a one-line description: \"demo — A tiny fixture repository.\""
+  },
+  {
+    "type": "assistant_message",
+    "text": "The README is a one-line description: \"demo — A tiny fixture repository.\""
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 6,
+      "output_tokens": 196,
+      "cache_read_input_tokens": 142916,
+      "cache_creation_input_tokens": 5479
+    }
+  }
+]

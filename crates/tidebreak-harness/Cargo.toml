@@ -1,0 +1,35 @@
+[package]
+name = "tidebreak-harness"
+description = "Tidebreak harness adapters: protocol translation from an external agent engine into the normalized event vocabulary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Dev-only: capture a real engine stream into fixtures/<harness>/<version>/.
+capture = []
+
+[dependencies]
+async-trait = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tidebreak-core = { path = "../tidebreak-core", default-features = false }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[[bin]]
+name = "tidebreak-harness-capture"
+path = "src/bin/capture.rs"
+required-features = ["capture"]
