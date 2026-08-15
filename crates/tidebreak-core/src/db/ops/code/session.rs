@@ -1,4 +1,6 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+};
 
 use crate::code::{
     Attention, AttentionSource, AttentionState, CodePermissionMode, CodeSession, CodeSessionId,
@@ -93,6 +95,106 @@ pub async fn bump_spawn_epoch(
     }
     transaction.commit().await.map_err(store_err)?;
     Ok(next)
+}
+
+/// Every session, most recently created first.
+pub async fn list_sessions(store: &DbStore) -> Result<Vec<CodeSession>> {
+    entities::code_session::Entity::find()
+        .order_by_desc(entities::code_session::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(session_from_row)
+        .collect()
+}
+
+/// Sessions belonging to one workspace, most recently created first.
+pub async fn list_sessions_for_workspace(
+    store: &DbStore,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<CodeSession>> {
+    entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::WorkspaceId.eq(workspace_id.0))
+        .order_by_desc(entities::code_session::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(session_from_row)
+        .collect()
+}
+
+/// Sessions in one lifecycle state.
+pub async fn list_sessions_by_lifecycle(
+    store: &DbStore,
+    lifecycle: CodeSessionLifecycle,
+) -> Result<Vec<CodeSession>> {
+    entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Lifecycle.eq(lifecycle.as_str().to_owned()))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(session_from_row)
+        .collect()
+}
+
+/// Persist mutable session fields. `id`, `workspace_id`, and `created_at` stay as stored.
+pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool> {
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::HarnessKind,
+            sea_orm::sea_query::Expr::value(session.harness_kind.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::code_session::Column::HarnessVersion,
+            sea_orm::sea_query::Expr::value(session.harness_version.clone()),
+        )
+        .col_expr(
+            entities::code_session::Column::HarnessResumeRef,
+            sea_orm::sea_query::Expr::value(session.harness_resume_ref.clone()),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionMode,
+            sea_orm::sea_query::Expr::value(session.permission_mode.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::code_session::Column::Lifecycle,
+            sea_orm::sea_query::Expr::value(session.lifecycle.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::code_session::Column::FenceReason,
+            sea_orm::sea_query::Expr::value(match &session.fence_reason {
+                Some(reason) => Some(serde_json::to_value(reason)?),
+                None => None,
+            }),
+        )
+        .col_expr(
+            entities::code_session::Column::ChildPid,
+            sea_orm::sea_query::Expr::value(session.child_pid),
+        )
+        .col_expr(
+            entities::code_session::Column::SpawnEpoch,
+            sea_orm::sea_query::Expr::value(session.spawn_epoch),
+        )
+        .col_expr(
+            entities::code_session::Column::AttentionState,
+            sea_orm::sea_query::Expr::value(serde_json::to_value(&session.attention.state)?),
+        )
+        .col_expr(
+            entities::code_session::Column::AttentionSource,
+            sea_orm::sea_query::Expr::value(session.attention.source.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::code_session::Column::UnrecognizedEventCount,
+            sea_orm::sea_query::Expr::value(session.unrecognized_event_count),
+        )
+        .filter(entities::code_session::Column::Id.eq(session.id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
 }
 
 pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {

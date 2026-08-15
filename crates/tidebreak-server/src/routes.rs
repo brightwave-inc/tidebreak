@@ -23,6 +23,7 @@ mod app_invoke;
 mod app_library;
 mod approvals;
 pub(crate) mod client_execution;
+pub(crate) mod code;
 mod compaction;
 mod connected_apps;
 mod delegated_file_execution;

@@ -5,6 +5,7 @@
 //! payloads) never ride these events — they carry hints.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::{AttentionSource, AttentionState, CodeApprovalId, CodeTurnId, HarnessKind};
 
@@ -18,7 +19,7 @@ pub const MAX_NOTICE_CHARS: usize = 1_024;
 pub const MAX_TOOL_SUMMARY_CHARS: usize = 512;
 
 /// Display-oriented classification of a tool the engine started.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolDetail {
     /// A shell command.
@@ -51,7 +52,7 @@ pub enum ToolDetail {
 }
 
 /// How a tool call finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOutcome {
     /// The tool ran and returned a result.
@@ -63,7 +64,7 @@ pub enum ToolOutcome {
 }
 
 /// Kind of file change reported by the engine or a checkpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum FileChangeKind {
     /// A new file.
@@ -77,7 +78,7 @@ pub enum FileChangeKind {
 }
 
 /// Bounded add/delete counts for a diff. Bodies live on a GET route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Diffstat {
     /// Files touched.
     pub files: u32,
@@ -91,7 +92,7 @@ pub struct Diffstat {
 }
 
 /// Token accounting as reported by the engine. Missing fields stay zero.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 pub struct CodeUsage {
     /// Input tokens.
     #[serde(default)]
@@ -108,25 +109,27 @@ pub struct CodeUsage {
 }
 
 /// Hint that a turn recorded a checkpoint. The diff body is loaded separately.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct CheckpointHint {
     /// Hidden ref name, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub checkpoint_ref: Option<String>,
     /// Bounded diffstat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub diffstat: Option<Diffstat>,
 }
 
 /// Bounded error carried on [`CodeEvent::TurnFailed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct BoundedError {
     /// Short message, already truncated by the adapter.
     pub message: String,
 }
 
 /// Severity of a visible-degradation notice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessNoticeLevel {
     /// Informational.
@@ -138,7 +141,7 @@ pub enum HarnessNoticeLevel {
 }
 
 /// Decision recorded on [`CodeEvent::ApprovalResolved`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalDecisionKind {
     /// Approved.
@@ -147,6 +150,7 @@ pub enum ApprovalDecisionKind {
     Deny {
         /// Feedback returned to the engine, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         feedback: Option<String>,
     },
 }
@@ -156,7 +160,7 @@ pub enum ApprovalDecisionKind {
 /// Serialized as an internally-tagged union (a `type` field selects the
 /// variant), and `#[non_exhaustive]` so new event kinds can be added without
 /// breaking downstream consumers.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CodeEvent {
@@ -168,6 +172,7 @@ pub enum CodeEvent {
         harness_version: String,
         /// Engine-native resume token, when the stream reported one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         resume_ref: Option<String>,
     },
     /// A user→engine turn has begun.
@@ -240,6 +245,7 @@ pub enum CodeEvent {
         usage: CodeUsage,
         /// Checkpoint recorded at turn end, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         checkpoint: Option<CheckpointHint>,
     },
     /// The turn failed and was abandoned.
@@ -273,7 +279,7 @@ pub enum CodeEvent {
 }
 
 /// A [`CodeEvent`] paired with its per-session sequence number.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct SequencedCodeEvent {
     /// Monotonic per-session sequence number; the first event is 1.
     pub seq: i64,
