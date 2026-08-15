@@ -70,6 +70,17 @@ pub enum AgentError {
     #[error("provider credential missing: {0}")]
     MissingCredential(String),
 
+    /// No usable connector session — never signed in, revoked, or refresh
+    /// reuse. Callers surface a reconnect affordance rather than a fault.
+    #[error("sign-in required: {0}")]
+    SignInRequired(String),
+
+    /// The authorization server refused the requested OAuth target. An
+    /// attested mint remints under a fresh context id; any other failure
+    /// is terminal.
+    #[error("attestation context rejected: {0}")]
+    InvalidTarget(String),
+
     /// A persistence failure from the `Store` / `BlobStore`.
     #[error("store error: {0}")]
     Store(String),
@@ -166,6 +177,8 @@ impl AgentError {
         match self {
             Self::Config(_) => "config",
             Self::MissingCredential(_) => "missing_credential",
+            Self::SignInRequired(_) => "authentication",
+            Self::InvalidTarget(_) => "invalid_target",
             Self::Store(_) => "store",
             Self::ProjectNotFound(_) => "not_found",
             Self::OutputFilenameTaken { .. } | Self::OutputRevisionConflict { .. } => "conflict",
@@ -306,6 +319,20 @@ mod tests {
         let info: AgentErrorInfo = (&AgentError::msg("boom")).into();
         let json = serde_json::to_string(&info).unwrap();
         assert_eq!(serde_json::from_str::<AgentErrorInfo>(&json).unwrap(), info);
+    }
+
+    #[test]
+    fn sign_in_required_shares_the_authentication_kind() {
+        let error = AgentError::SignInRequired("no session".into());
+        assert_eq!(error.kind(), "authentication");
+        assert_eq!(error.to_string(), "sign-in required: no session");
+    }
+
+    #[test]
+    fn invalid_target_is_its_own_kind() {
+        let error = AgentError::InvalidTarget("the requested target is unavailable".into());
+        assert_eq!(error.kind(), "invalid_target");
+        assert_ne!(error.kind(), "config");
     }
 
     #[test]
