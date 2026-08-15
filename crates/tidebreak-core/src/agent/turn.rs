@@ -1343,17 +1343,25 @@ impl Agent {
                 // plan turn refuses to spawn or wait on them at all: the
                 // read-only promise has to hold transitively, not just for
                 // this agent's own calls.
-                let plan_mode_blocks_orchestration =
-                    matches!(chat.permission_mode, Some(PermissionMode::Plan))
-                        && matches!(
-                            isolations[index],
-                            Some(CallIsolation::SandboxSpawn | CallIsolation::AgentWait)
-                        );
+                let plan_mode = matches!(chat.permission_mode, Some(PermissionMode::Plan));
+                let plan_mode_blocks_orchestration = plan_mode
+                    && matches!(
+                        isolations[index],
+                        Some(CallIsolation::SandboxSpawn | CallIsolation::AgentWait)
+                    );
+                let plan_mode_blocks_questions =
+                    plan_mode && call.name == crate::ASK_USER_QUESTIONS_TOOL;
                 if plan_mode_blocks_orchestration {
                     outputs[index] = Some(self.decline_call(
                         call,
                         events,
                         "not run: agent delegation is not available in plan mode; the chat is read-only until the reader leaves plan mode. Continue with read-only tools.".into(),
+                    ));
+                } else if plan_mode_blocks_questions {
+                    outputs[index] = Some(self.decline_call(
+                        call,
+                        events,
+                        "not run: ask_user_questions is not available in plan mode. Record missing inputs as assumptions or first steps in the plan and submit it with exit_plan_mode.".into(),
                     ));
                 } else {
                     match isolations[index].expect("an isolated call has a class") {

@@ -2,8 +2,10 @@
 //!
 //! A plan is a continuation, not a chat message: `exit_plan_mode` parks the
 //! foreground turn the way `ask_user_questions` does, and the user's decision
-//! completes the same tool call and resumes the blocked turn. Accepting is the
-//! one place a permission mode changes as a side effect — the chat leaves
+//! completes the same tool call and resumes the blocked turn. Plan mode itself
+//! does not park on `ask_user_questions` — a missing file or choice belongs in
+//! the plan as an assumption or first step. Accepting is the one place a
+//! permission mode changes as a side effect — the chat leaves
 //! [`crate::PermissionMode::Plan`] for the execution mode the decision names,
 //! so the resumed turn re-freezes its surface with execution tools.
 
@@ -176,7 +178,7 @@ pub fn validate_exit_plan_mode_arguments(arguments: &Value) -> bool {
 pub fn exit_plan_mode_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<ExitPlanModeArgs>(
         EXIT_PLAN_MODE_TOOL,
-        "Pause the current plan-mode turn and present the finished plan for the user's decision. Call it once your exploration is complete and the plan is concrete, with the full plan in Markdown. Call this tool alone, with no assistant text or sibling tools. If the user accepts, the chat leaves plan mode and you execute the plan; if they send it back, revise using their feedback and submit again.",
+        "Pause the current plan-mode turn and present the finished plan for the user's decision. Call it once your exploration is complete and the plan is concrete, with the full plan in Markdown. If a needed file, choice, or other input is missing, record it as an assumption or first step in the plan rather than asking the user separately. Call this tool alone, with no assistant text or sibling tools. If the user accepts, the chat leaves plan mode and you execute the plan; if they send it back, revise using their feedback and submit again.",
     )
 }
 
@@ -259,5 +261,13 @@ mod tests {
         assert_eq!(result["decision"], "accepted");
         assert_eq!(result["permission_mode"], "ask");
         assert!(result["note"].as_str().unwrap().contains("left plan mode"));
+    }
+
+    #[test]
+    fn missing_inputs_belong_in_the_plan() {
+        let description = exit_plan_mode_tool_spec().description;
+        assert!(description.contains("missing"));
+        assert!(description.contains("assumption or first step"));
+        assert!(description.contains("rather than asking the user separately"));
     }
 }

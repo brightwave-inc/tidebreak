@@ -267,19 +267,19 @@ pub(crate) fn compose_for_surface(
         let mut lines = if names.is_empty() {
             vec![
                 "- This chat is in plan mode: design the approach, do not carry it out.",
-                "- Use the conversation to produce a concrete plan: the intended steps, what each one touches, and any open decisions the user should settle.",
+                "- Use the conversation to produce a concrete plan: the intended steps, what each one touches, and any open decisions the user should settle. A missing file, choice, or other input is an assumption or first step in the plan, not a question to park on.",
                 "- Do not present work as done, staged, or in progress. The plan is a proposal; execution happens only after the user accepts it or switches the chat out of plan mode.",
             ]
         } else {
             vec![
                 "- This chat is in plan mode: design the approach, do not carry it out. Every tool available this turn is read-only, and requests to modify anything will be refused until the user leaves plan mode.",
-                "- Explore with the available read-only tools until you understand the task, then produce a concrete plan: the intended steps, what each one touches, and any open decisions the user should settle.",
+                "- Explore with the available read-only tools until you understand the task, then produce a concrete plan: the intended steps, what each one touches, and any open decisions the user should settle. A missing file, choice, or other input is an assumption or first step in the plan, not a question to park on.",
                 "- Do not present work as done, staged, or in progress. The plan is a proposal; execution happens only after the user accepts it or switches the chat out of plan mode.",
             ]
         };
         if has(tidebreak_core::EXIT_PLAN_MODE_TOOL) {
             lines.push(
-                "- When the plan is ready, submit it with `exit_plan_mode` and stop; the user decides from there. If they send it back, revise it with their feedback and submit again.",
+                "- When the plan is ready, submit it with `exit_plan_mode` and stop; the user decides from there. If they send it back, revise it with their feedback and submit again. If something needed is missing, write it into the plan as an assumption or first step and submit that; do not wait for a separate answer.",
             );
         }
         push_section(&mut prompt, PLAN_MODE_HEADING, &lines);
@@ -1013,6 +1013,8 @@ mod tests {
 
         assert!(plan.contains(PLAN_MODE_HEADING));
         assert!(plan.contains("do not carry it out"));
+        assert!(plan.contains("assumption or first step"));
+        assert!(plan.contains("not a question to park on"));
         assert!(!normal.contains(PLAN_MODE_HEADING));
         // The flag adds exactly one section; every tool-derived section stays
         // keyed to the surface alone.
@@ -1535,6 +1537,29 @@ mod tests {
         assert!(prompt.contains("no assistant prose and no sibling tool calls"));
         assert!(prompt.contains("correct it by emitting only `ask_user_questions`"));
         assert!(prompt.contains("wait for the user's structured answer"));
+    }
+
+    #[test]
+    fn plan_mode_sends_missing_inputs_through_exit_plan_mode() {
+        let prompt = compose_for_surface(
+            &[spec("read_file"), spec(tidebreak_core::EXIT_PLAN_MODE_TOOL)],
+            &[],
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            None,
+            None,
+            true,
+        );
+
+        assert!(prompt.contains("assumption or first step"));
+        assert!(prompt.contains("not a question to park on"));
+        assert!(prompt.contains("write it into the plan"));
+        assert!(prompt.contains("`exit_plan_mode`"));
+        assert!(!prompt.contains(USER_QUESTIONS_HEADING));
+        assert!(!prompt.contains("`ask_user_questions`"));
     }
 
     #[test]
