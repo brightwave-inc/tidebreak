@@ -19,10 +19,14 @@ postgres = ["tidebreak-core/postgres"]
 # a real turn through the binary. Off by default and never enabled by a release
 # build: see `src/scripted_provider.rs`.
 scripted-provider = []
+# Compile the scripted external-engine adapter in, so a test in another crate
+# can drive a real code-mode turn through the binary. Off by default.
+scripted-harness = []
 
 [dependencies]
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
+tidebreak-harness = { path = "../tidebreak-harness" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
 tidebreak-egress = { path = "../tidebreak-egress" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }

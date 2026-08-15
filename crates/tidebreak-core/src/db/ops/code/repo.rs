@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::code::{CodeRepo, QuickAction, RepoId};
 use crate::error::{AgentError, Result};
@@ -34,6 +34,74 @@ pub async fn get_repo(store: &DbStore, id: RepoId) -> Result<Option<CodeRepo>> {
         return Ok(None);
     };
     Ok(Some(repo_from_row(row)?))
+}
+
+/// Load a repository by its canonical toplevel path.
+pub async fn get_repo_by_root_path(store: &DbStore, root_path: &str) -> Result<Option<CodeRepo>> {
+    let Some(row) = entities::code_repo::Entity::find()
+        .filter(entities::code_repo::Column::RootPath.eq(root_path))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(repo_from_row(row)?))
+}
+
+/// Every registered repository, most recently created first.
+pub async fn list_repos(store: &DbStore) -> Result<Vec<CodeRepo>> {
+    entities::code_repo::Entity::find()
+        .order_by_desc(entities::code_repo::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(repo_from_row)
+        .collect()
+}
+
+/// Persist mutable repository fields. `id`, `root_path`, and `created_at` stay as stored.
+pub async fn save_repo(store: &DbStore, repo: &CodeRepo) -> Result<bool> {
+    let result = entities::code_repo::Entity::update_many()
+        .col_expr(
+            entities::code_repo::Column::DisplayName,
+            sea_orm::sea_query::Expr::value(repo.display_name.clone()),
+        )
+        .col_expr(
+            entities::code_repo::Column::DefaultBaseRef,
+            sea_orm::sea_query::Expr::value(repo.default_base_ref.clone()),
+        )
+        .col_expr(
+            entities::code_repo::Column::BranchPrefix,
+            sea_orm::sea_query::Expr::value(repo.branch_prefix.clone()),
+        )
+        .col_expr(
+            entities::code_repo::Column::SetupScript,
+            sea_orm::sea_query::Expr::value(repo.setup_script.clone()),
+        )
+        .col_expr(
+            entities::code_repo::Column::ArchiveScript,
+            sea_orm::sea_query::Expr::value(repo.archive_script.clone()),
+        )
+        .col_expr(
+            entities::code_repo::Column::QuickActions,
+            sea_orm::sea_query::Expr::value(serde_json::to_value(&repo.quick_actions)?),
+        )
+        .filter(entities::code_repo::Column::Id.eq(repo.id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Delete a repository. Callers must have removed its workspaces first.
+pub async fn delete_repo(store: &DbStore, id: RepoId) -> Result<bool> {
+    let result = entities::code_repo::Entity::delete_by_id(id.0)
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
 }
 
 pub(super) fn repo_from_row(row: entities::code_repo::Model) -> Result<CodeRepo> {

@@ -245,6 +245,9 @@ pub struct AppState {
     /// absent everywhere else, where folder bindings read as not connected
     /// and refuse to grant instead of parking.
     pub(crate) host_folders: Option<Arc<dyn crate::host_folders::HostFolders>>,
+    /// Code-mode runtime: worktrees, session workers, doctor, event bus.
+    /// Absent only in tests that assemble state without a [`DbStore`].
+    pub(crate) code: Option<Arc<crate::code::CodeRuntime>>,
 }
 
 impl AppState {
@@ -431,6 +434,7 @@ impl AppState {
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
             code_execution: None,
             host_folders: None,
+            code: None,
         })
     }
 

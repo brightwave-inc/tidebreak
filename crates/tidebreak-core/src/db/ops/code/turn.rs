@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
 use crate::error::{AgentError, Result};
@@ -43,6 +43,90 @@ pub async fn get_turn(store: &DbStore, id: CodeTurnId) -> Result<Option<CodeTurn
         return Ok(None);
     };
     Ok(Some(turn_from_row(row)?))
+}
+
+/// Turns of one session, oldest first.
+pub async fn list_turns(store: &DbStore, session_id: CodeSessionId) -> Result<Vec<CodeTurn>> {
+    entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+        .order_by_asc(entities::code_turn::Column::Ordinal)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(turn_from_row)
+        .collect()
+}
+
+/// The open (non-terminal) turn for a session, if any.
+pub async fn get_open_turn(store: &DbStore, session_id: CodeSessionId) -> Result<Option<CodeTurn>> {
+    let turns = list_turns(store, session_id).await?;
+    Ok(turns
+        .into_iter()
+        .rev()
+        .find(|turn| turn.status == CodeTurnStatus::Running))
+}
+
+/// Next 1-based ordinal for a new turn on this session.
+pub async fn next_turn_ordinal(store: &DbStore, session_id: CodeSessionId) -> Result<i64> {
+    let last = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::code_turn::Column::Ordinal)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    last.map_or(Some(1), |row| row.ordinal.checked_add(1))
+        .ok_or_else(|| {
+            AgentError::Store(format!("turn ordinal exhausted for session {session_id}"))
+        })
+}
+
+/// Persist mutable turn fields. `id`, `session_id`, `ordinal`, and `started_at` stay as stored.
+pub async fn save_turn(store: &DbStore, turn: &CodeTurn) -> Result<bool> {
+    let result = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Status,
+            sea_orm::sea_query::Expr::value(turn.status.as_str().to_owned()),
+        )
+        .col_expr(
+            entities::code_turn::Column::UserInput,
+            sea_orm::sea_query::Expr::value(turn.user_input.clone()),
+        )
+        .col_expr(
+            entities::code_turn::Column::UserInputBlobId,
+            sea_orm::sea_query::Expr::value(turn.user_input_blob_id),
+        )
+        .col_expr(
+            entities::code_turn::Column::CheckpointRef,
+            sea_orm::sea_query::Expr::value(turn.checkpoint_ref.clone()),
+        )
+        .col_expr(
+            entities::code_turn::Column::Diffstat,
+            sea_orm::sea_query::Expr::value(match &turn.diffstat {
+                Some(stat) => Some(serde_json::to_value(stat)?),
+                None => None,
+            }),
+        )
+        .col_expr(
+            entities::code_turn::Column::Usage,
+            sea_orm::sea_query::Expr::value(match &turn.usage {
+                Some(usage) => Some(serde_json::to_value(usage)?),
+                None => None,
+            }),
+        )
+        .col_expr(
+            entities::code_turn::Column::Narrative,
+            sea_orm::sea_query::Expr::value(turn.narrative.clone()),
+        )
+        .col_expr(
+            entities::code_turn::Column::EndedAt,
+            sea_orm::sea_query::Expr::value(turn.ended_at),
+        )
+        .filter(entities::code_turn::Column::Id.eq(turn.id.0))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
 }
 
 pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn> {

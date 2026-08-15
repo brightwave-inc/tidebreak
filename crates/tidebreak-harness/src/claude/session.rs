@@ -209,6 +209,13 @@ impl HarnessSession for ClaudeSession {
         self.resume_ref.clone()
     }
 
+    fn child_pid(&self) -> Option<i64> {
+        self.child
+            .as_ref()
+            .and_then(tokio::process::Child::id)
+            .map(i64::from)
+    }
+
     async fn shutdown(mut self: Box<Self>) -> Result<(), HarnessError> {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;

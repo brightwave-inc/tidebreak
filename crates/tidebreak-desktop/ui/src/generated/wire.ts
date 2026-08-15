@@ -488,6 +488,15 @@ export type AppViewSession = { frame_path: string, };
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
+ * Decision recorded on [`CodeEvent::ApprovalResolved`].
+ */
+export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny", 
+/**
+ * Feedback returned to the engine, when any.
+ */
+feedback?: string, };
+
+/**
  * How wide a standing grant the human chose, narrowest first.
  *
  * The renderer names a rung; the server builds the concrete grant from the
@@ -507,6 +516,54 @@ export type AssistantCitationId = string;
 export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: number, document_id: DocumentId, locator: CitationLocator, };
 
 /**
+ * An attention state together with the source that produced it.
+ *
+ * [`AttentionState::NeedsYou`] also carries a source so a structured need
+ * stays distinguishable after the pair is stored as JSON. The two sources
+ * must agree when the state is `NeedsYou`; [`Attention::needs_you`] enforces
+ * that at construction.
+ */
+export type Attention = { 
+/**
+ * The state.
+ */
+state: AttentionState, 
+/**
+ * Who or what set it.
+ */
+source: AttentionSource, };
+
+/**
+ * Why the current attention state was chosen.
+ */
+export type AttentionSource = "structured" | "heuristic" | "lifecycle" | "user";
+
+/**
+ * Server-computed attention for one unit of supervised work.
+ */
+export type AttentionState = { "type": "working" } | { "type": "needs_you", 
+/**
+ * Short prompt shown on the badge.
+ */
+prompt: string, 
+/**
+ * How this need was detected.
+ */
+source: AttentionSource, } | { "type": "stalled", 
+/**
+ * Seconds of observed silence.
+ */
+idle_secs: number, } | { "type": "done_unreviewed" } | { "type": "fenced", 
+/**
+ * Why it was fenced.
+ */
+reason: FenceReason, } | { "type": "manual", 
+/**
+ * User-supplied note.
+ */
+note: string, };
+
+/**
  * Where the Auto-mode judge stands on one parked call.
  *
  * The marker is load-bearing for the renderer: without it, "the judge is
@@ -516,9 +573,23 @@ export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: numb
 export type AutoJudgeStatus = "judging" | "approved" | "declined";
 
 /**
+ * Bounded error carried on [`CodeEvent::TurnFailed`].
+ */
+export type BoundedError = { 
+/**
+ * Short message, already truncated by the adapter.
+ */
+message: string, };
+
+/**
  * Identifies one tool call, stable across its request/approval/result.
  */
 export type CallId = string;
+
+/**
+ * Whether an adapter can honor a capability for a probed engine version.
+ */
+export type CapLevel = "supported" | "unsupported" | "unknown";
 
 /**
  * A persistent conversation with an exact, ordered host-root projection.
@@ -712,12 +783,155 @@ tool_activity: Array<ChatToolActivitySnapshot>,
 terminal_turns: Array<ChatTerminalTurnSnapshot>, last_event_seq: number, };
 
 /**
+ * Hint that a turn recorded a checkpoint. The diff body is loaded separately.
+ */
+export type CheckpointHint = { 
+/**
+ * Hidden ref name, when known.
+ */
+checkpoint_ref?: string, 
+/**
+ * Bounded diffstat.
+ */
+diffstat?: Diffstat, };
+
+/**
  * A small, human-scale position inside a cited document.
  *
  * Validation is intentionally loose. A page or line that does not exist still
  * renders and opens the document as close to that position as the reader can.
  */
 export type CitationLocator = { "kind": "document" } | { "kind": "page", page: number, } | { "kind": "pages", start: number, end: number, } | { "kind": "lines", start: number, end: number, } | { "kind": "sheet", sheet: string, cells: string | null, };
+
+/**
+ * Identifies one parked approval belonging to a code session.
+ */
+export type CodeApprovalId = string;
+
+/**
+ * One event in an external agent-engine session's journal.
+ *
+ * Serialized as an internally-tagged union (a `type` field selects the
+ * variant), and `#[non_exhaustive]` so new event kinds can be added without
+ * breaking downstream consumers.
+ */
+export type CodeEvent = { "type": "session_started", 
+/**
+ * Which engine.
+ */
+harness_kind: HarnessKind, 
+/**
+ * Version observed at launch.
+ */
+harness_version: string, 
+/**
+ * Engine-native resume token, when the stream reported one.
+ */
+resume_ref?: string, } | { "type": "turn_started", 
+/**
+ * The turn being processed.
+ */
+turn_id: CodeTurnId, } | { "type": "assistant_delta", 
+/**
+ * The text fragment to append.
+ */
+text: string, } | { "type": "assistant_message", 
+/**
+ * The message text.
+ */
+text: string, } | { "type": "reasoning_delta", 
+/**
+ * The reasoning fragment.
+ */
+text: string, } | { "type": "tool_started", 
+/**
+ * Engine-native call id.
+ */
+call_id: string, 
+/**
+ * Tool name as the engine reported it.
+ */
+name: string, 
+/**
+ * Display-oriented classification.
+ */
+detail: ToolDetail, } | { "type": "tool_completed", 
+/**
+ * Engine-native call id.
+ */
+call_id: string, 
+/**
+ * How it finished.
+ */
+outcome: ToolOutcome, 
+/**
+ * Bounded preview of the result.
+ */
+preview: string, } | { "type": "file_changed", 
+/**
+ * Path relative to the worktree, when the engine reports one.
+ */
+path: string, 
+/**
+ * Kind of change.
+ */
+kind: FileChangeKind, 
+/**
+ * Bounded diffstat.
+ */
+diffstat: Diffstat, } | { "type": "approval_requested", 
+/**
+ * Hint id; the row is the source of truth.
+ */
+approval_id: CodeApprovalId, } | { "type": "approval_resolved", 
+/**
+ * The approval that was decided.
+ */
+approval_id: CodeApprovalId, 
+/**
+ * The decision.
+ */
+decision: ApprovalDecisionKind, } | { "type": "user_steered", 
+/**
+ * The steered user text, already bounded.
+ */
+text: string, } | { "type": "turn_completed", 
+/**
+ * Token accounting as reported by the engine.
+ */
+usage: CodeUsage, 
+/**
+ * Checkpoint recorded at turn end, when any.
+ */
+checkpoint?: CheckpointHint, } | { "type": "turn_failed", 
+/**
+ * Bounded error.
+ */
+error: BoundedError, } | { "type": "turn_interrupted" } | { "type": "checkpoint_recorded", 
+/**
+ * The turn that ended at this checkpoint.
+ */
+turn_id: CodeTurnId, 
+/**
+ * Bounded diffstat.
+ */
+diffstat: Diffstat, } | { "type": "harness_notice", 
+/**
+ * Severity.
+ */
+level: HarnessNoticeLevel, 
+/**
+ * Bounded message.
+ */
+message: string, } | { "type": "attention_changed", 
+/**
+ * New state.
+ */
+state: AttentionState, 
+/**
+ * Who or what set it.
+ */
+source: AttentionSource, };
 
 /**
  * Renderer-safe configuration and readiness.
@@ -826,6 +1040,80 @@ export type CodeExecutionProviderSnapshot = "local" | "e2b" | "daytona" | "docke
  * act on — install a key, switch provider — never an internal failure detail.
  */
 export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
+
+/**
+ * How an external agent-engine session handles mutations and approvals.
+ *
+ * Each adapter maps these onto the engine's native flags. A mode the
+ * engine cannot honor is refused at session creation — never approximated.
+ */
+export type CodePermissionMode = "plan" | "ask" | "auto";
+
+/**
+ * A registered local git repository.
+ */
+export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, created_at: string, };
+
+/**
+ * Identifies one durable conversation with an external agent engine.
+ */
+export type CodeSessionId = string;
+
+/**
+ * Lifecycle of a persisted code session.
+ */
+export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "ended";
+
+/**
+ * One durable conversation with an external agent engine.
+ */
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+
+/**
+ * Identifies one user→engine cycle inside a code session.
+ */
+export type CodeTurnId = string;
+
+/**
+ * One user→engine turn.
+ */
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, usage?: CodeUsage, checkpoint_ref?: string, started_at: string, ended_at?: string, };
+
+/**
+ * Status of one user→engine turn.
+ */
+export type CodeTurnStatus = "running" | "completed" | "failed" | "interrupted";
+
+/**
+ * Token accounting as reported by the engine. Missing fields stay zero.
+ */
+export type CodeUsage = { 
+/**
+ * Input tokens.
+ */
+input_tokens: number, 
+/**
+ * Output tokens.
+ */
+output_tokens: number, 
+/**
+ * Cache-read input tokens, when the engine reports them.
+ */
+cache_read_input_tokens: number, 
+/**
+ * Cache-write input tokens, when the engine reports them.
+ */
+cache_creation_input_tokens: number, };
+
+/**
+ * One isolated workspace (worktree + branch) on a repo.
+ */
+export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, };
+
+/**
+ * Status of a persisted workspace.
+ */
+export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived";
 
 /**
  * What one on-demand compaction did.
@@ -1103,6 +1391,27 @@ admitted: boolean,
 denials: Array<DetachedAdmissionDenialReason>, };
 
 /**
+ * Bounded add/delete counts for a diff. Bodies live on a GET route.
+ */
+export type Diffstat = { 
+/**
+ * Files touched.
+ */
+files: number, 
+/**
+ * Lines added.
+ */
+insertions: number, 
+/**
+ * Lines deleted.
+ */
+deletions: number, 
+/**
+ * True when the underlying diff was truncated.
+ */
+truncated: boolean, };
+
+/**
  * Identifies an authoritative source document.
  *
  * Usually minted fresh with [`DocumentId::new`], but [`DocumentId::derive`]
@@ -1201,6 +1510,20 @@ export type ExecFileRejectionReason = "stale" | "snapshot_unavailable" | "staged
 export type ExecFileUndoAvailability = "available" | "already_undone" | "stale" | "not_available";
 
 /**
+ * Why a session was fenced during crash recovery.
+ */
+export type FenceReason = { "type": "orphan_alive" } | { "type": "probe_ambiguous", 
+/**
+ * Bounded human-readable detail.
+ */
+detail: string, };
+
+/**
+ * Kind of file change reported by the engine or a checkpoint.
+ */
+export type FileChangeKind = "added" | "modified" | "deleted" | "renamed";
+
+/**
  * The access level of a folder binding.
  *
  * Consent-bearing: the level is part of what the user grants and part of
@@ -1285,6 +1608,74 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
  * much larger thing to agree to than "don't ask me about `cargo` again".
  */
 export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "path_subtree", prefix: string, } | { "scope": "whole_tool" };
+
+/**
+ * Capability vector for one probed engine version.
+ *
+ * Constructed exhaustively — there is no [`Default`] — so a new flag is a
+ * compile break at every adapter.
+ */
+export type HarnessCaps = { 
+/**
+ * The engine can resume a prior session from a native resume ref.
+ */
+resume: CapLevel, 
+/**
+ * The engine streams partial assistant text.
+ */
+streaming_deltas: CapLevel, 
+/**
+ * The engine exposes a structured approval channel.
+ */
+structured_approvals: CapLevel, 
+/**
+ * The engine accepts a mid-turn user message.
+ */
+mid_turn_steering: CapLevel, 
+/**
+ * The engine has a read-only / plan posture the adapter can select.
+ */
+plan_mode: CapLevel, 
+/**
+ * The engine accepts a reasoning-effort control.
+ */
+reasoning_levels: CapLevel, 
+/**
+ * The engine emits native file-change events.
+ */
+native_file_change_events: CapLevel, 
+/**
+ * The engine honors a native interrupt.
+ */
+native_interrupt: CapLevel, };
+
+/**
+ * One engine's probe, capabilities, and remediation.
+ */
+export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
+
+/**
+ * Doctor report for every registered engine adapter.
+ */
+export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>, };
+
+/**
+ * Which external agent engine a session is bound to.
+ *
+ * Named after the shipped adapters. The traits those adapters implement
+ * stay engine-neutral; this enum is only the catalog of known engines.
+ */
+export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
+
+/**
+ * Severity of a visible-degradation notice.
+ */
+export type HarnessNoticeLevel = "info" | "warning" | "error";
+
+/**
+ * Adapter maturity, independent of any one capability flag.
+ */
+export type HarnessTier = "reference" | "secondary" | "tertiary" | "best_effort";
 
 /**
  * Renderer-safe mirror of the host broker's capability vocabulary.
@@ -2071,6 +2462,35 @@ models: Array<CustomModelConfig>, };
 export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openrouter" | "ollama" | "openai_compatible" | "model_gateway";
 
 /**
+ * Bounded pull-request digest stored on a workspace.
+ */
+export type PullRequestDigest = { 
+/**
+ * PR number on the host.
+ */
+number: number, 
+/**
+ * Host URL, when known.
+ */
+url?: string | null, 
+/**
+ * Host state token (open, merged, closed, …).
+ */
+state: string, 
+/**
+ * One-line checks summary.
+ */
+checks_summary?: string | null, };
+
+/**
+ * A follow-up parked while the session is already running a turn.
+ *
+ * No turn id: the row is created when the worker promotes this slot.
+ * `position` is 1-based in the single-slot queue.
+ */
+export type QueuedCodeTurn = { session_id: CodeSessionId, message: string, position: number, };
+
+/**
  * The id is the client-generated turn id promotion will accept under, so an
  * ambiguous promotion retry resolves to `Existing` rather than a duplicate
  * turn. Rows are FIFO by `position` within a chat and fully durable: a queue
@@ -2117,6 +2537,23 @@ created_at: string,
  * When it was last edited or reordered.
  */
 updated_at: string, };
+
+/**
+ * A named command the user can run in a workspace.
+ */
+export type QuickAction = { 
+/**
+ * Display name.
+ */
+name: string, 
+/**
+ * Command to run in the worktree.
+ */
+command: string, 
+/**
+ * When true, run once after workspace creation.
+ */
+auto_run_on_create: boolean, };
 
 /**
  * How hard a reasoning-capable model should think before answering.
@@ -2278,6 +2715,11 @@ cache_read_input_tokens: number,
 cache_creation_input_tokens: number, };
 
 /**
+ * Identifies a registered local git repository.
+ */
+export type RepoId = string;
+
+/**
  * Non-authoritative, well-known starting location for the native picker.
  *
  * This is deliberately not a free-form path. The trusted desktop decides how
@@ -2399,6 +2841,11 @@ error: string, };
  * Why a root appears in one conversation's exact ordered projection.
  */
 export type RootAttachmentOrigin = "project_default" | "conversation";
+
+/**
+ * One journaled event on the per-session WebSocket.
+ */
+export type SequencedCodeEventFrame = { seq: number, event: CodeEvent, replayed?: boolean, };
 
 /**
  * Runtime settings a client can read. The API key itself is never returned —
@@ -2695,6 +3142,40 @@ network: NetworkPolicy, };
 export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_search_may_share_query" | "web_extract_may_fetch_url" | "exec_may_run_networked_command" | "external_mcp_may_call_server" | "workspace_may_modify_files" | "delegate_may_run_background_agent" | "computer_may_control_app" | "unsupported";
 
 /**
+ * Display-oriented classification of a tool the engine started.
+ */
+export type ToolDetail = { "kind": "command", 
+/**
+ * Command string.
+ */
+cmd: string, 
+/**
+ * Working directory, when reported.
+ */
+cwd: string, } | { "kind": "file_edit", 
+/**
+ * Path being edited.
+ */
+path: string, } | { "kind": "file_read", 
+/**
+ * Path being read.
+ */
+path: string, } | { "kind": "search", 
+/**
+ * Query string.
+ */
+query: string, } | { "kind": "other", 
+/**
+ * Bounded summary.
+ */
+summary: string, };
+
+/**
+ * How a tool call finished.
+ */
+export type ToolOutcome = "succeeded" | "failed" | "denied";
+
+/**
  * What a call produced, in a form a human can read.
  *
  * A command's output is the whole reason to run it. Withholding it leaves the
@@ -2915,6 +3396,11 @@ export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
  * reference; it is intentionally not a model-controlled argument.
  */
 export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "searxng";
+
+/**
+ * Identifies one isolated workspace (worktree + branch) on a repo.
+ */
+export type WorkspaceId = string;
 
 /**
  * Every tool name the renderer will accept, at runtime.

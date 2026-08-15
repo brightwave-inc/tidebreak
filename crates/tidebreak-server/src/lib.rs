@@ -27,6 +27,7 @@ mod blob_retirement_worker;
 mod bus;
 mod chat_titling;
 mod chatgpt_runtime;
+mod code;
 /// Host-owned code-execution provider selection and policy.
 pub mod code_execution;
 mod connected_apps;
@@ -89,6 +90,8 @@ mod sandbox_task_plan_worker;
 mod sandbox_web_search_worker;
 mod scoped_model_token;
 mod scoped_store;
+#[cfg(any(test, feature = "scripted-harness"))]
+mod scripted_harness;
 #[cfg(feature = "scripted-provider")]
 mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
@@ -118,8 +121,6 @@ use uuid::Uuid;
 
 use resolver::KeyedResolver;
 use tidebreak_code_execution::ExecTool;
-#[cfg(test)]
-use tidebreak_core::DbStore;
 use tidebreak_core::{
     ask_user_questions_tool_spec, computer_capture_screen_tool_spec, computer_click_tool_spec,
     computer_focus_window_tool_spec, computer_key_press_tool_spec, computer_list_windows_tool_spec,
@@ -137,8 +138,8 @@ use tidebreak_core::{
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
-    CachingSecretProvider, Config, CreateAppTool, FsBlobStore, KeychainSecretProvider, ListDir,
-    Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
+    CachingSecretProvider, Config, CreateAppTool, DbStore, FsBlobStore, KeychainSecretProvider,
+    ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 
 pub use durable_oplog::DurableOperationStore;
@@ -683,6 +684,54 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_standing_grant),
         )
         .route("/chats/{id}/events", get(routes::chat_events))
+        .route(
+            "/code/repos",
+            post(routes::code::create_repo).get(routes::code::list_repos),
+        )
+        .route(
+            "/code/repos/{id}",
+            get(routes::code::get_repo)
+                .patch(routes::code::patch_repo)
+                .delete(routes::code::delete_repo),
+        )
+        .route("/code/harnesses", get(routes::code::list_harnesses))
+        .route(
+            "/code/harnesses/refresh",
+            post(routes::code::refresh_harnesses),
+        )
+        .route(
+            "/code/workspaces",
+            post(routes::code::create_workspace).get(routes::code::list_workspaces),
+        )
+        .route(
+            "/code/workspaces/{id}",
+            get(routes::code::get_workspace).patch(routes::code::patch_workspace),
+        )
+        .route(
+            "/code/workspaces/{id}/archive",
+            post(routes::code::archive_workspace),
+        )
+        .route(
+            "/code/workspaces/{id}/sessions",
+            post(routes::code::create_session).get(routes::code::list_workspace_sessions),
+        )
+        .route(
+            "/code/sessions/{id}/turns",
+            post(routes::code::submit_turn).get(routes::code::list_session_turns),
+        )
+        .route(
+            "/code/sessions/{id}/steer",
+            post(routes::code::steer_session),
+        )
+        .route(
+            "/code/sessions/{id}/interrupt",
+            post(routes::code::interrupt_session),
+        )
+        .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
+        .route(
+            "/code/sessions/{id}/events",
+            get(routes::code::session_events),
+        )
         .merge(client_executor_api)
         // Merged before the bearer layer, so `require_token` wraps outside
         // `require_admin`: an unauthenticated request to a deployment-plane
@@ -1064,7 +1113,8 @@ async fn bind_inner(
     let instance_lock = InstanceLock::acquire(&config)?;
     let sandbox_container_admission = sandbox_admission::resolve(&config);
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
-    let store = connect_store(&config).await?;
+    let db = connect_db(&config).await?;
+    let store: Arc<dyn Store> = db.clone();
     let secrets = secret_provider(&config);
     // An app update replaces this binary, and macOS pins each keychain
     // item's access to the creating binary's signature — so the first boot
@@ -1261,6 +1311,11 @@ async fn bind_inner(
         state.mcp.set_host_folders(host.clone());
     }
     state.host_folders = host_folders;
+    let code = Arc::new(code::CodeRuntime::new(db, state.config.data_dir.clone()));
+    if let Err(error) = code.recover().await {
+        tracing::warn!("code-mode recovery: {}", error.message());
+    }
+    state.code = Some(code);
     // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
     // everything else instead of after a second reconcile.
@@ -1740,6 +1795,10 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
 /// token file refuses to boot here, before the store exists, on every path
 /// that opens it (#853).
 async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
+    Ok(connect_db(config).await?)
+}
+
+async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
     match config.profile {
         Profile::Desktop => {
             std::fs::create_dir_all(&config.data_dir)

@@ -234,8 +234,28 @@ pub trait HarnessSession: Send {
     /// Ask the engine to stop the current turn.
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
 
+    /// Inject a mid-turn user message, when the engine accepts one.
+    ///
+    /// The default refuses: an adapter must override this only when its
+    /// capability vector states [`CapLevel::Supported`] for mid-turn steering.
+    async fn steer(&mut self, text: String) -> Result<(), HarnessError> {
+        let _ = text;
+        Err(HarnessError::Other(
+            "mid-turn steering is not available on this engine".into(),
+        ))
+    }
+
     /// Engine-native resume token, when the stream has reported one.
     fn resume_ref(&self) -> Option<String>;
+
+    /// Child pid recorded from a process this session spawned, when any.
+    ///
+    /// Recovery only ever probes a pid this method has exposed. The default
+    /// is `None`: an adapter that does not spawn a child, or has not spawned
+    /// one yet, must not invent a pid.
+    fn child_pid(&self) -> Option<i64> {
+        None
+    }
 
     /// Tear the session down.
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
