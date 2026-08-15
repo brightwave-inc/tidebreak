@@ -8,6 +8,7 @@ mod session_events;
 mod sessions;
 mod terminals;
 mod types;
+mod updates;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
@@ -20,7 +21,7 @@ pub(crate) use repos::{create_repo, delete_repo, get_repo, list_repos, patch_rep
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
     create_session, interrupt_session, list_session_turns, list_workspace_sessions, reap_session,
-    steer_session, submit_turn,
+    set_attention, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
@@ -29,11 +30,12 @@ pub(crate) use terminals::{
 #[allow(unused_imports)]
 pub(crate) use types::{
     CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCommitSnapshot,
-    CodeFileChange, CodePushSnapshot, CodeRepoSnapshot, CodeSessionSnapshot,
+    CodeFileChange, CodePushSnapshot, CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot,
     CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
-    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
-    HarnessDoctorReport, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeUpdateNotice, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
+    CodeWorkspaceSnapshot, HarnessDoctorReport, QueuedCodeTurn, SequencedCodeEventFrame,
 };
+pub(crate) use updates::code_updates;
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_diff, list_workspace_files,
     list_workspaces, patch_workspace,

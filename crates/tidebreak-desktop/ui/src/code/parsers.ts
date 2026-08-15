@@ -36,6 +36,9 @@ import type {
   SequencedCodeEventFrame,
   ToolDetail,
   ToolOutcome,
+  CodeSessionDigest,
+  CodeUpdateNotice,
+  PullRequestDigest,
 } from "../api/types";
 import type {
   CodeEvent as WireCodeEvent,
@@ -60,6 +63,8 @@ import type {
   QuickAction as WireQuickAction,
   SequencedCodeEventFrame as WireSequencedCodeEventFrame,
   ToolDetail as WireToolDetail,
+  CodeSessionDigest as WireCodeSessionDigest,
+  CodeUpdateNotice as WireCodeUpdateNotice,
 } from "../generated/wire";
 
 /**
@@ -1184,6 +1189,139 @@ function isMember<T extends string>(
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+export function parseCodeSessionDigest(value: unknown): CodeSessionDigest | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeSessionDigest>(value, [
+      "workspace",
+      "session",
+      "lifecycle",
+      "attention",
+      "title",
+      "turn_count",
+      "pr_state",
+    ]) ||
+    !nonEmpty(value.workspace) ||
+    !nonEmpty(value.session) ||
+    !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
+    typeof value.title !== "string" ||
+    !isFiniteNumber(value.turn_count)
+  ) {
+    return null;
+  }
+  const attention = parseAttention(value.attention);
+  if (!attention) return null;
+  const pr_state =
+    value.pr_state === undefined ? undefined : parsePrState(value.pr_state);
+  if (value.pr_state !== undefined && !pr_state) return null;
+  return {
+    workspace: value.workspace,
+    session: value.session,
+    lifecycle: value.lifecycle,
+    attention,
+    title: value.title,
+    turn_count: value.turn_count,
+    ...(pr_state ? { pr_state } : {}),
+  };
+}
+
+export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
+  if (!isRecord(value) || typeof value.type !== "string") return null;
+  switch (value.type) {
+    case "snapshot": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "snapshot" }>>(value, [
+          "type",
+          "sessions",
+        ]) ||
+        !Array.isArray(value.sessions)
+      ) {
+        return null;
+      }
+      const sessions: CodeSessionDigest[] = [];
+      for (const item of value.sessions) {
+        const parsed = parseCodeSessionDigest(item);
+        if (!parsed) return null;
+        sessions.push(parsed);
+      }
+      return { type: "snapshot", sessions };
+    }
+    case "digest": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "digest" }>>(value, [
+          "type",
+          "workspace",
+          "session",
+          "lifecycle",
+          "attention",
+          "title",
+          "turn_count",
+          "pr_state",
+        ]) ||
+        !nonEmpty(value.workspace) ||
+        !nonEmpty(value.session) ||
+        !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
+        typeof value.title !== "string" ||
+        !isFiniteNumber(value.turn_count)
+      ) {
+        return null;
+      }
+      const attention = parseAttention(value.attention);
+      if (!attention) return null;
+      const pr_state =
+        value.pr_state === undefined ? undefined : parsePrState(value.pr_state);
+      if (value.pr_state !== undefined && !pr_state) return null;
+      return {
+        type: "digest",
+        workspace: value.workspace,
+        session: value.session,
+        lifecycle: value.lifecycle,
+        attention,
+        title: value.title,
+        turn_count: value.turn_count,
+        ...(pr_state ? { pr_state } : {}),
+      };
+    }
+    case "terminal_activity": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "terminal_activity" }>>(
+          value,
+          ["type", "workspace_id", "terminal_id"],
+        ) ||
+        !nonEmpty(value.workspace_id) ||
+        !nonEmpty(value.terminal_id)
+      ) {
+        return null;
+      }
+      return {
+        type: "terminal_activity",
+        workspace_id: value.workspace_id,
+        terminal_id: value.terminal_id,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function parsePrState(value: unknown): PullRequestDigest | null {
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value.number) ||
+    typeof value.state !== "string"
+  ) {
+    return null;
+  }
+  return {
+    number: value.number,
+    state: value.state,
+    ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...(typeof value.checks_summary === "string"
+      ? { checks_summary: value.checks_summary }
+      : {}),
+  };
 }
 
 export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {

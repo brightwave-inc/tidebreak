@@ -124,7 +124,6 @@ impl TerminalHub {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<TerminalNotice> {
         self.notices.subscribe()
     }

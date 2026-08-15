@@ -123,11 +123,13 @@ import {
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
   type CodePushSnapshot as WireCodePushSnapshot,
   type CodeFileChange as WireCodeFileChange,
+  type CodeSessionDigest as WireCodeSessionDigest,
+  type CodeUpdateNotice as WireCodeUpdateNotice,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
+  type PullRequestDigest as WirePullRequestDigest,
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
-  type PullRequestDigest as WirePullRequestDigest,
   type Diffstat as WireDiffstat,
   type FileChangeKind as WireFileChangeKind,
   type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
@@ -1012,6 +1014,8 @@ export type PullRequestDigest = WirePullRequestDigest;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
 export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;
+export type CodeSessionDigest = WireCodeSessionDigest;
+export type CodeUpdateNotice = WireCodeUpdateNotice;
 
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
 export type CodeApprovalSnapshot = WireCodeApprovalSnapshot;

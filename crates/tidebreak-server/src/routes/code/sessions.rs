@@ -8,8 +8,8 @@ use crate::state::AppState;
 
 use super::require_code;
 use super::types::{
-    CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn, SteerBody,
-    SubmitTurnBody,
+    CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn, SetAttentionBody,
+    SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::SubmitTurnOutcome;
 use tidebreak_core::{CodeSessionId, WorkspaceId};
@@ -101,6 +101,17 @@ pub async fn interrupt_session(
 ) -> Result<StatusCode, ServerError> {
     require_code(&state)?.interrupt(id).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+pub async fn set_attention(
+    State(state): State<AppState>,
+    Path(id): Path<CodeSessionId>,
+    Json(body): Json<SetAttentionBody>,
+) -> Result<Json<CodeSessionSnapshot>, ServerError> {
+    let session = require_code(&state)?
+        .set_attention(id, body.clear, body.note)
+        .await?;
+    Ok(Json(CodeSessionSnapshot::from(session)))
 }
 
 pub async fn reap_session(

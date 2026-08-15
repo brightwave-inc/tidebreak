@@ -65,6 +65,20 @@ pub async fn append_event(
     Ok(seq)
 }
 
+/// Created-at of the newest journal row, if the session has any.
+pub async fn latest_event_created_at(
+    store: &DbStore,
+    session_id: CodeSessionId,
+) -> Result<Option<chrono::DateTime<Utc>>> {
+    Ok(entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::code_event::Column::Seq)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(|model| model.created_at))
+}
+
 /// Events for a session with `seq > after`, in order.
 pub async fn list_events(
     store: &DbStore,

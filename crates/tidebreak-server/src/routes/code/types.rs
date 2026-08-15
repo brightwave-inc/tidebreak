@@ -521,6 +521,91 @@ pub struct CodeTerminalActivityNotice {
     pub terminal_id: CodeTerminalId,
 }
 
+/// Cheap per-session digest on `/code/updates`.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSessionDigest {
+    pub workspace: WorkspaceId,
+    pub session: tidebreak_core::CodeSessionId,
+    pub lifecycle: CodeSessionLifecycle,
+    pub attention: Attention,
+    pub title: String,
+    pub turn_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr_state: Option<PullRequestDigest>,
+}
+
+impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
+    fn from(digest: crate::code::bus::SessionDigest) -> Self {
+        Self {
+            workspace: digest.workspace,
+            session: digest.session,
+            lifecycle: digest.lifecycle,
+            attention: digest.attention,
+            title: digest.title,
+            turn_count: digest.turn_count,
+            pr_state: digest.pr_state,
+        }
+    }
+}
+
+/// One unsequenced notice on `WS /code/updates`.
+///
+/// A connect is restated as [`Self::Snapshot`]; later notices are live only.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CodeUpdateNotice {
+    /// Full current digest of every non-ended session.
+    Snapshot {
+        /// One row per live session.
+        sessions: Vec<CodeSessionDigest>,
+    },
+    /// One session's current digest.
+    Digest {
+        workspace: WorkspaceId,
+        session: tidebreak_core::CodeSessionId,
+        lifecycle: CodeSessionLifecycle,
+        attention: Attention,
+        title: String,
+        turn_count: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        pr_state: Option<PullRequestDigest>,
+    },
+    /// Coalesced terminal activity. Not restated on connect.
+    TerminalActivity {
+        workspace_id: WorkspaceId,
+        terminal_id: CodeTerminalId,
+    },
+}
+
+impl CodeUpdateNotice {
+    pub(crate) fn digest(digest: crate::code::bus::SessionDigest) -> Self {
+        let wire = CodeSessionDigest::from(digest);
+        Self::Digest {
+            workspace: wire.workspace,
+            session: wire.session,
+            lifecycle: wire.lifecycle,
+            attention: wire.attention,
+            title: wire.title,
+            turn_count: wire.turn_count,
+            pr_state: wire.pr_state,
+        }
+    }
+}
+
+/// Body of `POST /code/sessions/{id}/attention`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetAttentionBody {
+    /// Drop a Manual pin and restore computed state.
+    #[serde(default)]
+    pub clear: bool,
+    /// Pin a Manual note. Ignored when `clear` is true.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// Body of `POST /code/workspaces/{id}/terminals`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
 
 /**
@@ -37,6 +38,13 @@ const client = {
     },
   ]),
   getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+  openCodeUpdates: vi.fn(() => {
+    return {
+      close() {},
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as WebSocket;
+  }),
 };
 
 const app: AppContextValue = {
@@ -74,6 +82,8 @@ const app: AppContextValue = {
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
+  disconnectCodeUpdates();
+  useCodeUpdatesStore.getState().reset();
 });
 
 describe("CodeSidebar", () => {

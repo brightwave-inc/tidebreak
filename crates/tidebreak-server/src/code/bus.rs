@@ -1,21 +1,59 @@
-//! In-memory live fan-out for one code-mode session.
+//! In-memory live fan-out for one code-mode session plus the install-wide
+//! updates channel.
 //!
 //! The journal is the durable record a client replays on connect; this bus is
 //! the live tail. The session worker appends each event to the journal and
 //! then publishes it here with its assigned `seq`.
+//!
+//! `/code/updates` is unsequenced: a dropped notice costs nothing because the
+//! full digest is restated on every connect.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tidebreak_core::{CodeSessionId, SequencedCodeEvent};
+use tidebreak_core::{
+    Attention, CodeSessionId, CodeSessionLifecycle, PullRequestDigest, SequencedCodeEvent,
+    WorkspaceId,
+};
 use tokio::sync::broadcast;
 
 const LIVE_BUFFER: usize = 256;
+const UPDATES_BUFFER: usize = 256;
 
-/// Per-session broadcast channels for live journal events.
-#[derive(Default)]
+/// Cheap per-session digest published on `/code/updates`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionDigest {
+    pub workspace: WorkspaceId,
+    pub session: CodeSessionId,
+    pub lifecycle: CodeSessionLifecycle,
+    pub attention: Attention,
+    pub title: String,
+    pub turn_count: i64,
+    pub pr_state: Option<PullRequestDigest>,
+}
+
+/// One unsequenced notice on the install-wide updates channel.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CodeLiveUpdate {
+    /// Cheap per-session digest, computed from rows.
+    Digest(SessionDigest),
+}
+
+/// Per-session broadcast channels for live journal events, plus the
+/// install-wide digest channel.
 pub(crate) struct CodeEventBus {
     channels: Mutex<HashMap<CodeSessionId, broadcast::Sender<SequencedCodeEvent>>>,
+    updates: broadcast::Sender<CodeLiveUpdate>,
+}
+
+impl Default for CodeEventBus {
+    fn default() -> Self {
+        let (updates, _) = broadcast::channel(UPDATES_BUFFER);
+        Self {
+            channels: Mutex::new(HashMap::new()),
+            updates,
+        }
+    }
 }
 
 impl CodeEventBus {
@@ -37,5 +75,13 @@ impl CodeEventBus {
 
     pub(crate) fn publish(&self, session: CodeSessionId, event: SequencedCodeEvent) {
         let _ = self.sender(session).send(event);
+    }
+
+    pub(crate) fn subscribe_updates(&self) -> broadcast::Receiver<CodeLiveUpdate> {
+        self.updates.subscribe()
+    }
+
+    pub(crate) fn publish_update(&self, update: CodeLiveUpdate) {
+        let _ = self.updates.send(update);
     }
 }

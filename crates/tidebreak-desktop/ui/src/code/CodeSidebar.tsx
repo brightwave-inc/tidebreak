@@ -9,7 +9,9 @@ import {
   useSidebarWidth,
 } from "@/sidebar/primitives";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
+import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { connectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 
 /**
@@ -31,11 +33,14 @@ export function CodeSidebar() {
   const repos = useCodeCatalogStore((state) => state.repos);
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const refresh = useCodeCatalogStore((state) => state.refresh);
+  const digests = useCodeUpdatesStore((state) => state.byWorkspace);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
 
   useEffect(() => {
     void refresh(client);
   }, [client, refresh]);
+
+  useEffect(() => connectCodeUpdates(client), [client]);
 
   const recent = workspaces
     .filter((workspace) => workspace.status !== "archived")
@@ -116,6 +121,7 @@ export function CodeSidebar() {
       <div className="flex min-h-0 flex-col gap-0.5">
         {recent.map((workspace) => {
           const active = pathname === `/code/w/${workspace.id}`;
+          const digest = digests[workspace.id];
           return (
             <SidebarButton
               key={workspace.id}
@@ -131,6 +137,7 @@ export function CodeSidebar() {
             >
               <FolderGit2 />
               <span>{workspace.title}</span>
+              <AttentionBadge attention={digest?.attention} compact />
             </SidebarButton>
           );
         })}

@@ -22,7 +22,9 @@ import type { PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import { PrCard } from "./PrCard";
@@ -76,6 +78,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
+  const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
+  const setViewedWorkspace = useCodeUpdatesStore((state) => state.setViewedWorkspace);
+
+  useEffect(() => {
+    setViewedWorkspace(workspaceId);
+    return () => setViewedWorkspace(null);
+  }, [setViewedWorkspace, workspaceId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -201,8 +210,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           <div className="flex items-center gap-2">
             {session && (
               <>
+                <AttentionBadge attention={digest?.attention ?? session.attention} />
+                <AttentionPin
+                  sessionId={session.id}
+                  attention={digest?.attention ?? session.attention}
+                  client={client}
+                />
                 <PendingApprovalBadge sessionId={session.id} client={client} />
-                <SessionLifecycleBadge session={session} client={client} />
+                <SessionLifecycleBadge
+                  session={session}
+                  client={client}
+                  lifecycle={digest?.lifecycle ?? session.lifecycle}
+                />
               </>
             )}
             <Button
@@ -353,15 +372,95 @@ function renderCodePanel(
   }
 }
 
+function AttentionPin({
+  sessionId,
+  attention,
+  client,
+}: {
+  sessionId: string;
+  attention: CodeSessionSnapshot["attention"];
+  client: ApiClient;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const remember = useCodeCatalogStore((state) => state.rememberSession);
+
+  async function pin() {
+    const next = note.trim();
+    if (!next) return;
+    setBusy(true);
+    try {
+      const session = await client.setCodeAttention(sessionId, { note: next });
+      remember(session);
+      setNote("");
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not pin attention"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clear() {
+    setBusy(true);
+    try {
+      const session = await client.setCodeAttention(sessionId, { clear: true });
+      remember(session);
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not clear the pin"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (attention.state.type === "manual") {
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        disabled={busy}
+        onClick={() => void clear()}
+      >
+        Clear pin
+      </Button>
+    );
+  }
+
+  return (
+    <form
+      className="flex items-center gap-1"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void pin();
+      }}
+    >
+      <input
+        className="border-input bg-background h-6 w-36 rounded-md border px-2 text-xs"
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        placeholder="Pin a note"
+        aria-label="Pin a note"
+        disabled={busy}
+      />
+      <Button type="submit" variant="ghost" size="xs" disabled={busy || !note.trim()}>
+        Pin
+      </Button>
+    </form>
+  );
+}
+
 function SessionLifecycleBadge({
   session,
   client,
+  lifecycle: digestLifecycle,
 }: {
   session: CodeSessionSnapshot;
   client: ApiClient;
+  lifecycle?: CodeSessionSnapshot["lifecycle"];
 }) {
   const store = useRegisteredCodeSession(session.id, client);
-  const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
+  const fromStore = store((state) => state.lifecycle);
+  const lifecycle = digestLifecycle ?? fromStore ?? session.lifecycle;
   return (
     <Badge
       variant={
