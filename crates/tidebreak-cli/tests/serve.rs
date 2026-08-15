@@ -398,13 +398,22 @@ fn a_scripted_tool_using_turn_completes_in_allow_mode() {
 /// authenticate. Both lines are printed only after the listener is bound, so
 /// this also synchronizes with a server ready to accept.
 fn spawn_serve(dir: &Path) -> (Reaper, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+    spawn_serve_with_env(dir, &[])
+}
+
+fn spawn_serve_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> (Reaper, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tidebreak"));
+    command
         .arg("serve")
         .env("TIDEBREAK_DATA_DIR", dir)
         .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
         .env_remove("TIDEBREAK_MCP_CONFIG")
         .env_remove("TIDEBREAK_SERVER_URL")
-        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn tidebreak serve");
@@ -746,5 +755,134 @@ fn print_mode_rejects_an_unknown_model_before_the_turn() {
     assert!(
         stderr.to_lowercase().contains("model") || stderr.to_lowercase().contains("provider"),
         "stderr: {stderr}"
+    );
+}
+
+/// A well-formed 1×1 PNG. Dimensions come from the header, so the pixels do
+/// not need to be a real decode — they just have to sniff as `image/png`.
+fn one_pixel_png() -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    bytes.extend_from_slice(&png_chunk(b"IDAT", &[]));
+    bytes.extend_from_slice(&png_chunk(b"IEND", &[]));
+    bytes
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut payload = kind.to_vec();
+    payload.extend_from_slice(data);
+    let mut crc = 0xffff_ffffu32;
+    for byte in &payload {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    crc = !crc;
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(&payload);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    chunk
+}
+
+fn get_json(url: &str, token: &str, path: &str) -> serde_json::Value {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            reqwest::Client::new()
+                .get(format!("{url}{path}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .expect("GET")
+                .error_for_status()
+                .expect("the route answers 2xx")
+                .json::<serde_json::Value>()
+                .await
+                .expect("JSON body")
+        })
+}
+
+/// #2115: `tidebreak attach` of an image must land on the next `-p` user
+/// message. Publishing the blob is not enough — `GET /chats/{id}/messages`
+/// has to show it.
+#[test]
+fn attaching_an_image_lands_on_the_next_print_turn() {
+    let served = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([{"text": "saw the image"}]).to_string();
+    let (_server, url, token) =
+        spawn_serve_with_env(served.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let chat = create_chat(&url, &token);
+
+    let source = elsewhere.path().join("dashboard.png");
+    std::fs::write(&source, one_pixel_png()).unwrap();
+    let attached = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args(["attach", &chat])
+        .arg(&source)
+        .arg("--server")
+        .arg(&url)
+        .env("TIDEBREAK_SERVER_TOKEN", &token)
+        .env("TIDEBREAK_DATA_DIR", elsewhere.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run attach");
+    let stderr = String::from_utf8_lossy(&attached.stderr).into_owned();
+    assert!(attached.status.success(), "stderr: {stderr}");
+    let attachment_id = String::from_utf8_lossy(&attached.stdout).trim().to_owned();
+    assert!(
+        uuid::Uuid::parse_str(&attachment_id).is_ok(),
+        "the published attachment id belongs on stdout, got {attachment_id:?}"
+    );
+    assert!(
+        stderr.contains("attached") && stderr.contains("image/png"),
+        "stderr: {stderr}"
+    );
+
+    let printed = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args([
+            "-p",
+            "what is in this image",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "allow",
+            "--server",
+        ])
+        .arg(&url)
+        .env("TIDEBREAK_SERVER_TOKEN", &token)
+        .env("TIDEBREAK_DATA_DIR", elsewhere.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run -p after attach");
+    let stdout = String::from_utf8_lossy(&printed.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&printed.stderr).into_owned();
+    assert!(
+        printed.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let transcript = get_json(&url, &token, &format!("/chats/{chat}/messages"));
+    let images = &transcript["messages"][0]["image_attachments"];
+    assert_eq!(
+        images,
+        &serde_json::json!([{
+            "attachment_id": attachment_id,
+            "media_type": "image/png",
+            "width": 1,
+            "height": 1,
+        }]),
+        "transcript: {transcript}"
     );
 }

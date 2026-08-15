@@ -213,7 +213,13 @@ async fn one_turn(
     // Subscribe before posting: the turn can start before this returns, and the
     // socket's replay only reaches back to the cursor it was opened at.
     let mut stream = Stream::open(client, chat).await?;
-    client.post_message(chat, turn_id, prompt).await?;
+    let attachments = crate::outputs::pending_image_attachments(chat)?;
+    client
+        .post_message(chat, turn_id, prompt, &attachments)
+        .await?;
+    if !attachments.is_empty() {
+        let _ = crate::outputs::clear_pending_image_attachments(chat);
+    }
     // Installed once the turn exists, and not before. Installing it earlier
     // would swallow signals over the handshake and the post — neither of which
     // watches the interrupt, and neither of which has a turn to cancel yet.
