@@ -49,7 +49,8 @@ crates/tidebreak-core/src/db/ops/code/        repo.rs, workspace.rs, session.rs,
 crates/tidebreak-harness/                     protocol translation only
   src/lib.rs       HarnessAdapter + HarnessSession traits, SessionSpec, LaunchPlan,
                    adapter registry
-  src/probe.rs     login-shell PATH resolution, version detection, auth observation
+  src/probe.rs     interactive-login shell resolution + env capture (0034),
+                   version detection, auth observation
   src/budget.rs    bounded stream-parse budgets
   src/claude/      mod.rs, parse.rs, session.rs, approvals.rs
   src/codex/  src/opencode/  src/grok/        later phases
@@ -219,7 +220,11 @@ POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
 GET/PATCH       /code/workspaces/{id}
 POST            /code/workspaces/{id}/archive        {force?}
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode}
-POST            /code/sessions/{id}/turns            {message}  (steer/queue if running)
+POST            /code/sessions/{id}/turns            {message}  (queued while running —
+                                                     the chat product's queue-default rule;
+                                                     steering is the explicit alternative,
+                                                     available only where the adapter's
+                                                     mid_turn_steering capability carries it)
 POST            /code/sessions/{id}/interrupt | /permission-mode | /attention | /reap
 WS              /code/sessions/{id}/events?after=    snapshot → replay → live
 WS              /code/updates                        digests, restated on connect
@@ -304,5 +309,9 @@ new `PanelContent` variants).
 Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
 bundled or pinned harness binaries; checkpoint restore (the refs land in
 v1; the restore surface does not); multiple sessions per workspace;
-an in-app code editor; chat↔code convergence (one inbox, shared projects);
+an in-app code editor; chat–code convergence (the single-surface end
+state: one conversation concept with an optional workspace binding,
+engines behind the adapter contract, no user-facing mode choice); remote
+session execution (the same harness in a managed sandbox feeding the same
+journal); a supervision-first mobile client over the updates channel;
 a per-repo worktree-location override; Windows support for code mode.
