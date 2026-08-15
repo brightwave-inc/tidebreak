@@ -25,7 +25,11 @@ macro_rules! id_type {
 
         impl $name {
             /// Generate a fresh, random identifier.
+            ///
+            /// Not `Default`: a `..Default::default()` on a struct that
+            /// happens to contain an id would invent a durable identity.
             #[must_use]
+            #[allow(clippy::new_without_default)]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
             }
@@ -273,7 +277,10 @@ pub struct RootAttachmentChangeId(Uuid);
 
 impl RootAttachmentChangeId {
     /// Generate a fresh change identity.
+    ///
+    /// Not `Default`: see [`id_type`].
     #[must_use]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
