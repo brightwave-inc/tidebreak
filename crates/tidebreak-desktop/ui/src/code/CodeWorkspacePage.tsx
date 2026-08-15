@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileCode, Files, FolderOpen } from "lucide-react";
+import { FileCode, Files, FolderOpen, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
@@ -32,6 +32,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
+import { TerminalPane } from "./TerminalPane";
 import {
   fenceReasonText,
   HARNESS_LABELS,
@@ -214,6 +215,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               <FileCode />
               Diff
             </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => openPanel({ type: "terminal" })}
+            >
+              <SquareTerminal />
+              Terminal
+            </Button>
             {workspace && workspace.status !== "archived" && (
               <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
                 Archive
@@ -328,6 +338,8 @@ function renderCodePanel(
           file={panel.file}
         />
       );
+    case "terminal":
+      return <TerminalPane client={client} workspaceId={workspaceId} />;
     default:
       return (
         <p className="text-muted-foreground px-3 py-6 text-sm">

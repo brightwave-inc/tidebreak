@@ -4,6 +4,9 @@ import {
   liveCodeSession,
   parseCodeSession,
   parseCodeSessionList,
+  parseCodeTerminal,
+  parseCodeTerminalList,
+  parseCodeTerminalRead,
   parseCodeTurn,
   parseCodeTurnList,
   parseCodeWorkspaceDiff,
@@ -120,6 +123,35 @@ describe("parseCodeWorkspaceDiff", () => {
 
   it("rejects a non-string body", () => {
     expect(parseCodeWorkspaceDiff({ ...diff, diff: 1 })).toBeNull();
+  });
+});
+
+describe("parseCodeTerminal", () => {
+  const terminal = {
+    id: "term-1",
+    workspace_id: "ws-1",
+    cols: 80,
+    rows: 24,
+    ended: false,
+    created_at: "2026-08-15T12:00:00.000Z",
+  };
+
+  it("accepts a live snapshot and a list", () => {
+    expect(parseCodeTerminal(terminal)).toEqual(terminal);
+    expect(parseCodeTerminalList([terminal])).toEqual([terminal]);
+  });
+
+  it("accepts a cursor-pull page", () => {
+    const page = {
+      id: "term-1",
+      workspace_id: "ws-1",
+      bytes: "aGVsbG8=",
+      cursor: 5,
+      overflow: false,
+      truncated: false,
+      ended: false,
+    };
+    expect(parseCodeTerminalRead(page)).toEqual(page);
   });
 });
 

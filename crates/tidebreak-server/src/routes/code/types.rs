@@ -5,9 +5,9 @@ use ts_rs::TS;
 
 use tidebreak_core::{
     Attention, CapLevel, CodeEvent, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-    Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind, HarnessTier,
-    PullRequestDigest, QuickAction, RepoId, WorkspaceId,
+    CodeSessionLifecycle, CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
+    HarnessTier, PullRequestDigest, QuickAction, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -355,6 +355,84 @@ pub struct CodeWorkspaceDiff {
 pub struct SessionEventsQuery {
     #[serde(default)]
     pub after: i64,
+}
+
+/// One live auxiliary terminal. Bytes live only in the process ring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeTerminalSnapshot {
+    pub id: CodeTerminalId,
+    pub workspace_id: WorkspaceId,
+    pub cols: u16,
+    pub rows: u16,
+    pub ended: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Cursor-pull response for `GET /code/workspaces/{id}/terminals/{tid}/read`.
+///
+/// `bytes` is standard base64 of the raw ring slice. `overflow` is true when
+/// the requested cursor had already fallen out of the ring; the payload then
+/// starts with the inline truncation marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeTerminalRead {
+    pub id: CodeTerminalId,
+    pub workspace_id: WorkspaceId,
+    pub bytes: String,
+    pub cursor: u64,
+    pub overflow: bool,
+    pub truncated: bool,
+    pub ended: bool,
+}
+
+/// Unsequenced activity notice published on the updates channel.
+///
+/// Never journaled. A client that missed one just pulls from its last cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[allow(dead_code)]
+pub struct CodeTerminalActivityNotice {
+    pub workspace_id: WorkspaceId,
+    pub terminal_id: CodeTerminalId,
+}
+
+/// Body of `POST /code/workspaces/{id}/terminals`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTerminalBody {
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+}
+
+/// Query for `GET /code/workspaces/{id}/terminals/{tid}/read`.
+#[derive(Debug, Deserialize)]
+pub struct TerminalReadQuery {
+    #[serde(default)]
+    pub cursor: u64,
+}
+
+/// Body of `POST /code/workspaces/{id}/terminals/{tid}/write`.
+///
+/// `bytes` is standard base64. Decoded length is capped by the write bound.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalWriteBody {
+    pub bytes: String,
+}
+
+/// Body of `POST /code/workspaces/{id}/terminals/{tid}/resize`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalResizeBody {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Path of a workspace-scoped terminal.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceTerminalPath {
+    pub id: WorkspaceId,
+    pub tid: CodeTerminalId,
 }
 
 /// Used so capability flags stay reachable from the doctor root.

@@ -4,6 +4,7 @@ mod harnesses;
 mod repos;
 mod session_events;
 mod sessions;
+mod terminals;
 mod types;
 mod workspaces;
 
@@ -14,9 +15,14 @@ pub(crate) use sessions::{
     create_session, interrupt_session, list_session_turns, list_workspace_sessions, reap_session,
     steer_session, submit_turn,
 };
+pub(crate) use terminals::{
+    close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
+    resize_terminal, write_terminal,
+};
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeFileChange, CodeRepoSnapshot, CodeSessionSnapshot, CodeTurnSnapshot, CodeWorkspaceDiff,
+    CodeFileChange, CodeRepoSnapshot, CodeSessionSnapshot, CodeTerminalActivityNotice,
+    CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot, CodeWorkspaceDiff,
     CodeWorkspaceFiles, CodeWorkspaceSnapshot, HarnessDoctorReport, QueuedCodeTurn,
     SequencedCodeEventFrame,
 };

@@ -93,6 +93,9 @@ dom_smoothie = { workspace = true }
 # Must move in lockstep with dom_smoothie (same major parse handoff type).
 dom_query = { workspace = true }
 zip = { workspace = true }
+# Auxiliary workspace terminals (0036). Server-only: the harness crate
+# must never depend on a PTY library.
+portable-pty = "=0.9.0"
 
 [target.'cfg(unix)'.dependencies]
 # Effective-uid account lookup (getpwuid_r) for the macOS managed-preferences

@@ -740,6 +740,28 @@ pub fn app(state: AppState) -> Router {
             "/code/sessions/{id}/events",
             get(routes::code::session_events),
         )
+        .route(
+            "/code/workspaces/{id}/terminals",
+            post(routes::code::create_terminal)
+                .get(routes::code::list_terminals)
+                .delete(routes::code::close_workspace_terminals),
+        )
+        .route(
+            "/code/workspaces/{id}/terminals/{tid}",
+            axum::routing::delete(routes::code::close_terminal),
+        )
+        .route(
+            "/code/workspaces/{id}/terminals/{tid}/read",
+            get(routes::code::read_terminal),
+        )
+        .route(
+            "/code/workspaces/{id}/terminals/{tid}/write",
+            post(routes::code::write_terminal),
+        )
+        .route(
+            "/code/workspaces/{id}/terminals/{tid}/resize",
+            post(routes::code::resize_terminal),
+        )
         .merge(client_executor_api)
         // Merged before the bearer layer, so `require_token` wraps outside
         // `require_admin`: an unauthenticated request to a deployment-plane

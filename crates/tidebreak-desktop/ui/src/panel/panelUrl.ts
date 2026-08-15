@@ -52,6 +52,8 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return parseFilesTarget(id);
     case "diff":
       return parseDiffTarget(id);
+    case "terminal":
+      return id ? { type: "terminal", terminalId: id } : { type: "terminal" };
     default:
       // `apps` and `plugins` were panel segments before the libraries became
       // routes of their own; those links fall back to the conversation alone.
@@ -133,6 +135,8 @@ export function encodePanelSegment(panel: PanelContent): string {
       if (panel.file) parts.push("f", encodeURIComponent(panel.file));
       return parts.join(".");
     }
+    case "terminal":
+      return panel.terminalId ? `terminal.${panel.terminalId}` : "terminal";
   }
 }
 

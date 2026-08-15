@@ -10,6 +10,7 @@ pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod session_worker;
 pub(crate) mod setup_script;
+pub(crate) mod terminal;
 pub(crate) mod worktree;
 
 pub(crate) use runtime::CodeRuntime;
