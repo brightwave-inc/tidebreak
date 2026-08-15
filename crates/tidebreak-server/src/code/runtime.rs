@@ -77,9 +77,34 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
-        recovery::recover_running_sessions(&self.db)
+        let actions = recovery::recover_running_sessions(&self.db)
             .await
-            .map_err(ServerError::from)
+            .map_err(ServerError::from)?;
+        // Recovery only mutates rows. Re-attach a worker for every session
+        // that is still usable so submit_turn is not stuck after a restart.
+        for session in list_sessions(&self.db).await? {
+            if matches!(
+                session.lifecycle,
+                CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+            ) {
+                continue;
+            }
+            if self
+                .workers
+                .lock()
+                .expect("code workers")
+                .contains_key(&session.id)
+            {
+                continue;
+            }
+            if let Err(error) = self.attach_and_spawn_worker(session).await {
+                tracing::warn!(
+                    "code-mode: could not resume a recovered session worker: {}",
+                    error.message()
+                );
+            }
+        }
+        Ok(actions)
     }
 
     pub(crate) fn adapter(
@@ -222,7 +247,7 @@ impl CodeRuntime {
                 from_title
             }
         };
-        let path = worktree_dir(&self.data_dir, &repo_slug, &workspace_slug);
+        let path = worktree_dir(&self.data_dir, repo_id, id, &repo_slug, &workspace_slug);
         let display_title = if title.is_empty() {
             workspace_slug.clone()
         } else {
@@ -320,6 +345,7 @@ impl CodeRuntime {
                 ));
             }
         }
+        self.end_workspace_sessions(id, force).await?;
         let path = std::path::Path::new(&workspace.worktree_path);
         if path.exists() {
             if let Some(block) = archive_blockers(path, &workspace.base_ref)
@@ -395,9 +421,12 @@ impl CodeRuntime {
                 format!("{harness} cannot honor plan mode"),
             ));
         }
-        let binary = probe.binary_path.clone().ok_or_else(|| {
-            ServerError::unprocessable_kind("harness_not_found", format!("{harness} has no path"))
-        })?;
+        if probe.binary_path.is_none() {
+            return Err(ServerError::unprocessable_kind(
+                "harness_not_found",
+                format!("{harness} has no path"),
+            ));
+        }
         let session = CodeSession {
             id: CodeSessionId::new(),
             workspace_id,
@@ -414,47 +443,7 @@ impl CodeRuntime {
             created_at: Utc::now(),
         };
         insert_session(&self.db, &session).await?;
-        let attached = attach_engine(
-            &self.db,
-            &self.bus,
-            session.id,
-            harness,
-            probe.version.clone(),
-            None,
-        )
-        .await
-        .map_err(map_worker)?;
-        let spec = SessionSpec {
-            worktree: PathBuf::from(&workspace.worktree_path),
-            permission_mode,
-            resume_ref: None,
-            extra_argv: Vec::new(),
-            extra_env: Vec::new(),
-            env: probe.env.clone(),
-            approval: None,
-            binary,
-            sink: super::session_worker::sink_for(
-                self.db.clone(),
-                self.bus.clone(),
-                session.id,
-                attached.spawn_epoch,
-                None,
-            ),
-        };
-        let engine = adapter.launch(spec).await.map_err(|err| {
-            ServerError::internal(format!("failed to launch engine session: {err}"))
-        })?;
-        let mut attached = attached;
-        attached.child_pid = engine.child_pid();
-        attached.harness_resume_ref = engine.resume_ref();
-        save_session(&self.db, &attached).await?;
-        let handle =
-            spawn_session_worker(self.db.clone(), self.bus.clone(), attached.clone(), engine);
-        self.workers
-            .lock()
-            .expect("code workers")
-            .insert(session.id, handle);
-        Ok(attached)
+        self.attach_and_spawn_worker(session).await
     }
 
     pub(crate) async fn get_session(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
@@ -541,6 +530,106 @@ impl CodeRuntime {
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
         Ok(list_sessions(&self.db).await?)
+    }
+
+    async fn end_workspace_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+        allow_running: bool,
+    ) -> Result<(), ServerError> {
+        let sessions = list_sessions_for_workspace(&self.db, workspace_id).await?;
+        if !allow_running
+            && sessions
+                .iter()
+                .any(|session| session.lifecycle == CodeSessionLifecycle::Running)
+        {
+            return Err(ServerError::conflict_kind(
+                "session_running",
+                "a session is still running in this workspace; pass force to end it",
+            ));
+        }
+        for mut session in sessions {
+            if session.lifecycle == CodeSessionLifecycle::Ended {
+                continue;
+            }
+            let handle = self
+                .workers
+                .lock()
+                .expect("code workers")
+                .remove(&session.id);
+            if let Some(handle) = handle {
+                let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+            }
+            session.lifecycle = CodeSessionLifecycle::Ended;
+            session.child_pid = None;
+            session.fence_reason = None;
+            save_session(&self.db, &session).await?;
+        }
+        Ok(())
+    }
+
+    async fn attach_and_spawn_worker(
+        &self,
+        session: CodeSession,
+    ) -> Result<CodeSession, ServerError> {
+        let workspace = self.get_workspace(session.workspace_id).await?;
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = adapter.probe(&self.host).await;
+        if !probe.found {
+            return Err(ServerError::unprocessable_kind(
+                "harness_not_found",
+                format!("{} is not installed", session.harness_kind),
+            ));
+        }
+        let binary = probe.binary_path.clone().ok_or_else(|| {
+            ServerError::unprocessable_kind(
+                "harness_not_found",
+                format!("{} has no path", session.harness_kind),
+            )
+        })?;
+        let attached = attach_engine(
+            &self.db,
+            &self.bus,
+            session.id,
+            session.harness_kind,
+            probe.version.clone().or(session.harness_version.clone()),
+            None,
+        )
+        .await
+        .map_err(map_worker)?;
+        let spec = SessionSpec {
+            worktree: PathBuf::from(&workspace.worktree_path),
+            permission_mode: session.permission_mode,
+            resume_ref: session.harness_resume_ref.clone(),
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: probe.env.clone(),
+            approval: None,
+            binary,
+            sink: super::session_worker::sink_for(
+                self.db.clone(),
+                self.bus.clone(),
+                session.id,
+                attached.spawn_epoch,
+                None,
+            ),
+        };
+        let engine = adapter.launch(spec).await.map_err(|err| {
+            ServerError::internal(format!("failed to launch engine session: {err}"))
+        })?;
+        let mut attached = attached;
+        attached.child_pid = engine.child_pid();
+        if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
+            attached.harness_resume_ref = Some(resume);
+        }
+        save_session(&self.db, &attached).await?;
+        let handle =
+            spawn_session_worker(self.db.clone(), self.bus.clone(), attached.clone(), engine);
+        self.workers
+            .lock()
+            .expect("code workers")
+            .insert(session.id, handle);
+        Ok(attached)
     }
 
     fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {

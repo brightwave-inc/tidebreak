@@ -272,10 +272,14 @@ pub struct SteerBody {
 }
 
 /// A follow-up parked while the session is already running a turn.
+///
+/// No turn id: the row is created when the worker promotes this slot.
+/// `position` is 1-based in the single-slot queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct QueuedCodeTurn {
     pub session_id: tidebreak_core::CodeSessionId,
     pub message: String,
+    pub position: i64,
 }
 
 /// Query for `GET /code/workspaces`.

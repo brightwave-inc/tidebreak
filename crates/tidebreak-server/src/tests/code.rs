@@ -57,8 +57,8 @@ async fn code_app_with(
     (app(state), token, runtime, dir)
 }
 
-fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
-    let repo = dir.join("origin");
+fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let repo = dir.join(name);
     std::fs::create_dir_all(&repo).unwrap();
     for args in [
         ["git", "init", "-b", "main"].as_slice(),
@@ -87,6 +87,10 @@ fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap()
         .success());
     repo
+}
+
+fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
+    init_git_repo_named(dir, "origin")
 }
 
 async fn register_and_workspace(
@@ -433,9 +437,10 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     );
     let follow_body: serde_json::Value = follow.json().await.unwrap();
     assert_eq!(follow_body["message"], "follow-up");
+    assert_eq!(follow_body["position"], 1);
     assert!(
-        follow_body.get("status").is_none(),
-        "queued follow-up must not mint a fake turn row: {follow_body}"
+        follow_body.get("id").is_none() && follow_body.get("status").is_none(),
+        "queued follow-up must not mint a fake turn id: {follow_body}"
     );
 
     let overflow = client
@@ -512,6 +517,257 @@ async fn explicit_steer_is_not_yet_available() {
     assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "steering_unavailable");
+}
+
+fn scripted_registry() -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+    registry
+}
+
+#[tokio::test]
+async fn a_recovered_session_accepts_a_turn() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+
+    let restarted = Arc::new(CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        scripted_registry(),
+    ));
+    restarted.recover().await.unwrap();
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        runtime.db.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(restarted);
+    let token2 = state.token.clone();
+    let addr2 = serve(app(state)).await;
+
+    let turn = reqwest::Client::new()
+        .post(format!("http://{addr2}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token2)
+        .json(&serde_json::json!({ "message": "after restart" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "recovered session must accept a turn: {}",
+        turn.text().await.unwrap()
+    );
+    let body: serde_json::Value = turn.json().await.unwrap();
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["user_input"], "after restart");
+}
+
+#[tokio::test]
+async fn archive_ends_the_session_before_removing_the_worktree() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let path = workspace["worktree_path"].as_str().unwrap().to_owned();
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    assert!(!std::path::Path::new(&path).exists());
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+
+    let again = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        again.status(),
+        reqwest::StatusCode::CONFLICT,
+        "archived workspace is not ready for a new session"
+    );
+}
+
+#[tokio::test]
+async fn archive_refuses_a_running_session_without_force() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "working".into(),
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(50)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "busy" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+                .await
+                .unwrap()
+                .unwrap();
+            if row.lifecycle == CodeSessionLifecycle::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("turn never reached Running");
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "session_running");
+
+    let forced = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), reqwest::StatusCode::OK);
+    let _ = turn.await;
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+}
+
+#[tokio::test]
+async fn two_repos_with_the_same_name_get_distinct_worktrees() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let left = init_git_repo_named(&dir.path().join("left"), "origin");
+    let right = init_git_repo_named(&dir.path().join("right"), "origin");
+    let (repo_a, ws_a) = register_and_workspace(&client, addr, &token, &left).await;
+    let (repo_b, ws_b) = register_and_workspace(&client, addr, &token, &right).await;
+    assert_eq!(repo_a["display_name"], "origin");
+    assert_eq!(repo_b["display_name"], "origin");
+    let path_a = ws_a["worktree_path"].as_str().unwrap();
+    let path_b = ws_b["worktree_path"].as_str().unwrap();
+    assert_ne!(path_a, path_b);
+    assert!(path_a.contains(json_id(&repo_a)));
+    assert!(path_b.contains(json_id(&repo_b)));
+    assert!(std::path::Path::new(path_a).join("README.md").is_file());
+    assert!(std::path::Path::new(path_b).join("README.md").is_file());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -49,6 +49,7 @@ pub async fn submit_turn(
             Json(QueuedCodeTurn {
                 session_id: id,
                 message,
+                position: 1,
             }),
         )
             .into_response()),

@@ -2484,8 +2484,11 @@ checks_summary?: string | null, };
 
 /**
  * A follow-up parked while the session is already running a turn.
+ *
+ * No turn id: the row is created when the worker promotes this slot.
+ * `position` is 1-based in the single-slot queue.
  */
-export type QueuedCodeTurn = { session_id: CodeSessionId, message: string, };
+export type QueuedCodeTurn = { session_id: CodeSessionId, message: string, position: number, };
 
 /**
  * The id is the client-generated turn id promotion will accept under, so an

@@ -145,6 +145,9 @@ async fn run_worker(
     }
 
     loop {
+        if session_was_ended(&db, &mut session).await {
+            break;
+        }
         drain_queued(&db, &bus, &mut session, engine.as_mut(), &pending).await;
         tokio::select! {
             _ = wake.notified() => {}
@@ -300,16 +303,21 @@ async fn drive_turn(
                 )
                 .await;
             }
-            session.lifecycle = CodeSessionLifecycle::Idle;
-            session.attention =
-                Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle);
-            let _ = save_session(db, session).await;
+            if !session_was_ended(db, session).await {
+                session.lifecycle = CodeSessionLifecycle::Idle;
+                session.attention =
+                    Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle);
+                let _ = save_session(db, session).await;
+            }
             return Err(WorkerError::Failed(err.to_string()));
         }
     }
 
     if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, turn.id).await {
         turn = current;
+    }
+    if session_was_ended(db, session).await {
+        return Ok(turn);
     }
     if turn.status == CodeTurnStatus::Interrupted {
         session.attention =
@@ -326,6 +334,16 @@ async fn drive_turn(
     session.lifecycle = CodeSessionLifecycle::Idle;
     let _ = save_session(db, session).await;
     Ok(turn)
+}
+
+async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {
+    match get_session(db, session.id).await {
+        Ok(Some(current)) if current.lifecycle == CodeSessionLifecycle::Ended => {
+            *session = current;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Bump the spawn epoch, record pid/version, and journal SessionStarted.

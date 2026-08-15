@@ -262,12 +262,30 @@ pub(crate) fn branch_name(prefix: &str, title: &str, seed: u128) -> String {
 }
 
 /// Path `<data_dir>/code/worktrees/<repo-slug>/<workspace-slug>/`.
-pub(crate) fn worktree_dir(data_dir: &Path, repo_slug: &str, workspace_slug: &str) -> PathBuf {
+/// `<data_dir>/code/worktrees/<repo-id>-<slug>/<workspace-id>-<slug>/`.
+///
+/// Ids are the uniqueness key so two clones of the same project cannot share
+/// a directory. Slugs stay only as a human-readable suffix.
+pub(crate) fn worktree_dir(
+    data_dir: &Path,
+    repo_id: tidebreak_core::RepoId,
+    workspace_id: tidebreak_core::WorkspaceId,
+    repo_slug: &str,
+    workspace_slug: &str,
+) -> PathBuf {
     data_dir
         .join("code")
         .join("worktrees")
-        .join(repo_slug)
-        .join(workspace_slug)
+        .join(dir_name(repo_id, repo_slug))
+        .join(dir_name(workspace_id, workspace_slug))
+}
+
+fn dir_name(id: impl std::fmt::Display, slug: &str) -> String {
+    if slug.is_empty() {
+        id.to_string()
+    } else {
+        format!("{id}-{slug}")
+    }
 }
 
 pub(crate) fn two_word_name(seed: u128) -> String {
@@ -424,6 +442,16 @@ mod tests {
         (dir, repo)
     }
 
+    fn scratch_worktree(data: &Path, label: &str) -> PathBuf {
+        worktree_dir(
+            data,
+            tidebreak_core::RepoId::new(),
+            tidebreak_core::WorkspaceId::new(),
+            "demo",
+            label,
+        )
+    }
+
     fn run(cwd: &Path, args: &[&str]) {
         let status = StdCommand::new(args[0])
             .args(&args[1..])
@@ -458,7 +486,7 @@ mod tests {
     async fn create_verifies_and_setup_failure_preserves_checkout() {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
-        let path = worktree_dir(data.path(), "demo", "first");
+        let path = scratch_worktree(data.path(), "first");
         create_worktree(&repo, &path, "tidebreak/first", "main")
             .await
             .unwrap();
@@ -474,7 +502,7 @@ mod tests {
     async fn create_cleans_up_a_half_created_worktree() {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
-        let path = worktree_dir(data.path(), "demo", "ghost");
+        let path = scratch_worktree(data.path(), "ghost");
         // Point at a missing base so `worktree add` fails after creating the branch
         // attempt; cleanup must not leave a registered worktree.
         let err = create_worktree(&repo, &path, "tidebreak/ghost", "no-such-ref")
@@ -495,7 +523,7 @@ mod tests {
     async fn archive_refuses_dirty_work_without_force_and_prunes_gone_trees() {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
-        let path = worktree_dir(data.path(), "demo", "dirty");
+        let path = scratch_worktree(data.path(), "dirty");
         create_worktree(&repo, &path, "tidebreak/dirty", "main")
             .await
             .unwrap();
@@ -509,7 +537,7 @@ mod tests {
         assert!(!path.exists());
 
         // Already-removed: deleting the directory out of band, then archive.
-        let path2 = worktree_dir(data.path(), "demo", "gone");
+        let path2 = scratch_worktree(data.path(), "gone");
         create_worktree(&repo, &path2, "tidebreak/gone", "main")
             .await
             .unwrap();
@@ -528,11 +556,11 @@ mod tests {
     async fn branch_collision_is_a_user_visible_error() {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
-        let first = worktree_dir(data.path(), "demo", "one");
+        let first = scratch_worktree(data.path(), "one");
         create_worktree(&repo, &first, "tidebreak/same", "main")
             .await
             .unwrap();
-        let second = worktree_dir(data.path(), "demo", "two");
+        let second = scratch_worktree(data.path(), "two");
         let err = create_worktree(&repo, &second, "tidebreak/same", "main")
             .await
             .unwrap_err();
@@ -541,6 +569,19 @@ mod tests {
             "collision must not auto-suffix: {err}"
         );
         assert!(!second.exists());
+    }
+
+    #[test]
+    fn worktree_paths_are_keyed_on_ids() {
+        let data = std::path::Path::new("/tmp/data");
+        let repo_a = tidebreak_core::RepoId::new();
+        let repo_b = tidebreak_core::RepoId::new();
+        let ws = tidebreak_core::WorkspaceId::new();
+        let left = worktree_dir(data, repo_a, ws, "origin", "first");
+        let right = worktree_dir(data, repo_b, ws, "origin", "first");
+        assert_ne!(left, right);
+        assert!(left.to_string_lossy().contains(&repo_a.to_string()));
+        assert!(right.to_string_lossy().contains(&repo_b.to_string()));
     }
 
     #[test]
