@@ -57,6 +57,22 @@ or `{decision: decline}`.
 
 Re-capture the whole version directory when the engine version moves.
 
+### opencode
+
+`--harness opencode` drives a long-lived `opencode serve --hostname 127.0.0.1 --port N` child (1.18.18). Fixtures are framed both-direction HTTP + SSE exchanges, one object per line:
+
+```text
+{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session","body":{…}}}
+{"dir":"in","msg":{"kind":"http","status":200,"path":"/session","body":{…}}}
+{"dir":"in","msg":{"kind":"sse","event":{"type":"session.created",…}}}
+```
+
+That path was chosen over `opencode run --format json` because serve is the richer channel: sessions, `prompt_async`, directory-scoped `/event`, and `POST /permission/{id}/reply`. Probe `opencode serve --help` and `opencode run --help` before recapturing a new version.
+
+The capture bin writes POST `/session` → POST `/session/{id}/prompt_async` and tees `/event?directory=…` until `session.idle` or `session.error`. Approval request/response pairs for `approval-approve` / `approval-deny` were captured with a helper that completes `POST /permission/{id}/reply` with `{reply: once}` or `{reply: reject, message: …}`.
+
+Re-capture the whole version directory when the engine version moves.
+
 ## Redaction
 
 Before committing a capture:

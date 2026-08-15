@@ -12,7 +12,8 @@
 //!
 //! Writes `<scenario>.ndjson` and a `manifest.toml`. Redact the stream before
 //! committing — see `fixtures/README.md`. Codex captures are framed JSON-RPC
-//! (`{"dir":"in"|"out","msg":…}`).
+//! (`{"dir":"in"|"out","msg":…}`). opencode captures are framed HTTP + SSE
+//! (`{"dir":"in"|"out","msg":{"kind":"http"|"sse",…}}`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ fn main() {
 
     match harness.as_str() {
         "codex" => capture_codex(&scenario, &prompt, &extra),
+        "opencode" => capture_opencode(&scenario, &prompt, &extra),
         _ => capture_claude(&harness, &scenario, &prompt, &extra),
     }
 }
@@ -165,6 +167,242 @@ fn capture_codex(scenario: &str, prompt: &str, extra: &[String]) {
     eprintln!("wrote {}", ndjson_path.display());
 }
 
+fn capture_opencode(scenario: &str, prompt: &str, extra: &[String]) {
+    let workspace = tempfile_workspace();
+    let binary = resolve_binary("opencode");
+    let version = opencode_version(&binary);
+    let port = pick_ephemeral_port();
+    let mut argv = vec![
+        binary.clone(),
+        "serve".into(),
+        "--hostname".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+    ];
+    argv.extend(extra.iter().cloned());
+
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(&workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn {binary}: {err}"));
+    wait_for_health(port);
+
+    let dest_dir = fixture_dir("opencode", &version);
+    let ndjson_path = dest_dir.join(format!("{scenario}.ndjson"));
+    let mut out = std::fs::File::create(&ndjson_path).unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir_q = format!(
+        "directory={}",
+        url_encode(workspace.to_string_lossy().as_ref())
+    );
+
+    let sse = std::thread::spawn({
+        let base = base.clone();
+        let dir_q = dir_q.clone();
+        let path = ndjson_path.clone();
+        move || tee_sse(&base, &dir_q, &path)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let create = serde_json::json!({
+        "title": scenario,
+        "agent": "build",
+        "model": { "providerID": "opencode", "id": "big-pickle" }
+    });
+    let session = http_json(
+        &mut out,
+        "POST",
+        "/session",
+        &format!("{base}/session?{dir_q}"),
+        Some(&create),
+    );
+    let session_id = session
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if session_id.is_empty() {
+        let _ = child.kill();
+        panic!("POST /session did not return an id: {session}");
+    }
+    let body = serde_json::json!({
+        "model": { "providerID": "opencode", "modelID": "big-pickle" },
+        "parts": [{ "type": "text", "text": prompt }]
+    });
+    let prompt_path = format!("/session/{session_id}/prompt_async");
+    http_json(
+        &mut out,
+        "POST",
+        &prompt_path,
+        &format!("{base}{prompt_path}?{dir_q}"),
+        Some(&body),
+    );
+    wait_for_idle_file(&ndjson_path);
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    let _ = sse.join();
+    write_manifest(
+        &dest_dir, "opencode", &version, scenario, &argv, &workspace, &status,
+    );
+    eprintln!("wrote {}", ndjson_path.display());
+}
+
+fn pick_ephemeral_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    listener.local_addr().expect("local_addr").port()
+}
+
+fn wait_for_health(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/global/health");
+    for _ in 0..50 {
+        let output = Command::new("curl")
+            .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}", &url])
+            .output();
+        if let Ok(output) = output {
+            if String::from_utf8_lossy(&output.stdout).starts_with('2') {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("opencode serve on :{port} never became healthy");
+}
+
+fn wait_for_idle_file(path: &Path) {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if text.contains("\"session.idle\"") || text.contains("\"session.error\"") {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("timed out waiting for session.idle in {}", path.display());
+}
+
+fn url_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn write_http_frame(
+    out: &mut std::fs::File,
+    _dir: &str,
+    method_or_status: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    inbound: bool,
+) {
+    let encoded_body = body
+        .map(|value| serde_json::to_string(value).expect("body"))
+        .unwrap_or_else(|| "null".into());
+    if inbound {
+        let status: u16 = method_or_status.parse().unwrap_or(0);
+        writeln!(
+            out,
+            r#"{{"dir":"in","msg":{{"kind":"http","status":{status},"path":{path},"body":{encoded_body}}}}}"#,
+            path = serde_json::to_string(path).unwrap(),
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            r#"{{"dir":"out","msg":{{"kind":"http","method":{method},"path":{path},"body":{encoded_body}}}}}"#,
+            method = serde_json::to_string(method_or_status).unwrap(),
+            path = serde_json::to_string(path).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn http_json(
+    out: &mut std::fs::File,
+    method: &str,
+    path: &str,
+    url: &str,
+    body: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    write_http_frame(out, "out", method, path, body, false);
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sS", "-D", "-", "-o", "-"]);
+    cmd.arg("-X").arg(method);
+    if let Some(body) = body {
+        cmd.args(["-H", "content-type: application/json"]);
+        cmd.arg("--data").arg(serde_json::to_string(body).unwrap());
+    }
+    cmd.arg(url);
+    let output = cmd.output().expect("curl");
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let (head, payload) = raw.split_once("\r\n\r\n").unwrap_or(("", raw.as_ref()));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("0");
+    let parsed: serde_json::Value = if payload.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(payload).unwrap_or(serde_json::Value::Null)
+    };
+    write_http_frame(out, "in", status, path, Some(&parsed), true);
+    parsed
+}
+
+fn tee_sse(base: &str, dir_q: &str, dest: &Path) {
+    let mut child = Command::new("curl")
+        .args(["-sS", "--no-buffer", &format!("{base}/event?{dir_q}")])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("curl sse");
+    let stdout = child.stdout.take().expect("sse stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dest)
+        .expect("append sse");
+    let mut pending = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if line.trim().is_empty() {
+            if let Some(data) = pending
+                .lines()
+                .filter_map(|item| item.strip_prefix("data:"))
+                .map(str::trim)
+                .find(|item| !item.is_empty())
+            {
+                writeln!(
+                    file,
+                    r#"{{"dir":"in","msg":{{"kind":"sse","event":{data}}}}}"#
+                )
+                .ok();
+                let _ = file.flush();
+            }
+            pending.clear();
+            continue;
+        }
+        pending.push_str(&line);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn write_rpc(
     stdin: &mut std::process::ChildStdin,
     out: &mut std::fs::File,
@@ -281,6 +519,10 @@ fn claude_version(binary: &str) -> String {
 
 fn codex_version(binary: &str) -> String {
     first_version_token(binary, false)
+}
+
+fn opencode_version(binary: &str) -> String {
+    first_version_token(binary, true)
 }
 
 fn first_version_token(binary: &str, first_word: bool) -> String {

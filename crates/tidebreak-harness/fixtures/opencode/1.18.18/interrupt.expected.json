@@ -1,0 +1,14 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90cb34dffetuBl8yP14fGnYD"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "turn_interrupted"
+  }
+]

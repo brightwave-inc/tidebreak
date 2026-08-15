@@ -1,0 +1,17 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90cae49ffebCr4HXOUTR1J97"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "turn_failed",
+    "error": {
+      "message": "Model not found: opencode/this-model-does-not-exist."
+    }
+  }
+]
