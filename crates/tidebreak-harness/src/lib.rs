@@ -22,6 +22,7 @@ use tidebreak_core::{
 
 pub mod budget;
 pub mod claude;
+pub mod codex;
 pub mod launch;
 pub mod probe;
 
@@ -335,6 +336,7 @@ impl AdapterRegistry {
 pub fn builtin_registry() -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(claude::ClaudeCodeAdapter::new()));
+    registry.register(Arc::new(codex::CodexAdapter::new()));
     registry
 }
 

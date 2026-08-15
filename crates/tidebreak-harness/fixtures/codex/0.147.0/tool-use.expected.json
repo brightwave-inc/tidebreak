@@ -1,0 +1,44 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.147.0",
+    "resume_ref": "01a006c6-6577-79f1-a3d9-e25433506368"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "exec-59525603-b92d-49e3-a3f2-b59f9373bdff",
+    "name": "commandExecution",
+    "detail": {
+      "kind": "command",
+      "cmd": "/bin/zsh -lc \"sed -n '1,200p' note.txt\"",
+      "cwd": "/workspace"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "exec-59525603-b92d-49e3-a3f2-b59f9373bdff",
+    "outcome": "succeeded",
+    "preview": "alpha\n"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "alpha"
+  },
+  {
+    "type": "assistant_message",
+    "text": "alpha"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 14109,
+      "output_tokens": 5,
+      "cache_read_input_tokens": 13056,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

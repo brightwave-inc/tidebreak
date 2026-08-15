@@ -1,0 +1,36 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.147.0",
+    "resume_ref": "01a006c6-2f0c-7581-bb06-1057bf661e4f"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "hello"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "assistant_message",
+    "text": "hello from fixture"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 13959,
+      "output_tokens": 7,
+      "cache_read_input_tokens": 8960,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

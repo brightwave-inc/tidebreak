@@ -1,0 +1,6 @@
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"tidebreak-harness-capture","version":"0.0.0"},"capabilities":{"experimentalApi":false}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"tidebreak-harness-capture/0.147.0 (Mac OS 26.6.1; arm64) Orca/1.4.182 (tidebreak-harness-capture; 0.0.0)","codexHome":"/tmp/redacted-codex-home","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"turn/start","params":{"threadId":"does-not-exist-thread","input":[{"type":"text","text":"hello"}]}}}
+{"dir":"in","msg":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"Mac","installationId":"dc346bec-fab7-40fb-aedc-4c75f353b283","environmentId":null},"emittedAtMs":1786819991306}}
+{"dir":"in","msg":{"error":{"code":-32600,"message":"invalid thread id: invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `o` at 2"},"id":2}}

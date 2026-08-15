@@ -1,0 +1,8 @@
+[
+  {
+    "type": "turn_failed",
+    "error": {
+      "message": "invalid thread id: invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `o` at 2"
+    }
+  }
+]
