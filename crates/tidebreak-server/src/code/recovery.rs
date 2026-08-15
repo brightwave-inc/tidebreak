@@ -9,12 +9,15 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle, save_session, save_turn,
+    append_event, get_open_turn, list_sessions_by_lifecycle, save_turn,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
     CodeTurnStatus, DbStore, FenceReason,
 };
+
+use super::attention::{persist_session, replace_attention};
+use super::bus::CodeEventBus;
 
 /// What boot recovery did to one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,18 +36,20 @@ pub(crate) enum PidLiveness {
 /// Scan every `Running` session and apply the conservative recovery rule.
 pub(crate) async fn recover_running_sessions(
     store: &DbStore,
+    bus: &CodeEventBus,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
-    recover_running_sessions_with(store, probe_recorded_pid).await
+    recover_running_sessions_with(store, bus, probe_recorded_pid).await
 }
 
 pub(crate) async fn recover_running_sessions_with(
     store: &DbStore,
+    bus: &CodeEventBus,
     probe: impl Fn(i64) -> PidLiveness,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
     let running = list_sessions_by_lifecycle(store, CodeSessionLifecycle::Running).await?;
     let mut actions = Vec::new();
     for session in running {
-        if let Some(action) = recover_one(store, session, &probe).await? {
+        if let Some(action) = recover_one(store, bus, session, &probe).await? {
             actions.push(action);
         }
     }
@@ -54,21 +59,24 @@ pub(crate) async fn recover_running_sessions_with(
 /// Resolve a fenced session after an explicit user reap. Never signals.
 pub(crate) async fn reap_session(
     store: &DbStore,
+    bus: &CodeEventBus,
     mut session: CodeSession,
 ) -> Result<CodeSession, tidebreak_core::AgentError> {
     session.lifecycle = CodeSessionLifecycle::Idle;
     session.fence_reason = None;
     session.child_pid = None;
-    let next = Attention::working(AttentionSource::Lifecycle);
-    if tidebreak_core::should_replace(&session.attention, &next) {
-        session.attention = next;
-    }
-    save_session(store, &session).await?;
+    replace_attention(
+        &mut session,
+        Attention::working(AttentionSource::Lifecycle),
+        false,
+    );
+    persist_session(store, bus, &session).await?;
     Ok(session)
 }
 
 async fn recover_one(
     store: &DbStore,
+    bus: &CodeEventBus,
     mut session: CodeSession,
     probe: &impl Fn(i64) -> PidLiveness,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
@@ -77,11 +85,15 @@ async fn recover_one(
         interrupt_open_turn(store, &session).await?;
         session.lifecycle = CodeSessionLifecycle::Idle;
         session.child_pid = None;
-        session.attention = Attention::needs_you(
-            "session recovered after the engine process exited",
-            AttentionSource::Lifecycle,
+        replace_attention(
+            &mut session,
+            Attention::needs_you(
+                "session recovered after the engine process exited",
+                AttentionSource::Lifecycle,
+            ),
+            false,
         );
-        save_session(store, &session).await?;
+        persist_session(store, bus, &session).await?;
         return Ok(Some(RecoveryAction::Interrupted {
             session: session.id.to_string(),
         }));
@@ -91,11 +103,15 @@ async fn recover_one(
             interrupt_open_turn(store, &session).await?;
             session.lifecycle = CodeSessionLifecycle::Idle;
             session.child_pid = None;
-            session.attention = Attention::needs_you(
-                "session recovered after the engine process exited",
-                AttentionSource::Lifecycle,
+            replace_attention(
+                &mut session,
+                Attention::needs_you(
+                    "session recovered after the engine process exited",
+                    AttentionSource::Lifecycle,
+                ),
+                false,
             );
-            save_session(store, &session).await?;
+            persist_session(store, bus, &session).await?;
             Ok(Some(RecoveryAction::Interrupted {
                 session: session.id.to_string(),
             }))
@@ -103,13 +119,17 @@ async fn recover_one(
         PidLiveness::Alive => {
             session.lifecycle = CodeSessionLifecycle::Fenced;
             session.fence_reason = Some(FenceReason::OrphanAlive);
-            session.attention = Attention::new(
-                AttentionState::Fenced {
-                    reason: FenceReason::OrphanAlive,
-                },
-                AttentionSource::Lifecycle,
+            replace_attention(
+                &mut session,
+                Attention::new(
+                    AttentionState::Fenced {
+                        reason: FenceReason::OrphanAlive,
+                    },
+                    AttentionSource::Lifecycle,
+                ),
+                false,
             );
-            save_session(store, &session).await?;
+            persist_session(store, bus, &session).await?;
             Ok(Some(RecoveryAction::Fenced {
                 session: session.id.to_string(),
             }))
@@ -293,7 +313,8 @@ mod tests {
     #[tokio::test]
     async fn dead_pid_closes_the_open_turn_as_interrupted() {
         let (_dir, store, session_id, turn_id) = seeded_running(Some(9_999_991)).await;
-        let actions = recover_running_sessions_with(&store, |_| PidLiveness::Dead)
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Dead)
             .await
             .unwrap();
         assert!(matches!(
@@ -323,7 +344,8 @@ mod tests {
         let decoy_pid = i64::from(decoy.id());
         let (_dir, store, session_id, turn_id) = seeded_running(Some(decoy_pid)).await;
         let flag = signaled.clone();
-        let actions = recover_running_sessions_with(&store, move |pid| {
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, move |pid| {
             // Recovery must probe only the recorded pid, and only via the
             // injected probe — never by signaling the decoy itself.
             assert_eq!(pid, decoy_pid);
@@ -339,6 +361,12 @@ mod tests {
         let session = get_session(&store, session_id).await.unwrap().unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
         assert_eq!(session.fence_reason, Some(FenceReason::OrphanAlive));
+        assert!(matches!(
+            session.attention.state,
+            AttentionState::Fenced {
+                reason: FenceReason::OrphanAlive
+            }
+        ));
         let turn = get_turn(&store, turn_id).await.unwrap().unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Running);
         assert!(
@@ -351,9 +379,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fenced_recovery_does_not_overwrite_a_manual_pin() {
+        let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
+        let mut session = get_session(&store, session_id).await.unwrap().unwrap();
+        session.attention = Attention::manual("hold");
+        tidebreak_core::db::code::save_session(&store, &session)
+            .await
+            .unwrap();
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
+            .await
+            .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Fenced { .. }]
+        ));
+        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert!(
+            matches!(session.attention.state, AttentionState::Manual { .. }),
+            "Fenced recovery must go through should_replace: {:?}",
+            session.attention
+        );
+    }
+
+    #[tokio::test]
     async fn eperm_probe_counts_as_alive() {
         let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
-        let actions = recover_running_sessions_with(&store, |_| PidLiveness::Alive)
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
             .await
             .unwrap();
         assert!(matches!(

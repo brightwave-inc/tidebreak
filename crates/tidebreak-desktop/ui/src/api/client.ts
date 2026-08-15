@@ -94,6 +94,7 @@ import {
   type HarnessDoctorReport,
   type HarnessKind,
   type SequencedCodeEventFrame,
+  type CodeUpdateNotice,
 } from "./types";
 import {
   parseAgentActivityHistory,
@@ -128,6 +129,7 @@ import {
   parseCodeWorkspacePr,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
+  parseCodeUpdateNotice,
 } from "../code/parsers";
 
 const WS_HANDSHAKE = "tidebreak-v1";
@@ -2071,6 +2073,39 @@ export class ApiClient {
       }
     };
     return socket;
+  }
+
+  /** Open the install-wide digest channel; auth via Sec-WebSocket-Protocol. */
+  openCodeUpdates(onNotice: (notice: CodeUpdateNotice) => void): WebSocket {
+    const url = `${this.baseUrl.replace(/^http/, "ws")}/code/updates`;
+    const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
+    const socket = new WebSocket(url, protocols);
+    socket.onmessage = (msg) => {
+      try {
+        const notice = parseCodeUpdateNotice(JSON.parse(String(msg.data)));
+        if (notice) onNotice(notice);
+        else console.error("dropping malformed code update notice");
+      } catch (err) {
+        console.error("bad code update notice", err);
+      }
+    };
+    return socket;
+  }
+
+  async setCodeAttention(
+    sessionId: string,
+    body: { clear?: boolean; note?: string },
+  ): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/attention`, {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code attention",
+    );
   }
 
   async listCodeApprovals(query?: {

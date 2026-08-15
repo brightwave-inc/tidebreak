@@ -1,4 +1,6 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+};
 
 use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
 use crate::error::{AgentError, Result};
@@ -56,6 +58,31 @@ pub async fn list_turns(store: &DbStore, session_id: CodeSessionId) -> Result<Ve
         .into_iter()
         .map(turn_from_row)
         .collect()
+}
+
+/// How many turns a session has recorded.
+pub async fn count_turns(store: &DbStore, session_id: CodeSessionId) -> Result<i64> {
+    let count = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+        .count(&store.conn)
+        .await
+        .map_err(store_err)?;
+    i64::try_from(count)
+        .map_err(|_| AgentError::Store(format!("turn count overflow for session {session_id}")))
+}
+
+/// Most recently created turn for a session, if any.
+pub async fn latest_turn(store: &DbStore, session_id: CodeSessionId) -> Result<Option<CodeTurn>> {
+    let Some(row) = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::code_turn::Column::Ordinal)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(turn_from_row(row)?))
 }
 
 /// The open (non-terminal) turn for a session, if any.

@@ -1,4 +1,5 @@
 import type {
+  Attention,
   CapLevel,
   CodePermissionMode,
   CodeSessionLifecycle,
@@ -80,6 +81,23 @@ export function defaultCreatePermissionMode(
   structuredApprovals: CapLevel | undefined,
 ): CodePermissionMode {
   return harnessHonorsStructuredApprovals(structuredApprovals) ? "ask" : "plan";
+}
+
+export function attentionLabel(attention: Attention): string {
+  switch (attention.state.type) {
+    case "working":
+      return "Working";
+    case "needs_you":
+      return attention.state.prompt || "Needs you";
+    case "stalled":
+      return "Stalled";
+    case "done_unreviewed":
+      return "Done";
+    case "fenced":
+      return "Fenced";
+    case "manual":
+      return attention.state.note || "Pinned";
+  }
 }
 
 export function createPermissionModes(

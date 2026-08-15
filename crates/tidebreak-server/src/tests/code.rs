@@ -1967,6 +1967,359 @@ async fn oversized_write_approval_is_still_decidable() {
     assert_eq!(seen[0].1, ApprovalDecision::Approve);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_channel_restates_the_full_digest_on_reconnect() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session);
+
+    let mut request = format!("ws://{addr}/code/updates")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let first = next_json(&mut socket).await;
+    assert_eq!(first["type"], "snapshot");
+    let sessions = first["sessions"].as_array().expect("snapshot sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session"], session_id);
+    assert_eq!(sessions[0]["workspace"], json_id(&workspace));
+    assert_eq!(sessions[0]["title"], "first change");
+    assert_eq!(sessions[0]["turn_count"], 0);
+
+    let _ = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "hi" }))
+        .send()
+        .await
+        .unwrap();
+
+    let mut saw_turn = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let notice = tokio::time::timeout(Duration::from_millis(500), next_json(&mut socket))
+            .await
+            .ok();
+        let Some(notice) = notice else {
+            continue;
+        };
+        if notice["type"] == "digest" && notice["turn_count"] == 1 {
+            saw_turn = true;
+            break;
+        }
+    }
+    assert!(saw_turn, "live digest must carry the new turn count");
+    drop(socket);
+
+    let mut request = format!("ws://{addr}/code/updates")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let restated = next_json(&mut socket).await;
+    assert_eq!(restated["type"], "snapshot");
+    let sessions = restated["sessions"].as_array().expect("restated sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session"], session_id);
+    assert_eq!(sessions[0]["turn_count"], 1);
+    assert_eq!(sessions[0]["attention"]["state"]["type"], "done_unreviewed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attention_follows_approval_completion_and_view() {
+    let adapter = ScriptedAdapter::new(approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_delay(Duration::from_millis(20));
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            let body: Vec<serde_json::Value> = listed.json().await.unwrap();
+            if let Some(row) = body.into_iter().next() {
+                let session = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if matches!(
+                    session.attention.state,
+                    AttentionState::NeedsYou {
+                        source: AttentionSource::Structured,
+                        ..
+                    }
+                ) {
+                    return row;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending structured NeedsYou never appeared");
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+
+    let after_decision = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !matches!(
+            after_decision.attention.state,
+            AttentionState::NeedsYou {
+                source: AttentionSource::Structured,
+                ..
+            }
+        ),
+        "decision must lift structured NeedsYou, got {:?}",
+        after_decision.attention
+    );
+
+    let finished = turn.await.unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.attention.state, AttentionState::DoneUnreviewed);
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (_socket, _) = connect_async(request).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+                .await
+                .unwrap()
+                .unwrap();
+            if row.attention.state == AttentionState::Working {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("viewing the session must clear DoneUnreviewed");
+}
+
+#[tokio::test]
+async fn stall_sweep_marks_a_silent_running_session() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Running;
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    crate::code::attention::sweep_stalled(&runtime.db, &runtime.bus, 0)
+        .await
+        .unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(row.attention.state, AttentionState::Stalled { .. }),
+        "{:?}",
+        row.attention
+    );
+}
+
+#[tokio::test]
+async fn user_can_pin_and_clear_attention() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session);
+
+    let pinned = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/attention"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "note": "look at this later" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pinned.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = pinned.json().await.unwrap();
+    assert_eq!(body["attention"]["state"]["type"], "manual");
+    assert_eq!(body["attention"]["state"]["note"], "look at this later");
+    assert_eq!(body["attention"]["source"], "user");
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Running;
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+    crate::code::attention::sweep_stalled(&runtime.db, &runtime.bus, 0)
+        .await
+        .unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(row.attention.state, AttentionState::Manual { .. }),
+        "Manual must survive the stall sweep"
+    );
+
+    let cleared = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/attention"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "clear": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = cleared.json().await.unwrap();
+    assert_ne!(body["attention"]["state"]["type"], "manual");
+}
+
+async fn next_json(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
+    loop {
+        let Some(frame) = socket.next().await else {
+            panic!("updates socket closed");
+        };
+        let WsMessage::Text(text) = frame.expect("ws frame") else {
+            continue;
+        };
+        return serde_json::from_str(text.as_str()).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn doctor_lists_the_scripted_adapter() {
     let (router, token, _runtime, _dir) = code_app(plain_text_script()).await;

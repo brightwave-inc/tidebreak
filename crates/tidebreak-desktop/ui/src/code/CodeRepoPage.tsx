@@ -4,7 +4,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
 import { RouteFrame } from "@/RouteFrame";
+import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { WORKSPACE_STATUS_LABELS } from "./labels";
@@ -29,6 +31,7 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
   const repos = useCodeCatalogStore((state) => state.repos);
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const refresh = useCodeCatalogStore((state) => state.refresh);
+  const digests = useCodeUpdatesStore((state) => state.byWorkspace);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -74,13 +77,17 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
                 })
               }
             >
-              <span>
+              <span className="flex min-w-0 items-center gap-2">
                 <span className="font-medium">{workspace.title}</span>
-                <span className="text-muted-foreground ml-2 font-mono text-xs">
+                <span className="text-muted-foreground font-mono text-xs">
                   {workspace.branch_name}
                 </span>
+                <AttentionBadge attention={digests[workspace.id]?.attention} compact />
               </span>
-              <span className="text-muted-foreground text-xs">
+              <span className="text-muted-foreground flex items-center gap-2 text-xs">
+                {digests[workspace.id]?.pr_state && (
+                  <span>PR #{digests[workspace.id]?.pr_state?.number}</span>
+                )}
                 {WORKSPACE_STATUS_LABELS[workspace.status]}
               </span>
             </button>

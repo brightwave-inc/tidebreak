@@ -38,6 +38,7 @@ async fn stream_events(mut socket: WebSocket, state: AppState, session: CodeSess
         return;
     };
     let mut live = runtime.bus.subscribe(session);
+    let _ = runtime.mark_session_viewed(session).await;
     let mut last_seq = after;
     if replay_after(&mut socket, &runtime.db, session, &mut last_seq)
         .await

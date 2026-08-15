@@ -757,9 +757,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
         .route(
+            "/code/sessions/{id}/attention",
+            post(routes::code::set_attention),
+        )
+        .route(
             "/code/sessions/{id}/events",
             get(routes::code::session_events),
         )
+        .route("/code/updates", get(routes::code::code_updates))
         .route(
             "/code/workspaces/{id}/terminals",
             post(routes::code::create_terminal)

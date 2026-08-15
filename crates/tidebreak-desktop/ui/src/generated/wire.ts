@@ -1124,6 +1124,11 @@ export type CodePushSnapshot = { branch: string, remote: string, };
 export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, created_at: string, };
 
 /**
+ * Cheap per-session digest on `/code/updates`.
+ */
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, };
+
+/**
  * Identifies one durable conversation with an external agent engine.
  */
 export type CodeSessionId = string;
@@ -1178,6 +1183,17 @@ export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordi
  * Status of one user→engine turn.
  */
 export type CodeTurnStatus = "running" | "completed" | "failed" | "interrupted";
+
+/**
+ * One unsequenced notice on `WS /code/updates`.
+ *
+ * A connect is restated as [`Self::Snapshot`]; later notices are live only.
+ */
+export type CodeUpdateNotice = { "type": "snapshot", 
+/**
+ * One row per live session.
+ */
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.

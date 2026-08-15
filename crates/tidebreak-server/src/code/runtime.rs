@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -11,7 +12,7 @@ use tidebreak_core::db::code::{
     delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
     get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
     list_repos, list_sessions, list_sessions_for_workspace, list_turns, list_workspaces,
-    save_approval, save_repo, save_session, save_workspace,
+    save_approval, save_repo, save_workspace,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -65,6 +66,8 @@ pub(crate) struct CodeRuntime {
     pr_cache: PrDigestCache,
     #[cfg(test)]
     gh_search_path: Mutex<Option<String>>,
+    stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
+    stall_started: AtomicBool,
 }
 
 impl CodeRuntime {
@@ -81,6 +84,8 @@ impl CodeRuntime {
             pr_cache: PrDigestCache::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
+            stall_sweep: Mutex::new(None),
+            stall_started: AtomicBool::new(false),
         }
     }
 
@@ -108,6 +113,8 @@ impl CodeRuntime {
             pr_cache: PrDigestCache::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
+            stall_sweep: Mutex::new(None),
+            stall_started: AtomicBool::new(false),
         }
     }
 
@@ -117,7 +124,8 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
-        let actions = recovery::recover_running_sessions(&self.db)
+        self.ensure_stall_sweep();
+        let actions = recovery::recover_running_sessions(&self.db, &self.bus)
             .await
             .map_err(ServerError::from)?;
         if let Err(error) = self.sweep_orphaned_checkpoints().await {
@@ -366,6 +374,7 @@ impl CodeRuntime {
                 workspace.id
             )));
         }
+        super::attention::emit_workspace_digests(&self.db, &self.bus, workspace.id).await;
         Ok(())
     }
 
@@ -480,7 +489,7 @@ impl CodeRuntime {
         .map_err(map_gh)?;
         if status.pr != workspace.pr {
             workspace.pr = status.pr.clone();
-            save_workspace(&self.db, &workspace).await?;
+            self.save_workspace(&workspace).await?;
         }
         Ok(status)
     }
@@ -507,7 +516,7 @@ impl CodeRuntime {
         .await
         .map_err(map_gh)?;
         workspace.pr = Some(digest);
-        save_workspace(&self.db, &workspace).await?;
+        self.save_workspace(&workspace).await?;
         self.workspace_pr(id).await
     }
 
@@ -692,10 +701,36 @@ impl CodeRuntime {
         if let Some(handle) = handle {
             let _ = handle.commands.send(WorkerCommand::Shutdown).await;
         }
-        let session = recovery::reap_session(&self.db, session)
+        let session = recovery::reap_session(&self.db, &self.bus, session)
             .await
             .map_err(ServerError::from)?;
         self.attach_and_spawn_worker(session).await
+    }
+
+    pub(crate) async fn set_attention(
+        &self,
+        id: CodeSessionId,
+        clear: bool,
+        note: Option<String>,
+    ) -> Result<CodeSession, ServerError> {
+        let _ = self.get_session(id).await?;
+        super::attention::user_set_attention(&self.db, &self.bus, id, clear, note)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn mark_session_viewed(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        super::attention::mark_viewed(&self.db, &self.bus, id)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    fn ensure_stall_sweep(&self) {
+        if self.stall_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::attention::StallSweepGuard::spawn(self.db.clone(), self.bus.clone());
+        *self.stall_sweep.lock().expect("stall sweep") = Some(guard);
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
@@ -812,7 +847,7 @@ impl CodeRuntime {
             session.lifecycle = CodeSessionLifecycle::Ended;
             session.child_pid = None;
             session.fence_reason = None;
-            save_session(&self.db, &session).await?;
+            super::attention::persist_session(&self.db, &self.bus, &session).await?;
         }
         Ok(())
     }
@@ -873,7 +908,7 @@ impl CodeRuntime {
         if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
             attached.harness_resume_ref = Some(resume);
         }
-        save_session(&self.db, &attached).await?;
+        super::attention::persist_session(&self.db, &self.bus, &attached).await?;
         let handle = spawn_session_worker(
             self.db.clone(),
             self.bus.clone(),
@@ -892,9 +927,12 @@ impl CodeRuntime {
         )
         .await?;
         if !pending.is_empty() {
-            attached.attention =
-                Attention::needs_you("an approval is waiting", AttentionSource::Structured);
-            save_session(&self.db, &attached).await?;
+            super::attention::replace_attention(
+                &mut attached,
+                Attention::needs_you("an approval is waiting", AttentionSource::Structured),
+                false,
+            );
+            super::attention::persist_session(&self.db, &self.bus, &attached).await?;
         }
         Ok(attached)
     }
@@ -1040,16 +1078,14 @@ impl CodeRuntime {
         )
         .await?;
         if still_pending.is_empty() {
-            if let Ok(Some(mut current)) = get_session(&self.db, approval.session_id).await {
-                if matches!(
-                    current.attention.state,
-                    tidebreak_core::AttentionState::NeedsYou { .. }
-                ) && current.attention.source == AttentionSource::Structured
-                {
-                    current.attention = Attention::working(AttentionSource::Lifecycle);
-                    let _ = save_session(&self.db, &current).await;
-                }
-            }
+            let _ = super::attention::apply_attention(
+                &self.db,
+                &self.bus,
+                approval.session_id,
+                Attention::working(AttentionSource::Lifecycle),
+                false,
+            )
+            .await;
         }
         Ok(approval)
     }

@@ -104,11 +104,14 @@ impl LiveSink {
         if insert_approval(&self.db, &approval).await.is_err() {
             return;
         }
-        if let Ok(Some(mut session)) = get_session(&self.db, self.session_id).await {
-            session.attention =
-                Attention::needs_you("an approval is waiting", AttentionSource::Structured);
-            let _ = save_session(&self.db, &session).await;
-        }
+        let _ = super::attention::apply_attention(
+            &self.db,
+            &self.bus,
+            self.session_id,
+            Attention::needs_you("an approval is waiting", AttentionSource::Structured),
+            false,
+        )
+        .await;
         let _ = persist_and_publish(
             &self.db,
             &self.bus,
@@ -366,11 +369,15 @@ async fn drive_turn(
     sink.set_turn(turn.id);
 
     session.lifecycle = CodeSessionLifecycle::Running;
-    session.attention = Attention::working(AttentionSource::Lifecycle);
+    super::attention::replace_attention(
+        session,
+        Attention::working(AttentionSource::Lifecycle),
+        false,
+    );
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
     }
-    save_session(db, session)
+    super::attention::persist_session(db, bus, session)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
@@ -459,9 +466,12 @@ async fn drive_turn(
             }
             if !session_was_ended(db, session).await {
                 session.lifecycle = CodeSessionLifecycle::Idle;
-                session.attention =
-                    Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle);
-                let _ = save_session(db, session).await;
+                super::attention::replace_attention(
+                    session,
+                    Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
+                    false,
+                );
+                let _ = super::attention::persist_session(db, bus, session).await;
             }
             return Err(WorkerError::Failed(err.to_string()));
         }
@@ -475,19 +485,29 @@ async fn drive_turn(
         return Ok(turn);
     }
     if turn.status == CodeTurnStatus::Interrupted {
-        session.attention =
-            Attention::needs_you("the turn was interrupted", AttentionSource::Lifecycle);
+        super::attention::replace_attention(
+            session,
+            Attention::needs_you("the turn was interrupted", AttentionSource::Lifecycle),
+            false,
+        );
     } else if turn.status == CodeTurnStatus::Failed {
-        session.attention =
-            Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle);
+        super::attention::replace_attention(
+            session,
+            Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
+            false,
+        );
     } else {
-        session.attention = Attention::new(
-            tidebreak_core::AttentionState::DoneUnreviewed,
-            AttentionSource::Lifecycle,
+        super::attention::replace_attention(
+            session,
+            Attention::new(
+                tidebreak_core::AttentionState::DoneUnreviewed,
+                AttentionSource::Lifecycle,
+            ),
+            false,
         );
     }
     session.lifecycle = CodeSessionLifecycle::Idle;
-    let _ = save_session(db, session).await;
+    let _ = super::attention::persist_session(db, bus, session).await;
     Ok(turn)
 }
 
@@ -525,8 +545,12 @@ pub(crate) async fn attach_engine(
     session.child_pid = child_pid;
     session.harness_version = version.or(session.harness_version);
     session.lifecycle = CodeSessionLifecycle::Idle;
-    session.attention = Attention::working(AttentionSource::Lifecycle);
-    save_session(db, &session)
+    super::attention::replace_attention(
+        &mut session,
+        Attention::working(AttentionSource::Lifecycle),
+        false,
+    );
+    super::attention::persist_session(db, bus, &session)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     persist_and_publish(
@@ -583,11 +607,28 @@ async fn persist_and_publish(
 ) -> Result<(), CodeJournalError> {
     apply_side_effects(db, session_id, spawn_epoch, &event).await?;
     let seq = append_event(db, session_id, spawn_epoch, &event).await?;
+    if is_activity(&event) {
+        let _ = super::attention::note_activity(db, bus, session_id).await;
+    }
     bus.publish(
         session_id,
         tidebreak_core::SequencedCodeEvent { seq, event },
     );
     Ok(())
+}
+
+fn is_activity(event: &CodeEvent) -> bool {
+    matches!(
+        event,
+        CodeEvent::AssistantDelta { .. }
+            | CodeEvent::AssistantMessage { .. }
+            | CodeEvent::ReasoningDelta { .. }
+            | CodeEvent::ToolStarted { .. }
+            | CodeEvent::ToolCompleted { .. }
+            | CodeEvent::FileChanged { .. }
+            | CodeEvent::ApprovalRequested { .. }
+            | CodeEvent::UserSteered { .. }
+    )
 }
 
 async fn apply_side_effects(
