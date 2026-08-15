@@ -27,7 +27,10 @@ pub mod probe;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
 pub use launch::{validate_launch_plan, BypassFlagError, LaunchPlan};
-pub use probe::{observe_version, resolve_binary, HostEnv, ProbeError};
+pub use probe::{
+    filter_child_env, observe_version, probe_shell, resolve_binary, HostEnv, ProbeCapture,
+    ProbeError,
+};
 
 /// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::CodeEvent`]
 /// minus persistence ids (turn id, approval id).
@@ -178,6 +181,9 @@ pub struct SessionSpec {
     pub extra_argv: Vec<String>,
     /// Extra environment from settings. Cannot override adapter-owned keys.
     pub extra_env: Vec<(String, String)>,
+    /// Shell-resolved environment captured by the probe. Children run under
+    /// this snapshot, not the GUI process environment.
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Approval-channel wiring, when the server has one to offer.
     pub approval: Option<ApprovalChannelSpec>,
     /// Absolute engine binary, already resolved by [`probe`].
@@ -249,6 +255,8 @@ pub struct HarnessProbe {
     pub authenticated: Option<bool>,
     /// Bounded stderr from the probe, for the doctor surface.
     pub stderr: String,
+    /// Shell-resolved environment captured by the same probe.
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 /// Adapter failure.
@@ -310,19 +318,6 @@ pub fn builtin_registry() -> AdapterRegistry {
     registry
 }
 
-/// Filter the process environment for an engine child: the user's variables
-/// minus anything Tidebreak-prefixed.
-#[must_use]
-pub fn passthrough_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    std::env::vars_os()
-        .filter(|(key, _)| {
-            !key.to_string_lossy()
-                .to_ascii_uppercase()
-                .starts_with("TIDEBREAK_")
-        })
-        .collect()
-}
-
 /// True when `path` is absolute and executable by the current user.
 #[must_use]
 pub fn is_absolute_executable(path: &Path) -> bool {
@@ -349,12 +344,6 @@ pub fn is_absolute_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn process_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn harness_crate_does_not_depend_on_a_pty() {
@@ -382,13 +371,18 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_env_strips_tidebreak_keys() {
-        let _guard = process_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var("TIDEBREAK_TEST_SECRET", "nope");
-        std::env::set_var("HARNESS_PASSTHROUGH_PROBE", "keep");
-        let env = passthrough_env();
+    fn filter_child_env_strips_tidebreak_keys() {
+        let snapshot = vec![
+            (
+                std::ffi::OsString::from("TIDEBREAK_TEST_SECRET"),
+                std::ffi::OsString::from("nope"),
+            ),
+            (
+                std::ffi::OsString::from("GATEWAY_URL"),
+                std::ffi::OsString::from("keep"),
+            ),
+        ];
+        let env = filter_child_env(snapshot);
         assert!(env.iter().all(|(key, _)| {
             !key.to_string_lossy()
                 .to_ascii_uppercase()
@@ -396,8 +390,6 @@ mod tests {
         }));
         assert!(env
             .iter()
-            .any(|(key, value)| { key == "HARNESS_PASSTHROUGH_PROBE" && value == "keep" }));
-        std::env::remove_var("TIDEBREAK_TEST_SECRET");
-        std::env::remove_var("HARNESS_PASSTHROUGH_PROBE");
+            .any(|(key, value)| { key == "GATEWAY_URL" && value == "keep" }));
     }
 }

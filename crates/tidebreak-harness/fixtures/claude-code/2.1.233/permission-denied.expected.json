@@ -15,15 +15,6 @@
     }
   },
   {
-    "type": "approval_resolved",
-    "harness_ref": {
-      "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC"
-    },
-    "decision": {
-      "type": "deny"
-    }
-  },
-  {
     "type": "harness_notice",
     "level": "warning",
     "message": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet."

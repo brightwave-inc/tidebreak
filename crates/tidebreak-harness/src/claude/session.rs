@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 use tracing::warn;
@@ -12,12 +12,13 @@ use tracing::warn;
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
-    passthrough_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, TurnInput,
+    filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
+    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput,
 };
 use tidebreak_core::CodePermissionMode;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
 /// Live Claude Code session: one child per [`HarnessSession::run_turn`].
 pub struct ClaudeSession {
@@ -36,11 +37,12 @@ impl ClaudeSession {
         }
     }
 
-    fn compose_plan(&self, input: &TurnInput) -> Result<LaunchPlan, HarnessError> {
+    fn compose_plan(&self) -> Result<LaunchPlan, HarnessError> {
+        // Prompt travels on stdin (`claude -p` with no prompt argument) so a
+        // user message cannot trip the bypass-flag denylist.
         let mut argv = vec![
             self.spec.binary.to_string_lossy().into_owned(),
             "-p".into(),
-            input.text.clone(),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -81,42 +83,87 @@ impl ClaudeSession {
 #[async_trait]
 impl HarnessSession for ClaudeSession {
     async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError> {
-        let plan = self.compose_plan(&input)?;
+        let plan = self.compose_plan()?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
             .current_dir(&plan.cwd)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .env_clear();
-        for (key, value) in passthrough_env() {
+        for (key, value) in filter_child_env(self.spec.env.iter().cloned()) {
             command.env(key, value);
         }
         for (key, value) in &plan.env {
             command.env(key, value);
         }
         let mut child = command.spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| HarnessError::Other("engine child has no stdin".into()))?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
         self.child = Some(child);
 
+        let prompt = input.text.clone();
+        let stdin_task = tokio::spawn(async move {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        });
+        let stderr_task = tokio::spawn(async move { drain_capped(stderr, MAX_STDERR_BYTES).await });
+
         let mut parser = ClaudeStreamParser::new();
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(line) = lines.next_line().await? {
-            for event in parser.push_line(&line) {
-                if let HarnessEvent::SessionStarted {
-                    resume_ref: Some(resume),
-                    ..
-                } = &event
-                {
-                    self.resume_ref = Some(resume.clone());
+        let budget = StreamBudget::default();
+        let mut lines = StreamLineBuffer::new();
+        let mut reader = stdout;
+        let mut chunk = vec![0_u8; budget.chunk_size];
+        loop {
+            let mut chunks_this_tick = 0;
+            let mut eof = false;
+            while chunks_this_tick < budget.max_chunks_per_tick {
+                match reader.read(&mut chunk).await? {
+                    0 => {
+                        eof = true;
+                        break;
+                    }
+                    n => {
+                        let tick = lines.push(&chunk[..n], budget);
+                        if tick.overflow_chunks > 0 {
+                            warn!(
+                                overflow_chunks = tick.overflow_chunks,
+                                "engine stdout exceeded the parse budget"
+                            );
+                        }
+                        for line in tick.lines {
+                            emit_parsed(&self.spec, &mut parser, &mut self.resume_ref, &line).await;
+                        }
+                    }
                 }
-                self.spec.sink.emit(event).await;
+                chunks_this_tick += 1;
             }
+            if eof {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        if !lines.pending().is_empty() {
+            let pending = lines.pending().to_owned();
+            emit_parsed(&self.spec, &mut parser, &mut self.resume_ref, &pending).await;
+        }
+
+        let _ = stdin_task.await;
+        let stderr = stderr_task.await.unwrap_or_default();
+        if !stderr.is_empty() {
+            warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
         if let Some(mut child) = self.child.take() {
             let _ = child.wait().await;
@@ -170,6 +217,44 @@ impl HarnessSession for ClaudeSession {
     }
 }
 
+async fn emit_parsed(
+    spec: &SessionSpec,
+    parser: &mut ClaudeStreamParser,
+    resume_ref: &mut Option<String>,
+    line: &str,
+) {
+    for event in parser.push_line(line) {
+        if let HarnessEvent::SessionStarted {
+            resume_ref: Some(resume),
+            ..
+        } = &event
+        {
+            *resume_ref = Some(resume.clone());
+        }
+        spec.sink.emit(event).await;
+    }
+}
+
+async fn drain_capped<R>(mut reader: R, cap: usize) -> String
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut out = Vec::new();
+    let mut buf = [0_u8; 4_096];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if out.len() < cap {
+                    let room = cap - out.len();
+                    out.extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn signal_interrupt(pid: u32) {
     #[cfg(unix)]
     {
@@ -181,12 +266,4 @@ fn signal_interrupt(pid: u32) {
     {
         let _ = pid;
     }
-}
-
-/// Unused stdin helper kept so a future streamed-JSON input path has a home.
-#[allow(dead_code)]
-async fn write_prompt(stdin: &mut tokio::process::ChildStdin, text: &str) -> std::io::Result<()> {
-    stdin.write_all(text.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.shutdown().await
 }

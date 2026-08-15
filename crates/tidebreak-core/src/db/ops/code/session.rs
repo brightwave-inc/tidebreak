@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::code::{
     Attention, AttentionSource, AttentionState, CodePermissionMode, CodeSession, CodeSessionId,
@@ -7,6 +7,7 @@ use crate::code::{
 use crate::error::{AgentError, Result};
 
 use super::super::super::{entities, store_err, DbStore};
+use super::acquire_code_session_write_lock;
 
 /// Insert a session row.
 pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()> {
@@ -48,33 +49,50 @@ pub async fn get_session(store: &DbStore, id: CodeSessionId) -> Result<Option<Co
 }
 
 /// Advance the spawn epoch and record the new child pid. Returns the new epoch.
+///
+/// Serialized on the same session-row lock journal appends take, so a
+/// superseded worker cannot keep a live epoch.
 pub async fn bump_spawn_epoch(
     store: &DbStore,
     id: CodeSessionId,
     child_pid: Option<i64>,
 ) -> Result<i64> {
-    let Some(mut session) = get_session(store, id).await? else {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, id).await? {
+        return Err(AgentError::Store(format!("code session {id} not found")));
+    }
+    let Some(session) = entities::code_session::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
         return Err(AgentError::Store(format!("code session {id} not found")));
     };
-    session.spawn_epoch = session
+    let next = session
         .spawn_epoch
         .checked_add(1)
         .ok_or_else(|| AgentError::Store(format!("code session {id} spawn epoch overflow")))?;
-    session.child_pid = child_pid;
-    entities::code_session::Entity::update_many()
+    let updated = entities::code_session::Entity::update_many()
         .col_expr(
             entities::code_session::Column::SpawnEpoch,
-            sea_orm::sea_query::Expr::value(session.spawn_epoch),
+            sea_orm::sea_query::Expr::value(next),
         )
         .col_expr(
             entities::code_session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(child_pid),
         )
         .filter(entities::code_session::Column::Id.eq(id.0))
-        .exec(&store.conn)
+        .filter(entities::code_session::Column::SpawnEpoch.eq(session.spawn_epoch))
+        .exec(&transaction)
         .await
         .map_err(store_err)?;
-    Ok(session.spawn_epoch)
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "code session {id} spawn epoch changed under the lock"
+        )));
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(next)
 }
 
 pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {

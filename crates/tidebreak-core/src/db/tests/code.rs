@@ -170,6 +170,27 @@ async fn journal_rejects_stale_spawn_epoch() {
 }
 
 #[tokio::test]
+async fn spawn_epoch_bumps_are_serialized() {
+    let (_dir, store, session_id, _) = seeded_session().await;
+    let n = 16_i64;
+    let mut joins = Vec::new();
+    for _ in 0..n {
+        let store = store.clone();
+        joins.push(tokio::spawn(async move {
+            bump_spawn_epoch(&store, session_id, None).await.unwrap()
+        }));
+    }
+    let mut epochs = Vec::new();
+    for join in joins {
+        epochs.push(join.await.unwrap());
+    }
+    epochs.sort_unstable();
+    assert_eq!(epochs, (1..=n).collect::<Vec<_>>());
+    let session = get_session(&store, session_id).await.unwrap().unwrap();
+    assert_eq!(session.spawn_epoch, n);
+}
+
+#[tokio::test]
 async fn journal_seq_is_monotonic_under_concurrent_appends() {
     let (_dir, store, session_id, _) = seeded_session().await;
     let n = 24;

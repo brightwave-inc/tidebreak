@@ -13,7 +13,7 @@ use tidebreak_core::{
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
-use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+use crate::HarnessEvent;
 
 /// Longest unrecognized payload kept for the debug log.
 const MAX_UNRECOGNIZED_LOG: usize = 512;
@@ -126,32 +126,20 @@ impl ClaudeStreamParser {
                 }]
             }
             "permission_denied" => {
-                let call_id = value
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
                 let message = value
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("permission denied")
                     .to_owned();
-                // `permission_denied` is a resolved denial, not a parked
-                // request. A live approval channel (the permission-prompt
-                // tool) is what produces real `ApprovalRequested` events;
-                // synthesizing one here would mint a spurious approval row.
-                let mut events = Vec::new();
-                if !call_id.is_empty() {
-                    events.push(HarnessEvent::ApprovalResolved {
-                        harness_ref: HarnessApprovalRef { call_id },
-                        decision: ApprovalDecision::Deny { feedback: None },
-                    });
-                }
-                events.push(HarnessEvent::HarnessNotice {
+                // `permission_denied` is an already-resolved denial, not a
+                // parked request. A live permission-prompt tool is what
+                // produces real ApprovalRequested / ApprovalResolved events;
+                // synthesizing either would mint or miss approval rows.
+                // The following tool_result already conveys the denial.
+                vec![HarnessEvent::HarnessNotice {
                     level: HarnessNoticeLevel::Warning,
                     message: bound(&message, MAX_NOTICE_CHARS),
-                });
-                events
+                }]
             }
             "hook_started" | "hook_response" | "status" | "thinking_tokens" => {
                 // Known stream noise. Counted so it is never silent.

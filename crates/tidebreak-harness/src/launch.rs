@@ -29,7 +29,7 @@ const DENIED_EXACT: &[&str] = &[
 /// including user-supplied extras.
 pub fn validate_launch_plan(plan: &LaunchPlan) -> Result<(), BypassFlagError> {
     for arg in &plan.argv {
-        if is_bypass_flag(arg) {
+        if arg.starts_with('-') && is_bypass_flag(arg) {
             return Err(BypassFlagError(arg.clone()));
         }
     }
@@ -96,5 +96,17 @@ mod tests {
         let err = validate_launch_plan(&plan(&["claude", "--dangerously-bypass-permissions"]))
             .unwrap_err();
         assert!(err.0.contains("dangerous"));
+    }
+
+    #[test]
+    fn prompt_text_is_not_scanned_as_a_flag() {
+        validate_launch_plan(&plan(&[
+            "claude",
+            "-p",
+            "this is dangerous, skip the permission for writes",
+            "--output-format",
+            "stream-json",
+        ]))
+        .unwrap();
     }
 }

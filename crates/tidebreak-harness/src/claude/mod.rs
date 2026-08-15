@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
 
 use crate::claude::session::ClaudeSession;
-use crate::probe::{observe_version, resolve_binary, HostEnv};
+use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
 
 /// Claude Code adapter. Capabilities below are for the captured version
@@ -32,16 +32,17 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
-        match resolve_binary(host, "claude").await {
-            Ok(path) => {
-                let version = observe_version(&path).await.ok();
+        match probe_shell(host, "claude").await {
+            Ok(capture) => {
+                let version = observe_version(&capture.binary).await.ok();
                 // Auth observation is not captured for 2.1.233. Do not guess.
                 HarnessProbe {
                     found: true,
-                    binary_path: Some(path),
+                    binary_path: Some(capture.binary),
                     version,
                     authenticated: None,
-                    stderr: String::new(),
+                    stderr: capture.stderr,
+                    env: capture.env,
                 }
             }
             Err(err) => HarnessProbe {
@@ -50,6 +51,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
                 version: None,
                 authenticated: None,
                 stderr: err.to_string(),
+                env: Vec::new(),
             },
         }
     }
@@ -146,13 +148,13 @@ mod tests {
         let (events, _) = replay("permission-denied");
         assert!(events
             .iter()
-            .any(|event| matches!(event, HarnessEvent::ApprovalResolved { .. })));
-        assert!(events
-            .iter()
             .any(|event| matches!(event, HarnessEvent::HarnessNotice { .. })));
-        assert!(events
-            .iter()
-            .all(|event| !matches!(event, HarnessEvent::ApprovalRequested { .. })));
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event,
+                HarnessEvent::ApprovalRequested { .. } | HarnessEvent::ApprovalResolved { .. }
+            )
+        }));
     }
 
     #[test]
@@ -189,6 +191,7 @@ mod tests {
             version: Some("2.1.233 (Claude Code)".into()),
             authenticated: None,
             stderr: String::new(),
+            env: Vec::new(),
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
