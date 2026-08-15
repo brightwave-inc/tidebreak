@@ -1,10 +1,17 @@
 # Code mode
 
-Status: proposed design, pre-implementation. The decision records
+Status: implemented (first version). The decision records
 [`0030`](decisions/0030-code-mode-separate-surface.md) through
-[`0036`](decisions/0036-code-mode-auxiliary-terminals.md) carry the decisions;
-this page carries the working design detail an implementer needs in one
-place. Where this page and a decision record disagree, the record wins.
+[`0036`](decisions/0036-code-mode-auxiliary-terminals.md) carry the decisions
+and are accepted; this page carries the working design detail in one place.
+Where this page and a decision record disagree, the record wins. The first
+version ships the full surface described here — repos, workspaces, sessions,
+approvals, checkpoints and review, auxiliary terminals, the git/PR flow, the
+updates channel, and adapters for Claude Code (reference tier), Codex CLI,
+opencode, and Grok CLI (the last currently refuses every permission mode:
+its captured 1.0.4 print surface honors none of them, and honesty beats
+approximation) — with the deliberately parked scope recorded in
+[`docs/deferred.md`](deferred.md).
 
 Code mode is Tidebreak's second product surface: pick a local git repository,
 spin up isolated **workspaces** (one worktree + branch each), and run

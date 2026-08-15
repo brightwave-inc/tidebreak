@@ -1,6 +1,6 @@
 # 34. Harness Discovery and the Credential Boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode
 - Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),
