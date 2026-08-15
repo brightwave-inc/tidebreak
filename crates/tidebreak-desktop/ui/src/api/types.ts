@@ -117,6 +117,9 @@ import {
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   type CodeFileChange as WireCodeFileChange,
+  type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
+  type CodeTerminalRead as WireCodeTerminalRead,
+  type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   type Diffstat as WireDiffstat,
   type FileChangeKind as WireFileChangeKind,
@@ -994,6 +997,9 @@ export type FileChangeKind = WireFileChangeKind;
 export type CodeFileChange = WireCodeFileChange;
 export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
+export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
+export type CodeTerminalRead = WireCodeTerminalRead;
+export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;
 
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
 export type CodeEvent = WireCodeEvent;

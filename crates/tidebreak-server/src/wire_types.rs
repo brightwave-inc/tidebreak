@@ -416,6 +416,9 @@ mod tests {
         generate::collect_from::<crate::routes::code::HarnessDoctorReport>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFiles>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeTerminalActivityNotice>(&cfg, &mut out);
         out
     }
 

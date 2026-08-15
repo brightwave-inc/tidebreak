@@ -248,6 +248,8 @@ pub struct AppState {
     /// Code-mode runtime: worktrees, session workers, doctor, event bus.
     /// Absent only in tests that assemble state without a [`DbStore`].
     pub(crate) code: Option<Arc<crate::code::CodeRuntime>>,
+    /// In-memory auxiliary terminals. Ephemeral: empty after every restart.
+    pub(crate) terminals: Arc<crate::code::terminal::TerminalHub>,
 }
 
 impl AppState {
@@ -435,6 +437,7 @@ impl AppState {
             code_execution: None,
             host_folders: None,
             code: None,
+            terminals: Arc::new(crate::code::terminal::TerminalHub::new()),
         })
     }
 

@@ -12,6 +12,8 @@ import type {
   CodeTurnSnapshot,
   CodeTurnStatus,
   CodeUsage,
+  CodeTerminalRead,
+  CodeTerminalSnapshot,
   CodeWorkspaceDiff,
   CodeWorkspaceFiles,
   CodeWorkspaceSnapshot,
@@ -34,6 +36,8 @@ import type {
   CodeRepoSnapshot as WireCodeRepoSnapshot,
   CodeSessionSnapshot as WireCodeSessionSnapshot,
   CodeTurnSnapshot as WireCodeTurnSnapshot,
+  CodeTerminalRead as WireCodeTerminalRead,
+  CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
@@ -465,6 +469,82 @@ export function parseCodeTurnList(value: unknown): CodeTurnSnapshot[] | null {
     turns.push(parsed);
   }
   return turns;
+}
+
+export function parseCodeTerminal(value: unknown): CodeTerminalSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeTerminalSnapshot>(value, [
+      "id",
+      "workspace_id",
+      "cols",
+      "rows",
+      "ended",
+      "created_at",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.workspace_id) ||
+    !isFiniteNumber(value.cols) ||
+    !isFiniteNumber(value.rows) ||
+    typeof value.ended !== "boolean" ||
+    !nonEmpty(value.created_at)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    workspace_id: value.workspace_id,
+    cols: value.cols,
+    rows: value.rows,
+    ended: value.ended,
+    created_at: value.created_at,
+  };
+}
+
+export function parseCodeTerminalList(
+  value: unknown,
+): CodeTerminalSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const terminals: CodeTerminalSnapshot[] = [];
+  for (const item of value) {
+    const parsed = parseCodeTerminal(item);
+    if (!parsed) return null;
+    terminals.push(parsed);
+  }
+  return terminals;
+}
+
+export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeTerminalRead>(value, [
+      "id",
+      "workspace_id",
+      "bytes",
+      "cursor",
+      "overflow",
+      "truncated",
+      "ended",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.workspace_id) ||
+    typeof value.bytes !== "string" ||
+    !isFiniteNumber(value.cursor) ||
+    typeof value.overflow !== "boolean" ||
+    typeof value.truncated !== "boolean" ||
+    typeof value.ended !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    workspace_id: value.workspace_id,
+    bytes: value.bytes,
+    cursor: value.cursor,
+    overflow: value.overflow,
+    truncated: value.truncated,
+    ended: value.ended,
+  };
 }
 
 export function parseHarnessDoctorReport(

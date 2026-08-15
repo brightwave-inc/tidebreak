@@ -21,6 +21,11 @@ describe("panel URLs", () => {
       turnId: "turn-1",
       file: "src/lib.rs",
     });
+    expect(parsePanelSegment("terminal")).toEqual({ type: "terminal" });
+    expect(parsePanelSegment("terminal.term-1")).toEqual({
+      type: "terminal",
+      terminalId: "term-1",
+    });
     expect(parsePanelSegment("agent")).toBeNull();
     expect(parsePanelSegment("document.doc-1.cite-1")).toEqual({
       type: "document",
@@ -74,6 +79,8 @@ describe("panel URLs", () => {
       { type: "diff" },
       { type: "diff", turnId: "turn-1" },
       { type: "diff", turnId: "turn-1", file: "src/lib.rs" },
+      { type: "terminal" },
+      { type: "terminal", terminalId: "term-1" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
     }

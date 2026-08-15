@@ -1075,6 +1075,32 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
 
 /**
+ * Unsequenced activity notice published on the updates channel.
+ *
+ * Never journaled. A client that missed one just pulls from its last cursor.
+ */
+export type CodeTerminalActivityNotice = { workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
+
+/**
+ * Identifies one auxiliary terminal attached to a workspace.
+ */
+export type CodeTerminalId = string;
+
+/**
+ * Cursor-pull response for `GET /code/workspaces/{id}/terminals/{tid}/read`.
+ *
+ * `bytes` is standard base64 of the raw ring slice. `overflow` is true when
+ * the requested cursor had already fallen out of the ring; the payload then
+ * starts with the inline truncation marker.
+ */
+export type CodeTerminalRead = { id: CodeTerminalId, workspace_id: WorkspaceId, bytes: string, cursor: number, overflow: boolean, truncated: boolean, ended: boolean, };
+
+/**
+ * One live auxiliary terminal. Bytes live only in the process ring.
+ */
+export type CodeTerminalSnapshot = { id: CodeTerminalId, workspace_id: WorkspaceId, cols: number, rows: number, ended: boolean, created_at: string, };
+
+/**
  * Identifies one user→engine cycle inside a code session.
  */
 export type CodeTurnId = string;

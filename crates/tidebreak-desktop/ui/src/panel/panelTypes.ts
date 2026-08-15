@@ -26,7 +26,9 @@ export type PanelContent =
   /** Changed files in a code-mode workspace; `turnId` filters to one turn. */
   | { type: "files"; turnId?: string }
   /** Server-produced unified diff; `turnId`/`file` anchor within the tab. */
-  | { type: "diff"; turnId?: string; file?: string };
+  | { type: "diff"; turnId?: string; file?: string }
+  /** Auxiliary workspace shell; `terminalId` pins a live PTY when known. */
+  | { type: "terminal"; terminalId?: string };
 
 export type PanelType = PanelContent["type"];
 

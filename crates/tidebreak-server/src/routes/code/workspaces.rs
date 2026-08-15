@@ -72,11 +72,11 @@ pub async fn archive_workspace(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<ArchiveWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    Ok(Json(CodeWorkspaceSnapshot::from(
-        require_code(&state)?
-            .archive_workspace(id, body.force)
-            .await?,
-    )))
+    let archived = require_code(&state)?
+        .archive_workspace(id, body.force)
+        .await?;
+    state.terminals.close_workspace(id);
+    Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 
 pub async fn list_workspace_files(
