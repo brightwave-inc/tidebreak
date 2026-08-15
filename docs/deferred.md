@@ -209,6 +209,67 @@ prompt server replies during an HTTP stream, propagate theme changes into app
 views, recover visibly from a transient frame-payload failure, make gateway
 sign-in restartable, and validate the external-app protocol against its SDK.
 
+## Code mode: what the first version deliberately leaves out
+
+Code mode ([`docs/code-mode.md`](code-mode.md), decision records 30–36) ships
+structured-first: harnesses are driven through their machine-readable
+protocols, and the product's answer to "the protocol doesn't carry it" is a
+visible capability gap, not a workaround. Several adjacent ideas are parked on
+purpose:
+
+- **Running a harness interactively in a PTY.** The escape-hatch version of
+  code mode — when the structured protocol breaks, fall back to a terminal
+  running the harness TUI — is rejected for now, not merely unbuilt
+  ([record 36](decisions/0036-code-mode-auxiliary-terminals.md)). Its
+  existence would sap the pressure to keep adapters honest, and it forfeits
+  approvals, resume, and durable history. Reconsider only if a harness's
+  machine-readable surface proves genuinely unusable over time.
+- **Bundled or pinned harness binaries.** Tidebreak resolves the user's own
+  installed CLIs and never brokers their credentials
+  ([record 34](decisions/0034-harness-discovery-credentials.md)). If version
+  drift becomes a recurring support burden, the pinned-runtime install
+  pattern already used for the managed Node runtime is the recorded escape
+  hatch.
+- **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
+  and power turn-scoped diffs; the surface that restores a workspace to an
+  earlier checkpoint waits until review flows have settled.
+- **Multiple sessions per workspace.** The data model keeps room for
+  follow-up and successor sessions in one worktree; v1 runs one active
+  session per workspace.
+- **An in-app code editor.** V1 reviews server-produced diffs and hands
+  editing to the user's editor via the worktree path. An embedded editor is
+  a heavyweight dependency with its own product surface; it needs demand
+  evidence first.
+- **Chat–code convergence.** The end state is one surface with no mode
+  choice: one conversation concept with an optional workspace binding, where
+  a workspace-bound conversation behaves code-like and engines — external
+  harnesses and Tidebreak's internal loop alike — sit behind the adapter
+  contract and are selected per conversation. The two modes are built
+  shape-compatible so this stays a mechanical merge
+  ([record 30](decisions/0030-code-mode-separate-surface.md)); the
+  convergence itself is a future record on top of two proven models.
+- **A per-repo worktree-location override.** Worktrees live under the
+  Tidebreak data directory; toolchains that misbehave outside the repo's
+  ancestry are the known cost, and the override waits for real instances of
+  that pain.
+- **Remote session execution.** The adapter contract deliberately never
+  assumes a session's engine is a local child process. A later execution
+  location can run the same harness in a managed sandbox — the session
+  ingesting a sequenced remote event stream into the same journal, the
+  workspace becoming a remote clone whose results arrive as pushed branches.
+  Channels that cannot carry interactive approvals restrict the session to
+  permission modes that need none, under the same visible-capability rules
+  as any other limitation.
+- **A supervision-first mobile client.** Every code-mode capability is a
+  server route, and the updates channel (restated digests, attention,
+  approvals) is deliberately cheap enough for a phone. A mobile client that
+  fires off sessions and supervises them — approve, deny with feedback,
+  steer, review completion — is a thin client of a reachable deployment and
+  waits on the self-host member-client path above.
+- **Code mode on Windows.** Login-shell discovery and worktree pathing both
+  need Windows-specific work, and Windows packaging is itself parked (see
+  above).
+
 ## What this means for planning
 
 V1 is not a claim that Tidebreak has every kind of automation or connector. It

@@ -1,0 +1,317 @@
+# Code mode
+
+Status: proposed design, pre-implementation. The decision records
+[`0030`](decisions/0030-code-mode-separate-surface.md) through
+[`0036`](decisions/0036-code-mode-auxiliary-terminals.md) carry the decisions;
+this page carries the working design detail an implementer needs in one
+place. Where this page and a decision record disagree, the record wins.
+
+Code mode is Tidebreak's second product surface: pick a local git repository,
+spin up isolated **workspaces** (one worktree + branch each), and run
+**sessions** — durable conversations with external coding-agent harnesses
+(Claude Code first; Codex CLI, opencode, and Grok CLI behind it) — supervised
+through a structured UI: conversation, tool activity, approvals, per-turn
+diffs, and a pull-request flow. The two-mode split is a delivery strategy:
+the destination is one surface where context selects behavior — a
+conversation bound to a workspace behaves code-like, one without is ordinary
+chat — and the adapter contract below is the runtime interface every engine,
+eventually including Tidebreak's own internal loop, sits behind
+([`0030`](decisions/0030-code-mode-separate-surface.md)).
+
+## Vocabulary
+
+| Noun | Meaning |
+|---|---|
+| repo | A registered local git repository: root path, default base ref, branch prefix, setup/archive scripts, quick actions. |
+| workspace | One isolated unit of work on a repo. Owns exactly one git worktree and one branch for life; carries PR state. |
+| session | One durable conversation with one harness inside a workspace. V1: one active session per workspace. |
+| turn | One user→agent cycle in a session, ending in a checkpoint. |
+| harness | The external coding-agent CLI being driven (never "provider"). |
+
+## Crate and module layout
+
+Dependencies flow downward per [`docs/crates.md`](crates.md):
+`tidebreak-core` ← `tidebreak-harness` ← `tidebreak-server` ← clients.
+
+```
+crates/tidebreak-core/src/code/
+  mod.rs         RepoId, WorkspaceId, CodeSessionId, CodeTurnId, CodeApprovalId,
+                 CodeTerminalId, HarnessKind — new id types, structurally like chat ids
+  event.rs       CodeEvent, SequencedCodeEvent (conventions of src/event.rs)
+  attention.rs   AttentionState, AttentionSource, should_replace
+  caps.rs        HarnessCaps, CapLevel, HarnessTier
+  permission.rs  CodePermissionMode { Plan, Ask, Auto } and its per-mode contract
+
+crates/tidebreak-core/src/db/entities.rs      six new entities (below)
+crates/tidebreak-core/src/db/ops/code/        repo.rs, workspace.rs, session.rs,
+                                              turn.rs, journal.rs, approval.rs
+
+crates/tidebreak-harness/                     protocol translation only
+  src/lib.rs       HarnessAdapter + HarnessSession traits, SessionSpec, LaunchPlan,
+                   adapter registry
+  src/probe.rs     interactive-login shell resolution + env capture (0034),
+                   version detection, auth observation
+  src/budget.rs    bounded stream-parse budgets
+  src/claude/      mod.rs, parse.rs, session.rs, approvals.rs
+  src/codex/  src/opencode/  src/grok/        later phases
+  src/bin/capture.rs                          dev-only, feature = "capture"
+  fixtures/<harness>/<version>/               *.ndjson + manifest.toml + *.expected.json
+
+crates/tidebreak-server/src/code/
+  mod.rs             wiring
+  session_worker.rs  per-session task: lease + spawn-epoch, adapter session, event pump
+  worktree.rs        git shell-out: repo validation, worktree add/remove/prune/self-heal
+  checkpoint.rs      hidden refs, synthetic commits via temp index, bounded diffs
+  setup_script.rs    setup/archive hooks, failure-preserves-checkout
+  recovery.rs        boot scan, fencing, orphan probe, reap
+  attention.rs       server-side attention computation, digest publication
+  approval_bridge.rs the loopback approval-prompt endpoint glue and decision routing
+  gh.rs              gh CLI shell-out: commit/push/PR/checks, graceful absence
+  terminal.rs        PTY shells, ring buffers, cursor reads (0036)
+  bus.rs             per-session broadcast + install-wide updates channel
+crates/tidebreak-server/src/routes/code/      repos, workspaces, sessions,
+                                              session_events, updates, approvals,
+                                              diffs, git, terminals, harnesses
+crates/tidebreak-server/src/scripted_harness.rs   feature-gated fake adapter
+                                              (the scripted_provider.rs pattern)
+
+crates/tidebreak-desktop/ui/src/code/         the UI family (below)
+```
+
+New dependencies, all exact-pinned and lockfile-matching: one Rust
+pseudo-terminal crate (terminals only — the harness crate must not depend on
+it, enforced by a dependency check), and the terminal-emulator UI package
+pair. Nothing else: no git library, no editor component, no diff library
+(git produces diffs; the UI styles them), no virtualization until measured.
+
+## Data model
+
+Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
+[`0002`](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md).
+
+- **`code_repo`** — `id`, `root_path` (unique, canonical toplevel),
+  `display_name`, `default_base_ref`, `branch_prefix`, `setup_script`,
+  `archive_script`, `quick_actions` (JSON array of
+  `{name, command, auto_run_on_create}`), `created_at`.
+- **`code_workspace`** — `id`, `repo_id`, `title`, `worktree_path`,
+  `branch_name`, `base_ref`, `status`
+  (`Creating | SetupFailed | Active | Archived`), `pr` (JSON digest:
+  number, url, state, checks summary; nullable), `created_at`,
+  `archived_at`.
+- **`code_session`** — `id`, `workspace_id`, `harness_kind`,
+  `harness_version` (observed at launch), `harness_resume_ref` (the
+  harness's own session/thread id for resume), `permission_mode`,
+  `lifecycle` (`Created | Idle | Running | Fenced | Ended`), `fence_reason`
+  (JSON, nullable), `child_pid`, `spawn_epoch`, `attention_state` (JSON),
+  `attention_source`, `unrecognized_event_count`, `created_at`.
+- **`code_turn`** — `id`, `session_id`, `ordinal`, `status`
+  (`Running | Completed | Failed | Interrupted`), `user_input` (inline or
+  blob reference when large), `checkpoint_ref`, `diffstat` (JSON), `usage`
+  (JSON, as reported by the harness), `narrative` (nullable; filled
+  asynchronously, never blocks lifecycle), `started_at`, `ended_at`.
+- **`code_event`** — `(session_id, seq)` primary key, `event` (JSON),
+  `created_at`. The journal. Appends are epoch-fenced: a write carrying a
+  stale `spawn_epoch` is rejected, so a superseded worker cannot corrupt the
+  stream (the `db/ops/turn/` claim discipline applied here).
+- **`code_approval`** — `id`, `session_id`, `turn_id`, `kind` (JSON,
+  normalized classification), `harness_raw` (JSON, size-capped), `state`
+  (`Pending | Approved | Denied`), `feedback`, `requested_at`,
+  `decided_at`.
+
+Boot recovery (`code/recovery.rs`, per
+[`0032`](decisions/0032-code-workspaces-worktrees-checkpoints.md)): sessions
+recorded `Running` are probed by recorded pid. Dead → the open turn closes
+as `Interrupted` (journaled), session `Idle`, attention
+`NeedsYou { source: Lifecycle }`. Alive → `Fenced { OrphanAlive }` until an
+explicit reap. Never signal a pid not recorded at spawn; `EPERM` counts as
+alive.
+
+## The adapter contract
+
+```rust
+#[async_trait]
+pub trait HarnessAdapter: Send + Sync {
+    fn kind(&self) -> HarnessKind;
+    /// Login-shell PATH resolution, version detection, auth observation.
+    /// Never reads or stores credentials (0034).
+    async fn probe(&self, host: &HostEnv) -> HarnessProbe;
+    /// Every capability flag stated for the probed version; `Unknown` is
+    /// legal, silence is not (0031).
+    fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps;
+    /// Spawn or connect for one session. The spec carries the worktree path,
+    /// permission mode, resume ref, approval-channel wiring, and event sink.
+    async fn launch(&self, spec: SessionSpec)
+        -> Result<Box<dyn HarnessSession>, HarnessError>;
+}
+
+#[async_trait]
+pub trait HarnessSession: Send {
+    /// Feed one user turn; normalized events flow to the sink until a
+    /// terminal turn event arrives.
+    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError>;
+    /// Resolve a pending approval through the harness's native channel (0033).
+    async fn decide(&mut self, approval: HarnessApprovalRef,
+                    decision: ApprovalDecision) -> Result<(), HarnessError>;
+    async fn interrupt(&mut self) -> Result<(), HarnessError>;
+    fn resume_ref(&self) -> Option<String>;
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
+}
+```
+
+Process models the trait absorbs:
+
+- **Claude Code** — one print-mode child per turn: streamed JSON output and
+  input, partial-message deltas on, resuming by the session id the stream
+  reports. Approvals via the permission-prompt tool over a loopback MCP
+  endpoint with a session-scoped token.
+- **Codex CLI** — a long-lived JSON-RPC server child (preferred; its
+  approval methods are the richer channel) or the JSONL exec mode with
+  resume, whichever the fixture spike proves stable on the installed
+  version.
+- **opencode** — a long-lived server child driven over HTTP with its event
+  stream; permissions over its permission API.
+- **Grok CLI** — best-effort tier; capabilities honestly `Unsupported` or
+  `Unknown` where its surface does not carry them.
+
+All children are pipe-based `tokio::process` with `kill_on_drop`, the
+user's environment minus Tidebreak internals
+([`0034`](decisions/0034-harness-discovery-credentials.md)), and bounded
+read budgets (fixed-size chunks, capped per tick, overflow counted and
+surfaced — parsing must be O(new bytes) and must never fall behind the
+terminal-rendering path).
+
+The exact flag strings, event schemas, and approval payload shapes per
+harness are established by the fixture-capture spike and recorded in the
+fixture manifests — deliberately not transcribed here, so this page cannot
+drift from captured reality
+([`0031`](decisions/0031-harness-adapter-boundary.md)).
+
+## The event vocabulary
+
+`CodeEvent` (journal payload; internally tagged, `#[non_exhaustive]`,
+bounded):
+
+| Variant | Carries |
+|---|---|
+| `SessionStarted` | harness kind, version, resume ref |
+| `TurnStarted` | turn id |
+| `AssistantDelta` / `AssistantMessage` | streamed or whole assistant text |
+| `ReasoningDelta` | streamed thinking text where the harness reports it |
+| `ToolStarted` | call id, name, `ToolDetail` (`Command {cmd, cwd}` \| `FileEdit {path}` \| `FileRead {path}` \| `Search {query}` \| `Other {summary}`) |
+| `ToolCompleted` | call id, outcome, bounded preview |
+| `FileChanged` | path, change kind, diffstat |
+| `ApprovalRequested` | approval id (hint; body loads from the approvals route) |
+| `ApprovalResolved` | approval id, decision |
+| `UserSteered` | the user's mid-turn message |
+| `TurnCompleted` | usage, checkpoint info |
+| `TurnFailed` | bounded error |
+| `TurnInterrupted` | — |
+| `CheckpointRecorded` | turn id, diffstat |
+| `HarnessNotice` | level, message — the visible-degradation channel |
+| `AttentionChanged` | state, source |
+
+## Server API surface
+
+```
+POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
+GET             /code/harnesses            doctor    POST /code/harnesses/refresh
+
+POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
+GET/PATCH       /code/workspaces/{id}
+POST            /code/workspaces/{id}/archive        {force?}
+POST            /code/workspaces/{id}/sessions       {harness, permission_mode}
+POST            /code/sessions/{id}/turns            {message}  (queued while running —
+                                                     the chat product's queue-default rule;
+                                                     steering is the explicit alternative,
+                                                     available only where the adapter's
+                                                     mid_turn_steering capability carries it)
+POST            /code/sessions/{id}/interrupt | /permission-mode | /attention | /reap
+WS              /code/sessions/{id}/events?after=    snapshot → replay → live
+WS              /code/updates                        digests, restated on connect
+
+GET             /code/approvals?state=pending
+POST            /code/approvals/{id}/decision        {approve | deny, feedback?}
+POST            /code/mcp/approval-prompt            loopback approval endpoint (0033)
+
+GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
+GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
+POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
+GET             /code/workspaces/{id}/pr             PR + checks digest (gh; graceful absence)
+POST            /code/workspaces/{id}/actions/{name} quick action; output journaled
+
+POST/GET/DELETE /code/workspaces/{id}/terminals
+GET             /code/workspaces/{id}/terminals/{tid}/read?cursor=
+POST            /code/workspaces/{id}/terminals/{tid}/write | /resize
+```
+
+The session worker is the only journal writer for its session, under a
+lease and the spawn epoch; routes submit work and read state, they never
+write the journal directly.
+
+Pull-request operations shell out to the user's `gh` (auth observed, never
+brokered — the [`0034`](decisions/0034-harness-discovery-credentials.md)
+boundary applies to `gh` exactly as to harnesses). Absent or signed-out
+`gh` degrades to copyable instructions, never to a broken button.
+
+## UI
+
+Routes (code-defined, hash history, in `ui/src/router.tsx`): `/code` (repo
+rail, doctor-driven empty state), `/code/r/$repoId` (workspace list,
+new-workspace flow, repo settings), `/code/w/$workspaceId` (the main
+surface; files, diff, and terminal open through the existing panel system —
+new `PanelContent` variants).
+
+`ui/src/code/`:
+
+- `CodeSidebar.tsx` on the existing sidebar frame and primitives: repos,
+  recent workspaces with attention badges, the mode switch back to chat.
+- `CodeUpdatesStore.ts` — one singleton store fed by `/code/updates`;
+  everything list-shaped reads from it.
+- `CodeSessionRegistry.ts` — `Map<sessionId, {store, controller, refCount}>`
+  of per-session stores from a `createCodeSessionStore()` factory; only
+  mounted session views hold event sockets. This is the chat store factory
+  generalized from one pinned instance to N.
+- `CodeSessionReducer.ts` — pure
+  `(state, SequencedCodeEvent) => {state, effects}` in the chat reducer's
+  exact shape.
+- Transcript from shared components: existing markdown rendering for
+  assistant text, existing tool-card chrome for tool events with a
+  code-mode `ToolDetail` renderer; new `CodeApprovalCard` (chat's approval
+  visual language, deny opens a feedback field), `TurnReviewCard`
+  (diffstat, duration, async narrative slot), `CodeComposer` (text,
+  permission-mode selector, interrupt), `PrCard` (status-quad chips),
+  `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
+  semantic status tokens; per-file grouping; per-turn anchoring),
+  `TerminalPane` (ephemeral renderer over the cursor-read API; replays
+  recent bytes on mount; chunked writes on a frame budget).
+- Settings: one new section, "Coding harnesses" — the doctor.
+- Wire: generated types plus hand-written validators in
+  `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).
+
+## Testing
+
+- Adapter parsers: fixture replay only
+  ([`0031`](decisions/0031-harness-adapter-boundary.md)); fixtures are
+  re-captured on harness version bumps, and that procedure lives in
+  `crates/tidebreak-harness/fixtures/README.md`.
+- Orchestration and routes: driven end to end against the scripted harness
+  (turn lifecycle, WS replay, approvals round-trip including
+  deny-with-feedback, interrupt, recovery matrix).
+- Git: integration tests against throwaway temp repos.
+- UI: reducer unit tests; DOM tests for transcript, approval card, and
+  registry reference counting.
+- Live harnesses cannot run in CI. Env-gated smoke tests
+  (`TIDEBREAK_LIVE_HARNESS=1`, ignored by default) plus a per-adapter
+  manual smoke checklist cover the real thing before an adapter ships.
+
+## What v1 excludes
+
+Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
+bundled or pinned harness binaries; checkpoint restore (the refs land in
+v1; the restore surface does not); multiple sessions per workspace;
+an in-app code editor; chat–code convergence (the single-surface end
+state: one conversation concept with an optional workspace binding,
+engines behind the adapter contract, no user-facing mode choice); remote
+session execution (the same harness in a managed sandbox feeding the same
+journal); a supervision-first mobile client over the updates channel;
+a per-repo worktree-location override; Windows support for code mode.
