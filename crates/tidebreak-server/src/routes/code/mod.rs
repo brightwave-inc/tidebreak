@@ -1,5 +1,6 @@
 //! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
 
+mod approvals;
 mod harnesses;
 mod repos;
 mod session_events;
@@ -8,6 +9,8 @@ mod terminals;
 mod types;
 mod workspaces;
 
+pub(crate) use crate::code::approval_bridge::approval_prompt;
+pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use harnesses::{list_harnesses, refresh_harnesses};
 pub(crate) use repos::{create_repo, delete_repo, get_repo, list_repos, patch_repo};
 pub(crate) use session_events::session_events;
@@ -21,10 +24,10 @@ pub(crate) use terminals::{
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeFileChange, CodeRepoSnapshot, CodeSessionSnapshot, CodeTerminalActivityNotice,
-    CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspaceSnapshot, HarnessDoctorReport, QueuedCodeTurn,
-    SequencedCodeEventFrame,
+    CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeFileChange, CodeRepoSnapshot,
+    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
+    CodeTurnSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceSnapshot,
+    HarnessDoctorReport, QueuedCodeTurn, SequencedCodeEventFrame,
 };
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_diff, list_workspace_files,

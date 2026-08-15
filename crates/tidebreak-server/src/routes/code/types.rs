@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use tidebreak_core::{
-    Attention, CapLevel, CodeEvent, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionLifecycle, CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
-    HarnessTier, PullRequestDigest, QuickAction, RepoId, WorkspaceId,
+    Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionLifecycle, CodeTerminalId,
+    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, Diffstat,
+    FenceReason, FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest,
+    QuickAction, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -348,6 +349,68 @@ pub struct CodeWorkspaceDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file: Option<String>,
+}
+
+/// One parked or decided engine approval.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeApprovalSnapshot {
+    pub id: CodeApprovalId,
+    pub session_id: tidebreak_core::CodeSessionId,
+    pub turn_id: tidebreak_core::CodeTurnId,
+    pub kind: CodeApprovalKind,
+    /// Exact JSON the engine sent, already size-capped. The card renders this.
+    pub harness_raw_json: String,
+    pub state: CodeApprovalState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub feedback: Option<String>,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<CodeApproval> for CodeApprovalSnapshot {
+    fn from(approval: CodeApproval) -> Self {
+        Self {
+            id: approval.id,
+            session_id: approval.session_id,
+            turn_id: approval.turn_id,
+            kind: approval.kind,
+            harness_raw_json: approval.harness_raw.to_string(),
+            state: approval.state,
+            feedback: approval.feedback,
+            requested_at: approval.requested_at,
+            decided_at: approval.decided_at,
+        }
+    }
+}
+
+/// Body of `POST /code/approvals/{id}/decision`.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeApprovalDecisionBody {
+    pub decision: CodeApprovalDecision,
+    #[serde(default)]
+    #[ts(optional)]
+    pub feedback: Option<String>,
+}
+
+/// `approve` or `deny`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeApprovalDecision {
+    Approve,
+    Deny,
+}
+
+/// Query for `GET /code/approvals`.
+#[derive(Debug, Deserialize)]
+pub struct ListApprovalsQuery {
+    #[serde(default)]
+    pub state: Option<CodeApprovalState>,
+    #[serde(default)]
+    pub session_id: Option<tidebreak_core::CodeSessionId>,
 }
 
 /// Query for `GET /code/sessions/{id}/events`.

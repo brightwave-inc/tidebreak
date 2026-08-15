@@ -48,19 +48,31 @@ impl ClaudeSession {
             "--verbose".into(),
             "--include-partial-messages".into(),
         ];
+        // Per-mode flag mapping captured on 2.1.233:
+        //   Plan → --permission-mode plan        (mutations refused)
+        //   Ask  → --permission-mode manual      (every tool parks on the prompt tool)
+        //   Auto → --permission-mode acceptEdits (workspace writes proceed; sensitive still parks)
+        // `--permission-mode auto` and `bypassPermissions` exist but are not
+        // these modes: `auto` is the engine's classifier, not Auto, and
+        // bypass is denylisted.
         match self.spec.permission_mode {
             CodePermissionMode::Plan => {
                 argv.push("--permission-mode".into());
                 argv.push("plan".into());
             }
             CodePermissionMode::Ask => {
-                // Engine default. Fixtures record this as `permissionMode: default`.
-                // `--help` does not list `default` as a flag value, so we omit it
-                // rather than guess.
+                argv.push("--permission-mode".into());
+                argv.push("manual".into());
             }
             CodePermissionMode::Auto => {
                 argv.push("--permission-mode".into());
                 argv.push("acceptEdits".into());
+            }
+        }
+        if let Some(channel) = &self.spec.approval {
+            if let Some(flags) = crate::claude::approvals::launch_args_for_approval_channel(channel)
+            {
+                argv.extend(flags);
             }
         }
         if let Some(resume) = &self.resume_ref {
@@ -172,15 +184,19 @@ impl HarnessSession for ClaudeSession {
     }
 
     async fn decide(
-        &mut self,
-        _approval: HarnessApprovalRef,
-        _decision: ApprovalDecision,
+        &self,
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Other(
-            "structured approvals are Unknown for Claude Code 2.1.233; \
-             the permission-prompt channel was not captured"
-                .into(),
-        ))
+        let Some(channel) = &self.spec.approval else {
+            return Err(HarnessError::Other(
+                "this session has no approval channel".into(),
+            ));
+        };
+        channel
+            .completer
+            .complete(&approval.call_id, decision)
+            .await
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
@@ -203,6 +219,14 @@ impl HarnessSession for ClaudeSession {
                 Ok(())
             }
         }
+    }
+
+    fn approval_completer(&self) -> std::sync::Arc<dyn crate::ApprovalCompleter> {
+        self.spec
+            .approval
+            .as_ref()
+            .map(|channel| channel.completer.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(crate::MissingApprovalChannel))
     }
 
     fn resume_ref(&self) -> Option<String> {

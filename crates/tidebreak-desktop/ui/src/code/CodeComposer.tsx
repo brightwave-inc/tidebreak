@@ -14,9 +14,8 @@ import {
  * Trimmed composer for a code session: text, send, interrupt, and the
  * permission mode the session was created under.
  *
- * Plan is the only mode this phase can honor. Ask and Auto stay visible so
- * the scale is honest, and they carry the server's "not yet available"
- * reason rather than disappearing.
+ * Ask is the default. Plan and Auto stay on the same scale. A mode the
+ * current harness cannot honor is disabled with the refusal reason.
  */
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto"];
@@ -25,12 +24,18 @@ export function CodeComposer({
   disabled,
   running,
   permissionMode,
+  availableModes = MODES,
+  unavailableReason = PERMISSION_MODE_UNAVAILABLE_REASON,
+  onPermissionMode,
   onSend,
   onInterrupt,
 }: {
   disabled?: boolean;
   running: boolean;
   permissionMode: CodePermissionMode;
+  availableModes?: readonly CodePermissionMode[];
+  unavailableReason?: string;
+  onPermissionMode?: (mode: CodePermissionMode) => void;
   onSend: (message: string) => Promise<void> | void;
   onInterrupt: () => Promise<void> | void;
 }) {
@@ -70,7 +75,7 @@ export function CodeComposer({
     <div className="flex flex-col gap-2 border-t px-4 py-3">
       <div className="flex flex-wrap items-center gap-1.5" data-testid="permission-modes">
         {MODES.map((mode) => {
-          const available = mode === "plan";
+          const available = availableModes.includes(mode);
           const selected = permissionMode === mode;
           return (
             <button
@@ -80,9 +85,10 @@ export function CodeComposer({
               title={
                 available
                   ? PERMISSION_MODE_LABELS[mode]
-                  : `${PERMISSION_MODE_LABELS[mode]}: ${PERMISSION_MODE_UNAVAILABLE_REASON}`
+                  : `${PERMISSION_MODE_LABELS[mode]}: ${unavailableReason}`
               }
               aria-pressed={selected}
+              onClick={() => available && onPermissionMode?.(mode)}
               className={cn(
                 "rounded-full border px-2.5 py-0.5 text-xs font-medium",
                 selected && "border-foreground bg-muted",
@@ -91,9 +97,7 @@ export function CodeComposer({
             >
               {PERMISSION_MODE_LABELS[mode]}
               {!available && (
-                <span className="sr-only">
-                  {PERMISSION_MODE_UNAVAILABLE_REASON}
-                </span>
+                <span className="sr-only">{unavailableReason}</span>
               )}
             </button>
           );

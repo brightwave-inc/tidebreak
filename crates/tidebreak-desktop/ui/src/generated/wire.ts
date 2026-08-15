@@ -804,9 +804,58 @@ diffstat?: Diffstat, };
 export type CitationLocator = { "kind": "document" } | { "kind": "page", page: number, } | { "kind": "pages", start: number, end: number, } | { "kind": "lines", start: number, end: number, } | { "kind": "sheet", sheet: string, cells: string | null, };
 
 /**
+ * `approve` or `deny`.
+ */
+export type CodeApprovalDecision = "approve" | "deny";
+
+/**
+ * Body of `POST /code/approvals/{id}/decision`.
+ */
+export type CodeApprovalDecisionBody = { decision: CodeApprovalDecision, feedback?: string, };
+
+/**
  * Identifies one parked approval belonging to a code session.
  */
 export type CodeApprovalId = string;
+
+/**
+ * Best-effort classification of what an approval is asking.
+ */
+export type CodeApprovalKind = { "type": "command", 
+/**
+ * Command string.
+ */
+cmd: string, 
+/**
+ * Working directory, when reported.
+ */
+cwd?: string | null, } | { "type": "file_write", 
+/**
+ * Paths involved.
+ */
+paths: Array<string>, } | { "type": "network", 
+/**
+ * Host or summary the engine reported.
+ */
+summary: string, } | { "type": "other", 
+/**
+ * Engine-provided summary.
+ */
+summary: string, };
+
+/**
+ * One parked or decided engine approval.
+ */
+export type CodeApprovalSnapshot = { id: CodeApprovalId, session_id: CodeSessionId, turn_id: CodeTurnId, kind: CodeApprovalKind, 
+/**
+ * Exact JSON the engine sent, already size-capped. The card renders this.
+ */
+harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested_at: string, decided_at?: string, };
+
+/**
+ * State of a persisted approval.
+ */
+export type CodeApprovalState = "pending" | "approved" | "denied";
 
 /**
  * One event in an external agent-engine session's journal.

@@ -3,6 +3,8 @@ import type {
   AttentionSource,
   AttentionState,
   CapLevel,
+  CodeApprovalSnapshot,
+  CodeApprovalState,
   CodeEvent,
   CodePermissionMode,
   CodeRepoSnapshot,
@@ -98,6 +100,11 @@ const FILE_CHANGE_KINDS = new Set<FileChangeKind>([
   "modified",
   "deleted",
   "renamed",
+]);
+const APPROVAL_STATES = new Set<CodeApprovalState>([
+  "pending",
+  "approved",
+  "denied",
 ]);
 const TOOL_OUTCOMES = new Set<ToolOutcome>(["succeeded", "failed", "denied"]);
 const ATTENTION_SOURCES = new Set<AttentionSource>([
@@ -837,6 +844,31 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         level: value.level,
         message: value.message,
       };
+    case "approval_requested":
+      if (
+        !onlyKeys(value, ["type", "approval_id"]) ||
+        !nonEmpty(value.approval_id)
+      ) {
+        return null;
+      }
+      return { type: "approval_requested", approval_id: value.approval_id };
+    case "approval_resolved":
+      if (
+        !onlyKeys(value, ["type", "approval_id", "decision"]) ||
+        !nonEmpty(value.approval_id) ||
+        !isRecord(value.decision) ||
+        (value.decision.type !== "approve" && value.decision.type !== "deny")
+      ) {
+        return null;
+      }
+      return {
+        type: "approval_resolved",
+        approval_id: value.approval_id,
+        decision: value.decision as Extract<
+          CodeEvent,
+          { type: "approval_resolved" }
+        >["decision"],
+      };
     case "attention_changed": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "attention_changed" }>>(value, [
@@ -1006,4 +1038,33 @@ function isMember<T extends string>(
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.session_id) ||
+    !nonEmpty(value.turn_id) ||
+    !isRecord(value.kind) ||
+    typeof value.kind.type !== "string" ||
+    typeof value.harness_raw_json !== "string" ||
+    !isMember(value.state, APPROVAL_STATES) ||
+    !nonEmpty(value.requested_at) ||
+    (value.feedback !== undefined && typeof value.feedback !== "string") ||
+    (value.decided_at !== undefined && typeof value.decided_at !== "string")
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    session_id: value.session_id,
+    turn_id: value.turn_id,
+    kind: value.kind as CodeApprovalSnapshot["kind"],
+    harness_raw_json: value.harness_raw_json,
+    state: value.state,
+    requested_at: value.requested_at,
+    ...(value.feedback !== undefined ? { feedback: value.feedback } : {}),
+    ...(value.decided_at !== undefined ? { decided_at: value.decided_at } : {}),
+  };
 }

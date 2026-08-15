@@ -97,6 +97,10 @@ pub enum HarnessEvent {
     ApprovalRequested {
         /// Engine-native handle used to decide the request.
         harness_ref: HarnessApprovalRef,
+        /// Size-capped raw engine payload. Empty object when the engine
+        /// emitted a request without a captured body.
+        #[serde(default)]
+        raw: serde_json::Value,
     },
     /// An approval was decided (observed on the stream, or after [`HarnessSession::decide`]).
     ApprovalResolved {
@@ -159,16 +163,55 @@ pub struct TurnInput {
     pub text: String,
 }
 
+/// Completes a parked engine approval. Implemented by the server bridge so
+/// [`HarnessSession::decide`] can run while `run_turn` is blocked on the child.
+#[async_trait]
+pub trait ApprovalCompleter: Send + Sync {
+    /// Finish the native channel for `call_id`.
+    async fn complete(&self, call_id: &str, decision: ApprovalDecision)
+        -> Result<(), HarnessError>;
+}
+
 /// Loopback approval-channel wiring supplied by the server layer.
 ///
 /// The server must serve a permission-prompt tool at `mcp_endpoint_url`
 /// authenticated by `token`. This crate does not implement that endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ApprovalChannelSpec {
     /// Loopback MCP endpoint URL.
     pub mcp_endpoint_url: String,
     /// Session-scoped token. Never logged.
     pub token: String,
+    /// How [`HarnessSession::decide`] finishes the parked MCP call.
+    pub completer: Arc<dyn ApprovalCompleter>,
+}
+
+impl std::fmt::Debug for ApprovalChannelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApprovalChannelSpec")
+            .field("mcp_endpoint_url", &self.mcp_endpoint_url)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ApprovalChannelSpec {
+    /// `--mcp-config` JSON captured for Claude Code 2.1.233 HTTP MCP.
+    #[must_use]
+    pub fn mcp_config_json(&self, server_name: &str) -> String {
+        serde_json::json!({
+            "mcpServers": {
+                server_name: {
+                    "type": "http",
+                    "url": self.mcp_endpoint_url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", self.token),
+                    },
+                }
+            }
+        })
+        .to_string()
+    }
 }
 
 /// What an adapter needs to spawn or connect one session.
@@ -227,8 +270,12 @@ pub trait HarnessSession: Send {
     async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError>;
 
     /// Resolve a pending approval through the engine's native channel.
+    ///
+    /// Takes shared `&self` so a decision can complete while `run_turn` is
+    /// blocked on the child. Adapters keep the parked channel behind interior
+    /// mutability.
     async fn decide(
-        &mut self,
+        &self,
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError>;
@@ -261,6 +308,28 @@ pub trait HarnessSession: Send {
 
     /// Tear the session down.
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
+
+    /// Shared decide handle, usable while `run_turn` holds the session.
+    fn approval_completer(&self) -> Arc<dyn ApprovalCompleter> {
+        Arc::new(MissingApprovalChannel)
+    }
+}
+
+/// Completer used when a session has no native channel.
+#[derive(Debug, Default)]
+pub(crate) struct MissingApprovalChannel;
+
+#[async_trait]
+impl ApprovalCompleter for MissingApprovalChannel {
+    async fn complete(
+        &self,
+        _call_id: &str,
+        _decision: ApprovalDecision,
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::Other(
+            "this session has no approval channel".into(),
+        ))
+    }
 }
 
 /// Result of probing an installed engine.

@@ -4,6 +4,7 @@
 //! in `tidebreak-harness`. This module owns git worktrees, the per-session
 //! worker, crash recovery, and the live event bus.
 
+pub(crate) mod approval_bridge;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
 pub(crate) mod recovery;

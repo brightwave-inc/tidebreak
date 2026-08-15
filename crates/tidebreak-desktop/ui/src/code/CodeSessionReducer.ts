@@ -68,6 +68,12 @@ export type CodeTranscriptItem =
       usage: CodeUsage | null;
       error: string | null;
       diffstat: Diffstat | null;
+    }
+  | {
+      kind: "approval";
+      id: string;
+      approvalId: string;
+      state: "pending" | "approved" | "denied";
     };
 
 export type CodeSessionState = {
@@ -324,6 +330,47 @@ export function reduceCodeSessionEvent(
           items: state.items.map((item) =>
             item.kind === "tool" && item.callId === event.call_id
               ? { ...item, status: event.outcome, preview: event.preview }
+              : item,
+          ),
+        },
+        effects,
+      };
+    }
+
+    case "approval_requested": {
+      const approvalId = event.approval_id;
+      const existing = state.items.some(
+        (item) => item.kind === "approval" && item.approvalId === approvalId,
+      );
+      return {
+        state: {
+          ...state,
+          items: existing
+            ? state.items
+            : [
+                ...state.items,
+                {
+                  kind: "approval",
+                  id: `approval:${approvalId}`,
+                  approvalId,
+                  state: "pending",
+                },
+              ],
+        },
+        effects,
+      };
+    }
+
+    case "approval_resolved": {
+      const approvalId = event.approval_id;
+      const nextState =
+        event.decision.type === "approve" ? "approved" : "denied";
+      return {
+        state: {
+          ...state,
+          items: state.items.map((item) =>
+            item.kind === "approval" && item.approvalId === approvalId
+              ? { ...item, state: nextState }
               : item,
           ),
         },

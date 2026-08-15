@@ -49,9 +49,9 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
   auto: "Auto",
 };
 
-/** The server refuses Ask and Auto until a later phase. */
+/** Shown when the selected harness cannot honor Ask or Auto. */
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
-  "not yet available; create the session in plan mode";
+  "this harness cannot honor that mode";
 
 export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "orphan_alive") {

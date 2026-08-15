@@ -1,6 +1,7 @@
 import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 
-import type { ToolDetail } from "../api/types";
+import type { CodeApprovalSnapshot, ToolDetail } from "../api/types";
+import { CodeApprovalCard } from "./CodeApprovalCard";
 import { Badge } from "@/components/ui/badge";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
@@ -19,9 +20,21 @@ import { TurnReviewCard } from "./TurnReviewCard";
 export function CodeTranscript({
   items,
   onOpenTurnDiff,
+  approvals = {},
+  decidingId,
+  approvalError,
+  onDecide,
 }: {
   items: CodeTranscriptItem[];
   onOpenTurnDiff?: (turnId: string) => void;
+  approvals?: Record<string, CodeApprovalSnapshot>;
+  decidingId?: string | null;
+  approvalError?: string;
+  onDecide?: (
+    approvalId: string,
+    decision: "approve" | "deny",
+    feedback?: string,
+  ) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -37,6 +50,16 @@ export function CodeTranscript({
           key={item.id}
           item={item}
           onOpenTurnDiff={onOpenTurnDiff}
+          approval={
+            item.kind === "approval" ? approvals[item.approvalId] : undefined
+          }
+          deciding={item.kind === "approval" && decidingId === item.approvalId}
+          approvalError={
+            item.kind === "approval" && decidingId === item.approvalId
+              ? approvalError
+              : undefined
+          }
+          onDecide={onDecide}
         />
       ))}
     </div>
@@ -46,9 +69,21 @@ export function CodeTranscript({
 function TranscriptItem({
   item,
   onOpenTurnDiff,
+  approval,
+  deciding,
+  approvalError,
+  onDecide,
 }: {
   item: CodeTranscriptItem;
   onOpenTurnDiff?: (turnId: string) => void;
+  approval?: CodeApprovalSnapshot;
+  deciding?: boolean;
+  approvalError?: string;
+  onDecide?: (
+    approvalId: string,
+    decision: "approve" | "deny",
+    feedback?: string,
+  ) => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -76,6 +111,24 @@ function TranscriptItem({
       );
     case "notice":
       return <HarnessNotice level={item.level} message={item.message} />;
+    case "approval":
+      if (!approval) {
+        return (
+          <p className="text-muted-foreground text-sm" role="status">
+            Loading approval…
+          </p>
+        );
+      }
+      return (
+        <CodeApprovalCard
+          approval={approval}
+          deciding={deciding}
+          error={approvalError}
+          onDecide={(decision, feedback) =>
+            onDecide?.(item.approvalId, decision, feedback)
+          }
+        />
+      );
     case "turn_boundary":
       return (
         <TurnReviewCard

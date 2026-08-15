@@ -762,6 +762,11 @@ pub fn app(state: AppState) -> Router {
             "/code/workspaces/{id}/terminals/{tid}/resize",
             post(routes::code::resize_terminal),
         )
+        .route("/code/approvals", get(routes::code::list_approvals))
+        .route(
+            "/code/approvals/{id}/decision",
+            post(routes::code::decide_approval),
+        )
         .merge(client_executor_api)
         // Merged before the bearer layer, so `require_token` wraps outside
         // `require_admin`: an unauthenticated request to a deployment-plane
@@ -811,6 +816,10 @@ pub fn app(state: AppState) -> Router {
     let view_frames = Router::new()
         .route("/mcp/view-frames/{token}", get(routes::get_mcp_view_frame))
         .route("/apps/view-frames/{token}", get(routes::get_app_view_frame))
+        .route(
+            "/code/mcp/approval-prompt",
+            post(routes::code::approval_prompt),
+        )
         .with_state(frame_state);
 
     Router::new()
@@ -1345,7 +1354,7 @@ async fn bind_inner(
     if let Err(error) = code.recover().await {
         tracing::warn!("code-mode recovery: {}", error.message());
     }
-    state.code = Some(code);
+    state.code = Some(code.clone());
     // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
     // everything else instead of after a second reconcile.
@@ -1497,6 +1506,7 @@ async fn bind_inner(
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
+    code.set_loopback_base(format!("http://{local_addr}"));
     // Publish before workers start answering so an attach racing boot sees a
     // file that matches the bound address. It carries the primary bearer and
     // the narrow local-import capability, never the executor credential. See

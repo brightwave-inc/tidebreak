@@ -21,7 +21,7 @@ use tidebreak_core::{
     CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
     WorkspaceId,
 };
-use tidebreak_harness::{AdapterRegistry, HarnessEvent};
+use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
 async fn code_app(
     events: Vec<HarnessEvent>,
@@ -56,6 +56,33 @@ async fn code_app_with(
     state.code = Some(runtime.clone());
     let token = state.token.clone();
     (app(state), token, runtime, dir)
+}
+
+fn approval_script() -> Vec<HarnessEvent> {
+    vec![
+        HarnessEvent::SessionStarted {
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: "scripted".into(),
+            resume_ref: Some("scripted-session".into()),
+        },
+        HarnessEvent::TurnStarted,
+        HarnessEvent::ApprovalRequested {
+            harness_ref: HarnessApprovalRef {
+                call_id: "toolu_scripted".into(),
+            },
+            raw: serde_json::json!({
+                "tool_name": "Write",
+                "input": { "file_path": "/workspace/probe.txt", "content": "hello" },
+                "tool_use_id": "toolu_scripted"
+            }),
+        },
+        HarnessEvent::AssistantDelta {
+            text: "after the decision".into(),
+        },
+        HarnessEvent::TurnCompleted {
+            usage: Default::default(),
+        },
+    ]
 }
 
 fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
@@ -162,6 +189,14 @@ async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
     assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "permission_mode_unavailable");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("structured approvals"),
+        "{}",
+        body["message"]
+    );
 
     let session = client
         .post(format!(
@@ -1457,6 +1492,261 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
         }),
         "expected a warning notice, got {events:?}"
     );
+}
+
+async fn ask_is_refused_when_structured_approvals_are_unsupported() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_unavailable");
+}
+
+#[tokio::test]
+async fn deny_feedback_reaches_the_scripted_engine() {
+    let adapter = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = json_id(&session).to_owned();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(listed.status(), reqwest::StatusCode::OK);
+            let body: Vec<serde_json::Value> = listed.json().await.unwrap();
+            if let Some(row) = body.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+    assert!(approval["harness_raw_json"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Write"));
+
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        row.attention.state,
+        AttentionState::NeedsYou { .. }
+    ));
+    assert_eq!(row.attention.source, AttentionSource::Structured);
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "decision": "deny",
+            "feedback": "no — use the fixtures directory instead",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    let decided: serde_json::Value = decided.json().await.unwrap();
+    assert_eq!(decided["state"], "denied");
+    assert_eq!(
+        decided["feedback"],
+        "no — use the fixtures directory instead"
+    );
+
+    let finished = turn.await.unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let seen = observed.observed_decisions();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "toolu_scripted");
+    assert_eq!(
+        seen[0].1,
+        ApprovalDecision::Deny {
+            feedback: Some("no — use the fixtures directory instead".into()),
+        }
+    );
+}
+
+#[tokio::test]
+async fn pending_approval_survives_restart_and_is_decidable() {
+    let first = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
+    let (router, token, runtime, dir) = code_app_with(first).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            let _ = client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await;
+        }
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+
+    let second = ScriptedAdapter::new(plain_text_script()).with_approvals(CapLevel::Supported);
+    let observed = second.clone();
+    let restarted = Arc::new(CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        {
+            let mut registry = AdapterRegistry::new();
+            registry.register(Arc::new(second));
+            registry
+        },
+    ));
+    restarted.recover().await.unwrap();
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        runtime.db.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(restarted);
+    let token2 = state.token.clone();
+    let addr2 = serve(app(state)).await;
+
+    let pending = reqwest::Client::new()
+        .get(format!("http://{addr2}/code/approvals?state=pending"))
+        .bearer_auth(&token2)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], approval["id"]);
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        row.attention.state,
+        AttentionState::NeedsYou { .. }
+    ));
+
+    let decided = reqwest::Client::new()
+        .post(format!(
+            "http://{addr2}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token2)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    let seen = observed.observed_decisions();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, ApprovalDecision::Approve);
 }
 
 #[tokio::test]

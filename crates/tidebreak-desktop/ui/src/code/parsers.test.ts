@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   liveCodeSession,
+  parseCodeApproval,
   parseCodeSession,
   parseCodeSessionList,
   parseCodeTerminal,
@@ -104,6 +105,34 @@ describe("parseCodeWorkspaceFiles", () => {
       parseCodeWorkspaceFiles({
         ...files,
         files: [{ ...files.files[0], kind: "moved" }],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeApproval", () => {
+  it("accepts a pending approval snapshot", () => {
+    const row = {
+      id: "appr-1",
+      session_id: "sess-1",
+      turn_id: "turn-1",
+      kind: { type: "file_write", paths: ["/workspace/probe.txt"] },
+      harness_raw_json: '{"tool_name":"Write"}',
+      state: "pending",
+      requested_at: "2026-08-15T12:00:00.000Z",
+    };
+    expect(parseCodeApproval(row)).toEqual(row);
+  });
+
+  it("rejects a row without the harness payload", () => {
+    expect(
+      parseCodeApproval({
+        id: "appr-1",
+        session_id: "sess-1",
+        turn_id: "turn-1",
+        kind: { type: "other", summary: "x" },
+        state: "pending",
+        requested_at: "2026-08-15T12:00:00.000Z",
       }),
     ).toBeNull();
   });

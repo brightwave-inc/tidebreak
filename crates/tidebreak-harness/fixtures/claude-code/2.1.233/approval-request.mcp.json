@@ -1,0 +1,17 @@
+{
+  "direction": "cli_to_mcp",
+  "method": "tools/call",
+  "params": {
+    "name": "permission_prompt",
+    "arguments": {
+      "tool_name": "Write",
+      "input": {
+        "file_path": "/workspace/probe.txt",
+        "content": "hello"
+      },
+      "tool_use_id": "toolu_01AccXU5wrjo1GDyiNaAGDXM"
+    }
+  },
+  "allow_response_text": "{\"behavior\":\"allow\"}",
+  "deny_response_text": "{\"behavior\":\"deny\",\"message\":\"no \u2014 use the fixtures directory instead\"}"
+}

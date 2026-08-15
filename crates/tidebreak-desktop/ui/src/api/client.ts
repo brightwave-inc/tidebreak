@@ -77,6 +77,7 @@ import {
   type AgentRunTaskPlan,
   type PendingChatPrompt,
   type TaskPlan,
+  type CodeApprovalSnapshot,
   type CodePermissionMode,
   type CodeRepoSnapshot,
   type CodeSessionSnapshot,
@@ -105,6 +106,7 @@ import {
   parseTaskPlan,
 } from "./parsers";
 import {
+  parseCodeApproval,
   parseCodeRepo,
   parseCodeSession,
   parseCodeSessionList,
@@ -1983,6 +1985,39 @@ export class ApiClient {
       }
     };
     return socket;
+  }
+
+  async listCodeApprovals(query?: {
+    state?: "pending" | "approved" | "denied";
+    sessionId?: string;
+  }): Promise<CodeApprovalSnapshot[]> {
+    const params = new URLSearchParams();
+    if (query?.state) params.set("state", query.state);
+    if (query?.sessionId) params.set("session_id", query.sessionId);
+    const suffix = params.size > 0 ? `?${params}` : "";
+    const body = await this.json<unknown>(`/code/approvals${suffix}`, {
+      headers: this.headers(),
+    });
+    return parseList(body, parseCodeApproval, "code approvals");
+  }
+
+  async decideCodeApproval(
+    approvalId: string,
+    body: { decision: "approve" | "deny"; feedback?: string },
+  ): Promise<CodeApprovalSnapshot> {
+    return requireParsed(
+      parseCodeApproval(
+        await this.json(
+          `/code/approvals/${encodeURIComponent(approvalId)}/decision`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+        ),
+      ),
+      "code approval",
+    );
   }
 }
 
