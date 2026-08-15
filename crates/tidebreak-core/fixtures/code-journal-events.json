@@ -1,0 +1,118 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "session-ref"
+  },
+  {
+    "type": "turn_started",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "hello"
+  },
+  {
+    "type": "assistant_message",
+    "text": "hello from fixture"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "thinking"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_1",
+    "name": "Read",
+    "detail": {
+      "kind": "file_read",
+      "path": "README.md"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_1",
+    "outcome": "succeeded",
+    "preview": "demo"
+  },
+  {
+    "type": "file_changed",
+    "path": "src/lib.rs",
+    "kind": "modified",
+    "diffstat": {
+      "files": 1,
+      "insertions": 3,
+      "deletions": 1,
+      "truncated": false
+    }
+  },
+  {
+    "type": "approval_requested",
+    "approval_id": "00000000-0000-0000-0000-000000000002"
+  },
+  {
+    "type": "approval_resolved",
+    "approval_id": "00000000-0000-0000-0000-000000000002",
+    "decision": {
+      "type": "deny",
+      "feedback": "use the fixtures directory"
+    }
+  },
+  {
+    "type": "user_steered",
+    "text": "try the other file"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 11,
+      "output_tokens": 22,
+      "cache_read_input_tokens": 33,
+      "cache_creation_input_tokens": 44
+    },
+    "checkpoint": {
+      "checkpoint_ref": "refs/tidebreak/checkpoints/ws/1",
+      "diffstat": {
+        "files": 2,
+        "insertions": 10,
+        "deletions": 1,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "type": "turn_failed",
+    "error": {
+      "message": "engine exited 1"
+    }
+  },
+  {
+    "type": "turn_interrupted"
+  },
+  {
+    "type": "checkpoint_recorded",
+    "turn_id": "00000000-0000-0000-0000-000000000001",
+    "diffstat": {
+      "files": 2,
+      "insertions": 10,
+      "deletions": 1,
+      "truncated": true
+    }
+  },
+  {
+    "type": "harness_notice",
+    "level": "warning",
+    "message": "unrecognized event type counted"
+  },
+  {
+    "type": "attention_changed",
+    "state": {
+      "type": "fenced",
+      "reason": {
+        "type": "orphan_alive"
+      }
+    },
+    "source": "lifecycle"
+  }
+]

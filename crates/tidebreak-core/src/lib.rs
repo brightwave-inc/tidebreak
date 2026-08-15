@@ -51,6 +51,7 @@ pub mod blob;
 pub mod cancel;
 pub mod citation;
 pub mod client_tools;
+pub mod code;
 pub mod computer_use;
 pub mod config;
 pub mod connected_app;
@@ -138,6 +139,16 @@ pub use client_tools::{
     WriteOutputToConnectedFolderProposal, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL,
     LIST_FOLDER_TOOL, MAX_CONNECTED_FOLDER_PATH_BYTES, MAX_FOLDER_ACCESS_REASON_CHARS,
     READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+};
+pub use code::{
+    should_replace, ApprovalDecisionKind, Attention, AttentionSource, AttentionState, BoundedError,
+    CapLevel, CheckpointHint, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
+    CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspace,
+    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
+    HarnessNoticeLevel, HarnessTier, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent,
+    ToolDetail, ToolOutcome, WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
