@@ -1649,3 +1649,165 @@ pub mod event {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod code_repo {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_repo")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub root_path: String,
+        pub display_name: String,
+        pub default_base_ref: String,
+        pub branch_prefix: String,
+        pub setup_script: Option<String>,
+        pub archive_script: Option<String>,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub quick_actions: Json,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_workspace {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_workspace")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repo_id: Uuid,
+        pub title: String,
+        pub worktree_path: String,
+        pub branch_name: String,
+        pub base_ref: String,
+        pub status: String,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub pr: Option<Json>,
+        pub created_at: DateTimeUtc,
+        pub archived_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_session {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_session")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub workspace_id: Uuid,
+        pub harness_kind: String,
+        pub harness_version: Option<String>,
+        pub harness_resume_ref: Option<String>,
+        pub permission_mode: String,
+        pub lifecycle: String,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub fence_reason: Option<Json>,
+        pub child_pid: Option<i64>,
+        pub spawn_epoch: i64,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub attention_state: Json,
+        pub attention_source: String,
+        pub unrecognized_event_count: i64,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_turn {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_turn")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub session_id: Uuid,
+        pub ordinal: i64,
+        pub status: String,
+        #[sea_orm(column_type = "Text")]
+        pub user_input: String,
+        pub user_input_blob_id: Option<Uuid>,
+        pub checkpoint_ref: Option<String>,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub diffstat: Option<Json>,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub usage: Option<Json>,
+        pub narrative: Option<String>,
+        pub started_at: DateTimeUtc,
+        pub ended_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_event {
+    use sea_orm::entity::prelude::*;
+
+    // Composite primary key `(session_id, seq)`: `seq` is monotonic *per
+    // session*, and the pair both enforces uniqueness and indexes the
+    // "this session's events after a cursor" replay query.
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_event")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub seq: i64,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub event: Json,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_approval {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_approval")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub session_id: Uuid,
+        pub turn_id: Uuid,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub kind: Json,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub harness_raw: Json,
+        pub state: String,
+        pub feedback: Option<String>,
+        pub requested_at: DateTimeUtc,
+        pub decided_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
