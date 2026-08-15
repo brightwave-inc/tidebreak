@@ -10,7 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use tidebreak_core::{AgentError, ChatId, OutputId, OutputRevisionId, Result};
+use tidebreak_core::{
+    AgentError, ChatId, OutputId, OutputRevisionId, Result, MAX_MESSAGE_ATTACHMENTS,
+};
+use uuid::Uuid;
 
 use crate::api::client::Client;
 use crate::api::wire::{OutputPreview, OutputRevisionRow, OutputSummary};
@@ -256,10 +259,9 @@ pub async fn attach(chat: ChatId, path: PathBuf, server: Server) -> Result<()> {
             .attach_image(chat, &media_type, bytes)
             .await
             .map_err(|error| local_import_error(client, error))?;
+        record_pending_image(chat, &attachment_id)?;
         println!("{attachment_id}");
-        eprintln!(
-            "tidebreak: published {title} as an image attachment; reference it from the next turn"
-        );
+        eprintln!("tidebreak: attached {title} as {media_type}");
     } else {
         let document_id = client
             .attach_document(chat, &title, &media_type, bytes)
@@ -281,4 +283,78 @@ fn local_import_error(client: &Client, error: AgentError) -> AgentError {
     } else {
         error
     }
+}
+
+/// Image ids `tidebreak attach` published for `chat` that the next `-p` turn
+/// has not yet submitted.
+pub(crate) fn pending_image_attachments(chat: ChatId) -> Result<Vec<Uuid>> {
+    let path = pending_images_path(chat)?;
+    let Some(bytes) = std::fs::read(&path).ok() else {
+        return Ok(Vec::new());
+    };
+    let ids = serde_json::from_slice::<Vec<Uuid>>(&bytes).map_err(|error| {
+        AgentError::msg(format!(
+            "could not read pending image attachments for {chat}: {error}"
+        ))
+    })?;
+    Ok(ids.into_iter().take(MAX_MESSAGE_ATTACHMENTS).collect())
+}
+
+pub(crate) fn clear_pending_image_attachments(chat: ChatId) -> Result<()> {
+    let path = pending_images_path(chat)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AgentError::msg(format!(
+            "could not clear pending image attachments for {chat}: {error}"
+        ))),
+    }
+}
+
+fn record_pending_image(chat: ChatId, attachment_id: &Uuid) -> Result<()> {
+    let mut ids = pending_image_attachments(chat)?;
+    if ids.contains(attachment_id) {
+        return Ok(());
+    }
+    if ids.len() >= MAX_MESSAGE_ATTACHMENTS {
+        return Err(AgentError::msg(format!(
+            "a message may carry at most {MAX_MESSAGE_ATTACHMENTS} image attachments"
+        )));
+    }
+    ids.push(*attachment_id);
+    write_pending_images(chat, &ids)
+}
+
+fn write_pending_images(chat: ChatId, ids: &[Uuid]) -> Result<()> {
+    let path = pending_images_path(chat)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AgentError::msg(format!(
+                "could not write pending image attachments for {chat}: {error}"
+            ))
+        })?;
+    }
+    let encoded = serde_json::to_vec(ids).map_err(|error| {
+        AgentError::msg(format!(
+            "could not write pending image attachments for {chat}: {error}"
+        ))
+    })?;
+    let temporary = path.with_extension("tmp");
+    let write =
+        std::fs::write(&temporary, encoded).and_then(|()| std::fs::rename(&temporary, &path));
+    if write.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write.map_err(|error| {
+        AgentError::msg(format!(
+            "could not write pending image attachments for {chat}: {error}"
+        ))
+    })
+}
+
+fn pending_images_path(chat: ChatId) -> Result<PathBuf> {
+    Ok(crate::profile_config()?
+        .data_dir
+        .join("pending-image-attachments")
+        .join(chat.to_string()))
 }

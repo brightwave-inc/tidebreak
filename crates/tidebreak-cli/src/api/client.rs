@@ -481,11 +481,24 @@ impl Client {
     }
 
     /// Accept a user message and queue its turn (`202`).
-    pub async fn post_message(&self, chat: ChatId, turn_id: TurnId, content: &str) -> Result<()> {
+    ///
+    /// `attachments` are image ids returned by [`Self::attach_image`]. An empty
+    /// slice is the ordinary text-only send.
+    pub async fn post_message(
+        &self,
+        chat: ChatId,
+        turn_id: TurnId,
+        content: &str,
+        attachments: &[uuid::Uuid],
+    ) -> Result<()> {
         let response = self
             .http
             .post(format!("{}/chats/{chat}/messages", self.base))
-            .json(&serde_json::json!({ "turn_id": turn_id, "content": content }))
+            .json(&serde_json::json!({
+                "turn_id": turn_id,
+                "content": content,
+                "attachments": attachments,
+            }))
             .send()
             .await
             .map_err(request_error)?;
@@ -700,7 +713,7 @@ impl Client {
         chat: ChatId,
         media_type: &str,
         bytes: Vec<u8>,
-    ) -> Result<String> {
+    ) -> Result<uuid::Uuid> {
         let response = self
             .with_local_import(
                 self.http
@@ -720,7 +733,7 @@ impl Client {
             .map_err(request_error)?;
         value["attachment_id"]
             .as_str()
-            .map(str::to_owned)
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
             .ok_or_else(|| AgentError::msg("image publish answered without an attachment id"))
     }
 
