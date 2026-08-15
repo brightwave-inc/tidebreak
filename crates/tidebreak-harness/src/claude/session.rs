@@ -1,11 +1,14 @@
 //! One print-mode child per turn.
 
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -23,8 +26,9 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// Live Claude Code session: one child per [`HarnessSession::run_turn`].
 pub struct ClaudeSession {
     spec: SessionSpec,
-    resume_ref: Option<String>,
-    child: Option<Child>,
+    resume_ref: Mutex<Option<String>>,
+    child: AsyncMutex<Option<Child>>,
+    child_pid: AtomicU32,
 }
 
 impl ClaudeSession {
@@ -32,8 +36,9 @@ impl ClaudeSession {
         let resume_ref = spec.resume_ref.clone();
         Self {
             spec,
-            resume_ref,
-            child: None,
+            resume_ref: Mutex::new(resume_ref),
+            child: AsyncMutex::new(None),
+            child_pid: AtomicU32::new(0),
         }
     }
 
@@ -75,9 +80,9 @@ impl ClaudeSession {
                 argv.extend(flags);
             }
         }
-        if let Some(resume) = &self.resume_ref {
+        if let Some(resume) = self.resume_ref.lock().expect("claude resume").clone() {
             argv.push("--resume".into());
-            argv.push(resume.clone());
+            argv.push(resume);
         }
         argv.extend(self.spec.extra_argv.iter().cloned());
         let mut env = self.spec.extra_env.clone();
@@ -94,7 +99,7 @@ impl ClaudeSession {
 
 #[async_trait]
 impl HarnessSession for ClaudeSession {
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
         let plan = self.compose_plan()?;
         let mut command = Command::new(&plan.argv[0]);
         command
@@ -124,7 +129,9 @@ impl HarnessSession for ClaudeSession {
             .stderr
             .take()
             .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-        self.child = Some(child);
+        self.child_pid
+            .store(child.id().unwrap_or(0), Ordering::SeqCst);
+        *self.child.lock().await = Some(child);
 
         let prompt = input.text.clone();
         let stdin_task = tokio::spawn(async move {
@@ -156,7 +163,7 @@ impl HarnessSession for ClaudeSession {
                             );
                         }
                         for line in tick.lines {
-                            emit_parsed(&self.spec, &mut parser, &mut self.resume_ref, &line).await;
+                            emit_parsed(&self.spec, &mut parser, &self.resume_ref, &line).await;
                         }
                     }
                 }
@@ -169,7 +176,7 @@ impl HarnessSession for ClaudeSession {
         }
         if !lines.pending().is_empty() {
             let pending = lines.pending().to_owned();
-            emit_parsed(&self.spec, &mut parser, &mut self.resume_ref, &pending).await;
+            emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await;
         }
 
         let _ = stdin_task.await;
@@ -177,9 +184,10 @@ impl HarnessSession for ClaudeSession {
         if !stderr.is_empty() {
             warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.wait().await;
         }
+        self.child_pid.store(0, Ordering::SeqCst);
         Ok(())
     }
 
@@ -199,49 +207,45 @@ impl HarnessSession for ClaudeSession {
             .await
     }
 
-    async fn interrupt(&mut self) -> Result<(), HarnessError> {
-        let Some(child) = self.child.as_mut() else {
+    async fn interrupt(&self) -> Result<(), HarnessError> {
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            signal_interrupt(pid);
+        }
+        let mut slot = self.child.lock().await;
+        let Some(child) = slot.as_mut() else {
             return Ok(());
         };
-        if let Some(id) = child.id() {
-            signal_interrupt(id);
-        }
         match timeout(INTERRUPT_GRACE, child.wait()).await {
             Ok(Ok(_)) => {
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
             Ok(Err(err)) => Err(err.into()),
             Err(_) => {
                 warn!("engine did not exit after SIGINT; killing");
                 child.kill().await?;
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
         }
     }
 
-    fn approval_completer(&self) -> std::sync::Arc<dyn crate::ApprovalCompleter> {
-        self.spec
-            .approval
-            .as_ref()
-            .map(|channel| channel.completer.clone())
-            .unwrap_or_else(|| std::sync::Arc::new(crate::MissingApprovalChannel))
-    }
-
     fn resume_ref(&self) -> Option<String> {
-        self.resume_ref.clone()
+        self.resume_ref.lock().expect("claude resume").clone()
     }
 
     fn child_pid(&self) -> Option<i64> {
-        self.child
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .map(i64::from)
+        match self.child_pid.load(Ordering::SeqCst) {
+            0 => None,
+            pid => Some(i64::from(pid)),
+        }
     }
 
-    async fn shutdown(mut self: Box<Self>) -> Result<(), HarnessError> {
-        if let Some(mut child) = self.child.take() {
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
         Ok(())
@@ -251,7 +255,7 @@ impl HarnessSession for ClaudeSession {
 async fn emit_parsed(
     spec: &SessionSpec,
     parser: &mut ClaudeStreamParser,
-    resume_ref: &mut Option<String>,
+    resume_ref: &Mutex<Option<String>>,
     line: &str,
 ) {
     for event in parser.push_line(line) {
@@ -260,7 +264,7 @@ async fn emit_parsed(
             ..
         } = &event
         {
-            *resume_ref = Some(resume.clone());
+            *resume_ref.lock().expect("claude resume") = Some(resume.clone());
         }
         spec.sink.emit(event).await;
     }

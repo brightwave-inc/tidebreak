@@ -1519,6 +1519,126 @@ async fn ask_is_refused_when_structured_approvals_are_unsupported() {
 }
 
 #[tokio::test]
+async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
+    let adapter = ScriptedAdapter::new(approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_delay(Duration::from_millis(20));
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+    let session_id = json_id(&session).to_owned();
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Running);
+    assert!(!turn.is_finished(), "run_turn must still be executing");
+
+    let decided = tokio::time::timeout(Duration::from_secs(2), async {
+        client
+            .post(format!(
+                "http://{addr}/code/approvals/{}/decision",
+                approval["id"].as_str().unwrap()
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "decision": "approve" }))
+            .send()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("decision must complete while run_turn is parked; a worker that cannot multiplex deadlocks here");
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        observed.observed_decisions().len(),
+        1,
+        "the harness must observe the decision before the turn ends"
+    );
+
+    let finished = turn.await.unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let body: serde_json::Value = finished.json().await.unwrap();
+    assert_eq!(body["status"], "completed");
+    let events = tidebreak_core::db::code::list_events(&runtime.db, parsed, 0)
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|framed| match &framed.event {
+            tidebreak_core::CodeEvent::ApprovalRequested { .. } => "requested",
+            tidebreak_core::CodeEvent::ApprovalResolved { .. } => "resolved",
+            tidebreak_core::CodeEvent::AssistantDelta { .. } => "delta",
+            tidebreak_core::CodeEvent::TurnCompleted { .. } => "completed",
+            _ => "other",
+        })
+        .collect();
+    assert!(kinds.contains(&"requested"));
+    assert!(kinds.contains(&"resolved"));
+    assert!(kinds.contains(&"delta"));
+    assert!(kinds.contains(&"completed"));
+    let requested = kinds.iter().position(|k| *k == "requested").unwrap();
+    let delta = kinds.iter().position(|k| *k == "delta").unwrap();
+    let completed = kinds.iter().position(|k| *k == "completed").unwrap();
+    assert!(requested < delta);
+    assert!(delta < completed);
+}
+
+#[tokio::test]
 async fn deny_feedback_reaches_the_scripted_engine() {
     let adapter = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
     let observed = adapter.clone();

@@ -176,7 +176,7 @@ struct ScriptedSession {
 
 #[async_trait]
 impl HarnessSession for ScriptedSession {
-    async fn run_turn(&mut self, _input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, _input: TurnInput) -> Result<(), HarnessError> {
         self.interrupt.store(false, Ordering::SeqCst);
         for event in &self.events {
             if self.interrupt.load(Ordering::SeqCst) {
@@ -226,16 +226,14 @@ impl HarnessSession for ScriptedSession {
         self.approver.complete(&approval.call_id, decision).await
     }
 
-    fn approval_completer(&self) -> Arc<dyn ApprovalCompleter> {
-        self.approver.clone()
-    }
-
-    async fn interrupt(&mut self) -> Result<(), HarnessError> {
+    async fn interrupt(&self) -> Result<(), HarnessError> {
         self.interrupt.store(true, Ordering::SeqCst);
+        // Drop a parked approval wait so run_turn can observe the flag.
+        let _ = self.approver.parked.lock().expect("scripted park").take();
         Ok(())
     }
 
-    async fn steer(&mut self, text: String) -> Result<(), HarnessError> {
+    async fn steer(&self, text: String) -> Result<(), HarnessError> {
         if self.mid_turn_steering != CapLevel::Supported {
             return Err(HarnessError::Other(
                 "mid-turn steering is not available on this engine".into(),

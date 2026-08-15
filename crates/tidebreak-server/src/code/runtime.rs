@@ -776,7 +776,6 @@ impl CodeRuntime {
                 commands: handle.commands.clone(),
                 pending: handle.pending.clone(),
                 wake: handle.wake.clone(),
-                approver: handle.approver.clone(),
                 sink: handle.sink.clone(),
             })
             .ok_or_else(|| {
@@ -855,11 +854,19 @@ impl CodeRuntime {
             ));
         }
         let handle = self.require_worker(approval.session_id)?;
+        let (reply, rx) = oneshot::channel();
         handle
-            .approver
-            .complete(&call_id, decision.clone())
+            .commands
+            .send(crate::code::session_worker::WorkerCommand::Decide {
+                approval: tidebreak_harness::HarnessApprovalRef { call_id },
+                decision: decision.clone(),
+                reply,
+            })
             .await
-            .map_err(|err| ServerError::internal(err.to_string()))?;
+            .map_err(|_| ServerError::internal("session worker is gone"))?;
+        rx.await
+            .map_err(|_| ServerError::internal("session worker dropped the decision"))?
+            .map_err(map_worker)?;
         let now = Utc::now();
         match &decision {
             ApprovalDecision::Approve => {

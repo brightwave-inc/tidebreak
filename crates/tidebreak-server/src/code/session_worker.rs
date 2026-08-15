@@ -3,6 +3,10 @@
 //! The worker owns the engine session and is the only journal writer for that
 //! session. Events are persisted (epoch-fenced) before they are published on
 //! the live bus.
+//!
+//! `run_turn` does not own the command loop. While a turn is in flight the
+//! worker keeps selecting on [`WorkerCommand`] so `decide` and `interrupt`
+//! reach the engine mid-turn — every adapter rides this, not just Claude.
 
 use std::sync::Arc;
 
@@ -21,7 +25,8 @@ use tidebreak_core::{
     CodeTurnId, CodeTurnStatus, DbStore,
 };
 use tidebreak_harness::{
-    ApprovalCompleter, HarnessError, HarnessEvent, HarnessEventSink, HarnessSession, TurnInput,
+    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
+    HarnessSession, TurnInput,
 };
 
 use super::bus::CodeEventBus;
@@ -30,6 +35,11 @@ pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
+    },
+    Decide {
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Interrupt {
         reply: oneshot::Sender<Result<(), WorkerError>>,
@@ -51,8 +61,6 @@ pub(crate) struct WorkerHandle {
     /// Single follow-up parked while a turn is running (queue-default).
     pub pending: Arc<std::sync::Mutex<Option<String>>>,
     pub wake: Arc<Notify>,
-    /// Shared decide handle; usable while `run_turn` holds the session.
-    pub approver: Arc<dyn ApprovalCompleter>,
     pub sink: Arc<LiveSink>,
 }
 
@@ -169,7 +177,6 @@ pub(crate) fn spawn_session_worker(
     let spawn_epoch = session.spawn_epoch;
     let pending = Arc::new(std::sync::Mutex::new(None));
     let wake = Arc::new(Notify::new());
-    let approver = engine.approval_completer();
     tokio::spawn(run_worker(
         db,
         bus,
@@ -185,7 +192,6 @@ pub(crate) fn spawn_session_worker(
         commands: tx,
         pending,
         wake,
-        approver,
         sink,
     }
 }
@@ -206,7 +212,7 @@ async fn run_worker(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
     mut session: CodeSession,
-    mut engine: Box<dyn HarnessSession>,
+    engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     pending: Arc<std::sync::Mutex<Option<String>>>,
     wake: Arc<Notify>,
@@ -221,7 +227,16 @@ async fn run_worker(
         if session_was_ended(&db, &mut session).await {
             break;
         }
-        drain_queued(&db, &bus, &mut session, engine.as_mut(), &sink, &pending).await;
+        drain_queued(
+            &db,
+            &bus,
+            &mut session,
+            engine.as_ref(),
+            &sink,
+            &pending,
+            &mut commands,
+        )
+        .await;
         tokio::select! {
             _ = wake.notified() => {}
             command = commands.recv() => match command {
@@ -230,41 +245,79 @@ async fn run_worker(
                         &db,
                         &bus,
                         &mut session,
-                        engine.as_mut(),
+                        engine.as_ref(),
                         &sink,
+                        &mut commands,
                         message,
                     )
                     .await;
                     let _ = reply.send(result);
                 }
-                Some(WorkerCommand::Interrupt { reply }) => {
-                    let result = engine
-                        .interrupt()
-                        .await
-                        .map_err(|err| WorkerError::Failed(err.to_string()));
-                    let _ = reply.send(result);
+                Some(command) => {
+                    if apply_control(engine.as_ref(), command).await == ControlFlow::Shutdown {
+                        break;
+                    }
                 }
-                Some(WorkerCommand::Shutdown) | None => break,
+                None => break,
             },
         }
     }
     let _ = engine.shutdown().await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlFlow {
+    Continue,
+    Shutdown,
+}
+
+async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> ControlFlow {
+    match command {
+        WorkerCommand::Decide {
+            approval,
+            decision,
+            reply,
+        } => {
+            let result = engine
+                .decide(approval, decision)
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()));
+            let _ = reply.send(result);
+            ControlFlow::Continue
+        }
+        WorkerCommand::Interrupt { reply } => {
+            let result = engine
+                .interrupt()
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()));
+            let _ = reply.send(result);
+            ControlFlow::Continue
+        }
+        WorkerCommand::RunTurn { reply, .. } => {
+            let _ = reply.send(Err(WorkerError::Conflict(
+                "a turn is already running on this session".into(),
+            )));
+            ControlFlow::Continue
+        }
+        WorkerCommand::Shutdown => ControlFlow::Shutdown,
+    }
+}
+
 async fn drain_queued(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
-    engine: &mut dyn HarnessSession,
+    engine: &dyn HarnessSession,
     sink: &LiveSink,
     pending: &Arc<std::sync::Mutex<Option<String>>>,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
         let next = pending.lock().expect("code turn queue").take();
         let Some(message) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, sink, message).await;
+        let _ = drive_turn(db, bus, session, engine, sink, commands, message).await;
     }
 }
 
@@ -272,8 +325,9 @@ async fn drive_turn(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
-    engine: &mut dyn HarnessSession,
+    engine: &dyn HarnessSession,
     sink: &LiveSink,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
     message: String,
 ) -> Result<CodeTurn, WorkerError> {
     if session.lifecycle == CodeSessionLifecycle::Running {
@@ -331,7 +385,25 @@ async fn drive_turn(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    let run = engine.run_turn(TurnInput { text: message }).await;
+    let run = engine.run_turn(TurnInput { text: message });
+    tokio::pin!(run);
+    let run = loop {
+        tokio::select! {
+            result = &mut run => break result,
+            command = commands.recv() => match command {
+                Some(command) => {
+                    if apply_control(engine, command).await == ControlFlow::Shutdown {
+                        let _ = engine.interrupt().await;
+                        break run.await;
+                    }
+                }
+                None => {
+                    let _ = engine.interrupt().await;
+                    break run.await;
+                }
+            }
+        }
+    };
 
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);

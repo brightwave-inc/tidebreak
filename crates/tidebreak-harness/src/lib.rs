@@ -263,17 +263,17 @@ pub trait HarnessAdapter: Send + Sync {
 }
 
 /// One live engine session.
+///
+/// Control methods take shared `&self` so a session worker can dispatch
+/// [`Self::decide`] and [`Self::interrupt`] while [`Self::run_turn`] is still
+/// in flight. Adapters keep process state behind interior mutability.
 #[async_trait]
-pub trait HarnessSession: Send {
+pub trait HarnessSession: Send + Sync {
     /// Feed one user turn; normalized events flow to the sink until a
     /// terminal turn event arrives.
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError>;
+    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError>;
 
     /// Resolve a pending approval through the engine's native channel.
-    ///
-    /// Takes shared `&self` so a decision can complete while `run_turn` is
-    /// blocked on the child. Adapters keep the parked channel behind interior
-    /// mutability.
     async fn decide(
         &self,
         approval: HarnessApprovalRef,
@@ -281,13 +281,13 @@ pub trait HarnessSession: Send {
     ) -> Result<(), HarnessError>;
 
     /// Ask the engine to stop the current turn.
-    async fn interrupt(&mut self) -> Result<(), HarnessError>;
+    async fn interrupt(&self) -> Result<(), HarnessError>;
 
     /// Inject a mid-turn user message, when the engine accepts one.
     ///
     /// The default refuses: an adapter must override this only when its
     /// capability vector states [`CapLevel::Supported`] for mid-turn steering.
-    async fn steer(&mut self, text: String) -> Result<(), HarnessError> {
+    async fn steer(&self, text: String) -> Result<(), HarnessError> {
         let _ = text;
         Err(HarnessError::Other(
             "mid-turn steering is not available on this engine".into(),
@@ -308,28 +308,6 @@ pub trait HarnessSession: Send {
 
     /// Tear the session down.
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
-
-    /// Shared decide handle, usable while `run_turn` holds the session.
-    fn approval_completer(&self) -> Arc<dyn ApprovalCompleter> {
-        Arc::new(MissingApprovalChannel)
-    }
-}
-
-/// Completer used when a session has no native channel.
-#[derive(Debug, Default)]
-pub(crate) struct MissingApprovalChannel;
-
-#[async_trait]
-impl ApprovalCompleter for MissingApprovalChannel {
-    async fn complete(
-        &self,
-        _call_id: &str,
-        _decision: ApprovalDecision,
-    ) -> Result<(), HarnessError> {
-        Err(HarnessError::Other(
-            "this session has no approval channel".into(),
-        ))
-    }
 }
 
 /// Result of probing an installed engine.
