@@ -17,15 +17,23 @@ use tidebreak_harness::{
 use tokio::sync::{oneshot, Mutex};
 
 /// Completer that records decisions and unparks a scripted turn.
+///
+/// A decision can arrive before [`Self::park`] if the worker multiplexes it
+/// in the gap after `ApprovalRequested` is journaled. Stash it in that case.
 #[derive(Default)]
 pub(crate) struct ScriptedApprover {
     parked: std::sync::Mutex<Option<oneshot::Sender<ApprovalDecision>>>,
+    staged: std::sync::Mutex<Option<ApprovalDecision>>,
     observed: std::sync::Mutex<Vec<(String, ApprovalDecision)>>,
 }
 
 impl ScriptedApprover {
     pub(crate) fn park(&self) -> oneshot::Receiver<ApprovalDecision> {
         let (tx, rx) = oneshot::channel();
+        if let Some(decision) = self.staged.lock().expect("scripted staged").take() {
+            let _ = tx.send(decision);
+            return rx;
+        }
         *self.parked.lock().expect("scripted park") = Some(tx);
         rx
     }
@@ -48,6 +56,8 @@ impl ApprovalCompleter for ScriptedApprover {
             .push((call_id.to_owned(), decision.clone()));
         if let Some(tx) = self.parked.lock().expect("scripted park").take() {
             let _ = tx.send(decision);
+        } else {
+            *self.staged.lock().expect("scripted staged") = Some(decision);
         }
         Ok(())
     }
@@ -230,6 +240,7 @@ impl HarnessSession for ScriptedSession {
         self.interrupt.store(true, Ordering::SeqCst);
         // Drop a parked approval wait so run_turn can observe the flag.
         let _ = self.approver.parked.lock().expect("scripted park").take();
+        let _ = self.approver.staged.lock().expect("scripted staged").take();
         Ok(())
     }
 

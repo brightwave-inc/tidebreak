@@ -1610,7 +1610,10 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
         "the harness must observe the decision before the turn ends"
     );
 
-    let finished = turn.await.unwrap();
+    let finished = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn must finish after the mid-turn decision")
+        .unwrap();
     assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
     let body: serde_json::Value = finished.json().await.unwrap();
     assert_eq!(body["status"], "completed");

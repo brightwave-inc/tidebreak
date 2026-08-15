@@ -97,9 +97,9 @@ pub enum HarnessEvent {
     ApprovalRequested {
         /// Engine-native handle used to decide the request.
         harness_ref: HarnessApprovalRef,
-        /// Size-capped raw engine payload. Empty object when the engine
-        /// emitted a request without a captured body.
-        #[serde(default)]
+        /// Size-capped raw engine payload. Null when the engine emitted a
+        /// request without a captured body.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
         raw: serde_json::Value,
     },
     /// An approval was decided (observed on the stream, or after [`HarnessSession::decide`]).
