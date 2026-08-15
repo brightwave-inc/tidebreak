@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 
 mod agent_run;
 mod app;
+mod code;
 mod connected_app;
 mod context_checkpoint;
 mod delegated_file_read;

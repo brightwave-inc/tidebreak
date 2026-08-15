@@ -12,6 +12,7 @@ use sea_orm_migration::prelude::*;
 
 mod agent_run;
 mod chat;
+mod code;
 mod content;
 mod sandbox;
 mod tools;
@@ -187,6 +188,13 @@ pub(super) fn tables() -> Vec<BaselineTable> {
             agent_run::turn_agent_run_wait_member_table(),
             agent_run::turn_agent_run_wait_member_indexes(),
         ),
+        // External agent-engine sessions. Isolated from chat tables.
+        entry(code::code_repo_table(), code::code_repo_indexes()),
+        entry(code::code_workspace_table(), code::code_workspace_indexes()),
+        entry(code::code_session_table(), code::code_session_indexes()),
+        entry(code::code_turn_table(), code::code_turn_indexes()),
+        entry(code::code_event_table(), code::code_event_indexes()),
+        entry(code::code_approval_table(), code::code_approval_indexes()),
     ]
 }
 

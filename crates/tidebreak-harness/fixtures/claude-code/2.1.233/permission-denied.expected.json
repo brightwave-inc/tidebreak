@@ -1,0 +1,49 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "135a02d7-ace6-479b-9a31-c3b305b7a50e"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC",
+    "name": "Write",
+    "detail": {
+      "kind": "file_edit",
+      "path": ""
+    }
+  },
+  {
+    "type": "harness_notice",
+    "level": "warning",
+    "message": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet."
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC",
+    "outcome": "failed",
+    "preview": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "I don"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "'t have permission to write that file — please approve the write request or let me know how you'd like to proceed."
+  },
+  {
+    "type": "assistant_message",
+    "text": "I don't have permission to write that file — please approve the write request or let me know how you'd like to proceed."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 4,
+      "output_tokens": 123,
+      "cache_read_input_tokens": 91858,
+      "cache_creation_input_tokens": 3759
+    }
+  }
+]

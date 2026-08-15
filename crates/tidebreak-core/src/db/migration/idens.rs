@@ -792,3 +792,91 @@ pub(crate) enum QueuedTurn {
     CreatedAt,
     UpdatedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeRepo {
+    Table,
+    Id,
+    RootPath,
+    DisplayName,
+    DefaultBaseRef,
+    BranchPrefix,
+    SetupScript,
+    ArchiveScript,
+    QuickActions,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeWorkspace {
+    Table,
+    Id,
+    RepoId,
+    Title,
+    WorktreePath,
+    BranchName,
+    BaseRef,
+    Status,
+    Pr,
+    CreatedAt,
+    ArchivedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeSession {
+    Table,
+    Id,
+    WorkspaceId,
+    HarnessKind,
+    HarnessVersion,
+    HarnessResumeRef,
+    PermissionMode,
+    Lifecycle,
+    FenceReason,
+    ChildPid,
+    SpawnEpoch,
+    AttentionState,
+    AttentionSource,
+    UnrecognizedEventCount,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeTurn {
+    Table,
+    Id,
+    SessionId,
+    Ordinal,
+    Status,
+    UserInput,
+    UserInputBlobId,
+    CheckpointRef,
+    Diffstat,
+    Usage,
+    Narrative,
+    StartedAt,
+    EndedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeEvent {
+    Table,
+    SessionId,
+    Seq,
+    Event,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeApproval {
+    Table,
+    Id,
+    SessionId,
+    TurnId,
+    Kind,
+    HarnessRaw,
+    State,
+    Feedback,
+    RequestedAt,
+    DecidedAt,
+}

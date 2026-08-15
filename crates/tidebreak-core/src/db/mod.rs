@@ -3030,6 +3030,12 @@ fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryR
     })
 }
 
+/// Persistence for the external agent-engine domain. Separate from the chat
+/// [`Store`] trait so the two surfaces cannot share a data path.
+pub mod code {
+    pub use super::ops::code::*;
+}
+
 /// SeaORM entity models. Kept internal — the public `Store` API speaks the domain
 /// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.
