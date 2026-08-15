@@ -10,7 +10,8 @@ use tokio::sync::oneshot;
 use tidebreak_core::db::code::{
     delete_repo, delete_workspace, get_open_turn, get_repo, get_repo_by_root_path, get_session,
     get_workspace, insert_repo, insert_session, insert_workspace, list_repos, list_sessions,
-    list_sessions_for_workspace, list_workspaces, save_repo, save_session, save_workspace,
+    list_sessions_for_workspace, list_turns, list_workspaces, save_repo, save_session,
+    save_workspace,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CapLevel, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
@@ -540,6 +541,14 @@ impl CodeRuntime {
     ) -> Result<Vec<CodeSession>, ServerError> {
         let _ = self.get_workspace(workspace_id).await?;
         Ok(list_sessions_for_workspace(&self.db, workspace_id).await?)
+    }
+
+    pub(crate) async fn list_session_turns(
+        &self,
+        session_id: CodeSessionId,
+    ) -> Result<Vec<CodeTurn>, ServerError> {
+        let _ = self.get_session(session_id).await?;
+        Ok(list_turns(&self.db, session_id).await?)
     }
 
     async fn refuse_running_sessions(

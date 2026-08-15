@@ -715,7 +715,10 @@ pub fn app(state: AppState) -> Router {
             "/code/workspaces/{id}/sessions",
             post(routes::code::create_session).get(routes::code::list_workspace_sessions),
         )
-        .route("/code/sessions/{id}/turns", post(routes::code::submit_turn))
+        .route(
+            "/code/sessions/{id}/turns",
+            post(routes::code::submit_turn).get(routes::code::list_session_turns),
+        )
         .route(
             "/code/sessions/{id}/steer",
             post(routes::code::steer_session),

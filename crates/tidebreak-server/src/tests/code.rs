@@ -275,6 +275,103 @@ async fn listing_workspace_sessions_returns_create_shaped_snapshots() {
 }
 
 #[tokio::test]
+async fn listing_session_turns_returns_user_input_and_usage() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let missing = client
+        .get(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            uuid::Uuid::new_v4()
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let empty = client
+        .get(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), reqwest::StatusCode::OK);
+    let empty_body: Vec<serde_json::Value> = empty.json().await.unwrap();
+    assert!(empty_body.is_empty());
+
+    let first = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let second = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "again" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    let listed: Vec<serde_json::Value> = listed.json().await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0]["id"], first["id"]);
+    assert_eq!(listed[0]["ordinal"], 1);
+    assert_eq!(listed[0]["status"], "completed");
+    assert_eq!(listed[0]["user_input"], "hello");
+    assert_eq!(listed[0]["usage"]["output_tokens"], 6);
+    assert!(listed[0]["started_at"].is_string());
+    assert!(listed[0]["ended_at"].is_string());
+    assert_eq!(listed[1]["id"], second["id"]);
+    assert_eq!(listed[1]["ordinal"], 2);
+    assert_eq!(listed[1]["user_input"], "again");
+}
+
+#[tokio::test]
 async fn workspace_setup_failure_preserves_the_checkout() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;

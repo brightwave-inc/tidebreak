@@ -1077,7 +1077,7 @@ export type CodeTurnId = string;
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, checkpoint_ref?: string, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, usage?: CodeUsage, checkpoint_ref?: string, started_at: string, ended_at?: string, };
 
 /**
  * Status of one user→engine turn.

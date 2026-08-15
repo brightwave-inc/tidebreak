@@ -130,6 +130,9 @@ pub struct CodeTurnSnapshot {
     pub user_input: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub usage: Option<tidebreak_core::CodeUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub checkpoint_ref: Option<String>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,7 @@ impl From<CodeTurn> for CodeTurnSnapshot {
             ordinal: turn.ordinal,
             status: turn.status,
             user_input: turn.user_input,
+            usage: turn.usage,
             checkpoint_ref: turn.checkpoint_ref,
             started_at: turn.started_at,
             ended_at: turn.ended_at,

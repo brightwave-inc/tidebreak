@@ -11,8 +11,8 @@ pub(crate) use harnesses::{list_harnesses, refresh_harnesses};
 pub(crate) use repos::{create_repo, delete_repo, get_repo, list_repos, patch_repo};
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
-    create_session, interrupt_session, list_workspace_sessions, reap_session, steer_session,
-    submit_turn,
+    create_session, interrupt_session, list_session_turns, list_workspace_sessions, reap_session,
+    steer_session, submit_turn,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

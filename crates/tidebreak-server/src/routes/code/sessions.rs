@@ -71,6 +71,16 @@ pub async fn submit_turn(
     }
 }
 
+pub async fn list_session_turns(
+    State(state): State<AppState>,
+    Path(id): Path<CodeSessionId>,
+) -> Result<Json<Vec<CodeTurnSnapshot>>, ServerError> {
+    let turns = require_code(&state)?.list_session_turns(id).await?;
+    Ok(Json(
+        turns.into_iter().map(CodeTurnSnapshot::from).collect(),
+    ))
+}
+
 pub async fn steer_session(
     Path(_id): Path<CodeSessionId>,
     Json(body): Json<SteerBody>,
