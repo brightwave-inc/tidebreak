@@ -8,8 +8,8 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 
 use tidebreak_core::db::code::{
-    delete_repo, delete_workspace, get_repo, get_repo_by_root_path, get_session, get_workspace,
-    insert_repo, insert_session, insert_workspace, list_repos, list_sessions,
+    delete_repo, delete_workspace, get_open_turn, get_repo, get_repo_by_root_path, get_session,
+    get_workspace, insert_repo, insert_session, insert_workspace, list_repos, list_sessions,
     list_sessions_for_workspace, list_workspaces, save_repo, save_session, save_workspace,
 };
 use tidebreak_core::{
@@ -482,7 +482,12 @@ impl CodeRuntime {
             ));
         }
         let handle = self.require_worker(id)?;
-        if session.lifecycle == CodeSessionLifecycle::Running {
+        // Queue-default (0009): a send while a turn is in flight parks one
+        // follow-up. This does not consult mid_turn_steering — that cap
+        // gates the separate /steer route only.
+        let in_flight = session.lifecycle == CodeSessionLifecycle::Running
+            || get_open_turn(&self.db, id).await?.is_some();
+        if in_flight {
             if !queue_follow_up(&handle, message) {
                 return Err(ServerError::conflict_kind(
                     "queue_full",

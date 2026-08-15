@@ -45,7 +45,6 @@ impl ScriptedAdapter {
         self
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_steering(mut self, level: CapLevel) -> Self {
         self.mid_turn_steering = level;
         self

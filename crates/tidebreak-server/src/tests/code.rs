@@ -17,8 +17,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    CodePermissionMode, CodeSessionId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, HarnessKind,
-    WorkspaceId,
+    CapLevel, CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnStatus,
+    CodeWorkspaceStatus, DbStore, HarnessKind, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, HarnessEvent};
 
@@ -349,7 +349,9 @@ async fn interrupt_stops_a_running_scripted_turn() {
 }
 
 #[tokio::test]
-async fn a_mid_turn_send_queues_instead_of_rejecting() {
+async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
+    // Claude Code advertises mid_turn_steering: Unknown. Queue-default must
+    // still accept the follow-up; it must not 409 as if this were a steer.
     let (router, token, runtime, dir) = code_app_with(
         ScriptedAdapter::new(vec![
             HarnessEvent::TurnStarted,
@@ -360,7 +362,8 @@ async fn a_mid_turn_send_queues_instead_of_rejecting() {
                 usage: Default::default(),
             },
         ])
-        .with_delay(Duration::from_millis(40)),
+        .with_delay(Duration::from_millis(40))
+        .with_steering(CapLevel::Unknown),
     )
     .await;
     let addr = serve(router).await;
@@ -384,61 +387,93 @@ async fn a_mid_turn_send_queues_instead_of_rejecting() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
 
-    let first = client
+    let first = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+                .await
+                .unwrap()
+                .unwrap();
+            if row.lifecycle == CodeSessionLifecycle::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("first turn never reached Running");
+
+    let follow = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "first" }));
-    let follow = async {
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        client
-            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": "follow-up" }))
-            .send()
-            .await
-            .unwrap()
-    };
-    let overflow = async {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        client
-            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "message": "too many" }))
-            .send()
-            .await
-            .unwrap()
-    };
-    let (first, follow, overflow) = tokio::join!(first.send(), follow, overflow);
-    assert_eq!(first.unwrap().status(), reqwest::StatusCode::ACCEPTED);
-    let follow = follow;
-    assert_eq!(follow.status(), reqwest::StatusCode::ACCEPTED);
+        .json(&serde_json::json!({ "message": "follow-up" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        follow.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "mid-turn submit must queue, not 409, even when steering is Unknown"
+    );
     let follow_body: serde_json::Value = follow.json().await.unwrap();
     assert_eq!(follow_body["message"], "follow-up");
+    assert!(
+        follow_body.get("status").is_none(),
+        "queued follow-up must not mint a fake turn row: {follow_body}"
+    );
+
+    let overflow = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "too many" }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(overflow.status(), reqwest::StatusCode::CONFLICT);
     let overflow_body: serde_json::Value = overflow.json().await.unwrap();
     assert_eq!(overflow_body["kind"], "queue_full");
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    assert_eq!(first.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let events = tidebreak_core::db::code::list_events(&runtime.db, parsed, 0)
+            let turns = tidebreak_core::db::code::list_turns(&runtime.db, parsed)
                 .await
                 .unwrap();
-            let completed = events
-                .iter()
-                .filter(|event| {
-                    matches!(event.event, tidebreak_core::CodeEvent::TurnCompleted { .. })
-                })
-                .count();
-            if completed >= 2 {
+            if turns.len() >= 2
+                && turns[1].status == CodeTurnStatus::Completed
+                && turns[1].user_input == "follow-up"
+            {
+                assert_eq!(turns[0].user_input, "first");
+                assert_eq!(turns[0].status, CodeTurnStatus::Completed);
+                let first_end = turns[0].ended_at.expect("first turn ended");
+                assert!(
+                    turns[1].started_at >= first_end,
+                    "queued turn must start after the live turn ends"
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("queued follow-up did not run");
+    .expect("queued follow-up did not run after the current turn completed");
 }
 
 #[tokio::test]
