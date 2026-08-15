@@ -143,11 +143,13 @@ pub const MAX_WEB_EXTRACT_URL_BYTES: usize = 2_048;
 
 /// Maximum serialized JSON bytes allocated to one model-facing child result.
 ///
-/// Four entries plus the fixed result-envelope overhead remain below the
-/// durable tool-call result cap. The bound is on encoded JSON rather than
-/// characters so control-character escaping and four-byte Unicode cannot
-/// expand a valid child receipt into an unresumable wait.
-pub const MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES: usize = 120 * 1024;
+/// The parent sees a bounded summary plus submitted output paths, not the
+/// child's full write-up. Immutable receipts are untouched. The bound is on
+/// encoded JSON rather than characters so control-character escaping and
+/// four-byte Unicode cannot expand a valid child receipt into an unresumable
+/// wait. Four entries plus the result envelope remain below the durable
+/// tool-call result cap.
+pub const MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES: usize = 8 * 1024;
 const WAIT_RESULT_TRUNCATION_MARKER: &str = "\n…[truncated for parent context]";
 pub(crate) const WAIT_INTERRUPTED_BY_STEER_RESULT: &str =
     "Wait interrupted by a newer user message.";
@@ -465,16 +467,22 @@ pub(crate) fn canonical_wait_for_agents_result(entries: &[AgentRunInboxEntry]) -
             results.push(original);
             continue;
         }
-        let AgentRunResultPayload::FinalText { text } = &entry.result.payload else {
-            return Err(AgentError::Store(
-                "non-text sandbox result exceeds its parent projection budget".into(),
-            ));
+        let text = match &entry.result.payload {
+            AgentRunResultPayload::FinalText { text }
+            | AgentRunResultPayload::Submission { summary: text, .. }
+            | AgentRunResultPayload::CheckIn { detail: text, .. } => text.as_str(),
+            _ => {
+                return Err(AgentError::Store(
+                    "non-text sandbox result exceeds its parent projection budget".into(),
+                ));
+            }
         };
         results.push(WaitForAgentResult {
             agent_id: entry.child_run_id,
-            result: AgentRunResultPayload::FinalText {
-                text: truncate_wait_result_text(entry.child_run_id, text)?,
-            },
+            result: wait_result_with_text(
+                &entry.result.payload,
+                truncate_wait_result_text(entry.child_run_id, &entry.result.payload, text)?,
+            ),
             truncated: true,
         });
     }
@@ -487,7 +495,29 @@ pub(crate) fn canonical_wait_for_agents_result(entries: &[AgentRunInboxEntry]) -
     Ok(result)
 }
 
-fn truncate_wait_result_text(agent_id: AgentRunId, text: &str) -> Result<String> {
+fn wait_result_with_text(payload: &AgentRunResultPayload, text: String) -> AgentRunResultPayload {
+    match payload {
+        AgentRunResultPayload::FinalText { .. } => AgentRunResultPayload::FinalText { text },
+        AgentRunResultPayload::Submission { outputs, .. } => AgentRunResultPayload::Submission {
+            outputs: outputs.clone(),
+            summary: text,
+        },
+        AgentRunResultPayload::CheckIn {
+            reason, steps_used, ..
+        } => AgentRunResultPayload::CheckIn {
+            reason: *reason,
+            steps_used: *steps_used,
+            detail: text,
+        },
+        other => other.clone(),
+    }
+}
+
+fn truncate_wait_result_text(
+    agent_id: AgentRunId,
+    payload: &AgentRunResultPayload,
+    text: &str,
+) -> Result<String> {
     let boundaries = text
         .char_indices()
         .map(|(offset, _)| offset)
@@ -496,9 +526,10 @@ fn truncate_wait_result_text(agent_id: AgentRunId, text: &str) -> Result<String>
     let fits = |end: usize| -> Result<bool> {
         let projected = WaitForAgentResult {
             agent_id,
-            result: AgentRunResultPayload::FinalText {
-                text: format!("{}{}", &text[..end], WAIT_RESULT_TRUNCATION_MARKER),
-            },
+            result: wait_result_with_text(
+                payload,
+                format!("{}{}", &text[..end], WAIT_RESULT_TRUNCATION_MARKER),
+            ),
             truncated: true,
         };
         Ok(serde_json::to_vec(&projected)?.len() <= MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES)
@@ -1180,6 +1211,18 @@ mod tests {
     }
 
     fn inbox(agent_id: AgentRunId, text: String) -> AgentRunInboxEntry {
+        inbox_payload(
+            agent_id,
+            AgentRunResultPayload::FinalText { text: text.clone() },
+            text,
+        )
+    }
+
+    fn inbox_payload(
+        agent_id: AgentRunId,
+        payload: AgentRunResultPayload,
+        text: String,
+    ) -> AgentRunInboxEntry {
         let now = Utc::now();
         AgentRunInboxEntry {
             parent_run_id: AgentRunId::new(),
@@ -1190,7 +1233,7 @@ mod tests {
                 lease_token: uuid::Uuid::new_v4(),
                 attempt_count: 1,
                 claim_count: 1,
-                payload: AgentRunResultPayload::FinalText { text: text.clone() },
+                payload,
                 text,
                 model_steps: 0,
                 usage: crate::provider::Usage::default(),
@@ -1717,5 +1760,60 @@ mod tests {
                 .chars()
                 .all(|character| character == '🧭'));
         }
+    }
+
+    #[test]
+    fn wait_result_projection_shortens_large_final_text_and_keeps_child_outputs() {
+        let essay_id = AgentRunId::new();
+        let submit_id = AgentRunId::new();
+        let essay = "write-up ".repeat(8_000);
+        let original_essay = AgentRunResultPayload::FinalText {
+            text: essay.clone(),
+        };
+        let outputs = vec![crate::AgentRunSubmittedOutput {
+            output_id: crate::OutputId::new(),
+            filename: "briefing.md".into(),
+        }];
+        let original_submission = AgentRunResultPayload::Submission {
+            outputs: outputs.clone(),
+            summary: "Wrote the briefing.".into(),
+        };
+        let entries = vec![
+            inbox_payload(essay_id, original_essay.clone(), essay.clone()),
+            inbox_payload(
+                submit_id,
+                original_submission.clone(),
+                "Wrote the briefing.".into(),
+            ),
+        ];
+
+        let encoded = canonical_wait_for_agents_result(&entries).unwrap();
+        assert!(encoded.len() <= ToolCallRecord::MAX_RESULT_BYTES);
+        assert_eq!(entries[0].result.payload, original_essay);
+        assert_eq!(entries[1].result.payload, original_submission);
+
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+
+        assert_eq!(results[0]["agent_id"], essay_id.to_string());
+        assert_eq!(results[0]["truncated"], true);
+        let projected = results[0]["result"]["text"].as_str().unwrap();
+        assert!(projected.ends_with(WAIT_RESULT_TRUNCATION_MARKER));
+        assert!(projected.len() < essay.len());
+        assert!(
+            serde_json::to_vec(&results[0]).unwrap().len() <= MAX_WAIT_FOR_AGENT_RESULT_JSON_BYTES
+        );
+
+        assert_eq!(results[1]["agent_id"], submit_id.to_string());
+        assert_eq!(results[1]["result"]["kind"], "submission");
+        assert_eq!(
+            results[1]["result"]["outputs"][0]["filename"],
+            "briefing.md"
+        );
+        assert_eq!(
+            results[1]["result"]["outputs"][0]["output_id"],
+            outputs[0].output_id.to_string()
+        );
     }
 }

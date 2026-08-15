@@ -320,9 +320,11 @@ is never treated as parent-visible merely because a process noticed it early.
 
 The completed wait tool result is the model-facing delivery. It contains each
 typed child result in the caller's original order and is reconstructed from the
-same immutable receipts after restart. `resuming` is the durable wake signal:
-any foreground worker can claim it without relying on an in-memory
-notification.
+same immutable receipts after restart. The parent-facing projection is bounded:
+a short summary plus any submitted output paths, with an explicit truncation
+marker when the immutable receipt is larger. Child receipts themselves are not
+rewritten. `resuming` is the durable wake signal: any foreground worker can
+claim it without relying on an in-memory notification.
 
 Queued, waiting, and retry-wait child work cancels immediately. A running child
 first enters `cancelling` and must acknowledge its exact live lease. That

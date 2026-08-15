@@ -223,8 +223,11 @@ returned ID, and then make one ordered `wait_for_agents` call. That call uses
 `All` semantics: it atomically records the pending tool call and exact ordered
 child set, applies progress once, and releases the foreground lease.
 After every child has a terminal delivery, recovery consumes all deliveries,
-completes the same tool call with results in request order, journals the exact
-completion event, and moves the turn to `resuming`.
+completes the same tool call with a bounded parent-facing projection in request
+order — a short summary plus any submitted output paths, with an explicit
+truncation marker when the immutable receipt is larger — journals the exact
+completion event, and moves the turn to `resuming`. Child receipts themselves
+are not rewritten.
 
 The foreground turn cannot silently finish while one of its children is still
 unsettled. If the model tries, the completion boundary keeps the turn alive and
