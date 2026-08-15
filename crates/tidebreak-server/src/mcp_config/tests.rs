@@ -98,8 +98,8 @@ impl SecretProvider for TestSecrets {
 #[async_trait::async_trait]
 impl GatewayEndpoints for NoGateway {
     async fn endpoint(&self, _slug: &str) -> Result<GatewayEndpointAccess> {
-        Err(AgentError::Authentication(
-            "gateway sign-in required: no gateway session is stored".to_string(),
+        Err(AgentError::SignInRequired(
+            "no gateway session is stored".to_string(),
         ))
     }
 }

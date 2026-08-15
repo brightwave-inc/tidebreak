@@ -52,16 +52,14 @@ const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
 const SCOPE: &str = "openid profile email offline_access";
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;
-const SIGN_IN_REQUIRED_PREFIX: &str = "chatgpt sign-in required";
-
 /// True when an operation failed because there is no usable ChatGPT session.
 #[must_use]
 pub fn is_chatgpt_sign_in_required(error: &AgentError) -> bool {
-    matches!(error, AgentError::Authentication(message) if message.starts_with(SIGN_IN_REQUIRED_PREFIX))
+    matches!(error, AgentError::SignInRequired(_))
 }
 
 fn sign_in_required(detail: &str) -> AgentError {
-    AgentError::Authentication(format!("{SIGN_IN_REQUIRED_PREFIX}: {detail}"))
+    AgentError::SignInRequired(detail.to_string())
 }
 
 fn chatgpt_error(context: &str, detail: impl std::fmt::Display) -> AgentError {

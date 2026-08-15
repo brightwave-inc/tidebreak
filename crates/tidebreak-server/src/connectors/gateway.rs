@@ -35,18 +35,17 @@ const SCOPE: &str = "openid profile offline_access models:read inference:invoke"
 pub const SECRET_KEY: &str = "gateway.credentials_v1";
 /// Refresh an access token this close to expiry instead of using it.
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;
-const SIGN_IN_REQUIRED_PREFIX: &str = "gateway sign-in required";
 
 /// True when an operation failed because there is no usable gateway session —
 /// never signed in, session revoked, or refresh-token reuse detected. Callers
 /// should surface a reconnect affordance instead of treating this as a fault.
 #[must_use]
 pub fn is_sign_in_required(error: &AgentError) -> bool {
-    matches!(error, AgentError::Authentication(_))
+    matches!(error, AgentError::SignInRequired(_))
 }
 
 fn sign_in_required(detail: &str) -> AgentError {
-    AgentError::Authentication(format!("{SIGN_IN_REQUIRED_PREFIX}: {detail}"))
+    AgentError::SignInRequired(detail.to_string())
 }
 
 fn gateway_error(context: &str, detail: impl std::fmt::Display) -> AgentError {
@@ -969,10 +968,7 @@ impl GatewayAuth {
                 let detail = error
                     .and_then(|error| error.error_description)
                     .unwrap_or_else(|| "the requested target is unavailable".to_string());
-                return Err(gateway_error(
-                    "token request",
-                    format!("invalid_target: {detail}"),
-                ));
+                return Err(AgentError::InvalidTarget(detail));
             }
             let detail = error
                 .and_then(|error| error.error_description.or(Some(error.error)))
@@ -1134,7 +1130,7 @@ struct AttestedTokens {
 /// requested target — for an attested mint, a context id pinned to a
 /// superseded session. Reminting under a fresh id recovers.
 fn is_attestation_context_rejected(error: &AgentError) -> bool {
-    matches!(error, AgentError::Config(message) if message.contains("invalid_target"))
+    matches!(error, AgentError::InvalidTarget(_))
 }
 
 impl GatewayConnection {
@@ -2119,5 +2115,19 @@ mod tests {
     fn sign_in_required_errors_are_recognizable() {
         assert!(is_sign_in_required(&sign_in_required("test")));
         assert!(!is_sign_in_required(&gateway_error("x", "y")));
+        assert!(!is_sign_in_required(&AgentError::Authentication(
+            "provider key rejected".into()
+        )));
+    }
+
+    #[test]
+    fn attestation_rejection_is_the_typed_variant_not_a_config_substring() {
+        assert!(is_attestation_context_rejected(&AgentError::InvalidTarget(
+            "the requested target is unavailable".into()
+        )));
+        assert!(!is_attestation_context_rejected(&gateway_error(
+            "token request",
+            "invalid_target: should not remint from a Config string"
+        )));
     }
 }
