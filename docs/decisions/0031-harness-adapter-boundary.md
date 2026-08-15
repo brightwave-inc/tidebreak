@@ -1,6 +1,6 @@
 # 31. Harness Adapters: One Normalized Event Vocabulary Behind a Per-Harness Boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode, harness integration
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),

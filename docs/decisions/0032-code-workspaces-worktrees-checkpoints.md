@@ -1,6 +1,6 @@
 # 32. Workspaces: Worktrees, Branches, and Per-Turn Checkpoints via Git Shell-Out
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),

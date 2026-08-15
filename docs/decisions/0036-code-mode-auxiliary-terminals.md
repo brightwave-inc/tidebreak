@@ -1,6 +1,6 @@
 # 36. Auxiliary Terminals Are Ephemeral Byte Streams, Never the Harness Interface
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode
 - Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),

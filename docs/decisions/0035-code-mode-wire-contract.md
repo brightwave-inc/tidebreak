@@ -1,6 +1,6 @@
 # 35. Code-Mode Wire Contract: Per-Session Journals Plus One Updates Channel
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode, wire contract
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),

@@ -1,6 +1,6 @@
 # 33. Code Mode Approvals Are First-Class and Deny Can Steer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode, approvals
 - Related: [`0031-harness-adapter-boundary.md`](0031-harness-adapter-boundary.md),

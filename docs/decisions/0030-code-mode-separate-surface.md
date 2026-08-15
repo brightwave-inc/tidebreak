@@ -1,6 +1,6 @@
 # 30. Code Mode Is a Separate Surface Built for Later Convergence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Owners: code mode
 - Related: [`0007-cli-headless-feature-parity.md`](0007-cli-headless-feature-parity.md),
