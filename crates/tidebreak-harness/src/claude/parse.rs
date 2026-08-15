@@ -136,13 +136,12 @@ impl ClaudeStreamParser {
                     .and_then(Value::as_str)
                     .unwrap_or("permission denied")
                     .to_owned();
+                // `permission_denied` is a resolved denial, not a parked
+                // request. A live approval channel (the permission-prompt
+                // tool) is what produces real `ApprovalRequested` events;
+                // synthesizing one here would mint a spurious approval row.
                 let mut events = Vec::new();
                 if !call_id.is_empty() {
-                    events.push(HarnessEvent::ApprovalRequested {
-                        harness_ref: HarnessApprovalRef {
-                            call_id: call_id.clone(),
-                        },
-                    });
                     events.push(HarnessEvent::ApprovalResolved {
                         harness_ref: HarnessApprovalRef { call_id },
                         decision: ApprovalDecision::Deny { feedback: None },
@@ -310,15 +309,12 @@ impl ClaudeStreamParser {
             }
         }
         let is_error = value.get("is_error").and_then(Value::as_bool) == Some(true);
-        let terminal = value
-            .get("terminal_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
-        if terminal == "aborted_streaming"
-            || subtype.contains("error") && terminal != "completed"
-            || (is_error && terminal != "completed")
-        {
+        // Only the captured interrupt fixture (`terminal_reason:
+        // aborted_streaming`) is an interruption. Any other error —
+        // including a missing terminal_reason — is a failure.
+        let interrupted =
+            value.get("terminal_reason").and_then(Value::as_str) == Some("aborted_streaming");
+        if interrupted {
             return vec![HarnessEvent::TurnInterrupted];
         }
         if is_error {

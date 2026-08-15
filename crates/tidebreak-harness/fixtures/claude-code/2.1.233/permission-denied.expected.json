@@ -15,12 +15,6 @@
     }
   },
   {
-    "type": "approval_requested",
-    "harness_ref": {
-      "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC"
-    }
-  },
-  {
     "type": "approval_resolved",
     "harness_ref": {
       "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC"

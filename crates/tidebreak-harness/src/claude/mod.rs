@@ -146,10 +146,13 @@ mod tests {
         let (events, _) = replay("permission-denied");
         assert!(events
             .iter()
-            .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. })));
+            .any(|event| matches!(event, HarnessEvent::ApprovalResolved { .. })));
         assert!(events
             .iter()
-            .any(|event| matches!(event, HarnessEvent::ApprovalResolved { .. })));
+            .any(|event| matches!(event, HarnessEvent::HarnessNotice { .. })));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, HarnessEvent::ApprovalRequested { .. })));
     }
 
     #[test]

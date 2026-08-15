@@ -349,6 +349,12 @@ pub fn is_absolute_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn process_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn harness_crate_does_not_depend_on_a_pty() {
@@ -377,6 +383,9 @@ mod tests {
 
     #[test]
     fn passthrough_env_strips_tidebreak_keys() {
+        let _guard = process_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("TIDEBREAK_TEST_SECRET", "nope");
         std::env::set_var("HARNESS_PASSTHROUGH_PROBE", "keep");
         let env = passthrough_env();
