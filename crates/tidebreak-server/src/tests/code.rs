@@ -17,8 +17,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    CapLevel, CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnStatus,
-    CodeWorkspaceStatus, DbStore, HarnessKind, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CapLevel, CodePermissionMode, CodeSessionId,
+    CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
+    WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, HarnessEvent};
 
@@ -289,6 +290,72 @@ async fn archive_requires_force_when_the_tree_is_dirty() {
     let body: serde_json::Value = forced.json().await.unwrap();
     assert_eq!(body["status"], "archived");
     assert!(!std::path::Path::new(path).exists());
+}
+
+#[tokio::test]
+async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let path = workspace["worktree_path"].as_str().unwrap();
+    std::fs::write(std::path::Path::new(path).join("dirty.txt"), "nope\n").unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "uncommitted");
+
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Idle);
+    assert!(std::path::Path::new(path).exists());
+
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "still here" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "session must stay usable after a refused dirty archive: {}",
+        turn.text().await.unwrap()
+    );
 }
 
 #[tokio::test]
@@ -587,6 +654,83 @@ async fn a_recovered_session_accepts_a_turn() {
     let body: serde_json::Value = turn.json().await.unwrap();
     assert_eq!(body["status"], "completed");
     assert_eq!(body["user_input"], "after restart");
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Fenced;
+    row.fence_reason = Some(FenceReason::OrphanAlive);
+    row.attention = Attention::new(
+        AttentionState::Fenced {
+            reason: FenceReason::OrphanAlive,
+        },
+        AttentionSource::Lifecycle,
+    );
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let fenced = Arc::new(CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        scripted_registry(),
+    ));
+    fenced.recover().await.unwrap();
+    let mut fenced_state = AppState::new(
+        Config::desktop(dir.path()),
+        runtime.db.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    fenced_state.code = Some(fenced);
+    let token3 = fenced_state.token.clone();
+    let addr3 = serve(app(fenced_state)).await;
+    let client3 = reqwest::Client::new();
+
+    let stuck = client3
+        .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token3)
+        .json(&serde_json::json!({ "message": "while fenced" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stuck.status(), reqwest::StatusCode::CONFLICT);
+    let stuck_body: serde_json::Value = stuck.json().await.unwrap();
+    assert_eq!(stuck_body["kind"], "session_fenced");
+
+    let reaped = client3
+        .post(format!("http://{addr3}/code/sessions/{session_id}/reap"))
+        .bearer_auth(&token3)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
+    let after_reap: serde_json::Value = reaped.json().await.unwrap();
+    assert_eq!(after_reap["lifecycle"], "idle");
+
+    let after = client3
+        .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token3)
+        .json(&serde_json::json!({ "message": "after reap" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "reap must attach a worker: {}",
+        after.text().await.unwrap()
+    );
+    let after_body: serde_json::Value = after.json().await.unwrap();
+    assert_eq!(after_body["status"], "completed");
+    assert_eq!(after_body["user_input"], "after reap");
 }
 
 #[tokio::test]

@@ -345,7 +345,7 @@ impl CodeRuntime {
                 ));
             }
         }
-        self.end_workspace_sessions(id, force).await?;
+        self.refuse_running_sessions(id, force).await?;
         let path = std::path::Path::new(&workspace.worktree_path);
         if path.exists() {
             if let Some(block) = archive_blockers(path, &workspace.base_ref)
@@ -360,6 +360,7 @@ impl CodeRuntime {
                 }
             }
         }
+        self.end_workspace_sessions(id).await?;
         remove_worktree(std::path::Path::new(&repo.root_path), path)
             .await
             .map_err(map_worktree)?;
@@ -523,31 +524,39 @@ impl CodeRuntime {
         if let Some(handle) = handle {
             let _ = handle.commands.send(WorkerCommand::Shutdown).await;
         }
-        recovery::reap_session(&self.db, session)
+        let session = recovery::reap_session(&self.db, session)
             .await
-            .map_err(ServerError::from)
+            .map_err(ServerError::from)?;
+        self.attach_and_spawn_worker(session).await
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
         Ok(list_sessions(&self.db).await?)
     }
 
-    async fn end_workspace_sessions(
+    async fn refuse_running_sessions(
         &self,
         workspace_id: WorkspaceId,
         allow_running: bool,
     ) -> Result<(), ServerError> {
+        if allow_running {
+            return Ok(());
+        }
         let sessions = list_sessions_for_workspace(&self.db, workspace_id).await?;
-        if !allow_running
-            && sessions
-                .iter()
-                .any(|session| session.lifecycle == CodeSessionLifecycle::Running)
+        if sessions
+            .iter()
+            .any(|session| session.lifecycle == CodeSessionLifecycle::Running)
         {
             return Err(ServerError::conflict_kind(
                 "session_running",
                 "a session is still running in this workspace; pass force to end it",
             ));
         }
+        Ok(())
+    }
+
+    async fn end_workspace_sessions(&self, workspace_id: WorkspaceId) -> Result<(), ServerError> {
+        let sessions = list_sessions_for_workspace(&self.db, workspace_id).await?;
         for mut session in sessions {
             if session.lifecycle == CodeSessionLifecycle::Ended {
                 continue;
