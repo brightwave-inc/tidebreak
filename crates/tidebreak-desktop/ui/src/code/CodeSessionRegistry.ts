@@ -1,11 +1,11 @@
 import type { ApiClient } from "../api/client";
-import type { SequencedCodeEventFrame } from "../api/types";
+import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import { CodeSessionController } from "./CodeSessionController";
 import {
   createCodeSessionStore,
   type CodeSessionStore,
 } from "./CodeSessionStore";
-import type { CodeSessionDeps } from "./CodeSessionReducer";
+import { hydrateCodeTurns, type CodeSessionDeps } from "./CodeSessionReducer";
 
 /**
  * Per-session stores and the sockets that feed them.
@@ -43,6 +43,7 @@ export function acquireCodeSession(
   sessionId: string,
   openSocket: CodeSessionOpenSocket,
   deps: CodeSessionDeps = defaultDeps,
+  hydrateTurns?: () => Promise<CodeTurnSnapshot[]>,
 ): ReturnType<typeof createCodeSessionStore> {
   const existing = registry.get(sessionId);
   if (existing) {
@@ -57,6 +58,10 @@ export function acquireCodeSession(
       store.getState().applyEvent(frame, deps);
     },
     onConnectionState: () => {},
+    hydrateTurns,
+    onHydrate: (turns) => {
+      store.getState().update((session) => hydrateCodeTurns(session, turns));
+    },
   });
   registry.set(sessionId, { store, controller, refCount: 1 });
   controller.start();
@@ -65,13 +70,14 @@ export function acquireCodeSession(
 
 export function acquireCodeSessionFromClient(
   sessionId: string,
-  client: Pick<ApiClient, "openCodeEvents">,
+  client: Pick<ApiClient, "openCodeEvents" | "listCodeSessionTurns">,
   deps?: CodeSessionDeps,
 ): ReturnType<typeof createCodeSessionStore> {
   return acquireCodeSession(
     sessionId,
     (after, onFrame) => client.openCodeEvents(sessionId, after, onFrame),
     deps,
+    () => client.listCodeSessionTurns(sessionId),
   );
 }
 

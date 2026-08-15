@@ -314,6 +314,18 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   };
 }
 
+/** `GET /code/sessions/{id}/turns` — oldest first. */
+export function parseCodeTurnList(value: unknown): CodeTurnSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const turns: CodeTurnSnapshot[] = [];
+  for (const item of value) {
+    const parsed = parseCodeTurn(item);
+    if (!parsed) return null;
+    turns.push(parsed);
+  }
+  return turns;
+}
+
 export function parseHarnessDoctorReport(
   value: unknown,
 ): HarnessDoctorReport | null {

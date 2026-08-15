@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { liveCodeSession, parseCodeSession, parseCodeSessionList } from "./parsers";
+import {
+  liveCodeSession,
+  parseCodeSession,
+  parseCodeSessionList,
+  parseCodeTurnList,
+} from "./parsers";
 
 const SESSION = {
   id: "sess-1",
@@ -30,6 +35,28 @@ describe("parseCodeSessionList", () => {
   it("rejects a non-array or a row the session parser would drop", () => {
     expect(parseCodeSessionList({ sessions: [SESSION] })).toBeNull();
     expect(parseCodeSessionList([SESSION, { ...SESSION, lifecycle: "paused" }])).toBeNull();
+  });
+});
+
+const TURN = {
+  id: "turn-1",
+  session_id: "sess-1",
+  ordinal: 1,
+  status: "completed",
+  user_input: "list the files",
+  started_at: "2026-08-15T12:00:00.000Z",
+  ended_at: "2026-08-15T12:00:02.000Z",
+};
+
+describe("parseCodeTurnList", () => {
+  it("accepts GET /code/sessions/{id}/turns", () => {
+    expect(parseCodeTurnList([TURN])).toEqual([TURN]);
+    expect(parseCodeTurnList([])).toEqual([]);
+  });
+
+  it("rejects a non-array or a row the turn parser would drop", () => {
+    expect(parseCodeTurnList({ turns: [TURN] })).toBeNull();
+    expect(parseCodeTurnList([{ ...TURN, status: "paused" }])).toBeNull();
   });
 });
 

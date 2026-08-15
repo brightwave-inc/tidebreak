@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
+  applyAcceptedTurn,
+  hydrateCodeTurns,
   initialCodeSessionState,
   reduceCodeSessionEvent,
+  userItemId,
   type CodeSessionDeps,
   type CodeSessionState,
 } from "./CodeSessionReducer";
@@ -133,6 +136,7 @@ describe("turn lifecycle", () => {
     );
     expect(state.busy).toBe(false);
     expect(state.activeTurnId).toBeNull();
+    expect(state.lifecycle).toBe("idle");
     expect(state.harnessKind).toBe("claude_code");
     expect(state.lastUsage).toEqual(NO_USAGE);
     expect(effects.at(-1)).toEqual({ type: "turn_resolved" });
@@ -154,6 +158,7 @@ describe("turn lifecycle", () => {
     const boundary = state.items[3];
     expect(boundary).toMatchObject({
       kind: "turn_boundary",
+      turnId: "t1",
       status: "completed",
       durationMs: 2500,
       usage: NO_USAGE,
@@ -168,8 +173,74 @@ describe("turn lifecycle", () => {
     expect(state.busy).toBe(false);
     expect(state.items.at(-1)).toMatchObject({
       kind: "turn_boundary",
+      turnId: "t1",
       status: "failed",
       error: "engine exited",
     });
+  });
+});
+
+const SNAPSHOT_TURN = {
+  id: "t1",
+  session_id: "sess-1",
+  ordinal: 1,
+  status: "completed" as const,
+  user_input: "list the files",
+  started_at: NOW,
+  ended_at: LATER,
+};
+
+describe("hydrate then replay", () => {
+  it("shows the user prompt after a disposed store reopens from after=0", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    expect(hydrated.items[0]).toEqual({
+      kind: "user",
+      id: userItemId("t1"),
+      turnId: "t1",
+      text: "list the files",
+    });
+    expect(hydrated.items[1]).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      status: "completed",
+      durationMs: 2500,
+    });
+
+    const replayed = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "assistant_delta", text: "README.md" },
+        { type: "turn_completed", usage: NO_USAGE },
+      ],
+      hydrated,
+    );
+    expect(replayed.state.items.filter((item) => item.kind === "user")).toHaveLength(
+      1,
+    );
+    expect(replayed.state.items[0]).toMatchObject({
+      kind: "user",
+      turnId: "t1",
+      text: "list the files",
+    });
+    expect(
+      replayed.state.items.filter((item) => item.kind === "turn_boundary"),
+    ).toHaveLength(1);
+    expect(replayed.state.items.find((item) => item.kind === "assistant")).toMatchObject({
+      text: "README.md",
+    });
+    expect(replayed.state.lifecycle).toBe("idle");
+  });
+
+  it("converges a live accept with hydrate on the same turn id", () => {
+    const accepted = applyAcceptedTurn(initialCodeSessionState(), {
+      ...SNAPSHOT_TURN,
+      status: "running",
+      ended_at: undefined,
+    });
+    const again = hydrateCodeTurns(accepted, [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    expect(again.items.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(again.items[0]?.id).toBe(userItemId("t1"));
   });
 });

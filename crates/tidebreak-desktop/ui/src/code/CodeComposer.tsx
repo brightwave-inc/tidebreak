@@ -45,6 +45,8 @@ export function CodeComposer({
     try {
       await onSend(message);
       setDraft("");
+    } catch {
+      // Leave the draft. A refused send has no turn to answer.
     } finally {
       setSending(false);
     }

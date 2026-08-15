@@ -1,4 +1,4 @@
-import type { SequencedCodeEventFrame } from "../api/types";
+import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import {
   INITIAL_RECONNECT_DELAY_MS,
   MAX_RECONNECT_DELAY_MS,
@@ -20,6 +20,12 @@ export type CodeSessionControllerOptions = {
   getAfter: () => number;
   onEvent: (event: SequencedCodeEventFrame) => void;
   onConnectionState: (state: CodeConnectionState) => void;
+  /**
+   * Snapshot of durable turns, applied once before the first socket opens so
+   * replay can fill assistant/tool events onto turn-keyed user items.
+   */
+  hydrateTurns?: () => Promise<CodeTurnSnapshot[]>;
+  onHydrate?: (turns: CodeTurnSnapshot[]) => void;
 };
 
 /**
@@ -41,6 +47,7 @@ function isWellFormedFrame(frame: SequencedCodeEventFrame): boolean {
 
 export class CodeSessionController {
   private disposed = false;
+  private hydrated = false;
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
@@ -48,6 +55,20 @@ export class CodeSessionController {
   constructor(private readonly options: CodeSessionControllerOptions) {}
 
   start(): void {
+    void this.hydrateThenConnect();
+  }
+
+  private async hydrateThenConnect(): Promise<void> {
+    if (this.options.hydrateTurns && !this.hydrated) {
+      try {
+        const turns = await this.options.hydrateTurns();
+        if (this.disposed) return;
+        this.options.onHydrate?.(turns);
+        this.hydrated = true;
+      } catch {
+        if (this.disposed) return;
+      }
+    }
     this.connect();
   }
 

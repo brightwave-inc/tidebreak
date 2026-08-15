@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
+  archiveForceKind,
+  HttpError,
   parseAgentActivityHistory,
   parseAgentRunTaskPlan,
   parseFolderAccessRequest,
@@ -1590,5 +1592,43 @@ describe("code workspace sessions", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");
     expect(init.method ?? "GET").toBe("GET");
+  });
+
+  it("lists GET /code/sessions/{id}/turns", async () => {
+    const turn = {
+      id: "turn-1",
+      session_id: "sess-1",
+      ordinal: 1,
+      status: "completed",
+      user_input: "list the files",
+      started_at: "2026-08-15T12:00:00.000Z",
+      ended_at: "2026-08-15T12:00:02.000Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([turn]), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    await expect(client.listCodeSessionTurns("sess-1")).resolves.toEqual([turn]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1/code/sessions/sess-1/turns",
+    );
+  });
+});
+
+describe("archive force kinds", () => {
+  it("treats unpushed leftover work as a force-confirm, not a dead-end toast", () => {
+    expect(archiveForceKind(new HttpError(409, "unpushed", "unpushed"))).toBe(
+      "unpushed",
+    );
+    expect(
+      archiveForceKind(new HttpError(409, "uncommitted", "uncommitted")),
+    ).toBe("uncommitted");
+    expect(
+      archiveForceKind(
+        new HttpError(409, "both", "uncommitted_and_unpushed"),
+      ),
+    ).toBe("uncommitted_and_unpushed");
+    expect(archiveForceKind(new HttpError(409, "busy", "session_running"))).toBeNull();
   });
 });

@@ -105,6 +105,7 @@ import {
   parseCodeSession,
   parseCodeSessionList,
   parseCodeTurn,
+  parseCodeTurnList,
   parseCodeWorkspace,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
@@ -166,8 +167,15 @@ export class HttpError extends Error {
 /** Archive is refused until the reader confirms discarding leftover work. */
 export const ARCHIVE_FORCE_KINDS = new Set([
   "uncommitted",
+  "unpushed",
   "uncommitted_and_unpushed",
 ]);
+
+/** The 409 kinds that mean archive needs an explicit force. */
+export function archiveForceKind(error: unknown): string | null {
+  if (!(error instanceof HttpError) || !error.kind) return null;
+  return ARCHIVE_FORCE_KINDS.has(error.kind) ? error.kind : null;
+}
 
 /** The server's own message for a failed response, or its status text. */
 async function throwIfNotOk(response: Response): Promise<void> {
@@ -1776,6 +1784,14 @@ export class ApiClient {
       ),
       "code session",
     );
+  }
+
+  async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
+    const body = await this.json<unknown>(
+      `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+      { headers: this.headers() },
+    );
+    return requireParsed(parseCodeTurnList(body), "code session turns");
   }
 
   async submitCodeTurn(

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeComposer } from "./CodeComposer";
@@ -36,5 +36,22 @@ describe("CodeComposer", () => {
     expect(
       screen.getAllByText(PERMISSION_MODE_UNAVAILABLE_REASON),
     ).toHaveLength(2);
+  });
+
+  it("keeps the draft when send is refused", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("session is fenced"));
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="plan"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "list the files" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(box).toHaveValue("list the files");
   });
 });

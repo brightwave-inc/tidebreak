@@ -1,4 +1,7 @@
 import type {
+  CodeSessionLifecycle,
+  CodeTurnSnapshot,
+  CodeTurnStatus,
   CodeUsage,
   HarnessKind,
   HarnessNoticeLevel,
@@ -22,7 +25,7 @@ export type CodeTranscriptItem =
   | {
       kind: "user";
       id: string;
-      turnId: string | null;
+      turnId: string;
       text: string;
     }
   | {
@@ -79,6 +82,8 @@ export type CodeSessionState = {
   harnessKind: HarnessKind | null;
   harnessVersion: string | null;
   lastUsage: CodeUsage | null;
+  /** Session lifecycle as the journal last stated it. */
+  lifecycle: CodeSessionLifecycle | null;
 };
 
 export type CodeSessionEffect =
@@ -108,7 +113,86 @@ export function initialCodeSessionState(): CodeSessionState {
     harnessKind: null,
     harnessVersion: null,
     lastUsage: null,
+    lifecycle: null,
   };
+}
+
+export function userItemId(turnId: string): string {
+  return `user:${turnId}`;
+}
+
+export function boundaryItemId(turnId: string): string {
+  return `boundary:${turnId}`;
+}
+
+/**
+ * Record a turn the server accepted. Create and hydrate share this so a
+ * reopen and a live send produce the same turn-keyed user item.
+ */
+export function applyAcceptedTurn(
+  state: CodeSessionState,
+  turn: CodeTurnSnapshot,
+): CodeSessionState {
+  const user: CodeTranscriptItem = {
+    kind: "user",
+    id: userItemId(turn.id),
+    turnId: turn.id,
+    text: turn.user_input,
+  };
+  const hasUser = state.items.some(
+    (item) => item.kind === "user" && item.turnId === turn.id,
+  );
+  const items = hasUser
+    ? state.items.map((item) =>
+        item.kind === "user" && item.turnId === turn.id ? user : item,
+      )
+    : [...state.items, user];
+  const running = turn.status === "running";
+  return {
+    ...state,
+    items,
+    busy: running || state.busy,
+    activeTurnId: running ? turn.id : state.activeTurnId,
+    turnStartedAt: running ? turn.started_at : state.turnStartedAt,
+    lifecycle: running ? "running" : state.lifecycle,
+  };
+}
+
+/** Snapshot of durable turns, applied before the journal replays. */
+export function hydrateCodeTurns(
+  state: CodeSessionState,
+  turns: readonly CodeTurnSnapshot[],
+): CodeSessionState {
+  let next = state;
+  for (const turn of turns) {
+    next = applyAcceptedTurn(next, turn);
+    if (turn.status !== "running") {
+      next = {
+        ...next,
+        items: upsertTurnBoundary(next.items, {
+          turnId: turn.id,
+          status: turn.status,
+          durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
+          usage: null,
+          error: null,
+        }),
+      };
+    }
+  }
+  const open = [...turns].reverse().find((turn) => turn.status === "running");
+  if (open) {
+    return {
+      ...next,
+      busy: true,
+      activeTurnId: open.id,
+      turnStartedAt: open.started_at,
+      lifecycle: "running",
+    };
+  }
+  if (turns.length > 0) {
+    return { ...next, lifecycle: next.lifecycle ?? "idle" };
+  }
+  return next;
 }
 
 export function reduceCodeSessionEvent(
@@ -143,9 +227,10 @@ export function reduceCodeSessionEvent(
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
-          turnStartedAt: deps.now(),
+          turnStartedAt: state.turnStartedAt ?? deps.now(),
           assistantBuffer: "",
           reasoningBuffer: "",
+          lifecycle: "running",
         },
         effects,
       };
@@ -273,6 +358,11 @@ export function reduceCodeSessionEvent(
             : "interrupted";
       const usage = event.type === "turn_completed" ? event.usage : null;
       const error = event.type === "turn_failed" ? event.error.message : null;
+      const turnId = state.activeTurnId;
+      const finalized = finalizeStreaming(
+        finalizeStreaming(state.items, "assistant"),
+        "reasoning",
+      );
       return {
         state: {
           ...state,
@@ -280,23 +370,18 @@ export function reduceCodeSessionEvent(
           lastUsage: usage ?? state.lastUsage,
           assistantBuffer: "",
           reasoningBuffer: "",
-          items: [
-            ...finalizeStreaming(
-              finalizeStreaming(state.items, "assistant"),
-              "reasoning",
-            ),
-            {
-              kind: "turn_boundary",
-              id: deps.nextId(),
-              turnId: state.activeTurnId,
-              status,
-              durationMs: durationMs(state.turnStartedAt, deps.now()),
-              usage,
-              error,
-            },
-          ],
+          items: turnId
+            ? upsertTurnBoundary(finalized, {
+                turnId,
+                status,
+                durationMs: durationMs(state.turnStartedAt, deps.now()),
+                usage,
+                error,
+              })
+            : finalized,
           activeTurnId: null,
           turnStartedAt: null,
+          lifecycle: "idle",
         },
         effects,
       };
@@ -333,8 +418,51 @@ function finalizeStreaming(
   );
 }
 
-function durationMs(startedAt: string | null, endedAt: string): number | null {
-  if (!startedAt) return null;
+function upsertTurnBoundary(
+  items: CodeTranscriptItem[],
+  boundary: {
+    turnId: string;
+    status: Exclude<CodeTurnStatus, "running">;
+    durationMs: number | null;
+    usage: CodeUsage | null;
+    error: string | null;
+  },
+): CodeTranscriptItem[] {
+  const item: CodeTranscriptItem = {
+    kind: "turn_boundary",
+    id: boundaryItemId(boundary.turnId),
+    turnId: boundary.turnId,
+    status: boundary.status,
+    durationMs: boundary.durationMs,
+    usage: boundary.usage,
+    error: boundary.error,
+  };
+  const index = items.findIndex(
+    (candidate) =>
+      candidate.kind === "turn_boundary" && candidate.turnId === boundary.turnId,
+  );
+  if (index === -1) return [...items, item];
+  const existing = items[index];
+  if (existing && existing.kind === "turn_boundary") {
+    return [
+      ...items.slice(0, index),
+      {
+        ...item,
+        usage: boundary.usage ?? existing.usage,
+        error: boundary.error ?? existing.error,
+        durationMs: boundary.durationMs ?? existing.durationMs,
+      },
+      ...items.slice(index + 1),
+    ];
+  }
+  return items;
+}
+
+function durationMs(
+  startedAt: string | null,
+  endedAt: string | null,
+): number | null {
+  if (!startedAt || !endedAt) return null;
   const start = Date.parse(startedAt);
   const end = Date.parse(endedAt);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {

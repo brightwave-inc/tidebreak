@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 
-import { ARCHIVE_FORCE_KINDS, HttpError, type ApiClient } from "../api/client";
+import { archiveForceKind, type ApiClient } from "../api/client";
 import type {
   CodeRepoSnapshot,
   CodeSessionSnapshot,
@@ -24,6 +24,7 @@ import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
 } from "./CodeSessionRegistry";
+import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import {
@@ -126,7 +127,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!workspace) return;
     const ok = await confirm({
       title: "Archive this workspace?",
-      description: "The worktree is removed. Uncommitted work is kept only if you cancel.",
+      description:
+        "The worktree is removed. Leftover work on the branch is kept only if you cancel.",
       confirmLabel: "Archive",
       destructive: true,
     });
@@ -134,10 +136,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     try {
       await archiveWorkspace(client, workspace.id, false);
     } catch (err) {
-      if (err instanceof HttpError && err.kind && ARCHIVE_FORCE_KINDS.has(err.kind)) {
+      if (archiveForceKind(err)) {
         const forced = await confirm({
-          title: "Discard uncommitted work?",
-          description: err.message,
+          title: "Discard leftover work?",
+          description: err instanceof Error ? err.message : String(err),
           confirmLabel: "Discard and archive",
           destructive: true,
         });
@@ -185,18 +187,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           </div>
           <div className="flex items-center gap-2">
             {session && (
-              <Badge
-                variant={
-                  session.lifecycle === "running"
-                    ? "success"
-                    : session.lifecycle === "fenced"
-                      ? "warning"
-                      : "outline"
-                }
-                size="sm"
-              >
-                {LIFECYCLE_LABELS[session.lifecycle]}
-              </Badge>
+              <SessionLifecycleBadge session={session} client={client} />
             )}
             {workspace && workspace.status !== "archived" && (
               <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
@@ -271,6 +262,31 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+function SessionLifecycleBadge({
+  session,
+  client,
+}: {
+  session: CodeSessionSnapshot;
+  client: ApiClient;
+}) {
+  const store = useRegisteredCodeSession(session.id, client);
+  const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
+  return (
+    <Badge
+      variant={
+        lifecycle === "running"
+          ? "success"
+          : lifecycle === "fenced"
+            ? "warning"
+            : "outline"
+      }
+      size="sm"
+    >
+      {LIFECYCLE_LABELS[lifecycle]}
+    </Badge>
+  );
+}
+
 function CodeSessionPane({
   session,
   client,
@@ -284,22 +300,13 @@ function CodeSessionPane({
   const items = store((state) => state.items);
   const busy = store((state) => state.busy);
   const harnessVersion = store((state) => state.harnessVersion);
+  const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
 
   async function send(message: string) {
-    store.getState().update((current) => ({
-      ...current,
-      items: [
-        ...current.items,
-        {
-          kind: "user",
-          id: `user-${Date.now()}`,
-          turnId: current.activeTurnId,
-          text: message,
-        },
-      ],
-    }));
     try {
-      await client.submitCodeTurn(session.id, message);
+      await submitAcceptedTurn(store.getState().update, () =>
+        client.submitCodeTurn(session.id, message),
+      );
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not send that turn"));
     }
@@ -323,9 +330,9 @@ function CodeSessionPane({
       <div className="min-h-0 flex-1 overflow-y-auto">
         <CodeTranscript items={items} />
       </div>
-      {session.lifecycle !== "ended" && (
+      {lifecycle !== "ended" && (
         <CodeComposer
-          running={busy || session.lifecycle === "running"}
+          running={busy || lifecycle === "running"}
           disabled={disabled}
           permissionMode={session.permission_mode}
           onSend={send}
