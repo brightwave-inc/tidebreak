@@ -8,10 +8,15 @@ import type {
   CodeRepoSnapshot,
   CodeSessionLifecycle,
   CodeSessionSnapshot,
+  CodeFileChange,
   CodeTurnSnapshot,
   CodeTurnStatus,
   CodeUsage,
+  CodeWorkspaceDiff,
+  CodeWorkspaceFiles,
   CodeWorkspaceSnapshot,
+  Diffstat,
+  FileChangeKind,
   CodeWorkspaceStatus,
   FenceReason,
   HarnessCaps,
@@ -29,7 +34,11 @@ import type {
   CodeRepoSnapshot as WireCodeRepoSnapshot,
   CodeSessionSnapshot as WireCodeSessionSnapshot,
   CodeTurnSnapshot as WireCodeTurnSnapshot,
+  CodeWorkspaceDiff as WireCodeWorkspaceDiff,
+  CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  CodeFileChange as WireCodeFileChange,
+  Diffstat as WireDiffstat,
   HarnessCaps as WireHarnessCaps,
   HarnessDoctorEntry as WireHarnessDoctorEntry,
   HarnessDoctorReport as WireHarnessDoctorReport,
@@ -80,6 +89,12 @@ const TURN_STATUSES = new Set<CodeTurnStatus>([
   "interrupted",
 ]);
 const NOTICE_LEVELS = new Set<HarnessNoticeLevel>(["info", "warning", "error"]);
+const FILE_CHANGE_KINDS = new Set<FileChangeKind>([
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+]);
 const TOOL_OUTCOMES = new Set<ToolOutcome>(["succeeded", "failed", "denied"]);
 const ATTENTION_SOURCES = new Set<AttentionSource>([
   "structured",
@@ -287,6 +302,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "user_input",
       "usage",
       "checkpoint_ref",
+      "diffstat",
       "started_at",
       "ended_at",
     ]) ||
@@ -304,6 +320,9 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   const usage =
     value.usage === undefined ? undefined : parseUsage(value.usage);
   if (value.usage !== undefined && !usage) return null;
+  const diffstat =
+    value.diffstat === undefined ? undefined : parseDiffstat(value.diffstat);
+  if (value.diffstat !== undefined && !diffstat) return null;
   return {
     id: value.id,
     session_id: value.session_id,
@@ -315,7 +334,124 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     ...(value.checkpoint_ref !== undefined
       ? { checkpoint_ref: value.checkpoint_ref }
       : {}),
+    ...(diffstat ? { diffstat } : {}),
     ...(value.ended_at !== undefined ? { ended_at: value.ended_at } : {}),
+  };
+}
+
+export function parseCodeWorkspaceFiles(
+  value: unknown,
+): CodeWorkspaceFiles | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceFiles>(value, [
+      "files",
+      "truncated",
+      "stat",
+      "turn_id",
+    ]) ||
+    !Array.isArray(value.files) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  const files: CodeFileChange[] = [];
+  for (const item of value.files) {
+    const parsed = parseCodeFileChange(item);
+    if (!parsed) return null;
+    files.push(parsed);
+  }
+  const stat = parseDiffstat(value.stat);
+  if (!stat) return null;
+  if (value.turn_id !== undefined && !nonEmpty(value.turn_id)) return null;
+  return {
+    files,
+    truncated: value.truncated,
+    stat,
+    ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
+  };
+}
+
+export function parseCodeWorkspaceDiff(
+  value: unknown,
+): CodeWorkspaceDiff | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceDiff>(value, [
+      "diff",
+      "truncated",
+      "stat",
+      "turn_id",
+      "file",
+    ]) ||
+    typeof value.diff !== "string" ||
+    typeof value.truncated !== "boolean" ||
+    !optionalString(value.turn_id) ||
+    !optionalString(value.file)
+  ) {
+    return null;
+  }
+  const stat = parseDiffstat(value.stat);
+  if (!stat) return null;
+  return {
+    diff: value.diff,
+    truncated: value.truncated,
+    stat,
+    ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
+    ...(value.file !== undefined ? { file: value.file } : {}),
+  };
+}
+
+function parseCodeFileChange(value: unknown): CodeFileChange | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeFileChange>(value, [
+      "path",
+      "kind",
+      "insertions",
+      "deletions",
+      "previous_path",
+    ]) ||
+    typeof value.path !== "string" ||
+    !isMember(value.kind, FILE_CHANGE_KINDS) ||
+    !isFiniteNumber(value.insertions) ||
+    !isFiniteNumber(value.deletions) ||
+    !optionalString(value.previous_path)
+  ) {
+    return null;
+  }
+  return {
+    path: value.path,
+    kind: value.kind,
+    insertions: value.insertions,
+    deletions: value.deletions,
+    ...(value.previous_path !== undefined
+      ? { previous_path: value.previous_path }
+      : {}),
+  };
+}
+
+export function parseDiffstat(value: unknown): Diffstat | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireDiffstat>(value, [
+      "files",
+      "insertions",
+      "deletions",
+      "truncated",
+    ]) ||
+    !isFiniteNumber(value.files) ||
+    !isFiniteNumber(value.insertions) ||
+    !isFiniteNumber(value.deletions) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    files: value.files,
+    insertions: value.insertions,
+    deletions: value.deletions,
+    truncated: value.truncated,
   };
 }
 
@@ -584,6 +720,24 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         return null;
       }
       return { type: "turn_failed", error: { message: value.error.message } };
+    case "checkpoint_recorded": {
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "checkpoint_recorded" }>>(
+          value,
+          ["type", "turn_id", "diffstat"],
+        ) ||
+        !nonEmpty(value.turn_id)
+      ) {
+        return null;
+      }
+      const diffstat = parseDiffstat(value.diffstat);
+      if (!diffstat) return null;
+      return {
+        type: "checkpoint_recorded",
+        turn_id: value.turn_id,
+        diffstat,
+      };
+    }
     case "turn_interrupted":
       return { type: "turn_interrupted" };
     case "harness_notice":

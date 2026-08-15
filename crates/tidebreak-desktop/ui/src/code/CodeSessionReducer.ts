@@ -3,6 +3,7 @@ import type {
   CodeTurnSnapshot,
   CodeTurnStatus,
   CodeUsage,
+  Diffstat,
   HarnessKind,
   HarnessNoticeLevel,
   SequencedCodeEventFrame,
@@ -66,6 +67,7 @@ export type CodeTranscriptItem =
       durationMs: number | null;
       usage: CodeUsage | null;
       error: string | null;
+      diffstat: Diffstat | null;
     };
 
 export type CodeSessionState = {
@@ -175,6 +177,7 @@ export function hydrateCodeTurns(
           durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
           usage: turn.usage ?? null,
           error: null,
+          diffstat: turn.diffstat ?? null,
         }),
       };
     }
@@ -346,6 +349,16 @@ export function reduceCodeSessionEvent(
       };
     }
 
+    case "checkpoint_recorded": {
+      return {
+        state: {
+          ...state,
+          items: applyDiffstat(state.items, event.turn_id, event.diffstat),
+        },
+        effects,
+      };
+    }
+
     case "turn_completed":
     case "turn_failed":
     case "turn_interrupted": {
@@ -358,6 +371,10 @@ export function reduceCodeSessionEvent(
             : "interrupted";
       const usage = event.type === "turn_completed" ? event.usage : null;
       const error = event.type === "turn_failed" ? event.error.message : null;
+      const diffstat =
+        event.type === "turn_completed"
+          ? (event.checkpoint?.diffstat ?? null)
+          : null;
       const turnId = state.activeTurnId;
       const finalized = finalizeStreaming(
         finalizeStreaming(state.items, "assistant"),
@@ -377,6 +394,7 @@ export function reduceCodeSessionEvent(
                 durationMs: durationMs(state.turnStartedAt, deps.now()),
                 usage,
                 error,
+                diffstat,
               })
             : finalized,
           activeTurnId: null,
@@ -438,6 +456,7 @@ function upsertTurnBoundary(
     durationMs: number | null;
     usage: CodeUsage | null;
     error: string | null;
+    diffstat: Diffstat | null;
   },
 ): CodeTranscriptItem[] {
   const item: CodeTranscriptItem = {
@@ -448,6 +467,7 @@ function upsertTurnBoundary(
     durationMs: boundary.durationMs,
     usage: boundary.usage,
     error: boundary.error,
+    diffstat: boundary.diffstat,
   };
   const index = items.findIndex(
     (candidate) =>
@@ -463,11 +483,24 @@ function upsertTurnBoundary(
         usage: boundary.usage ?? existing.usage,
         error: boundary.error ?? existing.error,
         durationMs: boundary.durationMs ?? existing.durationMs,
+        diffstat: boundary.diffstat ?? existing.diffstat,
       },
       ...items.slice(index + 1),
     ];
   }
   return items;
+}
+
+function applyDiffstat(
+  items: CodeTranscriptItem[],
+  turnId: string,
+  diffstat: Diffstat,
+): CodeTranscriptItem[] {
+  return items.map((item) =>
+    item.kind === "turn_boundary" && item.turnId === turnId
+      ? { ...item, diffstat }
+      : item,
+  );
 }
 
 function durationMs(

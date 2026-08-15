@@ -316,6 +316,7 @@ async fn drive_turn(
     if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, turn.id).await {
         turn = current;
     }
+    super::checkpoint::after_turn_completed(db, bus, session, &mut turn).await;
     if session_was_ended(db, session).await {
         return Ok(turn);
     }

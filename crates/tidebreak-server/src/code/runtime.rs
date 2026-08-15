@@ -15,12 +15,16 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, CapLevel, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurn, CodeWorkspace, CodeWorkspaceStatus, DbStore, HarnessKind,
-    RepoId, WorkspaceId,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
+    Diffstat, HarnessKind, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{builtin_registry, AdapterRegistry, HarnessAdapter, HostEnv, SessionSpec};
 
 use super::bus::CodeEventBus;
+use super::checkpoint::{
+    delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
+    sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
+};
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, queue_follow_up, spawn_session_worker, WorkerCommand, WorkerError, WorkerHandle,
@@ -81,6 +85,12 @@ impl CodeRuntime {
         let actions = recovery::recover_running_sessions(&self.db)
             .await
             .map_err(ServerError::from)?;
+        if let Err(error) = self.sweep_orphaned_checkpoints().await {
+            tracing::warn!(
+                "code-mode: checkpoint ref sweep failed: {}",
+                error.message()
+            );
+        }
         // Recovery only mutates rows. Re-attach a worker for every session
         // that is still usable so submit_turn is not stuck after a restart.
         for session in list_sessions(&self.db).await? {
@@ -366,6 +376,23 @@ impl CodeRuntime {
             .await
             .map_err(map_worktree)?;
         let _ = prune_worktrees(std::path::Path::new(&repo.root_path)).await;
+        if let Err(error) =
+            delete_workspace_refs(std::path::Path::new(&repo.root_path), workspace.id).await
+        {
+            tracing::warn!(
+                workspace = %workspace.id,
+                "code-mode: could not delete checkpoint refs on archive: {error}"
+            );
+        }
+        if let Err(error) = self
+            .sweep_repo_checkpoint_refs(std::path::Path::new(&repo.root_path), repo.id)
+            .await
+        {
+            tracing::warn!(
+                "code-mode: checkpoint ref sweep failed: {}",
+                error.message()
+            );
+        }
         workspace.status = CodeWorkspaceStatus::Archived;
         workspace.archived_at = Some(Utc::now());
         save_workspace(&self.db, &workspace).await?;
@@ -551,6 +578,62 @@ impl CodeRuntime {
         Ok(list_turns(&self.db, session_id).await?)
     }
 
+    pub(crate) async fn workspace_files(
+        &self,
+        workspace_id: WorkspaceId,
+        turn_id: Option<CodeTurnId>,
+    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+        let workspace = self.get_workspace(workspace_id).await?;
+        let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
+            .await
+            .map_err(map_checkpoint)?;
+        let listed = list_changed_files(&worktree, &from, &to, DiffBounds::default())
+            .await
+            .map_err(map_checkpoint)?;
+        Ok((listed.files, listed.truncated, listed.stat, turn))
+    }
+
+    pub(crate) async fn workspace_diff(
+        &self,
+        workspace_id: WorkspaceId,
+        turn_id: Option<CodeTurnId>,
+        file: Option<&str>,
+    ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+        let workspace = self.get_workspace(workspace_id).await?;
+        let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
+            .await
+            .map_err(map_checkpoint)?;
+        let produced = produce_diff(&worktree, &from, &to, file, DiffBounds::default())
+            .await
+            .map_err(map_checkpoint)?;
+        Ok((produced.diff, produced.truncated, produced.stat, turn))
+    }
+
+    async fn sweep_orphaned_checkpoints(&self) -> Result<(), ServerError> {
+        for repo in list_repos(&self.db).await? {
+            self.sweep_repo_checkpoint_refs(std::path::Path::new(&repo.root_path), repo.id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn sweep_repo_checkpoint_refs(
+        &self,
+        repo_root: &std::path::Path,
+        repo_id: RepoId,
+    ) -> Result<(), ServerError> {
+        let live: Vec<WorkspaceId> = list_workspaces(&self.db, Some(repo_id))
+            .await?
+            .into_iter()
+            .filter(|workspace| workspace.status != CodeWorkspaceStatus::Archived)
+            .map(|workspace| workspace.id)
+            .collect();
+        sweep_orphaned_refs(repo_root, &live)
+            .await
+            .map(|_| ())
+            .map_err(map_checkpoint)
+    }
+
     async fn refuse_running_sessions(
         &self,
         workspace_id: WorkspaceId,
@@ -675,6 +758,21 @@ impl CodeRuntime {
                     "no live worker is attached to this session",
                 )
             })
+    }
+}
+
+fn map_checkpoint(err: CheckpointError) -> ServerError {
+    match err {
+        CheckpointError::User(message) => {
+            if message.contains("not found") || message.contains("gone") {
+                ServerError::not_found(message)
+            } else if message.contains("no checkpoint") {
+                ServerError::conflict_kind("no_checkpoint", message)
+            } else {
+                ServerError::bad_request_kind("checkpoint", message)
+            }
+        }
+        CheckpointError::Internal(message) => ServerError::internal(message),
     }
 }
 

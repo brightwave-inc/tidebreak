@@ -5,6 +5,7 @@
 //! worker, crash recovery, and the live event bus.
 
 pub(crate) mod bus;
+pub(crate) mod checkpoint;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod session_worker;

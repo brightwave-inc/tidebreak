@@ -712,6 +712,14 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::archive_workspace),
         )
         .route(
+            "/code/workspaces/{id}/files",
+            get(routes::code::list_workspace_files),
+        )
+        .route(
+            "/code/workspaces/{id}/diff",
+            get(routes::code::get_workspace_diff),
+        )
+        .route(
             "/code/workspaces/{id}/sessions",
             post(routes::code::create_session).get(routes::code::list_workspace_sessions),
         )

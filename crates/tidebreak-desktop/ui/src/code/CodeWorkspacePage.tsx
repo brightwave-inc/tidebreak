@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { FileCode, Files, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
@@ -15,6 +15,9 @@ import { Button } from "@/components/ui/button";
 import { ClipboardCopyButton } from "@/ClipboardCopyButton";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { openExternal } from "@/host";
+import { PanelLayout } from "@/panel/PanelLayout";
+import type { PanelContent } from "@/panel/panelTypes";
+import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -27,6 +30,8 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
+import { DiffPanel } from "./DiffPanel";
+import { FilesPanel } from "./FilesPanel";
 import {
   fenceReasonText,
   HARNESS_LABELS,
@@ -56,6 +61,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client } = useApp();
   const { confirm, dialog } = useConfirm();
   const catalog = useCodeCatalogStore();
+  const layout = useLayoutState();
+  const { openPanel } = usePanelNav();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
   const [session, setSession] = useState<CodeSessionSnapshot | null>(
@@ -189,6 +196,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             {session && (
               <SessionLifecycleBadge session={session} client={client} />
             )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => openPanel({ type: "files" })}
+            >
+              <Files />
+              Files
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => openPanel({ type: "diff" })}
+            >
+              <FileCode />
+              Diff
+            </Button>
             {workspace && workspace.status !== "archived" && (
               <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
                 Archive
@@ -224,42 +249,92 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         )}
       </header>
       {error && <p className="text-critical px-4 py-2 text-sm">{error}</p>}
-      {fenced && session?.fence_reason && (
-        <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-          <p>{fenceReasonText(session.fence_reason)}</p>
-          <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
-            Reap
-          </Button>
-        </div>
-      )}
-      {!session && workspace?.status === "active" && (
-        <div className="flex flex-col gap-2 px-4 py-6">
-          <p className="text-sm">Start a Plan-mode session on this workspace.</p>
-          <div className="flex flex-wrap gap-2">
-            {readyHarnesses.map((entry) => (
-              <Button
-                key={entry.kind}
-                type="button"
-                size="sm"
-                disabled={starting}
-                onClick={() => void startSession(entry.kind)}
-              >
-                {HARNESS_LABELS[entry.kind]}
-              </Button>
-            ))}
+      <PanelLayout
+        layout={layout}
+        renderChat={(visible) => (
+          <div
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            hidden={!visible}
+          >
+            {fenced && session?.fence_reason && (
+              <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
+                <p>{fenceReasonText(session.fence_reason)}</p>
+                <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
+                  Reap
+                </Button>
+              </div>
+            )}
+            {!session && workspace?.status === "active" && (
+              <div className="flex flex-col gap-2 px-4 py-6">
+                <p className="text-sm">Start a Plan-mode session on this workspace.</p>
+                <div className="flex flex-wrap gap-2">
+                  {readyHarnesses.map((entry) => (
+                    <Button
+                      key={entry.kind}
+                      type="button"
+                      size="sm"
+                      disabled={starting}
+                      onClick={() => void startSession(entry.kind)}
+                    >
+                      {HARNESS_LABELS[entry.kind]}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {session && (
+              <CodeSessionPane
+                key={session.id}
+                session={session}
+                client={client}
+                disabled={fenced || workspace?.status !== "active"}
+                onOpenTurnDiff={(turnId) => openPanel({ type: "diff", turnId })}
+              />
+            )}
           </div>
-        </div>
-      )}
-      {session && (
-        <CodeSessionPane
-          key={session.id}
-          session={session}
-          client={client}
-          disabled={fenced || workspace?.status !== "active"}
-        />
-      )}
+        )}
+        renderPanel={(panel) =>
+          renderCodePanel(panel, client, workspaceId, openPanel)
+        }
+      />
     </>
   );
+}
+
+function renderCodePanel(
+  panel: PanelContent,
+  client: ApiClient,
+  workspaceId: string,
+  openPanel: (panel: PanelContent) => void,
+) {
+  switch (panel.type) {
+    case "files":
+      return (
+        <FilesPanel
+          client={client}
+          workspaceId={workspaceId}
+          turnId={panel.turnId}
+          onOpenFile={(file) =>
+            openPanel({ type: "diff", turnId: panel.turnId, file })
+          }
+        />
+      );
+    case "diff":
+      return (
+        <DiffPanel
+          client={client}
+          workspaceId={workspaceId}
+          turnId={panel.turnId}
+          file={panel.file}
+        />
+      );
+    default:
+      return (
+        <p className="text-muted-foreground px-3 py-6 text-sm">
+          This panel is not available here.
+        </p>
+      );
+  }
 }
 
 function SessionLifecycleBadge({
@@ -291,10 +366,12 @@ function CodeSessionPane({
   session,
   client,
   disabled,
+  onOpenTurnDiff,
 }: {
   session: CodeSessionSnapshot;
   client: ApiClient;
   disabled: boolean;
+  onOpenTurnDiff: (turnId: string) => void;
 }) {
   const store = useRegisteredCodeSession(session.id, client);
   const items = store((state) => state.items);
@@ -328,7 +405,7 @@ function CodeSessionPane({
         </p>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <CodeTranscript items={items} />
+        <CodeTranscript items={items} onOpenTurnDiff={onOpenTurnDiff} />
       </div>
       {lifecycle !== "ended" && (
         <CodeComposer

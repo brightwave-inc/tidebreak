@@ -1257,6 +1257,209 @@ async fn superseded_worker_cannot_append_to_the_journal() {
 }
 
 #[tokio::test]
+async fn a_completed_turn_records_a_checkpoint_and_serves_bounded_review() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree = std::path::Path::new(workspace["worktree_path"].as_str().unwrap());
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    std::fs::write(worktree.join("added.txt"), "new file\n").unwrap();
+    std::fs::write(worktree.join("README.md"), "hello from turn\n").unwrap();
+
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "edit the tree" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(turn["status"], "completed");
+    let checkpoint = turn["checkpoint_ref"].as_str().expect("checkpoint_ref");
+    assert!(
+        checkpoint.contains("refs/tidebreak/checkpoints/"),
+        "{checkpoint}"
+    );
+    assert!(turn["diffstat"]["files"].as_u64().unwrap() >= 1);
+
+    let files = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/files?turn={}",
+            json_id(&workspace),
+            json_id(&turn)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let paths: Vec<&str> = files["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|file| file["path"].as_str())
+        .collect();
+    assert!(paths.contains(&"added.txt"), "{paths:?}");
+
+    let diff = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/diff?turn={}&file=added.txt",
+            json_id(&workspace),
+            json_id(&turn)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(
+        diff["diff"].as_str().unwrap().contains("new file"),
+        "{}",
+        diff["diff"]
+    );
+    assert_eq!(diff["truncated"], false);
+
+    let events =
+        tidebreak_core::db::code::list_events(&_runtime.db, json_id(&session).parse().unwrap(), 0)
+            .await
+            .unwrap();
+    assert!(
+        events.iter().any(|framed| {
+            matches!(
+                framed.event,
+                tidebreak_core::CodeEvent::CheckpointRecorded { .. }
+            )
+        }),
+        "expected CheckpointRecorded in {events:?}"
+    );
+
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    let leftover = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/tidebreak/checkpoints/",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        leftover.status.success(),
+        "{}",
+        String::from_utf8_lossy(&leftover.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&leftover.stdout).trim().is_empty(),
+        "archive must drop checkpoint refs: {}",
+        String::from_utf8_lossy(&leftover.stdout)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_checkpoint_does_not_fail_the_turn() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    // Replace the checkout with a non-repo so the snapshot fails after the
+    // engine turn has already succeeded.
+    std::fs::remove_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("orphan.txt"), "still here\n").unwrap();
+
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "keep going" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(turn["status"], "completed");
+    assert!(turn["checkpoint_ref"].is_null());
+
+    let events =
+        tidebreak_core::db::code::list_events(&runtime.db, json_id(&session).parse().unwrap(), 0)
+            .await
+            .unwrap();
+    assert!(
+        events.iter().any(|framed| {
+            matches!(
+                framed.event,
+                tidebreak_core::CodeEvent::HarnessNotice {
+                    level: tidebreak_core::HarnessNoticeLevel::Warning,
+                    ..
+                }
+            )
+        }),
+        "expected a warning notice, got {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn doctor_lists_the_scripted_adapter() {
     let (router, token, _runtime, _dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;

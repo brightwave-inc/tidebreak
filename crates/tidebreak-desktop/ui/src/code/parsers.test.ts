@@ -6,6 +6,8 @@ import {
   parseCodeSessionList,
   parseCodeTurn,
   parseCodeTurnList,
+  parseCodeWorkspaceDiff,
+  parseCodeWorkspaceFiles,
 } from "./parsers";
 
 const SESSION = {
@@ -71,6 +73,53 @@ describe("parseCodeTurnList", () => {
   it("rejects a non-array or a row the turn parser would drop", () => {
     expect(parseCodeTurnList({ turns: [TURN] })).toBeNull();
     expect(parseCodeTurnList([{ ...TURN, status: "paused" }])).toBeNull();
+  });
+});
+
+describe("parseCodeWorkspaceFiles", () => {
+  const files = {
+    files: [
+      {
+        path: "src/lib.rs",
+        kind: "modified",
+        insertions: 3,
+        deletions: 1,
+      },
+    ],
+    truncated: false,
+    stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
+    turn_id: "turn-1",
+  };
+
+  it("accepts GET /code/workspaces/{id}/files", () => {
+    expect(parseCodeWorkspaceFiles(files)).toEqual(files);
+  });
+
+  it("rejects a missing stat or a bad kind", () => {
+    expect(parseCodeWorkspaceFiles({ ...files, stat: { files: 1 } })).toBeNull();
+    expect(
+      parseCodeWorkspaceFiles({
+        ...files,
+        files: [{ ...files.files[0], kind: "moved" }],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeWorkspaceDiff", () => {
+  const diff = {
+    diff: "--- a\n+++ b\n",
+    truncated: true,
+    stat: { files: 1, insertions: 1, deletions: 1, truncated: true },
+    file: "src/lib.rs",
+  };
+
+  it("accepts GET /code/workspaces/{id}/diff", () => {
+    expect(parseCodeWorkspaceDiff(diff)).toEqual(diff);
+  });
+
+  it("rejects a non-string body", () => {
+    expect(parseCodeWorkspaceDiff({ ...diff, diff: 1 })).toBeNull();
   });
 });
 

@@ -128,6 +128,17 @@ describe("usePanelNav", () => {
     await waitFor(() => expect(router.state.location.search).toEqual({}));
   });
 
+  it("keeps a code workspace URL when opening files and diff", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/code/w/ws-1");
+
+    await user.click(screen.getByText("open folders"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-1"),
+    );
+    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+  });
+
   it("toggles fullscreen on and back off, and not at all with nothing open", async () => {
     const user = userEvent.setup();
     const { router } = await mount("/c/chat-1?tabs=folders");

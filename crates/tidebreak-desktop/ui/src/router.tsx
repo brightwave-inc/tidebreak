@@ -222,6 +222,7 @@ function CodeRepoRouteComponent() {
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/w/$workspaceId",
+  validateSearch: (search: Record<string, unknown>): PanelSearch => panelSearchFrom(search),
   component: CodeWorkspaceRouteComponent,
 });
 

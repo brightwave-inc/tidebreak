@@ -1042,6 +1042,11 @@ export type CodeExecutionProviderSnapshot = "local" | "e2b" | "daytona" | "docke
 export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
+ * One changed path in a workspace or turn file list.
+ */
+export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
+
+/**
  * How an external agent-engine session handles mutations and approvals.
  *
  * Each adapter maps these onto the engine's native flags. A mode the
@@ -1077,7 +1082,7 @@ export type CodeTurnId = string;
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, usage?: CodeUsage, checkpoint_ref?: string, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1104,6 +1109,16 @@ cache_read_input_tokens: number,
  * Cache-write input tokens, when the engine reports them.
  */
 cache_creation_input_tokens: number, };
+
+/**
+ * Bounded unified diff for `GET /code/workspaces/{id}/diff`.
+ */
+export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, file?: string, };
+
+/**
+ * Bounded changed-file list for `GET /code/workspaces/{id}/files`.
+ */
+export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, };
 
 /**
  * One isolated workspace (worktree + branch) on a repo.

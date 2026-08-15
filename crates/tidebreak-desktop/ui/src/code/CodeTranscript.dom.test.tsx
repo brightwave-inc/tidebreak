@@ -47,6 +47,7 @@ const items: CodeTranscriptItem[] = [
       cache_creation_input_tokens: 0,
     },
     error: null,
+    diffstat: null,
   },
 ];
 

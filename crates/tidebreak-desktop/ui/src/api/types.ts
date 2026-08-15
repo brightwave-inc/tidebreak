@@ -114,7 +114,12 @@ import {
   type CodeTurnSnapshot as WireCodeTurnSnapshot,
   type CodeTurnStatus as WireCodeTurnStatus,
   type CodeUsage as WireCodeUsage,
+  type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
+  type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  type CodeFileChange as WireCodeFileChange,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  type Diffstat as WireDiffstat,
+  type FileChangeKind as WireFileChangeKind,
   type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
   type FenceReason as WireFenceReason,
   type HarnessCaps as WireHarnessCaps,
@@ -984,6 +989,11 @@ export type CodeTurnSnapshot = WireCodeTurnSnapshot;
 export type CodeTurnId = WireCodeTurnId;
 export type CodeTurnStatus = WireCodeTurnStatus;
 export type CodeUsage = WireCodeUsage;
+export type Diffstat = WireDiffstat;
+export type FileChangeKind = WireFileChangeKind;
+export type CodeFileChange = WireCodeFileChange;
+export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
+export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
 export type CodeEvent = WireCodeEvent;
