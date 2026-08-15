@@ -28,6 +28,21 @@ pub async fn create_session(
     ))
 }
 
+pub async fn list_workspace_sessions(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<WorkspaceId>,
+) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
+    let sessions = require_code(&state)?
+        .list_workspace_sessions(workspace_id)
+        .await?;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(CodeSessionSnapshot::from)
+            .collect(),
+    ))
+}
+
 pub async fn submit_turn(
     State(state): State<AppState>,
     Path(id): Path<CodeSessionId>,

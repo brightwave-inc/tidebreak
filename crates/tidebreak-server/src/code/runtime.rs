@@ -534,6 +534,14 @@ impl CodeRuntime {
         Ok(list_sessions(&self.db).await?)
     }
 
+    pub(crate) async fn list_workspace_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<CodeSession>, ServerError> {
+        let _ = self.get_workspace(workspace_id).await?;
+        Ok(list_sessions_for_workspace(&self.db, workspace_id).await?)
+    }
+
     async fn refuse_running_sessions(
         &self,
         workspace_id: WorkspaceId,

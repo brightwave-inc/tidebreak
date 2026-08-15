@@ -209,6 +209,72 @@ async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
 }
 
 #[tokio::test]
+async fn listing_workspace_sessions_returns_create_shaped_snapshots() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let missing = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            uuid::Uuid::new_v4()
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let empty = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), reqwest::StatusCode::OK);
+    let empty_body: Vec<serde_json::Value> = empty.json().await.unwrap();
+    assert!(empty_body.is_empty());
+
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    let listed: Vec<serde_json::Value> = listed.json().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], created["id"]);
+    assert_eq!(listed[0]["workspace_id"], created["workspace_id"]);
+    assert_eq!(listed[0]["harness_kind"], "claude_code");
+    assert_eq!(listed[0]["permission_mode"], "plan");
+    assert_eq!(listed[0]["lifecycle"], created["lifecycle"]);
+}
+
+#[tokio::test]
 async fn workspace_setup_failure_preserves_the_checkout() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;
