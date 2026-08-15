@@ -59,7 +59,7 @@ the headless CLI.
 | **Documents** | Attach any file. Office, PDF, images, and text open in native viewers; other formats fall back to extracted text when they can be read. Source pills jump to the page, line, sheet, or cell. No vector index: the agent reads bounded ranges directly. |
 | **Outputs** | Files written to `output/` are versioned by filename. Restore is append-only. Plotly charts stay interactive. The agent can write back into a connected folder; replacing an existing file always asks. |
 | **Models** | ChatGPT Plus or Pro, an API key (Anthropic, OpenAI, Gemini, xAI, Fireworks, Together, OpenRouter), or a local OpenAI-compatible endpoint including Ollama. Switch mid-chat. Keys stay in the OS credential store. |
-| **Execution** | Native macOS sandbox, local Docker, E2B, or Daytona. Per-chat network policy. Background agents one level deep. Built-in or configured web search (Exa, Tavily, Brave, SearXNG). Computer use (screen and app control) is in the product and not finished. |
+| **Execution** | Native macOS sandbox, local Docker, E2B, or Daytona. Per-chat network policy. Background agents one level deep. Built-in or configured web search (Exa, Tavily, Brave, SearXNG). Computer use: screen capture and consent-gated control of native apps. |
 | **Permissions** | Plan, Ask, Auto, or Allow all, per chat. Folder access is per capability from a native picker. Standing grants are revocable. Overwrite of a connected file always asks. |
 | **Extensions** | Built-in skills for Word, PDF, PowerPoint, spreadsheets, and charts; add your own. MCP servers over stdio or HTTP. REST APIs from an OpenAPI document, for local apps. Ask once for a mini-app and keep it in the sidebar. |
 
