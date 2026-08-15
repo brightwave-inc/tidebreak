@@ -252,6 +252,20 @@ purpose:
   Tidebreak data directory; toolchains that misbehave outside the repo's
   ancestry are the known cost, and the override waits for real instances of
   that pain.
+- **Remote session execution.** The adapter contract deliberately never
+  assumes a session's engine is a local child process. A later execution
+  location can run the same harness in a managed sandbox — the session
+  ingesting a sequenced remote event stream into the same journal, the
+  workspace becoming a remote clone whose results arrive as pushed branches.
+  Channels that cannot carry interactive approvals restrict the session to
+  permission modes that need none, under the same visible-capability rules
+  as any other limitation.
+- **A supervision-first mobile client.** Every code-mode capability is a
+  server route, and the updates channel (restated digests, attention,
+  approvals) is deliberately cheap enough for a phone. A mobile client that
+  fires off sessions and supervises them — approve, deny with feedback,
+  steer, review completion — is a thin client of a reachable deployment and
+  waits on the self-host member-client path above.
 - **Code mode on Windows.** Login-shell discovery and worktree pathing both
   need Windows-specific work, and Windows packaging is itself parked (see
   above).
