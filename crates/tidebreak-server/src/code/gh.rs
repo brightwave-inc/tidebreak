@@ -251,11 +251,13 @@ pub(crate) async fn create_pull_request(
             &gh,
         ),
     })?;
+    let base = gh_base_branch(base_ref);
     let stdout = run_gh(
         worktree,
         &binary,
         &[
-            "pr", "create", "--title", &pr_title, "--body", &pr_body, "--head", branch,
+            "pr", "create", "--title", &pr_title, "--body", &pr_body, "--base", base, "--head",
+            branch,
         ],
         GH_TIMEOUT,
     )
@@ -354,6 +356,15 @@ pub(crate) fn generate_pr_body(commits: &[String], stat: &Diffstat) -> String {
     body.push_str(&format_shortstat(stat));
     body.push('\n');
     body
+}
+
+/// Branch name `gh pr create --base` expects: strip a remote prefix.
+pub(crate) fn gh_base_branch(base_ref: &str) -> &str {
+    let trimmed = base_ref.trim();
+    trimmed
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| trimmed.strip_prefix("origin/"))
+        .unwrap_or(trimmed)
 }
 
 pub(crate) fn format_shortstat(stat: &Diffstat) -> String {
@@ -930,6 +941,13 @@ mod tests {
     }
 
     #[test]
+    fn gh_base_branch_strips_a_remote_prefix() {
+        assert_eq!(gh_base_branch("origin/develop"), "develop");
+        assert_eq!(gh_base_branch("refs/remotes/origin/develop"), "develop");
+        assert_eq!(gh_base_branch("main"), "main");
+    }
+
+    #[test]
     fn generated_commit_message_is_deterministic() {
         let stat = Diffstat {
             files: 3,
@@ -1075,7 +1093,7 @@ exit 3
             WorkspaceId::new(),
             "first change",
             "tidebreak/first-change",
-            "main",
+            "origin/main",
             None,
             None,
             &cache,
@@ -1095,6 +1113,11 @@ exit 3
         );
         let logged = std::fs::read_to_string(&log).unwrap();
         assert!(logged.contains("pr create"), "{logged}");
+        assert!(
+            logged.contains("--base main"),
+            "gh pr create must target the workspace base, not the host default: {logged}"
+        );
+        assert!(!logged.contains("--base origin/main"), "{logged}");
         assert!(logged.contains("pr view"), "{logged}");
         assert!(logged.contains("pr checks"), "{logged}");
         assert!(!logged.contains("merge"), "{logged}");

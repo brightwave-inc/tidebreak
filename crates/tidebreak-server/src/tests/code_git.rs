@@ -319,6 +319,10 @@ exit 3
 
     let logged = std::fs::read_to_string(&log).unwrap();
     assert!(logged.contains("pr create"), "{logged}");
+    assert!(
+        logged.contains("--base main"),
+        "gh pr create must pass the workspace base: {logged}"
+    );
     assert!(logged.contains("pr view"), "{logged}");
     assert!(logged.contains("pr checks"), "{logged}");
     assert!(!logged.contains("merge"), "{logged}");
