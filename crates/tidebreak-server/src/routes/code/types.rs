@@ -264,6 +264,20 @@ pub struct SubmitTurnBody {
     pub message: String,
 }
 
+/// Body of `POST /code/sessions/{id}/steer`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteerBody {
+    pub message: String,
+}
+
+/// A follow-up parked while the session is already running a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct QueuedCodeTurn {
+    pub session_id: tidebreak_core::CodeSessionId,
+    pub message: String,
+}
+
 /// Query for `GET /code/workspaces`.
 #[derive(Debug, Deserialize)]
 pub struct ListWorkspacesQuery {

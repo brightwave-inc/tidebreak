@@ -2483,6 +2483,11 @@ state: string,
 checks_summary?: string | null, };
 
 /**
+ * A follow-up parked while the session is already running a turn.
+ */
+export type QueuedCodeTurn = { session_id: CodeSessionId, message: string, };
+
+/**
  * The id is the client-generated turn id promotion will accept under, so an
  * ambiguous promotion retry resolves to `Existing` rather than a duplicate
  * turn. Rows are FIFO by `position` within a chat and fully durable: a queue

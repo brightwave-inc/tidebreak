@@ -22,13 +22,21 @@ use tidebreak_harness::{builtin_registry, AdapterRegistry, HarnessAdapter, HostE
 use super::bus::CodeEventBus;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, spawn_session_worker, WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, queue_follow_up, spawn_session_worker, WorkerCommand, WorkerError, WorkerHandle,
 };
 use super::worktree::{
     self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
     run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
+
+/// Result of `POST /code/sessions/{id}/turns`.
+pub(crate) enum SubmitTurnOutcome {
+    /// The session was idle; the turn ran to a terminal event.
+    Ran(Box<CodeTurn>),
+    /// The session was running; the message occupies the single follow-up slot.
+    Queued,
+}
 
 /// Shared code-mode services for the process.
 pub(crate) struct CodeRuntime {
@@ -436,18 +444,12 @@ impl CodeRuntime {
         let engine = adapter.launch(spec).await.map_err(|err| {
             ServerError::internal(format!("failed to launch engine session: {err}"))
         })?;
-        let allow_steer = caps.mid_turn_steering == CapLevel::Supported;
         let mut attached = attached;
         attached.child_pid = engine.child_pid();
         attached.harness_resume_ref = engine.resume_ref();
         save_session(&self.db, &attached).await?;
-        let handle = spawn_session_worker(
-            self.db.clone(),
-            self.bus.clone(),
-            attached.clone(),
-            engine,
-            allow_steer,
-        );
+        let handle =
+            spawn_session_worker(self.db.clone(), self.bus.clone(), attached.clone(), engine);
         self.workers
             .lock()
             .expect("code workers")
@@ -465,7 +467,7 @@ impl CodeRuntime {
         &self,
         id: CodeSessionId,
         message: String,
-    ) -> Result<CodeTurn, ServerError> {
+    ) -> Result<SubmitTurnOutcome, ServerError> {
         let session = self.get_session(id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
@@ -473,68 +475,33 @@ impl CodeRuntime {
                 "session is fenced until it is reaped",
             ));
         }
-        if session.lifecycle == CodeSessionLifecycle::Running {
-            let allow = self
-                .adapter(session.harness_kind)?
-                .capabilities(&tidebreak_harness::HarnessProbe {
-                    found: true,
-                    binary_path: None,
-                    version: session.harness_version.clone(),
-                    authenticated: None,
-                    stderr: String::new(),
-                    env: Vec::new(),
-                })
-                .mid_turn_steering
-                == CapLevel::Supported;
-            if !allow {
-                return Err(ServerError::conflict_kind(
-                    "turn_in_progress",
-                    "a turn is already running and this engine does not accept mid-turn steering",
-                ));
-            }
-            self.steer(id, message.clone()).await?;
-            return Ok(CodeTurn {
-                id: tidebreak_core::CodeTurnId::new(),
-                session_id: id,
-                ordinal: 0,
-                status: tidebreak_core::CodeTurnStatus::Running,
-                user_input: message,
-                user_input_blob_id: None,
-                checkpoint_ref: None,
-                diffstat: None,
-                usage: None,
-                narrative: None,
-                started_at: Utc::now(),
-                ended_at: None,
-            });
+        if session.lifecycle == CodeSessionLifecycle::Ended {
+            return Err(ServerError::conflict_kind(
+                "session_ended",
+                "session has ended",
+            ));
         }
         let handle = self.require_worker(id)?;
+        if session.lifecycle == CodeSessionLifecycle::Running {
+            if !queue_follow_up(&handle, message) {
+                return Err(ServerError::conflict_kind(
+                    "queue_full",
+                    "a follow-up is already queued on this session",
+                ));
+            }
+            return Ok(SubmitTurnOutcome::Queued);
+        }
         let (reply, rx) = oneshot::channel();
         handle
             .commands
             .send(WorkerCommand::RunTurn { message, reply })
             .await
             .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the turn"))?
-            .map_err(map_worker)
-    }
-
-    pub(crate) async fn steer(
-        &self,
-        id: CodeSessionId,
-        message: String,
-    ) -> Result<(), ServerError> {
-        let handle = self.require_worker(id)?;
-        let (reply, rx) = oneshot::channel();
-        handle
-            .commands
-            .send(WorkerCommand::Steer { message, reply })
+        let turn = rx
             .await
-            .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the steer"))?
-            .map_err(map_worker)
+            .map_err(|_| ServerError::internal("session worker dropped the turn"))?
+            .map_err(map_worker)?;
+        Ok(SubmitTurnOutcome::Ran(Box::new(turn)))
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
@@ -579,6 +546,8 @@ impl CodeRuntime {
             .map(|handle| WorkerHandle {
                 spawn_epoch: handle.spawn_epoch,
                 commands: handle.commands.clone(),
+                pending: handle.pending.clone(),
+                wake: handle.wake.clone(),
             })
             .ok_or_else(|| {
                 ServerError::conflict_kind(

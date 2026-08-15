@@ -348,6 +348,137 @@ async fn interrupt_stops_a_running_scripted_turn() {
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
 }
 
+#[tokio::test]
+async fn a_mid_turn_send_queues_instead_of_rejecting() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "working".into(),
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(40)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+
+    let first = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "first" }));
+    let follow = async {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        client
+            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "follow-up" }))
+            .send()
+            .await
+            .unwrap()
+    };
+    let overflow = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client
+            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "too many" }))
+            .send()
+            .await
+            .unwrap()
+    };
+    let (first, follow, overflow) = tokio::join!(first.send(), follow, overflow);
+    assert_eq!(first.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    let follow = follow;
+    assert_eq!(follow.status(), reqwest::StatusCode::ACCEPTED);
+    let follow_body: serde_json::Value = follow.json().await.unwrap();
+    assert_eq!(follow_body["message"], "follow-up");
+    assert_eq!(overflow.status(), reqwest::StatusCode::CONFLICT);
+    let overflow_body: serde_json::Value = overflow.json().await.unwrap();
+    assert_eq!(overflow_body["kind"], "queue_full");
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let events = tidebreak_core::db::code::list_events(&runtime.db, parsed, 0)
+                .await
+                .unwrap();
+            let completed = events
+                .iter()
+                .filter(|event| {
+                    matches!(event.event, tidebreak_core::CodeEvent::TurnCompleted { .. })
+                })
+                .count();
+            if completed >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("queued follow-up did not run");
+}
+
+#[tokio::test]
+async fn explicit_steer_is_not_yet_available() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/steer",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "redirect" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "steering_unavailable");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     let (router, token, runtime, dir) = code_app_with(

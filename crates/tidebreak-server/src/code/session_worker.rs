@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
@@ -28,10 +28,6 @@ pub(crate) enum WorkerCommand {
         message: String,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
-    Steer {
-        message: String,
-        reply: oneshot::Sender<Result<(), WorkerError>>,
-    },
     Interrupt {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
@@ -49,6 +45,9 @@ pub(crate) enum WorkerError {
 pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
     pub commands: mpsc::Sender<WorkerCommand>,
+    /// Single follow-up parked while a turn is running (queue-default).
+    pub pending: Arc<std::sync::Mutex<Option<String>>>,
+    pub wake: Arc<Notify>,
 }
 
 struct LiveSink {
@@ -98,15 +97,37 @@ pub(crate) fn spawn_session_worker(
     bus: Arc<CodeEventBus>,
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
-    allow_steer: bool,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
-    tokio::spawn(run_worker(db, bus, session, engine, allow_steer, rx));
+    let pending = Arc::new(std::sync::Mutex::new(None));
+    let wake = Arc::new(Notify::new());
+    tokio::spawn(run_worker(
+        db,
+        bus,
+        session,
+        engine,
+        pending.clone(),
+        wake.clone(),
+        rx,
+    ));
     WorkerHandle {
         spawn_epoch,
         commands: tx,
+        pending,
+        wake,
     }
+}
+
+/// Park one follow-up. Returns `false` when the single slot is already taken.
+pub(crate) fn queue_follow_up(handle: &WorkerHandle, message: String) -> bool {
+    let mut pending = handle.pending.lock().expect("code turn queue");
+    if pending.is_some() {
+        return false;
+    }
+    *pending = Some(message);
+    handle.wake.notify_one();
+    true
 }
 
 async fn run_worker(
@@ -114,7 +135,8 @@ async fn run_worker(
     bus: Arc<CodeEventBus>,
     mut session: CodeSession,
     mut engine: Box<dyn HarnessSession>,
-    allow_steer: bool,
+    pending: Arc<std::sync::Mutex<Option<String>>>,
+    wake: Arc<Notify>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
     if let Some(pid) = engine.child_pid() {
@@ -122,36 +144,44 @@ async fn run_worker(
         let _ = save_session(&db, &session).await;
     }
 
-    while let Some(command) = commands.recv().await {
-        match command {
-            WorkerCommand::RunTurn { message, reply } => {
-                let result = drive_turn(&db, &bus, &mut session, engine.as_mut(), message).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Steer { message, reply } => {
-                let result = if !allow_steer {
-                    Err(WorkerError::Conflict(
-                        "mid-turn steering is not available on this engine".into(),
-                    ))
-                } else {
-                    engine
-                        .steer(message)
+    loop {
+        drain_queued(&db, &bus, &mut session, engine.as_mut(), &pending).await;
+        tokio::select! {
+            _ = wake.notified() => {}
+            command = commands.recv() => match command {
+                Some(WorkerCommand::RunTurn { message, reply }) => {
+                    let result =
+                        drive_turn(&db, &bus, &mut session, engine.as_mut(), message).await;
+                    let _ = reply.send(result);
+                }
+                Some(WorkerCommand::Interrupt { reply }) => {
+                    let result = engine
+                        .interrupt()
                         .await
-                        .map_err(|err| WorkerError::Failed(err.to_string()))
-                };
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Interrupt { reply } => {
-                let result = engine
-                    .interrupt()
-                    .await
-                    .map_err(|err| WorkerError::Failed(err.to_string()));
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Shutdown => break,
+                        .map_err(|err| WorkerError::Failed(err.to_string()));
+                    let _ = reply.send(result);
+                }
+                Some(WorkerCommand::Shutdown) | None => break,
+            },
         }
     }
     let _ = engine.shutdown().await;
+}
+
+async fn drain_queued(
+    db: &Arc<DbStore>,
+    bus: &Arc<CodeEventBus>,
+    session: &mut CodeSession,
+    engine: &mut dyn HarnessSession,
+    pending: &Arc<std::sync::Mutex<Option<String>>>,
+) {
+    loop {
+        let next = pending.lock().expect("code turn queue").take();
+        let Some(message) = next else {
+            break;
+        };
+        let _ = drive_turn(db, bus, session, engine, message).await;
+    }
 }
 
 async fn drive_turn(

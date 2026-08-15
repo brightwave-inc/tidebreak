@@ -7,7 +7,11 @@ use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 use super::require_code;
-use super::types::{CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, SubmitTurnBody};
+use super::types::{
+    CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn, SteerBody,
+    SubmitTurnBody,
+};
+use crate::code::runtime::SubmitTurnOutcome;
 use tidebreak_core::{CodeSessionId, WorkspaceId};
 
 pub async fn create_session(
@@ -33,8 +37,36 @@ pub async fn submit_turn(
     if message.is_empty() {
         return Err(ServerError::bad_request("message must not be empty"));
     }
-    let turn = require_code(&state)?.submit_turn(id, message).await?;
-    Ok((StatusCode::ACCEPTED, Json(CodeTurnSnapshot::from(turn))))
+    match require_code(&state)?
+        .submit_turn(id, message.clone())
+        .await?
+    {
+        SubmitTurnOutcome::Ran(turn) => {
+            Ok((StatusCode::ACCEPTED, Json(CodeTurnSnapshot::from(*turn))).into_response())
+        }
+        SubmitTurnOutcome::Queued => Ok((
+            StatusCode::ACCEPTED,
+            Json(QueuedCodeTurn {
+                session_id: id,
+                message,
+            }),
+        )
+            .into_response()),
+    }
+}
+
+pub async fn steer_session(
+    Path(_id): Path<CodeSessionId>,
+    Json(body): Json<SteerBody>,
+) -> Result<StatusCode, ServerError> {
+    let message = body.message.trim();
+    if message.is_empty() {
+        return Err(ServerError::bad_request("message must not be empty"));
+    }
+    Err(ServerError::unprocessable_kind(
+        "steering_unavailable",
+        "explicit mid-turn steering is not yet available; the message was not queued",
+    ))
 }
 
 pub async fn interrupt_session(
