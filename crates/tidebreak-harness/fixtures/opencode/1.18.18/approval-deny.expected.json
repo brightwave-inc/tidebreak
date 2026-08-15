@@ -1,0 +1,310 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90d7992ffe7TX0YtIWyo6Nyl"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " user"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " wants"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " me"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " run"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " this"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " shell"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " command"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " then"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " stop"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ":"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " echo"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " hi"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "The user wants me to run exactly this shell command and then stop: echo hi"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
+    "name": "bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "approval_requested",
+    "harness_ref": {
+      "call_id": "per_006f28b45001X8Mo5OoIrM4xyl"
+    }
+  },
+  {
+    "type": "approval_resolved",
+    "harness_ref": {
+      "call_id": "per_006f28b45001X8Mo5OoIrM4xyl"
+    },
+    "decision": {
+      "type": "deny",
+      "feedback": "use the fixtures directory instead"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
+    "outcome": "denied",
+    "preview": "The user rejected permission to use this specific tool call with the following feedback: use the fixtures directory instead"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " user"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " rejected"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " my"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " permission"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " run"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " `"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "echo"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " hi"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "`"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " with"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " feedback"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " \""
+  },
+  {
+    "type": "assistant_delta",
+    "text": "use"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixtures"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " directory"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " instead"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "\"."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Let"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " me"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " check"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixtures"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " directory"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "The user rejected my permission to run `echo hi` with feedback \"use the fixtures directory instead\". Let me check the fixtures directory."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_viY1Lx1AXCvyGzESMURk7927",
+    "name": "glob",
+    "detail": {
+      "kind": "search",
+      "query": "glob"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call_00_viY1Lx1AXCvyGzESMURk7927",
+    "outcome": "succeeded",
+    "preview": "No files found"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "No"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixtures"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " directory"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " found"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Let"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " me"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " look"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " at"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " directory"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " structure"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "No fixtures directory found. Let me look at the directory structure."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_pTqLHUb6Tp5CWsKjACRA5197",
+    "name": "bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "",
+      "cwd": ""
+    }
+  },
+  {
+    "type": "approval_requested",
+    "harness_ref": {
+      "call_id": "per_006f2966b001Edi4ogHcyFv2aT"
+    }
+  }
+]

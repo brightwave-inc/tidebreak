@@ -24,6 +24,7 @@ pub mod budget;
 pub mod claude;
 pub mod codex;
 pub mod launch;
+pub mod opencode;
 pub mod probe;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
@@ -337,6 +338,7 @@ pub fn builtin_registry() -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(claude::ClaudeCodeAdapter::new()));
     registry.register(Arc::new(codex::CodexAdapter::new()));
+    registry.register(Arc::new(opencode::OpencodeAdapter::new()));
     registry
 }
 

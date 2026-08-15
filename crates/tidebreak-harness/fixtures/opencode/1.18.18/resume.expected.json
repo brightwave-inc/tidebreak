@@ -1,0 +1,36 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90df0c7ffeyKprRxU4NlwEY7"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "res"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "umed"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "assistant_message",
+    "text": "resumed fixture"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 116,
+      "output_tokens": 4,
+      "cache_read_input_tokens": 8192,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

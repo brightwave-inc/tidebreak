@@ -1,0 +1,127 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90ddb9effedxnVHx00P4svrw"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " user"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " wants"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " me"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " read"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " READ"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ME"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ".md"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " reply"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " with"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " first"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " word"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " that"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " file"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "The user wants me to read README.md and reply with exactly the first word of that file."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_hWtj3zfWzwaUyytIP55s8125",
+    "name": "read",
+    "detail": {
+      "kind": "file_read",
+      "path": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call_00_hWtj3zfWzwaUyytIP55s8125",
+    "outcome": "succeeded",
+    "preview": "demo\n\nA tiny fixture repository."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "demo"
+  },
+  {
+    "type": "assistant_message",
+    "text": "demo"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 125,
+      "output_tokens": 2,
+      "cache_read_input_tokens": 6272,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

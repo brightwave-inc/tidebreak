@@ -1,0 +1,60 @@
+harness = "opencode"
+version = "1.18.18"
+date = "2026-08-15"
+observed_version_command = "opencode --version"
+observed_version = "1.18.18"
+observed_auth_command = "opencode auth list"
+observed_auth = "3 credentials on the capturing login (Fireworks, model-gateway, model-gateway-anthropic); empty XDG_DATA_HOME prints 0 credentials (exit 0). Isolated capture used the public opencode zen model."
+
+# Integration path: long-lived `opencode serve` HTTP child + REST + SSE.
+# Chosen over `opencode run --format json` because 1.18.18's serve API is real:
+# sessions, messages, directory-scoped /event stream, and a permission reply
+# surface. Prompt travels in the JSON body, never on argv.
+#
+# Capture used isolated XDG_* dirs, --pure, throwaway git repo as cwd,
+# cheapest public zen model opencode/big-pickle, tiny prompts.
+
+integration_path = "serve-http-sse"
+model = "opencode/big-pickle"
+
+scenarios = [
+  "plain-text",
+  "tool-use",
+  "approval-approve",
+  "approval-deny",
+  "resume",
+  "interrupt",
+  "error",
+]
+
+[permission_mode_mapping]
+# SessionSpec.permission_mode -> POST /session body. Never composed as --auto.
+Plan = { agent = "plan" }
+Ask = { agent = "build", permission = [{ permission = "bash", pattern = "*", action = "ask" }, { permission = "edit", pattern = "*", action = "ask" }, { permission = "read", pattern = "*", action = "allow" }] }
+Auto = { agent = "build", permission = [{ permission = "edit", pattern = "*", action = "allow" }, { permission = "read", pattern = "*", action = "allow" }, { permission = "bash", pattern = "*", action = "ask" }] }
+
+[redaction]
+notes = """
+Worktree paths rewritten to /workspace (including /private/workspace).
+Isolated XDG home rewritten to /tmp/redacted-opencode-home.
+/Users/thet rewritten to /Users/redacted.
+Session ids kept: they are the resume handle GET /session/{id} requires.
+No sk- / bearer / API-key material was present.
+"""
+verified = [
+  "opencode --version => 1.18.18",
+  "opencode auth list => 3 credentials (exit 0); empty XDG_DATA_HOME => 0 credentials (exit 0)",
+  "opencode serve --hostname 127.0.0.1 --port N: GET /global/health {healthy, version}, OpenAPI at /doc",
+  "POST /session creates a session (id ^ses) with agent + model + optional permission ruleset",
+  "POST /session/{id}/prompt_async admits a turn; prompt is JSON body; returns 204",
+  "GET /event?directory=... SSE: server.connected, session.created/updated/status/idle, message.updated, message.part.updated, message.part.delta (field=text), permission.asked/replied",
+  "POST /session/{id}/abort interrupts a turn (session.error name=MessageAbortedError)",
+  "permission.asked + POST /permission/{id}/reply {reply: once|reject, message?}",
+]
+not_verified = [
+  "opencode run --format json event vocabulary (probed via --help only; not captured)",
+  "v2 /api/session/{id}/prompt delivery=steer mid-turn steering (schema exists; not captured)",
+  "native file.edited events on a successful edit (not captured; session.diff was empty arrays)",
+  "session.next.* v2 durable events on GET /event (not observed in these captures)",
+  "GET /api/session/{id}/event (timed out in spike; not used)",
+]

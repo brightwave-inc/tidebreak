@@ -1,0 +1,92 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "opencode",
+    "harness_version": "1.18.18",
+    "resume_ref": "ses_ff90df0c7ffeyKprRxU4NlwEY7"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " user"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " wants"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " me"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " reply"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " with"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " \""
+  },
+  {
+    "type": "assistant_delta",
+    "text": "hello"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "\"."
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "The user wants me to reply with exactly \"hello from fixture\"."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "hello"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "assistant_message",
+    "text": "hello from fixture"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 8281,
+      "output_tokens": 4,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

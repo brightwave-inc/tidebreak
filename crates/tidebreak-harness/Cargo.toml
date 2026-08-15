@@ -18,6 +18,7 @@ capture = []
 [dependencies]
 async-trait = { workspace = true }
 libc = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
