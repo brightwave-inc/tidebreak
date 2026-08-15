@@ -255,6 +255,27 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
   };
 }
 
+/** `GET /code/workspaces/{id}/sessions` — newest first. */
+export function parseCodeSessionList(
+  value: unknown,
+): CodeSessionSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const sessions: CodeSessionSnapshot[] = [];
+  for (const item of value) {
+    const parsed = parseCodeSession(item);
+    if (!parsed) return null;
+    sessions.push(parsed);
+  }
+  return sessions;
+}
+
+/** The one session a workspace page should attach, if any. */
+export function liveCodeSession(
+  sessions: readonly CodeSessionSnapshot[],
+): CodeSessionSnapshot | null {
+  return sessions.find((session) => session.lifecycle !== "ended") ?? null;
+}
+
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   if (
     !isRecord(value) ||

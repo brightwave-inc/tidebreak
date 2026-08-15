@@ -1565,3 +1565,30 @@ describe("source download progress", () => {
     );
   });
 });
+
+describe("code workspace sessions", () => {
+  it("lists GET /code/workspaces/{id}/sessions", async () => {
+    const session = {
+      id: "sess-1",
+      workspace_id: "ws-1",
+      harness_kind: "claude_code",
+      permission_mode: "plan",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T12:00:00.000Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([session]), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(client.listCodeWorkspaceSessions("ws-1")).resolves.toEqual([
+      session,
+    ]);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");
+    expect(init.method ?? "GET").toBe("GET");
+  });
+});

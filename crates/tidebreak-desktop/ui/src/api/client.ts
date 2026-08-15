@@ -103,6 +103,7 @@ import {
 import {
   parseCodeRepo,
   parseCodeSession,
+  parseCodeSessionList,
   parseCodeTurn,
   parseCodeWorkspace,
   parseHarnessDoctorReport,
@@ -1742,6 +1743,19 @@ export class ApiClient {
         ),
       ),
       "code workspace",
+    );
+  }
+
+  async listCodeWorkspaceSessions(
+    workspaceId: string,
+  ): Promise<CodeSessionSnapshot[]> {
+    const body = await this.json<unknown>(
+      `/code/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+      { headers: this.headers() },
+    );
+    return requireParsed(
+      parseCodeSessionList(body),
+      "code workspace sessions",
     );
   }
 

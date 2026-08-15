@@ -18,6 +18,7 @@ import { openExternal } from "@/host";
 import { RouteFrame } from "@/RouteFrame";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import {
   acquireCodeSessionFromClient,
@@ -66,10 +67,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     let cancelled = false;
     void (async () => {
       try {
-        const next = await client.getCodeWorkspace(workspaceId);
+        const [next, sessions] = await Promise.all([
+          client.getCodeWorkspace(workspaceId),
+          client.listCodeWorkspaceSessions(workspaceId),
+        ]);
         if (cancelled) return;
         setWorkspace(next);
-        catalog.upsertWorkspace(next);
+        const catalogState = useCodeCatalogStore.getState();
+        catalogState.upsertWorkspace(next);
+        const live = liveCodeSession(sessions);
+        if (live) {
+          catalogState.rememberSession(live);
+          setSession(live);
+        } else if (!catalogState.sessionsByWorkspace[workspaceId]) {
+          setSession(null);
+        }
         const nextRepo = await client.getCodeRepo(next.repo_id);
         if (!cancelled) setRepo(nextRepo);
       } catch (err) {

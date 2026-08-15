@@ -8,15 +8,13 @@ import type {
   HarnessDoctorReport,
 } from "../api/types";
 
-const SESSION_CACHE_KEY = "tidebreak.code-sessions";
-
 /**
  * Repos, workspaces, and the last session each workspace opened.
  *
- * The walking skeleton has no `/code/updates` digest and no list-sessions
- * route, so the rail and the workspace page share this catalog. Sessions are
- * remembered after create (and across reloads) so reopening a workspace can
- * still attach its socket.
+ * The workspace page loads sessions from `GET /code/workspaces/{id}/sessions`.
+ * `rememberSession` is write-through after create/reap so the same window
+ * does not wait on another round trip. Nothing here is persisted: a reload
+ * asks the server again.
  */
 
 type CodeCatalogState = {
@@ -40,30 +38,10 @@ type CodeCatalogStore = CodeCatalogState & {
   reset: () => void;
 };
 
-function readCachedSessions(): Record<string, CodeSessionSnapshot> {
-  try {
-    const raw = window.localStorage.getItem(SESSION_CACHE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Record<string, CodeSessionSnapshot>;
-  } catch {
-    return {};
-  }
-}
-
-function writeCachedSessions(sessions: Record<string, CodeSessionSnapshot>) {
-  try {
-    window.localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(sessions));
-  } catch {
-    /* ignore quota / private-mode */
-  }
-}
-
 export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   repos: [],
   workspaces: [],
-  sessionsByWorkspace: readCachedSessions(),
+  sessionsByWorkspace: {},
   doctor: null,
   loaded: false,
   error: null,
@@ -83,17 +61,16 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     }
   },
   rememberSession: (session) => {
-    const sessionsByWorkspace = {
-      ...get().sessionsByWorkspace,
-      [session.workspace_id]: session,
-    };
-    writeCachedSessions(sessionsByWorkspace);
-    set({ sessionsByWorkspace });
+    set({
+      sessionsByWorkspace: {
+        ...get().sessionsByWorkspace,
+        [session.workspace_id]: session,
+      },
+    });
   },
   forgetWorkspace: (workspaceId) => {
     const { [workspaceId]: _removed, ...sessionsByWorkspace } =
       get().sessionsByWorkspace;
-    writeCachedSessions(sessionsByWorkspace);
     set({
       sessionsByWorkspace,
       workspaces: get().workspaces.filter((item) => item.id !== workspaceId),
@@ -116,7 +93,6 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     });
   },
   reset: () => {
-    writeCachedSessions({});
     set({
       repos: [],
       workspaces: [],
