@@ -36,8 +36,10 @@ cargo test --workspace
 git config core.hooksPath .githooks
 ```
 
-The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml);
-`rustup` will pick it up automatically.
+The Rust toolchain is pinned to an exact version in
+[`rust-toolchain.toml`](rust-toolchain.toml); `rustup` will pick it up
+automatically. Bump the pin deliberately — a floating `stable` would let a
+rustup update fail the tree for everyone at once under clippy `-D warnings`.
 
 ### macOS keychain prompts
 
