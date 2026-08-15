@@ -11,8 +11,12 @@ spin up isolated **workspaces** (one worktree + branch each), and run
 **sessions** — durable conversations with external coding-agent harnesses
 (Claude Code first; Codex CLI, opencode, and Grok CLI behind it) — supervised
 through a structured UI: conversation, tool activity, approvals, per-turn
-diffs, and a pull-request flow. The modes are separate today and deliberately
-shaped to converge later ([`0030`](decisions/0030-code-mode-separate-surface.md)).
+diffs, and a pull-request flow. The two-mode split is a delivery strategy:
+the destination is one surface where context selects behavior — a
+conversation bound to a workspace behaves code-like, one without is ordinary
+chat — and the adapter contract below is the runtime interface every engine,
+eventually including Tidebreak's own internal loop, sits behind
+([`0030`](decisions/0030-code-mode-separate-surface.md)).
 
 ## Vocabulary
 

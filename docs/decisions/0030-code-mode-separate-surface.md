@@ -109,9 +109,25 @@ Gratuitous divergence — a different streaming idiom, a different settings
 mechanism, a private design language — is out of bounds without a decision
 record explaining why the shared shape cannot serve.
 
-Deliberately excluded from this record: the unification itself (one inbox, one
-project tree, chats that drive code sessions). That is a future record built
-on two proven models; this record's job is to keep it cheap.
+**The destination is one surface, and the engine slot is the primary
+abstraction.** The mode split is a delivery strategy, not the intended end
+state. The product Tidebreak is steering toward has no user-facing mode
+choice at all: a conversation bound to a repo-backed workspace behaves
+code-like, and a conversation without one is ordinary chat — context selects
+behavior. In that end state the adapter contract of
+[`0031`](0031-harness-adapter-boundary.md) is the product's runtime
+interface, and Tidebreak's internal agent loop holds no privileged seat: it
+is one engine implementation among several, selected where its capabilities
+(document work, brokered host access, outputs) are the honest best fit, with
+the same capability-flag honesty rules that govern external harnesses.
+Design choices in either mode should be tested against that destination:
+a feature that assumes the internal loop is special, or that the two
+surfaces are permanent, is going the wrong way.
+
+Deliberately excluded from this record: the unification itself (one inbox,
+one conversation concept with optional workspace binding, engines selected
+per conversation). That is a future record built on two proven models; this
+record's job is to keep it cheap.
 
 ## Alternatives Considered
 
@@ -154,11 +170,12 @@ choices (user-visible worktrees), because the two never share a data path.
 New tables are a baseline schema change and advance the desktop schema epoch
 per [`0002`](0002-pre-v1-schema-and-persisted-format-mutability.md).
 
-Revisit this decision when both models are proven and users are asking for the
-other mode's surfaces — one inbox across chats and code sessions, code
-workspaces inside chat projects, or a chat that can drive a code session. The
-convergence constraints above are the measure of whether this record did its
-job: unification should require merging structures, not translating them.
+Revisit this decision when both models are proven and the unification can
+begin: one conversation concept with an optional workspace binding, engines
+selected per conversation behind the adapter contract, and no user-facing
+mode choice. The convergence constraints above are the measure of whether
+this record did its job: unification should require merging structures, not
+translating them.
 
 ## Validation
 

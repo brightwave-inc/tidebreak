@@ -78,6 +78,14 @@ third; Grok CLI is best-effort. A feature that cannot be expressed for a
 harness gets a per-adapter decision, even when that decision is "not
 supported here", recorded in the caps value.
 
+The contract is engine-neutral on purpose. Nothing in the traits, the event
+vocabulary, or the capability flags may assume the engine is a *coding*
+agent: [`0030`](0030-code-mode-separate-surface.md) names a destination in
+which Tidebreak's own internal loop is one more implementation of this
+contract, selected where its capabilities are the best fit. A proposed
+addition to the contract that only makes sense for code is a smell to
+resolve in review, not a convenience to accept.
+
 `CodeEvent` follows the chat journal's conventions exactly — internally
 tagged serde enum, `#[non_exhaustive]`, bounded payloads with hint events
 pointing at renderer-safe routes for anything large — so the two journals

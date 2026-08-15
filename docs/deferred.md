@@ -240,9 +240,12 @@ purpose:
   editing to the user's editor via the worktree path. An embedded editor is
   a heavyweight dependency with its own product surface; it needs demand
   evidence first.
-- **Chat–code convergence.** One inbox across chats and code sessions,
-  code workspaces inside projects, chats that drive code sessions. The two
-  modes are built shape-compatible so this stays a mechanical merge
+- **Chat–code convergence.** The end state is one surface with no mode
+  choice: one conversation concept with an optional workspace binding, where
+  a workspace-bound conversation behaves code-like and engines — external
+  harnesses and Tidebreak's internal loop alike — sit behind the adapter
+  contract and are selected per conversation. The two modes are built
+  shape-compatible so this stays a mechanical merge
   ([record 30](decisions/0030-code-mode-separate-surface.md)); the
   convergence itself is a future record on top of two proven models.
 - **A per-repo worktree-location override.** Worktrees live under the
