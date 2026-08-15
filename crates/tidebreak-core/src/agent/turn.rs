@@ -770,10 +770,15 @@ impl Agent {
                     .map(|call| self.decline_call(call, events, correction.clone()))
                     .collect::<Vec<_>>();
                 let blocks = Self::stream_content_blocks(&items, &calls);
+                // The rejected step is not what the provider generated: we
+                // declined the control and will ask again. Anthropic validates
+                // the latest assistant thinking prefix against the original
+                // blocks, so a captured set here 400s the retry. Cancel
+                // already drops partial reasoning for the same reason.
                 transcript.push(ChatMessage {
                     role: Role::Assistant,
                     content: blocks,
-                    reasoning: candidate.reasoning.clone(),
+                    reasoning: MessageReasoning::default(),
                 });
                 transcript.push(ChatMessage {
                     role: Role::User,
