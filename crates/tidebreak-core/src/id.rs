@@ -4,6 +4,11 @@
 //! say, passing a [`TurnId`] where a [`ChatId`] is expected. All ids
 //! serialize transparently (as the bare UUID string), so on the wire and in the
 //! `Store` they are indistinguishable from a plain UUID.
+//!
+//! Identity is minted only by [`id_type`]'s `new`, a typed `derive` /
+//! `from_uuid`, or an explicit `From<Uuid>`. There is no `Default`: a
+//! `..Default::default()` on a struct that happens to contain an id would
+//! otherwise invent a durable identity as a side effect.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,12 +34,6 @@ macro_rules! id_type {
             #[must_use]
             pub fn as_uuid(&self) -> &Uuid {
                 &self.0
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
             }
         }
 
@@ -292,12 +291,6 @@ impl RootAttachmentChangeId {
     #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0
-    }
-}
-
-impl Default for RootAttachmentChangeId {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
