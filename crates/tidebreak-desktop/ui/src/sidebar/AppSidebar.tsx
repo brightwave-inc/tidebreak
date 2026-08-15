@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { LayoutGrid, Puzzle, SquarePen } from "lucide-react";
+import { FolderGit2, LayoutGrid, Puzzle, SquarePen } from "lucide-react";
 
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
@@ -63,6 +63,12 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
           icon={<Puzzle />}
           active={pathname === "/plugins" || pathname.startsWith("/plugins/")}
           onClick={() => void navigate({ to: "/plugins" })}
+        />
+        <RouteButton
+          label="Code"
+          icon={<FolderGit2 />}
+          active={pathname === "/code" || pathname.startsWith("/code/")}
+          onClick={() => void navigate({ to: "/code" })}
         />
       </div>
 

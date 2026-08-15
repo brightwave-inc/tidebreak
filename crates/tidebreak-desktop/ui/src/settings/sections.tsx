@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   SquareTerminal,
   Mic,
+  Terminal,
   Waypoints,
 } from "lucide-react";
 
@@ -31,6 +32,7 @@ import { ProvidersPanel } from "./ProvidersPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
 import { WebSearchPanel } from "./WebSearchPanel";
 import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
+import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -177,6 +179,11 @@ function UpdatesSection() {
   );
 }
 
+function CodingHarnessesSection() {
+  const { client } = useApp();
+  return <CodingHarnessesPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -233,6 +240,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     label: "Code execution",
     icon: SquareTerminal,
     Component: CodeExecutionSection,
+  },
+  {
+    path: "coding-harnesses",
+    label: "Coding harnesses",
+    icon: Terminal,
+    Component: CodingHarnessesSection,
   },
   {
     path: "connected-apps",
