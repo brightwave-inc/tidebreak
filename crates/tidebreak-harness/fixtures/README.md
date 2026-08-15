@@ -73,6 +73,22 @@ The capture bin writes POST `/session` → POST `/session/{id}/prompt_async` and
 
 Re-capture the whole version directory when the engine version moves.
 
+### Grok CLI
+
+`--harness grok` drives print mode (`--prompt-file` + `--output-format streaming-json`).
+That path was chosen over `grok agent stdio` ACP because 1.0.4's print stream
+is a real NDJSON surface and no ACP permission request/response pair was
+captured. Probe `grok --help` and `grok agent stdio --help` before recapturing
+a new version.
+
+The capture bin writes the prompt to a file in the throwaway repo and tees
+stdout until the child exits. SIGINT on a live child produces a truncated
+stream with no `end` event (exit 130). `--always-approve`, `--yolo`, and
+`--permission-mode bypassPermissions` are denylisted and must not appear on
+a composed launch plan.
+
+Re-capture the whole version directory when the engine version moves.
+
 ## Redaction
 
 Before committing a capture:

@@ -1,0 +1,45 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","deep-research","workflow","goal","loop","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","vercel:workflow"]}
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","deep-research","workflow","goal","loop","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","vercel:workflow"]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" wants"}
+{"type":"thought","data":" a"}
+{"type":"thought","data":" long"}
+{"type":"thought","data":" essay"}
+{"type":"thought","data":" of"}
+{"type":"thought","data":" at"}
+{"type":"thought","data":" least"}
+{"type":"thought","data":" "}
+{"type":"thought","data":"200"}
+{"type":"thought","data":"0"}
+{"type":"thought","data":" words"}
+{"type":"thought","data":" about"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" number"}
+{"type":"thought","data":" "}
+{"type":"thought","data":"7"}
+{"type":"thought","data":"."}
+{"type":"thought","data":" This"}
+{"type":"thought","data":" is"}
+{"type":"thought","data":" a"}
+{"type":"thought","data":" straightforward"}
+{"type":"thought","data":" writing"}
+{"type":"thought","data":" request"}
+{"type":"thought","data":" -"}
+{"type":"thought","data":" no"}
+{"type":"thought","data":" tools"}
+{"type":"thought","data":" needed"}
+{"type":"thought","data":"."}
+{"type":"thought","data":" I"}
+{"type":"thought","data":" should"}
+{"type":"thought","data":" write"}
+{"type":"thought","data":" a"}
+{"type":"thought","data":" substantial"}
+{"type":"thought","data":","}
+{"type":"thought","data":" well"}
+{"type":"thought","data":"-"}
+{"type":"thought","data":"structured"}
+{"type":"thought","data":" essay"}
+{"type":"thought","data":" that"}
+{"type":"thought","data":" genuinely"}
+{"type":"thought","data":" r..."}

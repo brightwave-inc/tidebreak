@@ -23,6 +23,7 @@ use tidebreak_core::{
 pub mod budget;
 pub mod claude;
 pub mod codex;
+pub mod grok;
 pub mod launch;
 pub mod opencode;
 pub mod probe;
@@ -386,6 +387,7 @@ pub fn builtin_registry() -> AdapterRegistry {
     registry.register(Arc::new(claude::ClaudeCodeAdapter::new()));
     registry.register(Arc::new(codex::CodexAdapter::new()));
     registry.register(Arc::new(opencode::OpencodeAdapter::new()));
+    registry.register(Arc::new(grok::GrokAdapter::new()));
     registry
 }
 

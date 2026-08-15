@@ -1,0 +1,78 @@
+harness = "grok"
+version = "1.0.4"
+date = "2026-08-15"
+observed_version_command = "grok --version"
+observed_version = "grok 1.0.4 (d846eb93d94d) [stable]"
+observed_auth_command = "grok models"
+observed_auth = "You are logged in with grok.com."
+
+# Integration path: one print-mode child per turn
+# (`--prompt-file` + `--output-format streaming-json`).
+# Chosen over `grok agent stdio` ACP because the print stream is a real
+# machine-readable NDJSON surface and no ACP permission request/response
+# pair was captured. `grok agent stdio` initialize + session/new was
+# probed; ACP remains not_verified for approvals.
+#
+# Capture used the user's signed-in GROK_HOME (isolated GROK_HOME with
+# only auth.json copied produced 401 on cli-chat-proxy). Model
+# model-gateway-model-gateway/grok-4.5 (cheapest first-party model that
+# accepted the request; kimi-k2p6-turbo returned a JSON-schema 400).
+# Tiny prompts, throwaway git repo as cwd, --no-leader via a private
+# --leader-socket, --reasoning-effort low on some turns.
+
+integration_path = "print-streaming-json"
+model = "model-gateway-model-gateway/grok-4.5"
+
+scenarios = [
+  "plain-text",
+  "tool-use",
+  "permission-denied",
+  "resume",
+  "interrupt",
+  "error",
+]
+
+[permission_mode_mapping]
+# No Tidebreak permission mode is honored on 1.0.4 print mode.
+# Ask/Auto: no structured approval channel in streaming-json.
+# Plan: `--permission-mode plan` and `--sandbox read-only` both wrote
+# files in captured turns. `--deny Edit/Write/Bash` did refuse those
+# tools (see permission-denied) but is not composed as a Plan stand-in.
+# `--always-approve` / `--yolo` / `bypassPermissions` are denylisted.
+Plan = "refused"
+Ask = "refused"
+Auto = "refused"
+
+[redaction]
+notes = """
+Worktree paths (/private/tmp/tidebreak-grok-capture/ws-plain) rewritten to /workspace.
+Other /tmp/tidebreak-grok-capture paths rewritten to /tmp/redacted.
+/Users/thet rewritten to /Users/redacted.
+No sk- / bearer / API-key material was present.
+Session ids kept: they are the resume handle `--resume` requires.
+available_commands lists host-local skill names from the capturing GROK_HOME.
+"""
+verified = [
+  "grok --version => grok 1.0.4 (d846eb93d94d) [stable]",
+  "grok models => You are logged in with grok.com. (empty GROK_HOME => You are not authenticated.)",
+  "print mode: --prompt-file + --output-format streaming-json (stdin is not read into the prompt)",
+  "stream types: available_commands, thought, text, tool_call, tool_call_update, usage, end, error",
+  "tool_call fields: toolCallId, title, kind, status, toolName, rawInput, content, locations",
+  "tool_call_update status: null (progress), completed, failed",
+  "end.sessionId is the resume handle; --resume <id> reused that id",
+  "SIGINT mid-turn: child exits, stream truncated, no end/error line",
+  "unknown model: single {type:error,message} line, exit 1",
+  "--always-approve, --yolo, --dangerously-skip-permissions accepted by CLI; denylisted",
+  "--permission-mode plan wrote note.txt; --sandbox read-only wrote sandboxed.txt",
+  "--deny Edit --deny Write --deny Bash failed write + run_terminal_command (Denied by permission policy)",
+  "ACP: grok agent stdio initialize + session/new returned sessionId; no request_permission captured",
+]
+not_verified = [
+  "ACP session/request_permission request/response pair",
+  "approval-approve / approval-deny (no structured channel in print mode)",
+  "mid-turn steering (print mode is one child per turn)",
+  "native file-change events",
+  "streaming-messages-json / --include-partial-messages",
+  "grok agent serve WebSocket",
+  "--permission-mode acceptEdits / auto / dontAsk as a Tidebreak Auto mapping",
+]

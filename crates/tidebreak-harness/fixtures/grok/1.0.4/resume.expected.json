@@ -1,0 +1,89 @@
+[
+  {
+    "type": "reasoning_delta",
+    "text": "The"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " user"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " wants"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " me"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " to"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " reply"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " with"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": ":"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " \""
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "res"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "umed"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "\""
+  },
+  {
+    "type": "assistant_delta",
+    "text": "res"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "umed"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " fixture"
+  },
+  {
+    "type": "assistant_message",
+    "text": "resumed fixture"
+  },
+  {
+    "type": "session_started",
+    "harness_kind": "grok",
+    "harness_version": "1.0.4",
+    "resume_ref": "01a00759-bacb-7d63-a3fb-515ad8d7c292"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 18290,
+      "output_tokens": 17,
+      "cache_read_input_tokens": 384,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]
