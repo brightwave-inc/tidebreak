@@ -1,0 +1,296 @@
+[
+  {
+    "type": "reasoning_delta",
+    "text": "The"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " user"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " wants"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " me"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " to"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " read"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " README"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": ".md"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " and"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " reply"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " with"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " the"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " first"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " word"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " of"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " that"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " file"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " and"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " nothing"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " else"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "I'll"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " read"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " `"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "README"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ".md"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "`"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " reply"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " with"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " only"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " its"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " first"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " word"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_message",
+    "text": "I'll read `README.md` and reply with only its first word."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call-c47230c3-37a6-4c14-ad84-fba191ecdfaf-0",
+    "name": "read_file",
+    "detail": {
+      "kind": "file_read",
+      "path": "README.md"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call-c47230c3-37a6-4c14-ad84-fba191ecdfaf-0",
+    "outcome": "succeeded",
+    "preview": "1→demo\n\nA tiny fixture repository.\n"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "The"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " user"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " wants"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " me"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " to"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " reply"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " with"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " exactly"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " the"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " first"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " word"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " of"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " the"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " README"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": ".md"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " file"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " and"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " nothing"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " else"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "."
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " The"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " first"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " word"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " is"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": " \""
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "demo"
+  },
+  {
+    "type": "reasoning_delta",
+    "text": "\"."
+  },
+  {
+    "type": "assistant_delta",
+    "text": "demo"
+  },
+  {
+    "type": "assistant_message",
+    "text": "demo"
+  },
+  {
+    "type": "session_started",
+    "harness_kind": "grok",
+    "harness_version": "1.0.4",
+    "resume_ref": "01a0075b-1e4d-77c1-8930-5984a45286bc"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 9189,
+      "output_tokens": 84,
+      "cache_read_input_tokens": 9728,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

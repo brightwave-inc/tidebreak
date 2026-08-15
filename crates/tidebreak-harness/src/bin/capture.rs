@@ -8,12 +8,16 @@
 //!
 //! cargo run -p tidebreak-harness --features capture --bin tidebreak-harness-capture -- \
 //!   --harness codex --scenario plain-text --prompt "reply with exactly: hello from fixture"
+//!
+//! cargo run -p tidebreak-harness --features capture --bin tidebreak-harness-capture -- \
+//!   --harness grok --scenario plain-text --prompt "reply with exactly: hello from fixture"
 //! ```
 //!
 //! Writes `<scenario>.ndjson` and a `manifest.toml`. Redact the stream before
 //! committing — see `fixtures/README.md`. Codex captures are framed JSON-RPC
 //! (`{"dir":"in"|"out","msg":…}`). opencode captures are framed HTTP + SSE
-//! (`{"dir":"in"|"out","msg":{"kind":"http"|"sse",…}}`).
+//! (`{"dir":"in"|"out","msg":{"kind":"http"|"sse",…}}`). Grok captures are
+//! print-mode `streaming-json` (one ACP-derived object per line).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -42,8 +46,47 @@ fn main() {
     match harness.as_str() {
         "codex" => capture_codex(&scenario, &prompt, &extra),
         "opencode" => capture_opencode(&scenario, &prompt, &extra),
+        "grok" => capture_grok(&scenario, &prompt, &extra),
         _ => capture_claude(&harness, &scenario, &prompt, &extra),
     }
+}
+
+fn capture_grok(scenario: &str, prompt: &str, extra: &[String]) {
+    let workspace = tempfile_workspace();
+    let binary = resolve_binary("grok");
+    let version = grok_version(&binary);
+    let prompt_path = workspace.join("prompt.txt");
+    std::fs::write(&prompt_path, prompt).unwrap();
+    let mut argv = vec![
+        binary.clone(),
+        "--prompt-file".into(),
+        prompt_path.to_string_lossy().into_owned(),
+        "--output-format".into(),
+        "streaming-json".into(),
+        "--cwd".into(),
+        workspace.to_string_lossy().into_owned(),
+        "--no-auto-update".into(),
+    ];
+    argv.extend(extra.iter().cloned());
+
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(&workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn {binary}: {err}"));
+    let stdout = child.stdout.take().expect("stdout");
+    let dest_dir = fixture_dir("grok", &version);
+    let ndjson_path = dest_dir.join(format!("{scenario}.ndjson"));
+    let mut out = std::fs::File::create(&ndjson_path).unwrap();
+    std::io::copy(&mut std::io::BufReader::new(stdout), &mut out).unwrap();
+    let status = child.wait().unwrap();
+    write_manifest(
+        &dest_dir, "grok", &version, scenario, &argv, &workspace, &status,
+    );
+    eprintln!("wrote {}", ndjson_path.display());
 }
 
 fn capture_claude(harness: &str, scenario: &str, prompt: &str, extra: &[String]) {
@@ -523,6 +566,23 @@ fn codex_version(binary: &str) -> String {
 
 fn opencode_version(binary: &str) -> String {
     first_version_token(binary, true)
+}
+
+fn grok_version(binary: &str) -> String {
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|err| panic!("{binary} --version: {err}"));
+    let line = String::from_utf8_lossy(&output.stdout);
+    let line = line
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown");
+    line.split_whitespace()
+        .find(|token| token.bytes().next().is_some_and(|b| b.is_ascii_digit()))
+        .unwrap_or("unknown")
+        .to_owned()
 }
 
 fn first_version_token(binary: &str, first_word: bool) -> String {

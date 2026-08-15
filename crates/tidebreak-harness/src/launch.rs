@@ -23,12 +23,20 @@ const DENIED_EXACT: &[&str] = &[
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
     "--dangerously-bypass-approvals-and-sandbox",
+    "--always-approve",
+    "--yolo",
 ];
+
+/// Bypass mode values that can appear as a `--permission-mode` argument.
+const DENIED_VALUES: &[&str] = &["bypassPermissions"];
 
 /// Reject a composed launch plan that includes a permission-bypass flag,
 /// including user-supplied extras.
 pub fn validate_launch_plan(plan: &LaunchPlan) -> Result<(), BypassFlagError> {
     for arg in &plan.argv {
+        if DENIED_VALUES.contains(&arg.as_str()) {
+            return Err(BypassFlagError(arg.clone()));
+        }
         if arg.starts_with('-') && is_bypass_flag(arg) {
             return Err(BypassFlagError(arg.clone()));
         }
@@ -40,6 +48,11 @@ fn is_bypass_flag(arg: &str) -> bool {
     let token = arg.split('=').next().unwrap_or(arg);
     if DENIED_EXACT.contains(&token) {
         return true;
+    }
+    if let Some((_, value)) = arg.split_once('=') {
+        if DENIED_VALUES.contains(&value) {
+            return true;
+        }
     }
     // Conservative pattern for obvious equivalents we have not enumerated.
     let lower = token.to_ascii_lowercase();
@@ -85,9 +98,18 @@ mod tests {
             "--allow-dangerously-skip-permissions",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-skip-permissions=true",
+            "--always-approve",
+            "--yolo",
+            "bypassPermissions",
         ] {
             let err = validate_launch_plan(&plan(&["claude", flag])).unwrap_err();
-            assert!(err.0.contains("dangerous"), "{flag}");
+            assert!(
+                err.0.contains("dangerous")
+                    || err.0.contains("always-approve")
+                    || err.0.contains("yolo")
+                    || err.0.contains("bypassPermissions"),
+                "{flag} => {err}"
+            );
         }
     }
 

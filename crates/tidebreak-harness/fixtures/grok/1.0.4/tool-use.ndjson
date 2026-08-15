@@ -1,0 +1,74 @@
+{"type":"available_commands","tools":["read_file","search_tool","use_tool"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","goal","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","workflow"]}
+{"type":"available_commands","tools":["read_file","search_tool","use_tool"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","goal","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","workflow"]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" wants"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" read"}
+{"type":"thought","data":" README"}
+{"type":"thought","data":".md"}
+{"type":"thought","data":" and"}
+{"type":"thought","data":" reply"}
+{"type":"thought","data":" with"}
+{"type":"thought","data":" exactly"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" first"}
+{"type":"thought","data":" word"}
+{"type":"thought","data":" of"}
+{"type":"thought","data":" that"}
+{"type":"thought","data":" file"}
+{"type":"thought","data":" and"}
+{"type":"thought","data":" nothing"}
+{"type":"thought","data":" else"}
+{"type":"thought","data":"."}
+{"type":"text","data":"I'll"}
+{"type":"text","data":" read"}
+{"type":"text","data":" `"}
+{"type":"text","data":"README"}
+{"type":"text","data":".md"}
+{"type":"text","data":"`"}
+{"type":"text","data":" and"}
+{"type":"text","data":" reply"}
+{"type":"text","data":" with"}
+{"type":"text","data":" only"}
+{"type":"text","data":" its"}
+{"type":"text","data":" first"}
+{"type":"text","data":" word"}
+{"type":"text","data":"."}
+{"type":"available_commands","tools":["read_file","search_tool","use_tool","mgrt_986a1b7135f4986150aa5fa0028feeaa__describe","mgrt_986a1b7135f4986150aa5fa0028feeaa__run","mgrt_986a1b7135f4986150aa5fa0028feeaa__spawn","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_status","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_events","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_send","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_cancel","primary__model_gateway_proxy_api","primary__spawn","primary__sandbox_status","primary__sandbox_events","primary__sandbox_send","primary__sandbox_cancel"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","goal","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","workflow"]}
+{"type":"usage","usage":{"input_tokens":9050,"output_tokens":56,"cache_read_input_tokens":384,"cache_creation_input_tokens":0,"reasoning_tokens":22}}
+{"type":"tool_call","toolCallId":"call-c47230c3-37a6-4c14-ad84-fba191ecdfaf-0","title":"read_file","kind":"read","status":"pending","toolName":"read_file","rawInput":{"target_file":"README.md","limit":20},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-c47230c3-37a6-4c14-ad84-fba191ecdfaf-0","status":null,"content":[],"rawOutput":null,"locations":[{"path":"README.md"}]}
+{"type":"tool_call_update","toolCallId":"call-c47230c3-37a6-4c14-ad84-fba191ecdfaf-0","status":"completed","content":[{"type":"content","content":{"type":"text","text":"1→demo\n\nA tiny fixture repository.\n"}}],"rawOutput":{"type":"ReadFile","FileContent":{"content":"1→demo\n\nA tiny fixture repository.\n","content_concise":"1→demo\n\nA tiny fixture repository.\n","absolute_path":"/workspace/README.md","offset":null,"limit":20,"raw_output":"demo\n\nA tiny fixture repository.\n","total_lines":4}},"locations":[]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" wants"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" reply"}
+{"type":"thought","data":" with"}
+{"type":"thought","data":" exactly"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" first"}
+{"type":"thought","data":" word"}
+{"type":"thought","data":" of"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" README"}
+{"type":"thought","data":".md"}
+{"type":"thought","data":" file"}
+{"type":"thought","data":" and"}
+{"type":"thought","data":" nothing"}
+{"type":"thought","data":" else"}
+{"type":"thought","data":"."}
+{"type":"thought","data":" The"}
+{"type":"thought","data":" first"}
+{"type":"thought","data":" word"}
+{"type":"thought","data":" is"}
+{"type":"thought","data":" \""}
+{"type":"thought","data":"demo"}
+{"type":"thought","data":"\"."}
+{"type":"text","data":"demo"}
+{"type":"available_commands","tools":["read_file","search_tool","use_tool","mgrt_986a1b7135f4986150aa5fa0028feeaa__describe","mgrt_986a1b7135f4986150aa5fa0028feeaa__run","mgrt_986a1b7135f4986150aa5fa0028feeaa__spawn","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_status","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_events","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_send","mgrt_986a1b7135f4986150aa5fa0028feeaa__sandbox_cancel","primary__model_gateway_proxy_api","primary__spawn","primary__sandbox_status","primary__sandbox_events","primary__sandbox_send","primary__sandbox_cancel"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","plugins","reload-plugins","session-info","feedback","goal","orca-cli","alpha-parity","brandkit","design-taste-frontend","design-taste-frontend-v1","english","find-skills","fleet-review-loop","full-output-enforcement","gpt-taste","high-end-visual-design","image-to-code","imagegen-frontend-mobile","imagegen-frontend-web","industrial-brutalist-ui","minimalist-ui","orchestration","redesign-existing-projects","stitch-design-taste","tidebreak-dev-exercise","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","bundled:imagine","implement","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","karpathy-guidelines","frontend-design","ai-gateway","ai-sdk","upstream","auth","bootstrap","cdn-caching","chat-sdk","deployments-cicd","env-vars","eve","knowledge-update","vercel:marketplace","microfrontends","next-cache-components","next-forge","next-upgrade","nextjs","react-best-practices","routing-middleware","runtime-cache","shadcn","turbopack","vercel-agent","vercel-cli","vercel-connect","vercel-firewall","vercel-functions","vercel-sandbox","vercel-storage","verification","workflow"]}
+{"type":"usage","usage":{"input_tokens":139,"output_tokens":28,"cache_read_input_tokens":9344,"cache_creation_input_tokens":0,"reasoning_tokens":27}}
+{"type":"end","stopReason":"end_turn","sessionId":"01a0075b-1e4d-77c1-8930-5984a45286bc","requestId":"ee6fd4c2-0e77-4eaf-8d43-703c95ca88c7","usage":{"input_tokens":9189,"cache_read_input_tokens":9728,"cache_creation_input_tokens":0,"output_tokens":84,"reasoning_tokens":49,"total_tokens":19001},"num_turns":2,"total_cost_usd":0.007412136,"total_cost_usd_ticks":74121360,"modelUsage":{"grok-4.5":{"inputTokens":9189,"outputTokens":84,"cacheReadInputTokens":9728,"cacheCreationInputTokens":0,"modelCalls":2,"costUSD":0.007412136}}}
