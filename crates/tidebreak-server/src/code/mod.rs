@@ -7,6 +7,7 @@
 pub(crate) mod approval_bridge;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
+pub(crate) mod gh;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod session_worker;

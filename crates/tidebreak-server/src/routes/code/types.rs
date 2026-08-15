@@ -258,6 +258,70 @@ pub struct ArchiveWorkspaceBody {
     pub force: bool,
 }
 
+/// Body of `POST /code/workspaces/{id}/git/commit`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitWorkspaceBody {
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Body of `POST /code/workspaces/{id}/git/pr`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePullRequestBody {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// Result of staging and committing the workspace worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCommitSnapshot {
+    pub sha: String,
+    pub message: String,
+    pub stat: Diffstat,
+}
+
+/// Result of pushing the workspace branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodePushSnapshot {
+    pub branch: String,
+    pub remote: String,
+}
+
+/// PR + checks digest plus the local git facts the PR card needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspacePrSnapshot {
+    pub dirty: bool,
+    pub unpushed: bool,
+    pub ahead: u64,
+    pub has_upstream: bool,
+    pub suggested_commit_message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<PullRequestDigest>,
+    pub gh_found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gh_authenticated: Option<bool>,
+    pub remediation: String,
+}
+
+/// Bounded output of one named quick action. Never journaled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeActionSnapshot {
+    pub name: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
 /// Body of `POST /code/workspaces/{id}/sessions`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -421,6 +421,10 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeTerminalActivityNotice>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeApprovalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeApprovalDecisionBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeCommitSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodePushSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeWorkspacePrSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeActionSnapshot>(&cfg, &mut out);
         out
     }
 

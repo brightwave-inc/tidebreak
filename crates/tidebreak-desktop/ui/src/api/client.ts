@@ -82,10 +82,14 @@ import {
   type CodeRepoSnapshot,
   type CodeSessionSnapshot,
   type CodeTurnSnapshot,
+  type CodeActionSnapshot,
+  type CodeCommitSnapshot,
+  type CodePushSnapshot,
   type CodeTerminalRead,
   type CodeTerminalSnapshot,
   type CodeWorkspaceDiff,
   type CodeWorkspaceFiles,
+  type CodeWorkspacePrSnapshot,
   type CodeWorkspaceSnapshot,
   type HarnessDoctorReport,
   type HarnessKind,
@@ -112,12 +116,16 @@ import {
   parseCodeSessionList,
   parseCodeTurn,
   parseCodeTurnList,
+  parseCodeAction,
+  parseCodeCommit,
+  parseCodePush,
   parseCodeTerminal,
   parseCodeTerminalList,
   parseCodeTerminalRead,
   parseCodeWorkspace,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspacePr,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
 } from "../code/parsers";
@@ -1844,6 +1852,84 @@ export class ApiClient {
         ),
       ),
       "code workspace files",
+    );
+  }
+
+  async commitCodeWorkspace(
+    workspaceId: string,
+    message?: string,
+  ): Promise<CodeCommitSnapshot> {
+    return requireParsed(
+      parseCodeCommit(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/git/commit`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(message ? { message } : {}),
+          },
+        ),
+      ),
+      "code commit",
+    );
+  }
+
+  async pushCodeWorkspace(workspaceId: string): Promise<CodePushSnapshot> {
+    return requireParsed(
+      parseCodePush(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/git/push`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "code push",
+    );
+  }
+
+  async createCodePullRequest(
+    workspaceId: string,
+    body: { title?: string; body?: string } = {},
+  ): Promise<CodeWorkspacePrSnapshot> {
+    return requireParsed(
+      parseCodeWorkspacePr(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/git/pr`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+        ),
+      ),
+      "code pull request",
+    );
+  }
+
+  async getCodeWorkspacePr(
+    workspaceId: string,
+  ): Promise<CodeWorkspacePrSnapshot> {
+    return requireParsed(
+      parseCodeWorkspacePr(
+        await this.json(`/code/workspaces/${encodeURIComponent(workspaceId)}/pr`, {
+          headers: this.headers(),
+        }),
+      ),
+      "code pull request",
+    );
+  }
+
+  async runCodeWorkspaceAction(
+    workspaceId: string,
+    name: string,
+  ): Promise<CodeActionSnapshot> {
+    return requireParsed(
+      parseCodeAction(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/actions/${encodeURIComponent(name)}`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "code quick action",
     );
   }
 

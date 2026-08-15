@@ -1616,6 +1616,46 @@ describe("code workspace sessions", () => {
   });
 });
 
+describe("code workspace git flow", () => {
+  it("commits, pushes, and loads the PR digest", async () => {
+    const commit = {
+      sha: "abc123",
+      message: "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
+      stat: { files: 1, insertions: 1, deletions: 0, truncated: false },
+    };
+    const push = { branch: "tidebreak/first", remote: "origin" };
+    const digest = {
+      dirty: false,
+      unpushed: false,
+      ahead: 1,
+      has_upstream: true,
+      suggested_commit_message: commit.message,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(commit), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(push), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(digest), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    await expect(client.commitCodeWorkspace("ws-1", "first change")).resolves.toEqual(commit);
+    await expect(client.pushCodeWorkspace("ws-1")).resolves.toEqual(push);
+    await expect(client.getCodeWorkspacePr("ws-1")).resolves.toEqual(digest);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/git/commit",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/git/push",
+    );
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "http://127.0.0.1/code/workspaces/ws-1/pr",
+    );
+  });
+});
+
 describe("archive force kinds", () => {
   it("treats unpushed leftover work as a force-confirm, not a dead-end toast", () => {
     expect(archiveForceKind(new HttpError(409, "unpushed", "unpushed"))).toBe(

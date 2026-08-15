@@ -41,6 +41,7 @@ mod app_invoke;
 mod app_library;
 mod chat_titling;
 mod code;
+mod code_git;
 mod code_terminals;
 mod compaction;
 mod configuration;

@@ -18,7 +18,11 @@ import type {
   CodeTerminalSnapshot,
   CodeWorkspaceDiff,
   CodeWorkspaceFiles,
+  CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
+  CodeActionSnapshot,
+  CodeCommitSnapshot,
+  CodePushSnapshot,
   Diffstat,
   FileChangeKind,
   CodeWorkspaceStatus,
@@ -43,8 +47,13 @@ import type {
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  CodeActionSnapshot as WireCodeActionSnapshot,
+  CodeCommitSnapshot as WireCodeCommitSnapshot,
+  CodePushSnapshot as WireCodePushSnapshot,
   CodeFileChange as WireCodeFileChange,
   Diffstat as WireDiffstat,
+  PullRequestDigest as WirePullRequestDigest,
   HarnessCaps as WireHarnessCaps,
   HarnessDoctorEntry as WireHarnessDoctorEntry,
   HarnessDoctorReport as WireHarnessDoctorReport,
@@ -213,7 +222,7 @@ export function parseCodeWorkspace(
   ) {
     return null;
   }
-  return {
+  const parsed: CodeWorkspaceSnapshot = {
     id: value.id,
     repo_id: value.repo_id,
     title: value.title,
@@ -222,8 +231,145 @@ export function parseCodeWorkspace(
     base_ref: value.base_ref,
     status: value.status,
     created_at: value.created_at,
-    ...(value.pr !== undefined ? { pr: value.pr as CodeWorkspaceSnapshot["pr"] } : {}),
     ...(value.archived_at !== undefined ? { archived_at: value.archived_at } : {}),
+  };
+  if (value.pr !== undefined) {
+    const pr = parsePullRequestDigest(value.pr);
+    if (!pr) return null;
+    parsed.pr = pr;
+  }
+  return parsed;
+}
+
+export function parsePullRequestDigest(
+  value: unknown,
+): NonNullable<CodeWorkspaceSnapshot["pr"]> | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WirePullRequestDigest>(value, [
+      "number",
+      "url",
+      "state",
+      "checks_summary",
+    ]) ||
+    !isFiniteNumber(value.number) ||
+    !nonEmpty(value.state) ||
+    (value.url !== undefined && value.url !== null && typeof value.url !== "string") ||
+    (value.checks_summary !== undefined &&
+      value.checks_summary !== null &&
+      typeof value.checks_summary !== "string")
+  ) {
+    return null;
+  }
+  return {
+    number: value.number,
+    state: value.state,
+    ...(value.url ? { url: value.url } : {}),
+    ...(value.checks_summary ? { checks_summary: value.checks_summary } : {}),
+  };
+}
+
+export function parseCodeWorkspacePr(
+  value: unknown,
+): CodeWorkspacePrSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspacePrSnapshot>(value, [
+      "dirty",
+      "unpushed",
+      "ahead",
+      "has_upstream",
+      "suggested_commit_message",
+      "pr",
+      "gh_found",
+      "gh_authenticated",
+      "remediation",
+    ]) ||
+    typeof value.dirty !== "boolean" ||
+    typeof value.unpushed !== "boolean" ||
+    !isFiniteNumber(value.ahead) ||
+    typeof value.has_upstream !== "boolean" ||
+    typeof value.suggested_commit_message !== "string" ||
+    typeof value.gh_found !== "boolean" ||
+    (value.gh_authenticated !== undefined &&
+      typeof value.gh_authenticated !== "boolean") ||
+    typeof value.remediation !== "string"
+  ) {
+    return null;
+  }
+  const parsed: CodeWorkspacePrSnapshot = {
+    dirty: value.dirty,
+    unpushed: value.unpushed,
+    ahead: value.ahead,
+    has_upstream: value.has_upstream,
+    suggested_commit_message: value.suggested_commit_message,
+    gh_found: value.gh_found,
+    remediation: value.remediation,
+    ...(value.gh_authenticated !== undefined
+      ? { gh_authenticated: value.gh_authenticated }
+      : {}),
+  };
+  if (value.pr !== undefined) {
+    const pr = parsePullRequestDigest(value.pr);
+    if (!pr) return null;
+    parsed.pr = pr;
+  }
+  return parsed;
+}
+
+export function parseCodeCommit(value: unknown): CodeCommitSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCommitSnapshot>(value, ["sha", "message", "stat"]) ||
+    !nonEmpty(value.sha) ||
+    typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  const stat = parseDiffstat(value.stat);
+  if (!stat) return null;
+  return { sha: value.sha, message: value.message, stat };
+}
+
+export function parseCodePush(value: unknown): CodePushSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodePushSnapshot>(value, ["branch", "remote"]) ||
+    !nonEmpty(value.branch) ||
+    !nonEmpty(value.remote)
+  ) {
+    return null;
+  }
+  return { branch: value.branch, remote: value.remote };
+}
+
+export function parseCodeAction(value: unknown): CodeActionSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeActionSnapshot>(value, [
+      "name",
+      "success",
+      "exit_code",
+      "stdout",
+      "stderr",
+      "timed_out",
+    ]) ||
+    !nonEmpty(value.name) ||
+    typeof value.success !== "boolean" ||
+    (value.exit_code !== undefined && !isFiniteNumber(value.exit_code)) ||
+    typeof value.stdout !== "string" ||
+    typeof value.stderr !== "string" ||
+    typeof value.timed_out !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    name: value.name,
+    success: value.success,
+    stdout: value.stdout,
+    stderr: value.stderr,
+    timed_out: value.timed_out,
+    ...(value.exit_code !== undefined ? { exit_code: value.exit_code } : {}),
   };
 }
 

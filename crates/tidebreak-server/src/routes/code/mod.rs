@@ -1,6 +1,7 @@
 //! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
 
 mod approvals;
+mod git;
 mod harnesses;
 mod repos;
 mod session_events;
@@ -11,6 +12,9 @@ mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use approvals::{decide_approval, list_approvals};
+pub(crate) use git::{
+    commit_workspace, create_pull_request, get_workspace_pr, push_workspace, run_workspace_action,
+};
 pub(crate) use harnesses::{list_harnesses, refresh_harnesses};
 pub(crate) use repos::{create_repo, delete_repo, get_repo, list_repos, patch_repo};
 pub(crate) use session_events::session_events;
@@ -24,9 +28,10 @@ pub(crate) use terminals::{
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeFileChange, CodeRepoSnapshot,
-    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
-    CodeTurnSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceSnapshot,
+    CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCommitSnapshot,
+    CodeFileChange, CodePushSnapshot, CodeRepoSnapshot, CodeSessionSnapshot,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
     HarnessDoctorReport, QueuedCodeTurn, SequencedCodeEventFrame,
 };
 pub(crate) use workspaces::{

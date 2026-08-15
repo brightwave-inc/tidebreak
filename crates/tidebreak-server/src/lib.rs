@@ -720,6 +720,26 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_diff),
         )
         .route(
+            "/code/workspaces/{id}/git/commit",
+            post(routes::code::commit_workspace),
+        )
+        .route(
+            "/code/workspaces/{id}/git/push",
+            post(routes::code::push_workspace),
+        )
+        .route(
+            "/code/workspaces/{id}/git/pr",
+            post(routes::code::create_pull_request),
+        )
+        .route(
+            "/code/workspaces/{id}/pr",
+            get(routes::code::get_workspace_pr),
+        )
+        .route(
+            "/code/workspaces/{id}/actions/{name}",
+            post(routes::code::run_workspace_action),
+        )
+        .route(
             "/code/workspaces/{id}/sessions",
             post(routes::code::create_session).get(routes::code::list_workspace_sessions),
         )
