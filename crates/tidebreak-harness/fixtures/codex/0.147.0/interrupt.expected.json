@@ -1,0 +1,710 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.147.0",
+    "resume_ref": "01a006c7-84da-77e1-92e7-08a4f6ed2103"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "#"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Rivers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ":"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " The"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Living"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Ar"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "teries"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Earth"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "\n\n"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "R"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ivers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " are"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " among"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " oldest"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " most"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " powerful"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " forces"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " shaping"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " planet"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " They"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " carve"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " valleys"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " through"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " mountains"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " carry"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " soil"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " across"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " continents"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " nourish"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " forests"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " farms"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " connect"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " distant"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " communities"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " provide"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " homes"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " for"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " countless"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " species"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Although"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " a"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " river"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " may"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " appear"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " be"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " a"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " simple"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " stream"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " moving"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " water"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " it"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " is"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " better"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " understood"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " as"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " a"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " living"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " system"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ":"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " a"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " constantly"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " changing"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " network"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " channels"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " wetlands"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " flood"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "pl"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ains"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " underground"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " flows"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " sediments"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " organisms"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " human"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " relationships"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Rivers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " have"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " influenced"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " physical"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " landscape"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Earth"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " development"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " human"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " civilization"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " so"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " deeply"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " that"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " it"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " is"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " difficult"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " to"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " imagine"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " world"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " without"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " them"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ".\n\n"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "At"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " their"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " most"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " basic"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " level"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " rivers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " are"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " part"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " water"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " cycle"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Water"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " falls"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " atmosphere"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " as"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " rain"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " or"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " snow"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " gathers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " on"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " ground"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " see"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "ps"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " into"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " soil"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " and"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " rock"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " melts"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " glaciers"
+  },
+  {
+    "type": "assistant_delta",
+    "text": ","
+  },
+  {
+    "type": "assistant_delta",
+    "text": " or"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " emerges"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " from"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " springs"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_delta",
+    "text": " Some"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " of"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " this"
+  },
+  {
+    "type": "turn_interrupted"
+  }
+]

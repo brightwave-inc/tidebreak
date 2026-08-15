@@ -1,0 +1,66 @@
+harness = "codex"
+version = "0.147.0"
+date = "2026-08-15"
+observed_version_command = "codex --version"
+observed_version = "codex-cli 0.147.0"
+observed_auth_command = "codex login status"
+observed_auth = "Logged in using ChatGPT"
+
+# Integration path: long-lived `codex app-server --stdio` JSON-RPC (preferred).
+# Chosen over `codex exec --json` because 0.147.0's app-server handshake is
+# stable and is the richer approval channel
+# (`item/commandExecution/requestApproval` with accept/decline).
+# `codex exec --json` + `codex exec resume <id>` exists and is documented;
+# it was not used for these fixtures.
+#
+# Capture used an isolated $CODEX_HOME (auth.json copied, no user config),
+# model gpt-5.6-luna (cheapest ChatGPT-account model that accepted the
+# request; gpt-5-mini is rejected on this account), effort=low, tiny
+# prompts, throwaway git repo as cwd.
+
+integration_path = "app-server-stdio"
+model = "gpt-5.6-luna"
+
+scenarios = [
+  "plain-text",
+  "tool-use",
+  "approval-approve",
+  "approval-deny",
+  "resume",
+  "interrupt",
+  "error",
+]
+
+[permission_mode_mapping]
+# SessionSpec.permission_mode → thread/start params. Never composed on argv
+# as --dangerously-bypass-approvals-and-sandbox.
+Plan = { sandbox = "read-only", approvalPolicy = "untrusted" }
+Ask = { sandbox = "workspace-write", approvalPolicy = "untrusted" }
+Auto = { sandbox = "workspace-write", approvalPolicy = "on-request" }
+
+[redaction]
+notes = """
+Worktree paths (/var/folders/…/codex-ws-…) rewritten to /workspace.
+CODEX_HOME paths rewritten to /tmp/redacted-codex-home.
+Other /var/folders and /Users/… paths rewritten to /tmp/redacted and /Users/redacted.
+No sk- / bearer / API-key material was present.
+Thread ids kept: they are the resume handle thread/resume requires.
+"""
+verified = [
+  "codex --version => codex-cli 0.147.0",
+  "codex login status => Logged in using ChatGPT (exit 0); empty CODEX_HOME => Not logged in (exit 1)",
+  "codex app-server --stdio JSON-RPC: initialize, initialized, thread/start, thread/resume, turn/start, turn/interrupt",
+  "inbound notifications: turn/started, turn/completed, item/started, item/completed, item/agentMessage/delta, item/commandExecution/requestApproval, serverRequest/resolved, thread/tokenUsage/updated",
+  "approval request item/commandExecution/requestApproval; decide via JSON-RPC result {decision: accept|decline}",
+  "turn/completed status: completed | interrupted | failed",
+  "commandExecution status: inProgress | completed | declined",
+]
+not_verified = [
+  "codex exec --json event vocabulary (probed via --help only; not captured)",
+  "deny feedback on item/commandExecution/requestApproval (decision is accept/decline/cancel only; no rejection string)",
+  "item/fileChange/requestApproval and item/permissions/requestApproval (not seen in these captures)",
+  "legacy execCommandApproval / applyPatchApproval methods (not seen)",
+  "turn/steer mid-turn steering",
+  "native file-change events (turn/diff/updated, item/fileChange/*)",
+  "collaborationMode plan (Plan is mapped to sandbox=read-only instead)",
+]

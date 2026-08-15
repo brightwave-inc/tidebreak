@@ -1,0 +1,32 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.147.0",
+    "resume_ref": "01a006c7-47f3-7ad3-8d77-65d5caba8441"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "second"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " turn"
+  },
+  {
+    "type": "assistant_message",
+    "text": "second turn"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 15352,
+      "output_tokens": 6,
+      "cache_read_input_tokens": 14080,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

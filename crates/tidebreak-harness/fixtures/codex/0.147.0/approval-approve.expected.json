@@ -1,0 +1,87 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "codex",
+    "harness_version": "0.147.0",
+    "resume_ref": "01a006c6-ac48-7982-82d8-b355ca4e102d"
+  },
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Running"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " the"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " exact"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " command"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " now"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Running the exact command now."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "exec-f5557c0a-1ece-4571-8bd5-5a74e11e269a",
+    "name": "commandExecution",
+    "detail": {
+      "kind": "command",
+      "cmd": "/bin/zsh -lc \"python3 -c 'print(42)'\"",
+      "cwd": "/workspace"
+    }
+  },
+  {
+    "type": "approval_requested",
+    "harness_ref": {
+      "call_id": "exec-f5557c0a-1ece-4571-8bd5-5a74e11e269a"
+    }
+  },
+  {
+    "type": "approval_resolved",
+    "harness_ref": {
+      "call_id": "exec-f5557c0a-1ece-4571-8bd5-5a74e11e269a"
+    },
+    "decision": {
+      "type": "approve"
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "exec-f5557c0a-1ece-4571-8bd5-5a74e11e269a",
+    "outcome": "succeeded",
+    "preview": "42\n"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "42"
+  },
+  {
+    "type": "assistant_message",
+    "text": "42"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 14466,
+      "output_tokens": 5,
+      "cache_read_input_tokens": 14080,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

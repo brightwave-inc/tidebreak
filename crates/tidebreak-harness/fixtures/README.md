@@ -32,6 +32,29 @@ tool allowlist that still produces the scenario (for example a single `Read`
 for a tool-use turn). Check `claude --help` for current flags; the capture
 bin defaults to `-p --output-format stream-json --verbose --include-partial-messages`.
 
+### Codex CLI
+
+`--harness codex` drives the long-lived `codex app-server --stdio` JSON-RPC
+child (0.147.0). Fixtures are framed both-direction exchanges, one object
+per line:
+
+```text
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{…}}}
+{"dir":"in","msg":{"id":1,"result":{…}}}
+```
+
+That path was chosen over `codex exec --json` because app-server is the
+richer approval channel (`item/commandExecution/requestApproval`). Probe
+`codex app-server --help` and `codex exec --help` before recapturing a new
+version; if app-server is gone or unstable, recapture via exec JSONL and
+update the version manifest.
+
+The capture bin writes initialize → thread/start → turn/start and tees
+until `turn/completed`. Approval request/response pairs for
+`approval-approve` / `approval-deny` were captured with a helper that
+completes `item/commandExecution/requestApproval` with `{decision: accept}`
+or `{decision: decline}`.
+
 Re-capture the whole version directory when the engine version moves.
 
 ## Redaction
