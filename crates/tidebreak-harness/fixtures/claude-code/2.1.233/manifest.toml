@@ -17,6 +17,9 @@ scenarios = [
   "permission-denied",
   "resume",
   "interrupt",
+  "approval-request",
+  "approval-allow",
+  "approval-deny-with-feedback",
 ]
 
 [redaction]
@@ -33,10 +36,16 @@ verified = [
   "claude --version => 2.1.233 (Claude Code)",
   "stream types: system, stream_event, assistant, user, result, control_response",
   "system subtypes: hook_started, hook_response, init, status, thinking_tokens, permission_denied",
+  "hidden --permission-prompt-tool is accepted (absent from --help; unknown flags error)",
+  "HTTP MCP + --mcp-config + --permission-prompt-tool mcp__tb-approvals__permission_prompt",
+  "prompt request shape: {tool_name, input, tool_use_id}",
+  "prompt response: single MCP text block {behavior: allow} | {behavior: deny, message}",
+  "deny message is the tool_result the model reads (non_execution_kind: permission-rule)",
+  "Ask maps to --permission-mode manual; Auto to acceptEdits; Plan to plan",
 ]
 not_verified = [
-  "permission-prompt-tool / MCP approval channel (not in --help on 2.1.233; not captured)",
   "mid-turn steering input",
   "native file-change events",
   "reasoning-level control flags",
+  "live Auto (acceptEdits) turn with the prompt tool — flag is documented; not recaptured",
 ]

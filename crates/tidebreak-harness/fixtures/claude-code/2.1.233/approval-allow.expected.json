@@ -1,0 +1,52 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "e65cc2a8-e5db-4f07-8e58-219691c423b5"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01AccXU5wrjo1GDyiNaAGDXM",
+    "name": "Write",
+    "detail": {
+      "kind": "file_edit",
+      "path": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01AccXU5wrjo1GDyiNaAGDXM",
+    "outcome": "succeeded",
+    "preview": "File created successfully at: /workspace/probe.txt (file state is current in your context — no need to Read it back)"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "Created"
+  },
+  {
+    "type": "assistant_delta",
+    "text": " prob"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "e.txt with \"hello"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "\"."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Created probe.txt with \"hello\"."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 4,
+      "output_tokens": 107,
+      "cache_read_input_tokens": 103012,
+      "cache_creation_input_tokens": 186
+    }
+  }
+]

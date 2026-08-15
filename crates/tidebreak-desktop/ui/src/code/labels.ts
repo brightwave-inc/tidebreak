@@ -1,4 +1,5 @@
 import type {
+  CapLevel,
   CodePermissionMode,
   CodeSessionLifecycle,
   CodeWorkspaceStatus,
@@ -49,9 +50,9 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
   auto: "Auto",
 };
 
-/** The server refuses Ask and Auto until a later phase. */
+/** Shown when the selected harness cannot honor Ask or Auto. */
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
-  "not yet available; create the session in plan mode";
+  "this harness cannot honor that mode";
 
 export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "orphan_alive") {
@@ -65,4 +66,26 @@ export function isHarnessReady(entry: {
   authenticated?: boolean;
 }): boolean {
   return entry.found && entry.authenticated !== false;
+}
+
+/** Ask/Auto need a structured approval channel. Plan does not. */
+export function harnessHonorsStructuredApprovals(
+  structuredApprovals: CapLevel | undefined,
+): boolean {
+  return structuredApprovals === "supported";
+}
+
+/** Create default: Ask when the doctor says the harness can honor it, else Plan. */
+export function defaultCreatePermissionMode(
+  structuredApprovals: CapLevel | undefined,
+): CodePermissionMode {
+  return harnessHonorsStructuredApprovals(structuredApprovals) ? "ask" : "plan";
+}
+
+export function createPermissionModes(
+  structuredApprovals: CapLevel | undefined,
+): CodePermissionMode[] {
+  return harnessHonorsStructuredApprovals(structuredApprovals)
+    ? ["plan", "ask", "auto"]
+    : ["plan"];
 }

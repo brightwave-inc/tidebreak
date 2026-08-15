@@ -4,6 +4,8 @@ import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
 import type {
+  CodeApprovalSnapshot,
+  CodePermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
@@ -32,6 +34,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
+import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
 import {
   fenceReasonText,
@@ -71,6 +74,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,12 +108,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     };
   }, [client, workspaceId]);
 
-  async function startSession(harness: HarnessKind) {
+  async function startSession(harness: HarnessKind, permissionMode: CodePermissionMode) {
     setStarting(true);
     try {
       const created = await client.createCodeSession(workspaceId, {
         harness,
-        permission_mode: "plan",
+        permission_mode: permissionMode,
       });
       catalog.rememberSession(created);
       setSession(created);
@@ -195,7 +199,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           </div>
           <div className="flex items-center gap-2">
             {session && (
-              <SessionLifecycleBadge session={session} client={client} />
+              <>
+                <PendingApprovalBadge sessionId={session.id} client={client} />
+                <SessionLifecycleBadge session={session} client={client} />
+              </>
             )}
             <Button
               type="button"
@@ -275,22 +282,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             {!session && workspace?.status === "active" && (
-              <div className="flex flex-col gap-2 px-4 py-6">
-                <p className="text-sm">Start a Plan-mode session on this workspace.</p>
-                <div className="flex flex-wrap gap-2">
-                  {readyHarnesses.map((entry) => (
-                    <Button
-                      key={entry.kind}
-                      type="button"
-                      size="sm"
-                      disabled={starting}
-                      onClick={() => void startSession(entry.kind)}
-                    >
-                      {HARNESS_LABELS[entry.kind]}
-                    </Button>
-                  ))}
-                </div>
-              </div>
+              <StartSessionPrompt
+                harnesses={readyHarnesses}
+                starting={starting}
+                selectedMode={createMode}
+                onSelectMode={setCreateMode}
+                onStart={(harness, mode) => void startSession(harness, mode)}
+              />
             )}
             {session && (
               <CodeSessionPane
@@ -374,6 +372,25 @@ function SessionLifecycleBadge({
   );
 }
 
+function PendingApprovalBadge({
+  sessionId,
+  client,
+}: {
+  sessionId: string;
+  client: ApiClient;
+}) {
+  const store = useRegisteredCodeSession(sessionId, client);
+  const pending = store((state) =>
+    state.items.filter((item) => item.kind === "approval" && item.state === "pending"),
+  ).length;
+  if (pending === 0) return null;
+  return (
+    <Badge variant="warning" size="sm" data-testid="pending-approval-badge">
+      {pending} {pending === 1 ? "approval" : "approvals"}
+    </Badge>
+  );
+}
+
 function CodeSessionPane({
   session,
   client,
@@ -390,6 +407,30 @@ function CodeSessionPane({
   const busy = store((state) => state.busy);
   const harnessVersion = store((state) => state.harnessVersion);
   const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
+  const [approvals, setApprovals] = useState<Record<string, CodeApprovalSnapshot>>(
+    {},
+  );
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | undefined>();
+  const availableModes: CodePermissionMode[] = ["plan", "ask", "auto"];
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows = await client.listCodeApprovals({ sessionId: session.id });
+        if (cancelled) return;
+        const next: Record<string, CodeApprovalSnapshot> = {};
+        for (const row of rows) next[row.id] = row;
+        setApprovals(next);
+      } catch {
+        // The journal still surfaces the card; the body loads on the next poll.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, session.id, items]);
 
   async function send(message: string) {
     try {
@@ -417,13 +458,37 @@ function CodeSessionPane({
         </p>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <CodeTranscript items={items} onOpenTurnDiff={onOpenTurnDiff} />
+        <CodeTranscript
+          items={items}
+          onOpenTurnDiff={onOpenTurnDiff}
+          approvals={approvals}
+          decidingId={decidingId}
+          approvalError={approvalError}
+          onDecide={async (approvalId, decision, feedback) => {
+            setDecidingId(approvalId);
+            setApprovalError(undefined);
+            try {
+              const next = await client.decideCodeApproval(approvalId, {
+                decision,
+                feedback,
+              });
+              setApprovals((current) => ({ ...current, [approvalId]: next }));
+            } catch (err) {
+              setApprovalError(
+                friendlyErrorMessage(err, "Could not record that decision"),
+              );
+            } finally {
+              setDecidingId(null);
+            }
+          }}
+        />
       </div>
       {lifecycle !== "ended" && (
         <CodeComposer
           running={busy || lifecycle === "running"}
           disabled={disabled}
           permissionMode={session.permission_mode}
+          availableModes={availableModes}
           onSend={send}
           onInterrupt={interrupt}
         />

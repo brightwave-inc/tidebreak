@@ -8,18 +8,23 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 
 use tidebreak_core::db::code::{
-    delete_repo, delete_workspace, get_open_turn, get_repo, get_repo_by_root_path, get_session,
-    get_workspace, insert_repo, insert_session, insert_workspace, list_repos, list_sessions,
-    list_sessions_for_workspace, list_turns, list_workspaces, save_repo, save_session,
-    save_workspace,
+    delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
+    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
+    list_repos, list_sessions, list_sessions_for_workspace, list_turns, list_workspaces,
+    save_approval, save_repo, save_session, save_workspace,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CapLevel, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
+    ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
+    CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
     Diffstat, HarnessKind, RepoId, WorkspaceId,
 };
-use tidebreak_harness::{builtin_registry, AdapterRegistry, HarnessAdapter, HostEnv, SessionSpec};
+use tidebreak_harness::{
+    builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
+    HarnessEvent, HarnessEventSink, HostEnv, SessionSpec,
+};
 
+use super::approval_bridge::ApprovalBridge;
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
@@ -27,7 +32,8 @@ use super::checkpoint::{
 };
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, queue_follow_up, spawn_session_worker, WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, journal_event, queue_follow_up, spawn_session_worker, WorkerCommand,
+    WorkerError, WorkerHandle,
 };
 use super::worktree::{
     self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
@@ -49,7 +55,9 @@ pub(crate) struct CodeRuntime {
     pub bus: Arc<CodeEventBus>,
     pub adapters: AdapterRegistry,
     pub data_dir: PathBuf,
+    pub approvals: Arc<ApprovalBridge>,
     host: HostEnv,
+    loopback_base: Mutex<Option<String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
 }
 
@@ -60,9 +68,17 @@ impl CodeRuntime {
             bus: Arc::new(CodeEventBus::default()),
             adapters: builtin_registry(),
             data_dir,
+            approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
+            loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Bound after listen so Claude can be pointed at the loopback MCP route.
+    pub(crate) fn set_loopback_base(&self, base: String) {
+        *self.loopback_base.lock().expect("loopback base") =
+            Some(base.trim_end_matches('/').into());
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -76,7 +92,9 @@ impl CodeRuntime {
             bus: Arc::new(CodeEventBus::default()),
             adapters,
             data_dir,
+            approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
+            loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
         }
     }
@@ -405,12 +423,6 @@ impl CodeRuntime {
         harness: HarnessKind,
         permission_mode: CodePermissionMode,
     ) -> Result<CodeSession, ServerError> {
-        if permission_mode != CodePermissionMode::Plan {
-            return Err(ServerError::unprocessable_kind(
-                "permission_mode_unavailable",
-                format!("{permission_mode} is not yet available; create the session in plan mode"),
-            ));
-        }
         let workspace = self.get_workspace(workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
@@ -444,12 +456,7 @@ impl CodeRuntime {
             ));
         }
         let caps = adapter.capabilities(&probe);
-        if caps.plan_mode != CapLevel::Supported && permission_mode == CodePermissionMode::Plan {
-            return Err(ServerError::unprocessable_kind(
-                "permission_mode_unavailable",
-                format!("{harness} cannot honor plan mode"),
-            ));
-        }
+        refuse_unhonored_mode(harness, permission_mode, &caps)?;
         if probe.binary_path.is_none() {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",
@@ -706,6 +713,14 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_worker)?;
+        let sink = super::session_worker::sink_for(
+            self.db.clone(),
+            self.bus.clone(),
+            session.id,
+            attached.spawn_epoch,
+            None,
+        );
+        let approval = self.approval_channel(session.id, session.permission_mode);
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
@@ -713,15 +728,9 @@ impl CodeRuntime {
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
             env: probe.env.clone(),
-            approval: None,
+            approval,
             binary,
-            sink: super::session_worker::sink_for(
-                self.db.clone(),
-                self.bus.clone(),
-                session.id,
-                attached.spawn_epoch,
-                None,
-            ),
+            sink: sink.clone() as Arc<dyn HarnessEventSink>,
         };
         let engine = adapter.launch(spec).await.map_err(|err| {
             ServerError::internal(format!("failed to launch engine session: {err}"))
@@ -732,12 +741,28 @@ impl CodeRuntime {
             attached.harness_resume_ref = Some(resume);
         }
         save_session(&self.db, &attached).await?;
-        let handle =
-            spawn_session_worker(self.db.clone(), self.bus.clone(), attached.clone(), engine);
+        let handle = spawn_session_worker(
+            self.db.clone(),
+            self.bus.clone(),
+            attached.clone(),
+            engine,
+            sink,
+        );
         self.workers
             .lock()
             .expect("code workers")
             .insert(session.id, handle);
+        let pending = list_approvals(
+            &self.db,
+            Some(CodeApprovalState::Pending),
+            Some(attached.id),
+        )
+        .await?;
+        if !pending.is_empty() {
+            attached.attention =
+                Attention::needs_you("an approval is waiting", AttentionSource::Structured);
+            save_session(&self.db, &attached).await?;
+        }
         Ok(attached)
     }
 
@@ -751,6 +776,7 @@ impl CodeRuntime {
                 commands: handle.commands.clone(),
                 pending: handle.pending.clone(),
                 wake: handle.wake.clone(),
+                sink: handle.sink.clone(),
             })
             .ok_or_else(|| {
                 ServerError::conflict_kind(
@@ -759,6 +785,168 @@ impl CodeRuntime {
                 )
             })
     }
+
+    fn approval_channel(
+        &self,
+        session_id: CodeSessionId,
+        mode: CodePermissionMode,
+    ) -> Option<ApprovalChannelSpec> {
+        if !matches!(mode, CodePermissionMode::Ask | CodePermissionMode::Auto) {
+            return None;
+        }
+        let base = self.loopback_base.lock().expect("loopback base").clone()?;
+        let token = self.approvals.issue_token(session_id);
+        Some(ApprovalChannelSpec {
+            mcp_endpoint_url: format!("{base}/code/mcp/approval-prompt"),
+            token,
+            completer: self.approvals.clone(),
+        })
+    }
+
+    pub(crate) async fn ingest_harness_event(
+        &self,
+        session_id: CodeSessionId,
+        event: HarnessEvent,
+    ) -> Result<(), ServerError> {
+        let handle = self.require_worker(session_id)?;
+        handle.sink.emit(event).await;
+        Ok(())
+    }
+
+    pub(crate) async fn list_approvals(
+        &self,
+        state: Option<CodeApprovalState>,
+        session_id: Option<CodeSessionId>,
+    ) -> Result<Vec<CodeApproval>, ServerError> {
+        Ok(list_approvals(&self.db, state, session_id).await?)
+    }
+
+    pub(crate) async fn get_approval(
+        &self,
+        id: CodeApprovalId,
+    ) -> Result<CodeApproval, ServerError> {
+        get_approval(&self.db, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))
+    }
+
+    pub(crate) async fn decide_approval(
+        &self,
+        id: CodeApprovalId,
+        decision: ApprovalDecision,
+    ) -> Result<CodeApproval, ServerError> {
+        let mut approval = self.get_approval(id).await?;
+        if approval.state != CodeApprovalState::Pending {
+            return Err(ServerError::conflict_kind(
+                "approval_already_decided",
+                format!("approval {id} is {}", approval.state.as_str()),
+            ));
+        }
+        let call_id = approval
+            .harness_raw
+            .get("call_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if call_id.is_empty() {
+            return Err(ServerError::internal(
+                "approval row is missing a harness call_id",
+            ));
+        }
+        let handle = self.require_worker(approval.session_id)?;
+        let (reply, rx) = oneshot::channel();
+        handle
+            .commands
+            .send(crate::code::session_worker::WorkerCommand::Decide {
+                approval: tidebreak_harness::HarnessApprovalRef { call_id },
+                decision: decision.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| ServerError::internal("session worker is gone"))?;
+        rx.await
+            .map_err(|_| ServerError::internal("session worker dropped the decision"))?
+            .map_err(map_worker)?;
+        let now = Utc::now();
+        match &decision {
+            ApprovalDecision::Approve => {
+                approval.state = CodeApprovalState::Approved;
+                approval.feedback = None;
+            }
+            ApprovalDecision::Deny { feedback } => {
+                approval.state = CodeApprovalState::Denied;
+                approval.feedback = feedback.clone();
+            }
+        }
+        approval.decided_at = Some(now);
+        if !save_approval(&self.db, &approval).await? {
+            return Err(ServerError::not_found(format!("approval {id} not found")));
+        }
+        let session = self.get_session(approval.session_id).await?;
+        journal_event(
+            &self.db,
+            &self.bus,
+            approval.session_id,
+            session.spawn_epoch,
+            CodeEvent::ApprovalResolved {
+                approval_id: approval.id,
+                decision: match &decision {
+                    ApprovalDecision::Approve => ApprovalDecisionKind::Approve,
+                    ApprovalDecision::Deny { feedback } => ApprovalDecisionKind::Deny {
+                        feedback: feedback.clone(),
+                    },
+                },
+            },
+        )
+        .await
+        .map_err(|err| ServerError::internal(err.to_string()))?;
+        let still_pending = list_approvals(
+            &self.db,
+            Some(CodeApprovalState::Pending),
+            Some(approval.session_id),
+        )
+        .await?;
+        if still_pending.is_empty() {
+            if let Ok(Some(mut current)) = get_session(&self.db, approval.session_id).await {
+                if matches!(
+                    current.attention.state,
+                    tidebreak_core::AttentionState::NeedsYou { .. }
+                ) && current.attention.source == AttentionSource::Structured
+                {
+                    current.attention = Attention::working(AttentionSource::Lifecycle);
+                    let _ = save_session(&self.db, &current).await;
+                }
+            }
+        }
+        Ok(approval)
+    }
+}
+
+fn refuse_unhonored_mode(
+    harness: HarnessKind,
+    mode: CodePermissionMode,
+    caps: &tidebreak_core::HarnessCaps,
+) -> Result<(), ServerError> {
+    let ok = match mode {
+        CodePermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
+        CodePermissionMode::Ask | CodePermissionMode::Auto => {
+            caps.structured_approvals == CapLevel::Supported
+        }
+    };
+    if ok {
+        return Ok(());
+    }
+    let reason = match mode {
+        CodePermissionMode::Plan => format!("{harness} cannot honor plan mode"),
+        CodePermissionMode::Ask | CodePermissionMode::Auto => format!(
+            "{harness} cannot honor {mode}: structured approvals are {}",
+            caps.structured_approvals.as_str()
+        ),
+    };
+    Err(ServerError::unprocessable_kind(
+        "permission_mode_unavailable",
+        reason,
+    ))
 }
 
 fn map_checkpoint(err: CheckpointError) -> ServerError {

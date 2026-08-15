@@ -2,15 +2,15 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -28,14 +28,15 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// Live Codex session: one app-server child for the session lifetime.
 pub struct CodexSession {
     spec: SessionSpec,
-    resume_ref: Option<String>,
-    child: Option<Child>,
-    stdin: Option<Arc<Mutex<ChildStdin>>>,
-    stdout: Option<Arc<Mutex<StdoutReader>>>,
-    parser: CodexStreamParser,
+    resume_ref: Mutex<Option<String>>,
+    child: AsyncMutex<Option<Child>>,
+    child_pid: AtomicU32,
+    stdin: Option<Arc<AsyncMutex<ChildStdin>>>,
+    stdout: Option<Arc<AsyncMutex<StdoutReader>>>,
+    parser: Mutex<CodexStreamParser>,
     next_id: AtomicI64,
-    pending_approvals: HashMap<String, Value>,
-    current_turn_id: Option<String>,
+    pending_approvals: Mutex<HashMap<String, Value>>,
+    current_turn_id: Mutex<Option<String>>,
 }
 
 struct StdoutReader {
@@ -48,14 +49,15 @@ impl CodexSession {
         let resume_ref = spec.resume_ref.clone();
         Self {
             spec,
-            resume_ref,
-            child: None,
+            resume_ref: Mutex::new(resume_ref),
+            child: AsyncMutex::new(None),
+            child_pid: AtomicU32::new(0),
             stdin: None,
             stdout: None,
-            parser: CodexStreamParser::new(),
+            parser: Mutex::new(CodexStreamParser::new()),
             next_id: AtomicI64::new(1),
-            pending_approvals: HashMap::new(),
-            current_turn_id: None,
+            pending_approvals: Mutex::new(HashMap::new()),
+            current_turn_id: Mutex::new(None),
         }
     }
 
@@ -76,9 +78,12 @@ impl CodexSession {
         Ok(())
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<i64, HarnessError> {
+    async fn request(&self, method: &str, params: Value) -> Result<i64, HarnessError> {
         let id = self.next_rpc_id();
-        self.parser.note_outbound(&json!(id), method);
+        self.parser
+            .lock()
+            .expect("codex parser")
+            .note_outbound(&json!(id), method);
         self.write_message(&json!({ "id": id, "method": method, "params": params }))
             .await?;
         Ok(id)
@@ -164,12 +169,15 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
         .stderr
         .take()
         .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-    session.stdin = Some(Arc::new(Mutex::new(stdin)));
-    session.stdout = Some(Arc::new(Mutex::new(StdoutReader {
+    session.stdin = Some(Arc::new(AsyncMutex::new(stdin)));
+    session.stdout = Some(Arc::new(AsyncMutex::new(StdoutReader {
         stdout,
         lines: StreamLineBuffer::new(),
     })));
-    session.child = Some(child);
+    session
+        .child_pid
+        .store(child.id().unwrap_or(0), Ordering::SeqCst);
+    *session.child.lock().await = Some(child);
     tokio::spawn(async move {
         let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
     });
@@ -186,26 +194,27 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
     session.read_until_rpc(init_id).await?;
     session.notify("initialized", None).await?;
 
-    let (method, params) = if let Some(resume) = session.resume_ref.clone() {
-        ("thread/resume", json!({ "threadId": resume }))
-    } else {
-        let (sandbox, approval) = thread_start_policy(session.spec.permission_mode);
-        (
-            "thread/start",
-            json!({
-                "cwd": session.spec.worktree,
-                "approvalPolicy": approval,
-                "sandbox": sandbox,
-            }),
-        )
-    };
+    let (method, params) =
+        if let Some(resume) = session.resume_ref.lock().expect("codex resume").clone() {
+            ("thread/resume", json!({ "threadId": resume }))
+        } else {
+            let (sandbox, approval) = thread_start_policy(session.spec.permission_mode);
+            (
+                "thread/start",
+                json!({
+                    "cwd": session.spec.worktree,
+                    "approvalPolicy": approval,
+                    "sandbox": sandbox,
+                }),
+            )
+        };
     let thread_req = session.request(method, params).await?;
     session.read_until_rpc(thread_req).await?;
     Ok(session)
 }
 
 impl CodexSession {
-    async fn read_until_rpc(&mut self, rpc_id: i64) -> Result<(), HarnessError> {
+    async fn read_until_rpc(&self, rpc_id: i64) -> Result<(), HarnessError> {
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -237,7 +246,7 @@ impl CodexSession {
         }
     }
 
-    async fn read_until_terminal_turn(&mut self) -> Result<(), HarnessError> {
+    async fn read_until_terminal_turn(&self) -> Result<(), HarnessError> {
         loop {
             let lines = self.read_lines().await?;
             if lines.is_empty() {
@@ -264,7 +273,7 @@ impl CodexSession {
         }
     }
 
-    async fn read_lines(&mut self) -> Result<Vec<String>, HarnessError> {
+    async fn read_lines(&self) -> Result<Vec<String>, HarnessError> {
         let Some(stdout) = &self.stdout else {
             return Err(HarnessError::Other("engine child has no stdout".into()));
         };
@@ -290,7 +299,7 @@ impl CodexSession {
         }
     }
 
-    async fn emit_parsed(&mut self, line: &str) -> Vec<HarnessEvent> {
+    async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
         if let Ok(value) = serde_json::from_str::<Value>(line) {
             if let Some(turn_id) = value
                 .pointer("/result/turn/id")
@@ -298,21 +307,28 @@ impl CodexSession {
                 .or_else(|| value.pointer("/params/turnId"))
                 .and_then(Value::as_str)
             {
-                self.current_turn_id = Some(turn_id.to_owned());
+                *self.current_turn_id.lock().expect("codex turn") = Some(turn_id.to_owned());
             }
         }
-        let events = self.parser.push_line(line);
+        let events = self.parser.lock().expect("codex parser").push_line(line);
         for event in &events {
             if let HarnessEvent::SessionStarted {
                 resume_ref: Some(resume),
                 ..
             } = event
             {
-                self.resume_ref = Some(resume.clone());
+                *self.resume_ref.lock().expect("codex resume") = Some(resume.clone());
             }
-            if let HarnessEvent::ApprovalRequested { harness_ref } = event {
-                if let Some(id) = self.parser.pending_approval_rpc_id(&harness_ref.call_id) {
+            if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
+                if let Some(id) = self
+                    .parser
+                    .lock()
+                    .expect("codex parser")
+                    .pending_approval_rpc_id(&harness_ref.call_id)
+                {
                     self.pending_approvals
+                        .lock()
+                        .expect("codex approvals")
                         .insert(harness_ref.call_id.clone(), id.clone());
                 }
             }
@@ -324,11 +340,11 @@ impl CodexSession {
 
 #[async_trait]
 impl HarnessSession for CodexSession {
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError> {
-        if self.child.is_none() {
+    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+        if self.child_pid.load(Ordering::SeqCst) == 0 {
             return Err(HarnessError::Other("engine child is not running".into()));
         }
-        let Some(thread_id) = self.resume_ref.clone() else {
+        let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
             return Err(HarnessError::Other("thread has no resume ref".into()));
         };
         let id = self
@@ -345,14 +361,21 @@ impl HarnessSession for CodexSession {
     }
 
     async fn decide(
-        &mut self,
+        &self,
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
         let rpc_id = self
             .pending_approvals
+            .lock()
+            .expect("codex approvals")
             .remove(&approval.call_id)
-            .or_else(|| self.parser.take_pending_approval(&approval.call_id))
+            .or_else(|| {
+                self.parser
+                    .lock()
+                    .expect("codex parser")
+                    .take_pending_approval(&approval.call_id)
+            })
             .ok_or_else(|| {
                 HarnessError::Other(format!(
                     "no parked approval with call_id {}",
@@ -376,10 +399,10 @@ impl HarnessSession for CodexSession {
         Ok(())
     }
 
-    async fn interrupt(&mut self) -> Result<(), HarnessError> {
-        if let (Some(thread_id), Some(turn_id)) =
-            (self.resume_ref.clone(), self.current_turn_id.clone())
-        {
+    async fn interrupt(&self) -> Result<(), HarnessError> {
+        let thread_id = self.resume_ref.lock().expect("codex resume").clone();
+        let turn_id = self.current_turn_id.lock().expect("codex turn").clone();
+        if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
             let id = self
                 .request(
                     "turn/interrupt",
@@ -390,40 +413,44 @@ impl HarnessSession for CodexSession {
                 return Ok(());
             }
         }
-        let Some(child) = self.child.as_mut() else {
-            return Ok(());
-        };
-        if let Some(pid) = child.id() {
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        if pid != 0 {
             signal_interrupt(pid);
         }
+        let mut slot = self.child.lock().await;
+        let Some(child) = slot.as_mut() else {
+            return Ok(());
+        };
         match timeout(Duration::from_secs(2), child.wait()).await {
             Ok(Ok(_)) => {
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
             Ok(Err(err)) => Err(err.into()),
             Err(_) => {
                 warn!("engine did not exit after SIGINT; killing");
                 child.kill().await?;
-                self.child = None;
+                *slot = None;
+                self.child_pid.store(0, Ordering::SeqCst);
                 Ok(())
             }
         }
     }
 
     fn resume_ref(&self) -> Option<String> {
-        self.resume_ref.clone()
+        self.resume_ref.lock().expect("codex resume").clone()
     }
 
     fn child_pid(&self) -> Option<i64> {
-        self.child
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .map(i64::from)
+        match self.child_pid.load(Ordering::SeqCst) {
+            0 => None,
+            pid => Some(i64::from(pid)),
+        }
     }
 
-    async fn shutdown(mut self: Box<Self>) -> Result<(), HarnessError> {
-        if let Some(mut child) = self.child.take() {
+    async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
         Ok(())

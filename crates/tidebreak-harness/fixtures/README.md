@@ -97,3 +97,18 @@ UPDATE_HARNESS_FIXTURES=1 cargo test -p tidebreak-harness --locked
 ```
 
 Do not invent parser branches for shapes that are not in a fixture.
+
+## Approval channel (Claude Code 2.1.233)
+
+`--permission-prompt-tool` is a hidden flag: it is not listed in `--help`,
+but an unknown flag errors and this one does not. Print-mode approvals ride
+an MCP tool registered via `--mcp-config`. HTTP transport with a Bearer
+token was captured; that is the loopback the server serves.
+
+`approval-request.mcp.json` is the CLI→MCP `tools/call` payload. The
+matching `approval-request.ndjson` is the print-mode stream parked at the
+Write tool-use, before a decision. `approval-allow` and
+`approval-deny-with-feedback` are the full streams after the captured
+responses `{"behavior":"allow"}` and
+`{"behavior":"deny","message":"no — use the fixtures directory instead"}`.
+The deny message is what the model reads as the tool_result.

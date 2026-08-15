@@ -30,6 +30,17 @@ impl ServerError {
         }
     }
 
+    /// A `401 Unauthorized` for a missing or unknown session-scoped token.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            info: AgentErrorInfo {
+                kind: "unauthorized".to_string(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `400 Bad Request` for a malformed request (bad path segment, or an
     /// unparseable / wrong-typed / wrong-content-type body). Used to map axum's
     /// built-in extractor rejections into the same `{ kind, message }` shape as

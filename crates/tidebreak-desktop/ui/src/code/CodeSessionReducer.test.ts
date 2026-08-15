@@ -98,6 +98,26 @@ describe("seq cursor", () => {
   });
 });
 
+describe("approvals", () => {
+  it("parks a card on request and marks it denied on resolve", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "approval_requested", approval_id: "appr-1" },
+      {
+        type: "approval_resolved",
+        approval_id: "appr-1",
+        decision: { type: "deny", feedback: "use fixtures" },
+      },
+    ]);
+    const card = state.items.find((item) => item.kind === "approval");
+    expect(card).toMatchObject({
+      kind: "approval",
+      approvalId: "appr-1",
+      state: "denied",
+    });
+  });
+});
+
 describe("turn lifecycle", () => {
   it("records deltas, tools, notices, and a completed boundary with usage", () => {
     const clock: CodeSessionDeps = {

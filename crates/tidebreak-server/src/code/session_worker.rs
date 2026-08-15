@@ -3,6 +3,10 @@
 //! The worker owns the engine session and is the only journal writer for that
 //! session. Events are persisted (epoch-fenced) before they are published on
 //! the live bus.
+//!
+//! `run_turn` does not own the command loop. While a turn is in flight the
+//! worker keeps selecting on [`WorkerCommand`] so `decide` and `interrupt`
+//! reach the engine mid-turn — every adapter rides this, not just Claude.
 
 use std::sync::Arc;
 
@@ -12,14 +16,18 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    append_event, bump_spawn_epoch, get_open_turn, get_session, insert_turn, next_turn_ordinal,
-    save_session, save_turn, CodeJournalError,
+    append_event, bump_spawn_epoch, get_open_turn, get_session, insert_approval, insert_turn,
+    next_turn_ordinal, save_session, save_turn, CodeJournalError,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, BoundedError, CodeApprovalId, CodeEvent, CodeSession,
-    CodeSessionId, CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, DbStore,
+    Attention, AttentionSource, BoundedError, CodeApproval, CodeApprovalId, CodeApprovalKind,
+    CodeApprovalState, CodeEvent, CodeSession, CodeSessionId, CodeSessionLifecycle, CodeTurn,
+    CodeTurnId, CodeTurnStatus, DbStore,
 };
-use tidebreak_harness::{HarnessError, HarnessEvent, HarnessEventSink, HarnessSession, TurnInput};
+use tidebreak_harness::{
+    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
+    HarnessSession, TurnInput,
+};
 
 use super::bus::CodeEventBus;
 
@@ -27,6 +35,11 @@ pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
+    },
+    Decide {
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Interrupt {
         reply: oneshot::Sender<Result<(), WorkerError>>,
@@ -48,9 +61,10 @@ pub(crate) struct WorkerHandle {
     /// Single follow-up parked while a turn is running (queue-default).
     pub pending: Arc<std::sync::Mutex<Option<String>>>,
     pub wake: Arc<Notify>,
+    pub sink: Arc<LiveSink>,
 }
 
-struct LiveSink {
+pub(crate) struct LiveSink {
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
     session_id: CodeSessionId,
@@ -58,9 +72,68 @@ struct LiveSink {
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
 }
 
+impl LiveSink {
+    pub(crate) fn set_turn(&self, turn_id: CodeTurnId) {
+        *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
+    }
+
+    async fn record_approval(
+        &self,
+        harness_ref: &tidebreak_harness::HarnessApprovalRef,
+        raw: &serde_json::Value,
+    ) {
+        let existing = *self.turn_id.lock().expect("code sink turn");
+        let turn_id = match existing {
+            Some(id) => id,
+            None => match get_open_turn(&self.db, self.session_id).await {
+                Ok(Some(turn)) => turn.id,
+                _ => return,
+            },
+        };
+        let approval = CodeApproval {
+            id: CodeApprovalId::new(),
+            session_id: self.session_id,
+            turn_id,
+            kind: kind_from_raw(raw),
+            harness_raw: persist_harness_raw(&harness_ref.call_id, raw),
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: Utc::now(),
+            decided_at: None,
+        };
+        if insert_approval(&self.db, &approval).await.is_err() {
+            return;
+        }
+        if let Ok(Some(mut session)) = get_session(&self.db, self.session_id).await {
+            session.attention =
+                Attention::needs_you("an approval is waiting", AttentionSource::Structured);
+            let _ = save_session(&self.db, &session).await;
+        }
+        let _ = persist_and_publish(
+            &self.db,
+            &self.bus,
+            self.session_id,
+            self.spawn_epoch,
+            CodeEvent::ApprovalRequested {
+                approval_id: approval.id,
+            },
+        )
+        .await;
+    }
+}
+
 #[async_trait]
 impl HarnessEventSink for LiveSink {
     async fn emit(&self, event: HarnessEvent) {
+        if let HarnessEvent::ApprovalRequested { harness_ref, raw } = &event {
+            self.record_approval(harness_ref, raw).await;
+            return;
+        }
+        if matches!(event, HarnessEvent::ApprovalResolved { .. }) {
+            // The decision route journals ApprovalResolved after the harness
+            // observes the decision. Ignore a duplicate emit from the engine.
+            return;
+        }
         if matches!(event, HarnessEvent::TurnStarted) && self.turn_id.lock().unwrap().is_some() {
             // The worker already journaled TurnStarted for this turn.
             return;
@@ -97,6 +170,7 @@ pub(crate) fn spawn_session_worker(
     bus: Arc<CodeEventBus>,
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
+    sink: Arc<LiveSink>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
@@ -107,6 +181,7 @@ pub(crate) fn spawn_session_worker(
         bus,
         session,
         engine,
+        sink.clone(),
         pending.clone(),
         wake.clone(),
         rx,
@@ -116,6 +191,7 @@ pub(crate) fn spawn_session_worker(
         commands: tx,
         pending,
         wake,
+        sink,
     }
 }
 
@@ -130,11 +206,13 @@ pub(crate) fn queue_follow_up(handle: &WorkerHandle, message: String) -> bool {
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_worker(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
     mut session: CodeSession,
-    mut engine: Box<dyn HarnessSession>,
+    engine: Box<dyn HarnessSession>,
+    sink: Arc<LiveSink>,
     pending: Arc<std::sync::Mutex<Option<String>>>,
     wake: Arc<Notify>,
     mut commands: mpsc::Receiver<WorkerCommand>,
@@ -148,42 +226,97 @@ async fn run_worker(
         if session_was_ended(&db, &mut session).await {
             break;
         }
-        drain_queued(&db, &bus, &mut session, engine.as_mut(), &pending).await;
+        drain_queued(
+            &db,
+            &bus,
+            &mut session,
+            engine.as_ref(),
+            &sink,
+            &pending,
+            &mut commands,
+        )
+        .await;
         tokio::select! {
             _ = wake.notified() => {}
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn { message, reply }) => {
-                    let result =
-                        drive_turn(&db, &bus, &mut session, engine.as_mut(), message).await;
+                    let result = drive_turn(
+                        &db,
+                        &bus,
+                        &mut session,
+                        engine.as_ref(),
+                        &sink,
+                        &mut commands,
+                        message,
+                    )
+                    .await;
                     let _ = reply.send(result);
                 }
-                Some(WorkerCommand::Interrupt { reply }) => {
-                    let result = engine
-                        .interrupt()
-                        .await
-                        .map_err(|err| WorkerError::Failed(err.to_string()));
-                    let _ = reply.send(result);
+                Some(command) => {
+                    if apply_control(engine.as_ref(), command).await == ControlFlow::Shutdown {
+                        break;
+                    }
                 }
-                Some(WorkerCommand::Shutdown) | None => break,
+                None => break,
             },
         }
     }
     let _ = engine.shutdown().await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlFlow {
+    Continue,
+    Shutdown,
+}
+
+async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> ControlFlow {
+    match command {
+        WorkerCommand::Decide {
+            approval,
+            decision,
+            reply,
+        } => {
+            let result = engine
+                .decide(approval, decision)
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()));
+            let _ = reply.send(result);
+            ControlFlow::Continue
+        }
+        WorkerCommand::Interrupt { reply } => {
+            let result = engine
+                .interrupt()
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()));
+            let _ = reply.send(result);
+            ControlFlow::Continue
+        }
+        WorkerCommand::RunTurn { reply, .. } => {
+            let _ = reply.send(Err(WorkerError::Conflict(
+                "a turn is already running on this session".into(),
+            )));
+            ControlFlow::Continue
+        }
+        WorkerCommand::Shutdown => ControlFlow::Shutdown,
+    }
+}
+
 async fn drain_queued(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
-    engine: &mut dyn HarnessSession,
+    engine: &dyn HarnessSession,
+    sink: &LiveSink,
     pending: &Arc<std::sync::Mutex<Option<String>>>,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
         let next = pending.lock().expect("code turn queue").take();
         let Some(message) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, message).await;
+        let _ = drive_turn(db, bus, session, engine, sink, commands, message).await;
     }
 }
 
@@ -191,7 +324,9 @@ async fn drive_turn(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
-    engine: &mut dyn HarnessSession,
+    engine: &dyn HarnessSession,
+    sink: &LiveSink,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
     message: String,
 ) -> Result<CodeTurn, WorkerError> {
     if session.lifecycle == CodeSessionLifecycle::Running {
@@ -228,6 +363,7 @@ async fn drive_turn(
     insert_turn(db, &turn)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    sink.set_turn(turn.id);
 
     session.lifecycle = CodeSessionLifecycle::Running;
     session.attention = Attention::working(AttentionSource::Lifecycle);
@@ -248,7 +384,25 @@ async fn drive_turn(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    let run = engine.run_turn(TurnInput { text: message }).await;
+    let run = engine.run_turn(TurnInput { text: message });
+    tokio::pin!(run);
+    let run = loop {
+        tokio::select! {
+            result = &mut run => break result,
+            command = commands.recv() => match command {
+                Some(command) => {
+                    if apply_control(engine, command).await == ControlFlow::Shutdown {
+                        let _ = engine.interrupt().await;
+                        break run.await;
+                    }
+                }
+                None => {
+                    let _ = engine.interrupt().await;
+                    break run.await;
+                }
+            }
+        }
+    };
 
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
@@ -400,7 +554,7 @@ pub(crate) fn sink_for(
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: Option<CodeTurnId>,
-) -> Arc<dyn HarnessEventSink> {
+) -> Arc<LiveSink> {
     Arc::new(LiveSink {
         db,
         bus,
@@ -408,6 +562,16 @@ pub(crate) fn sink_for(
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
     })
+}
+
+pub(crate) async fn journal_event(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    event: CodeEvent,
+) -> Result<(), CodeJournalError> {
+    persist_and_publish(db, bus, session_id, spawn_epoch, event).await
 }
 
 async fn persist_and_publish(
@@ -464,6 +628,72 @@ async fn apply_side_effects(
     Ok(())
 }
 
+const MAX_HARNESS_RAW_BYTES: usize = 16 * 1024;
+
+/// Size-capped preview plus `call_id` as a sibling. Decide reads `call_id`,
+/// never the preview: a Write/Edit payload larger than the cap would otherwise
+/// truncate `tool_use_id` away and leave the row undecidable.
+fn persist_harness_raw(call_id: &str, raw: &serde_json::Value) -> serde_json::Value {
+    let mut stored = match cap_raw(raw) {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("payload".to_owned(), other);
+            map
+        }
+    };
+    stored.insert(
+        "call_id".to_owned(),
+        serde_json::Value::String(call_id.to_owned()),
+    );
+    serde_json::Value::Object(stored)
+}
+
+fn cap_raw(raw: &serde_json::Value) -> serde_json::Value {
+    let rendered = raw.to_string();
+    if rendered.len() <= MAX_HARNESS_RAW_BYTES {
+        return raw.clone();
+    }
+    let end = rendered.floor_char_boundary(MAX_HARNESS_RAW_BYTES);
+    serde_json::json!({ "truncated": true, "preview": &rendered[..end] })
+}
+
+fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
+    let tool = raw
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let input = raw.get("input").cloned().unwrap_or(serde_json::Value::Null);
+    match tool {
+        "Write" | "Edit" | "NotebookEdit" => {
+            let path = input
+                .get("file_path")
+                .or_else(|| input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            CodeApprovalKind::FileWrite { paths: vec![path] }
+        }
+        "Bash" => CodeApprovalKind::Command {
+            cmd: input
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            cwd: input
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        },
+        "WebFetch" | "WebSearch" => CodeApprovalKind::Network {
+            summary: tool.to_owned(),
+        },
+        _ => CodeApprovalKind::Other {
+            summary: tool.to_owned(),
+        },
+    }
+}
+
 fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEvent> {
     Some(match event {
         HarnessEvent::SessionStarted {
@@ -506,9 +736,9 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             kind,
             diffstat,
         },
-        HarnessEvent::ApprovalRequested { .. } => CodeEvent::ApprovalRequested {
-            approval_id: CodeApprovalId::new(),
-        },
+        HarnessEvent::ApprovalRequested { .. } => {
+            return None;
+        }
         HarnessEvent::ApprovalResolved { decision, .. } => CodeEvent::ApprovalResolved {
             approval_id: CodeApprovalId::new(),
             decision: match decision {
@@ -536,5 +766,40 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
 impl From<HarnessError> for WorkerError {
     fn from(err: HarnessError) -> Self {
         Self::Failed(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_raw_truncates_on_a_char_boundary() {
+        // `{"xx":"` is 7 bytes; a string of `é` (2 bytes each) then places a
+        // mid-character byte at MAX_HARNESS_RAW_BYTES. Slicing there panics.
+        let raw = serde_json::json!({ "xx": "é".repeat(MAX_HARNESS_RAW_BYTES) });
+        assert!(raw.to_string().len() > MAX_HARNESS_RAW_BYTES);
+        assert!(!raw.to_string().is_char_boundary(MAX_HARNESS_RAW_BYTES));
+        let capped = cap_raw(&raw);
+        assert_eq!(capped["truncated"], true);
+        let preview = capped["preview"].as_str().expect("preview is a string");
+        assert!(preview.len() <= MAX_HARNESS_RAW_BYTES);
+        assert!(preview.is_char_boundary(preview.len()));
+    }
+
+    #[test]
+    fn persist_harness_raw_keeps_call_id_when_the_payload_is_capped() {
+        let raw = serde_json::json!({
+            "tool_name": "Write",
+            "input": {
+                "file_path": "/workspace/big.txt",
+                "content": "x".repeat(MAX_HARNESS_RAW_BYTES + 64),
+            },
+            "tool_use_id": "toolu_oversized",
+        });
+        let stored = persist_harness_raw("toolu_oversized", &raw);
+        assert_eq!(stored["truncated"], true);
+        assert_eq!(stored["call_id"], "toolu_oversized");
+        assert!(stored.get("tool_use_id").is_none());
     }
 }

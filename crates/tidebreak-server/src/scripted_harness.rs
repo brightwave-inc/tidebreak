@@ -11,22 +11,72 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tidebreak_core::{CapLevel, CodePermissionMode, HarnessCaps, HarnessKind};
 use tidebreak_harness::{
-    HarnessAdapter, HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession,
-    HostEnv, SessionSpec, TurnInput,
+    ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv, SessionSpec, TurnInput,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
+
+/// Completer that records decisions and unparks a scripted turn.
+///
+/// A decision can arrive before [`Self::park`] if the worker multiplexes it
+/// in the gap after `ApprovalRequested` is journaled. Stash it in that case.
+#[derive(Default)]
+pub(crate) struct ScriptedApprover {
+    parked: std::sync::Mutex<Option<oneshot::Sender<ApprovalDecision>>>,
+    staged: std::sync::Mutex<Option<ApprovalDecision>>,
+    observed: std::sync::Mutex<Vec<(String, ApprovalDecision)>>,
+}
+
+impl ScriptedApprover {
+    pub(crate) fn park(&self) -> oneshot::Receiver<ApprovalDecision> {
+        let (tx, rx) = oneshot::channel();
+        if let Some(decision) = self.staged.lock().expect("scripted staged").take() {
+            let _ = tx.send(decision);
+            return rx;
+        }
+        *self.parked.lock().expect("scripted park") = Some(tx);
+        rx
+    }
+
+    pub(crate) fn observed(&self) -> Vec<(String, ApprovalDecision)> {
+        self.observed.lock().expect("scripted observed").clone()
+    }
+}
+
+#[async_trait]
+impl ApprovalCompleter for ScriptedApprover {
+    async fn complete(
+        &self,
+        call_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<(), HarnessError> {
+        self.observed
+            .lock()
+            .expect("scripted observed")
+            .push((call_id.to_owned(), decision.clone()));
+        if let Some(tx) = self.parked.lock().expect("scripted park").take() {
+            let _ = tx.send(decision);
+        } else {
+            *self.staged.lock().expect("scripted staged") = Some(decision);
+        }
+        Ok(())
+    }
+}
 
 /// Environment variable carrying a JSON array of [`HarnessEvent`]s.
 #[allow(dead_code)]
 const SCRIPT_VAR: &str = "TIDEBREAK_SCRIPTED_HARNESS";
 
 /// One scripted engine session.
+#[derive(Clone)]
 pub(crate) struct ScriptedAdapter {
     kind: HarnessKind,
     events: Vec<HarnessEvent>,
     delay: Duration,
     mid_turn_steering: CapLevel,
+    structured_approvals: CapLevel,
     child_pid: Option<i64>,
+    approver: Arc<ScriptedApprover>,
 }
 
 impl ScriptedAdapter {
@@ -36,8 +86,20 @@ impl ScriptedAdapter {
             events,
             delay: Duration::ZERO,
             mid_turn_steering: CapLevel::Unsupported,
+            structured_approvals: CapLevel::Unsupported,
             child_pid: None,
+            approver: Arc::new(ScriptedApprover::default()),
         }
+    }
+
+    pub(crate) fn with_approvals(mut self, level: CapLevel) -> Self {
+        self.structured_approvals = level;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn observed_decisions(&self) -> Vec<(String, ApprovalDecision)> {
+        self.approver.observed()
     }
 
     pub(crate) fn with_delay(mut self, delay: Duration) -> Self {
@@ -78,7 +140,7 @@ impl HarnessAdapter for ScriptedAdapter {
         HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
-            structured_approvals: CapLevel::Unsupported,
+            structured_approvals: self.structured_approvals,
             mid_turn_steering: self.mid_turn_steering,
             plan_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Unsupported,
@@ -105,6 +167,7 @@ impl HarnessAdapter for ScriptedAdapter {
             interrupt: Arc::new(AtomicBool::new(false)),
             steered: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
+            approver: self.approver.clone(),
         }))
     }
 }
@@ -118,11 +181,12 @@ struct ScriptedSession {
     interrupt: Arc<AtomicBool>,
     steered: Mutex<Option<String>>,
     unrecognized: AtomicU64,
+    approver: Arc<ScriptedApprover>,
 }
 
 #[async_trait]
 impl HarnessSession for ScriptedSession {
-    async fn run_turn(&mut self, _input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, _input: TurnInput) -> Result<(), HarnessError> {
         self.interrupt.store(false, Ordering::SeqCst);
         for event in &self.events {
             if self.interrupt.load(Ordering::SeqCst) {
@@ -134,6 +198,19 @@ impl HarnessSession for ScriptedSession {
             }
             if let Some(text) = self.steered.lock().await.take() {
                 self.sink.emit(HarnessEvent::UserSteered { text }).await;
+            }
+            if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
+                self.sink.emit(event.clone()).await;
+                let rx = self.approver.park();
+                if let Ok(decision) = rx.await {
+                    self.sink
+                        .emit(HarnessEvent::ApprovalResolved {
+                            harness_ref: harness_ref.clone(),
+                            decision,
+                        })
+                        .await;
+                }
+                continue;
             }
             self.sink.emit(event.clone()).await;
             if matches!(
@@ -152,21 +229,22 @@ impl HarnessSession for ScriptedSession {
     }
 
     async fn decide(
-        &mut self,
-        _approval: tidebreak_harness::HarnessApprovalRef,
-        _decision: tidebreak_harness::ApprovalDecision,
+        &self,
+        approval: HarnessApprovalRef,
+        decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Other(
-            "scripted engine has no approval channel".into(),
-        ))
+        self.approver.complete(&approval.call_id, decision).await
     }
 
-    async fn interrupt(&mut self) -> Result<(), HarnessError> {
+    async fn interrupt(&self) -> Result<(), HarnessError> {
         self.interrupt.store(true, Ordering::SeqCst);
+        // Drop a parked approval wait so run_turn can observe the flag.
+        let _ = self.approver.parked.lock().expect("scripted park").take();
+        let _ = self.approver.staged.lock().expect("scripted staged").take();
         Ok(())
     }
 
-    async fn steer(&mut self, text: String) -> Result<(), HarnessError> {
+    async fn steer(&self, text: String) -> Result<(), HarnessError> {
         if self.mid_turn_steering != CapLevel::Supported {
             return Err(HarnessError::Other(
                 "mid-turn steering is not available on this engine".into(),

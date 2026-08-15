@@ -1,0 +1,40 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "aa8bfc30-886d-4792-93f4-ce64c1cc00a5"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01Pwo7nMXPQZWnBMyeTuL8ts",
+    "name": "Write",
+    "detail": {
+      "kind": "file_edit",
+      "path": ""
+    }
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01Pwo7nMXPQZWnBMyeTuL8ts",
+    "outcome": "failed",
+    "preview": "no — use the fixtures directory instead"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "DENIED"
+  },
+  {
+    "type": "assistant_message",
+    "text": "DENIED"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 4,
+      "output_tokens": 140,
+      "cache_read_input_tokens": 99470,
+      "cache_creation_input_tokens": 3728
+    }
+  }
+]

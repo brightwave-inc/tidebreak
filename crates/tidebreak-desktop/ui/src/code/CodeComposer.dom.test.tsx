@@ -10,32 +10,44 @@ afterEach(() => {
 });
 
 describe("CodeComposer", () => {
-  it("shows Ask and Auto as disabled with the server's unavailable reason", () => {
+  it("enables Ask and Auto and reports the selected mode", () => {
+    const onPermissionMode = vi.fn();
     render(
       <CodeComposer
         running={false}
-        permissionMode="plan"
+        permissionMode="ask"
+        onPermissionMode={onPermissionMode}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("button", { name: "Plan" })).toBeEnabled();
+    const ask = screen.getByRole("button", { name: "Ask" });
+    const auto = screen.getByRole("button", { name: "Auto" });
+    expect(ask).toBeEnabled();
+    expect(auto).toBeEnabled();
+    expect(ask).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(auto);
+    expect(onPermissionMode).toHaveBeenCalledWith("auto");
+  });
+
+  it("disables a mode the harness cannot honor", () => {
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="plan"
+        availableModes={["plan"]}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
     const ask = screen.getByRole("button", { name: /Ask/ });
-    const auto = screen.getByRole("button", { name: /Auto/ });
     expect(ask).toBeDisabled();
-    expect(auto).toBeDisabled();
     expect(ask).toHaveAttribute(
       "title",
       `Ask: ${PERMISSION_MODE_UNAVAILABLE_REASON}`,
     );
-    expect(auto).toHaveAttribute(
-      "title",
-      `Auto: ${PERMISSION_MODE_UNAVAILABLE_REASON}`,
-    );
-    expect(
-      screen.getAllByText(PERMISSION_MODE_UNAVAILABLE_REASON),
-    ).toHaveLength(2);
   });
 
   it("keeps the draft when send is refused", async () => {

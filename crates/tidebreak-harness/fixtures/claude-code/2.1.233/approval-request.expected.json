@@ -1,0 +1,17 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "e65cc2a8-e5db-4f07-8e58-219691c423b5"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01AccXU5wrjo1GDyiNaAGDXM",
+    "name": "Write",
+    "detail": {
+      "kind": "file_edit",
+      "path": ""
+    }
+  }
+]

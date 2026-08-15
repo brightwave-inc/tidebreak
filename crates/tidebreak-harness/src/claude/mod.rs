@@ -61,8 +61,12 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
-            // Permission-prompt-tool channel was not captured.
-            structured_approvals: CapLevel::Unknown,
+            // Hidden `--permission-prompt-tool` + HTTP MCP captured on 2.1.233.
+            structured_approvals: if version_is_2_1_233(_probe.version.as_deref()) {
+                CapLevel::Supported
+            } else {
+                CapLevel::Unknown
+            },
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Unknown,
@@ -77,6 +81,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         }
         Ok(Box::new(ClaudeSession::new(spec)))
     }
+}
+
+fn version_is_2_1_233(version: Option<&str>) -> bool {
+    version.is_some_and(|value| value.starts_with("2.1.233"))
 }
 
 #[cfg(test)]
@@ -179,6 +187,63 @@ mod tests {
     }
 
     #[test]
+    fn fixture_replay_approval_allow() {
+        let (events, _) = replay("approval-allow");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted { name, .. } if name == "Write"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted { outcome, .. }
+                if *outcome == tidebreak_core::ToolOutcome::Succeeded
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
+        assert!(events
+            .iter()
+            .all(|event| { !matches!(event, HarnessEvent::ApprovalRequested { .. }) }));
+    }
+
+    #[test]
+    fn fixture_replay_approval_deny_with_feedback() {
+        let (events, _) = replay("approval-deny-with-feedback");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted { outcome, preview, .. }
+                if *outcome == tidebreak_core::ToolOutcome::Failed
+                    && preview.contains("fixtures directory")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::AssistantMessage { text } if text.contains("DENIED")
+        )));
+    }
+
+    #[test]
+    fn fixture_replay_approval_request_parses_the_mcp_payload() {
+        let path = fixture_dir().join("approval-request.mcp.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let request: crate::claude::approvals::PermissionPromptRequest =
+            serde_json::from_value(raw["params"]["arguments"].clone()).unwrap();
+        let event = crate::claude::approvals::event_from_prompt_request(&request);
+        match event {
+            HarnessEvent::ApprovalRequested { harness_ref, raw } => {
+                assert_eq!(harness_ref.call_id, request.tool_use_id);
+                assert_eq!(raw["tool_name"], "Write");
+            }
+            other => panic!("{other:?}"),
+        }
+        let (events, _) = replay("approval-request");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted { name, .. } if name == "Write"
+        )));
+    }
+
+    #[test]
     fn adapter_has_a_fixtures_directory_with_a_manifest() {
         assert!(fixture_dir().join("manifest.toml").is_file());
     }
@@ -197,9 +262,22 @@ mod tests {
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
         assert_eq!(caps.native_interrupt, CapLevel::Supported);
         assert_eq!(caps.plan_mode, CapLevel::Supported);
-        assert_eq!(caps.structured_approvals, CapLevel::Unknown);
+        assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn structured_approvals_stay_unknown_off_the_captured_version() {
+        let caps = ClaudeCodeAdapter::new().capabilities(&HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("2.1.300 (Claude Code)".into()),
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+        });
+        assert_eq!(caps.structured_approvals, CapLevel::Unknown);
     }
 }

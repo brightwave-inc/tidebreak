@@ -2,7 +2,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
-import type { CodeRepoSnapshot, HarnessKind } from "../api/types";
+import type {
+  CodePermissionMode,
+  CodeRepoSnapshot,
+  HarnessKind,
+} from "../api/types";
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,15 +19,22 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { HARNESS_LABELS, isHarnessReady } from "./labels";
+import {
+  createPermissionModes,
+  defaultCreatePermissionMode,
+  HARNESS_LABELS,
+  isHarnessReady,
+} from "./labels";
 
 /**
- * Create a workspace and its first Plan-mode session, then open it.
+ * Create a workspace and its first session, then open it.
  *
- * Ask and Auto are refused by the server in this phase, so the dialog does
- * not offer them. The harness picker is the doctor: only engines that are
- * installed (and signed in, when the doctor knows) can be chosen.
+ * Permission mode defaults to Ask when the doctor reports structured
+ * approvals, otherwise Plan — create always has a mode the harness can honor.
+ * The harness picker is the doctor: only engines that are installed (and
+ * signed in, when the doctor knows) can be chosen.
  */
 
 export function NewWorkspaceDialog({
@@ -46,6 +57,9 @@ export function NewWorkspaceDialog({
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [permissionMode, setPermissionMode] = useState<CodePermissionMode | null>(
+    null,
+  );
   const [creating, setCreating] = useState(false);
 
   const readyHarnesses =
@@ -58,11 +72,20 @@ export function NewWorkspaceDialog({
     const selected = repos.find((repo) => repo.id === (defaultRepoId ?? repos[0]?.id));
     setBaseRef(selected?.default_base_ref ?? "");
     setHarness(readyHarnesses[0]?.kind ?? "claude_code");
+    setPermissionMode(null);
     // Reset against the dialog opening, not against doctor refreshes mid-open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, defaultRepoId, repos]);
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
+  const selectedHarness = readyHarnesses.find((entry) => entry.kind === harness);
+  const availableModes = createPermissionModes(
+    selectedHarness?.caps.structured_approvals,
+  );
+  const postedMode =
+    permissionMode && availableModes.includes(permissionMode)
+      ? permissionMode
+      : defaultCreatePermissionMode(selectedHarness?.caps.structured_approvals);
   const canCreate =
     Boolean(repoId && title.trim() && selectedRepo && readyHarnesses.length > 0) &&
     !creating;
@@ -80,7 +103,7 @@ export function NewWorkspaceDialog({
       upsertWorkspace(workspace);
       const session = await client.createCodeSession(workspace.id, {
         harness,
-        permission_mode: "plan",
+        permission_mode: postedMode,
       });
       rememberSession(session);
       onOpenChange(false);
@@ -101,7 +124,7 @@ export function NewWorkspaceDialog({
         <DialogHeader>
           <DialogTitle>New workspace</DialogTitle>
           <DialogDescription>
-            One worktree and one Plan-mode session on the selected repo.
+            One worktree and one session on the selected repo.
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-3" onSubmit={submit}>
@@ -158,9 +181,14 @@ export function NewWorkspaceDialog({
               ))}
             </select>
           </label>
-          <p className="text-xs text-muted-foreground">
-            Permission mode is Plan. Ask and Auto are {PERMISSION_UNAVAILABLE}.
-          </p>
+          <div className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Permission mode</span>
+            <PermissionModePicker
+              value={postedMode}
+              availableModes={availableModes}
+              onChange={setPermissionMode}
+            />
+          </div>
           <DialogFooter>
             <Button
               type="button"
@@ -179,5 +207,3 @@ export function NewWorkspaceDialog({
     </Dialog>
   );
 }
-
-const PERMISSION_UNAVAILABLE = "not yet available";

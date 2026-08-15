@@ -97,6 +97,10 @@ pub enum HarnessEvent {
     ApprovalRequested {
         /// Engine-native handle used to decide the request.
         harness_ref: HarnessApprovalRef,
+        /// Size-capped raw engine payload. Null when the engine emitted a
+        /// request without a captured body.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        raw: serde_json::Value,
     },
     /// An approval was decided (observed on the stream, or after [`HarnessSession::decide`]).
     ApprovalResolved {
@@ -159,16 +163,55 @@ pub struct TurnInput {
     pub text: String,
 }
 
+/// Completes a parked engine approval. Implemented by the server bridge so
+/// [`HarnessSession::decide`] can run while `run_turn` is blocked on the child.
+#[async_trait]
+pub trait ApprovalCompleter: Send + Sync {
+    /// Finish the native channel for `call_id`.
+    async fn complete(&self, call_id: &str, decision: ApprovalDecision)
+        -> Result<(), HarnessError>;
+}
+
 /// Loopback approval-channel wiring supplied by the server layer.
 ///
 /// The server must serve a permission-prompt tool at `mcp_endpoint_url`
 /// authenticated by `token`. This crate does not implement that endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ApprovalChannelSpec {
     /// Loopback MCP endpoint URL.
     pub mcp_endpoint_url: String,
     /// Session-scoped token. Never logged.
     pub token: String,
+    /// How [`HarnessSession::decide`] finishes the parked MCP call.
+    pub completer: Arc<dyn ApprovalCompleter>,
+}
+
+impl std::fmt::Debug for ApprovalChannelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApprovalChannelSpec")
+            .field("mcp_endpoint_url", &self.mcp_endpoint_url)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ApprovalChannelSpec {
+    /// `--mcp-config` JSON captured for Claude Code 2.1.233 HTTP MCP.
+    #[must_use]
+    pub fn mcp_config_json(&self, server_name: &str) -> String {
+        serde_json::json!({
+            "mcpServers": {
+                server_name: {
+                    "type": "http",
+                    "url": self.mcp_endpoint_url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", self.token),
+                    },
+                }
+            }
+        })
+        .to_string()
+    }
 }
 
 /// What an adapter needs to spawn or connect one session.
@@ -220,27 +263,31 @@ pub trait HarnessAdapter: Send + Sync {
 }
 
 /// One live engine session.
+///
+/// Control methods take shared `&self` so a session worker can dispatch
+/// [`Self::decide`] and [`Self::interrupt`] while [`Self::run_turn`] is still
+/// in flight. Adapters keep process state behind interior mutability.
 #[async_trait]
-pub trait HarnessSession: Send {
+pub trait HarnessSession: Send + Sync {
     /// Feed one user turn; normalized events flow to the sink until a
     /// terminal turn event arrives.
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError>;
+    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError>;
 
     /// Resolve a pending approval through the engine's native channel.
     async fn decide(
-        &mut self,
+        &self,
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError>;
 
     /// Ask the engine to stop the current turn.
-    async fn interrupt(&mut self) -> Result<(), HarnessError>;
+    async fn interrupt(&self) -> Result<(), HarnessError>;
 
     /// Inject a mid-turn user message, when the engine accepts one.
     ///
     /// The default refuses: an adapter must override this only when its
     /// capability vector states [`CapLevel::Supported`] for mid-turn steering.
-    async fn steer(&mut self, text: String) -> Result<(), HarnessError> {
+    async fn steer(&self, text: String) -> Result<(), HarnessError> {
         let _ = text;
         Err(HarnessError::Other(
             "mid-turn steering is not available on this engine".into(),

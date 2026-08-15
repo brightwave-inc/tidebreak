@@ -104,6 +104,8 @@ import {
   type AttentionSource as WireAttentionSource,
   type AttentionState as WireAttentionState,
   type CapLevel as WireCapLevel,
+  type CodeApprovalSnapshot as WireCodeApprovalSnapshot,
+  type CodeApprovalState as WireCodeApprovalState,
   type CodeEvent as WireCodeEvent,
   type CodePermissionMode as WireCodePermissionMode,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
@@ -1002,6 +1004,8 @@ export type CodeTerminalRead = WireCodeTerminalRead;
 export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;
 
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
+export type CodeApprovalSnapshot = WireCodeApprovalSnapshot;
+export type CodeApprovalState = WireCodeApprovalState;
 export type CodeEvent = WireCodeEvent;
 export type SequencedCodeEventFrame = WireSequencedCodeEventFrame;
 export type ToolDetail = WireToolDetail;
