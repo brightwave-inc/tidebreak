@@ -929,6 +929,38 @@ impl Store for PauseTerminalStore {
     ) -> Result<tidebreak_core::DocumentRecord> {
         self.inner.accept_document_source(source).await
     }
+    async fn begin_root_attachment_change(
+        &self,
+        request: &BeginRootAttachmentChange,
+    ) -> Result<tidebreak_core::BeginRootAttachmentChangeOutcome> {
+        self.inner.begin_root_attachment_change(request).await
+    }
+    async fn finish_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+        executor_id: uuid::Uuid,
+        terminal: &tidebreak_core::RootAttachmentChangeTerminal,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::FinishRootAttachmentChangeOutcome> {
+        self.inner
+            .finish_root_attachment_change(id, executor_id, terminal, finished_at)
+            .await
+    }
+    async fn get_root_attachment_change(
+        &self,
+        id: RootAttachmentChangeId,
+    ) -> Result<Option<tidebreak_core::RootAttachmentChange>> {
+        self.inner.get_root_attachment_change(id).await
+    }
+    async fn list_pending_root_attachment_changes(
+        &self,
+        executor_id: uuid::Uuid,
+        limit: u64,
+    ) -> Result<Vec<tidebreak_core::RootAttachmentChange>> {
+        self.inner
+            .list_pending_root_attachment_changes(executor_id, limit)
+            .await
+    }
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         self.inner.create_chat(chat).await
     }

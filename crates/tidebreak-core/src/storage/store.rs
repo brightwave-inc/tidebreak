@@ -73,12 +73,6 @@ fn agent_run_storage_unavailable<T>() -> Result<T> {
     ))
 }
 
-fn root_attachment_storage_unavailable<T>() -> Result<T> {
-    Err(AgentError::Store(
-        "durable root attachment storage is not implemented by this Store".into(),
-    ))
-}
-
 fn operation_log_storage_unavailable<T>() -> Result<T> {
     Err(AgentError::Store(
         "durable operation-log storage is not implemented by this Store".into(),
@@ -95,6 +89,11 @@ fn image_publication_storage_unavailable<T>() -> Result<T> {
 ///
 /// Implementations must be safe to share across threads (`Send + Sync`) and are
 /// held behind `Arc<dyn Store>`, so this trait stays object-safe.
+///
+/// A method whose only default would be `Err("… not implemented")` is
+/// required. New persistence surface lands required, or it does not land.
+/// Real defaults (owner-scoped delegates, compatibility projections) stay.
+/// See decision 0037.
 #[async_trait]
 pub trait Store: Send + Sync {
     /// Persist a new project.
@@ -144,19 +143,13 @@ pub trait Store: Send + Sync {
     /// At most one of `chat_id` and `project_id` may be present, and it must
     /// identify an existing owner. A live document's ownership is immutable:
     /// callers must delete it before recreating the same id in another corpus.
-    async fn create_document(&self, _document: &DocumentRecord) -> Result<()> {
-        document_storage_unavailable()
-    }
+    async fn create_document(&self, document: &DocumentRecord) -> Result<()>;
 
     /// Fetch an authoritative document by id, or `None` if it does not exist.
-    async fn get_document(&self, _id: DocumentId) -> Result<Option<DocumentRecord>> {
-        document_storage_unavailable()
-    }
+    async fn get_document(&self, id: DocumentId) -> Result<Option<DocumentRecord>>;
 
     /// List documents in `scope`, most-recently-created first.
-    async fn list_documents(&self, _scope: DocumentScope) -> Result<Vec<DocumentRecord>> {
-        document_storage_unavailable()
-    }
+    async fn list_documents(&self, scope: DocumentScope) -> Result<Vec<DocumentRecord>>;
 
     /// List document metadata in deterministic newest-first order.
     ///
@@ -165,12 +158,10 @@ pub trait Store: Send + Sync {
     /// order. Implementations must not load canonical text.
     async fn list_document_summaries(
         &self,
-        _scope: DocumentScope,
-        _after: Option<DocumentListCursor>,
-        _limit: u64,
-    ) -> Result<Vec<DocumentSummaryRecord>> {
-        document_storage_unavailable()
-    }
+        scope: DocumentScope,
+        after: Option<DocumentListCursor>,
+        limit: u64,
+    ) -> Result<Vec<DocumentSummaryRecord>>;
 
     /// List document ids in `scope` without requiring canonical content.
     ///
@@ -305,26 +296,20 @@ pub trait Store: Send + Sync {
     }
 
     /// Hard-delete source content.
-    async fn delete_document(&self, _id: DocumentId) -> Result<()> {
-        document_storage_unavailable()
-    }
+    async fn delete_document(&self, id: DocumentId) -> Result<()>;
 
     /// Create or replace authoritative document content.
     ///
     /// Replacements preserve `created_at` and use last-write-wins semantics.
     /// `project_id`, when present, must identify an existing project. A live
     /// document cannot move between corpora.
-    async fn upsert_document(&self, _document: &DocumentUpsert) -> Result<DocumentRecord> {
-        document_storage_unavailable()
-    }
+    async fn upsert_document(&self, document: &DocumentUpsert) -> Result<DocumentRecord>;
 
     /// Atomically accept an already-published source blob and decoded text.
     async fn accept_document_source(
         &self,
-        _document: &DocumentSourceUpsert,
-    ) -> Result<DocumentRecord> {
-        document_storage_unavailable()
-    }
+        document: &DocumentSourceUpsert,
+    ) -> Result<DocumentRecord>;
 
     /// Persist a new chat.
     ///
@@ -1081,10 +1066,8 @@ pub trait Store: Send + Sync {
     /// control; it is not renderer-selected authorization.
     async fn begin_root_attachment_change(
         &self,
-        _request: &BeginRootAttachmentChange,
-    ) -> Result<BeginRootAttachmentChangeOutcome> {
-        root_attachment_storage_unavailable()
-    }
+        request: &BeginRootAttachmentChange,
+    ) -> Result<BeginRootAttachmentChangeOutcome>;
 
     /// Atomically finish one exact change under its stable executor.
     ///
@@ -1096,21 +1079,17 @@ pub trait Store: Send + Sync {
     /// operation; arbitrary transport failures are not durable broker failures.
     async fn finish_root_attachment_change(
         &self,
-        _id: RootAttachmentChangeId,
-        _executor_id: uuid::Uuid,
-        _terminal: &RootAttachmentChangeTerminal,
-        _finished_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<FinishRootAttachmentChangeOutcome> {
-        root_attachment_storage_unavailable()
-    }
+        id: RootAttachmentChangeId,
+        executor_id: uuid::Uuid,
+        terminal: &RootAttachmentChangeTerminal,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<FinishRootAttachmentChangeOutcome>;
 
     /// Fetch one attachment change by exact idempotency identity.
     async fn get_root_attachment_change(
         &self,
-        _id: RootAttachmentChangeId,
-    ) -> Result<Option<RootAttachmentChange>> {
-        root_attachment_storage_unavailable()
-    }
+        id: RootAttachmentChangeId,
+    ) -> Result<Option<RootAttachmentChange>>;
 
     /// List up to `limit` awaiting changes owned by one stable native executor.
     ///
@@ -1118,11 +1097,9 @@ pub trait Store: Send + Sync {
     /// are returned in deterministic oldest-first order.
     async fn list_pending_root_attachment_changes(
         &self,
-        _executor_id: uuid::Uuid,
-        _limit: u64,
-    ) -> Result<Vec<RootAttachmentChange>> {
-        root_attachment_storage_unavailable()
-    }
+        executor_id: uuid::Uuid,
+        limit: u64,
+    ) -> Result<Vec<RootAttachmentChange>>;
 
     /// Atomically accept one foreground coordinator or sandboxed child run.
     ///

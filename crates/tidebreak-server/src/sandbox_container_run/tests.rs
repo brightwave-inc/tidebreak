@@ -341,6 +341,89 @@ impl Store for TerminalFaultStore {
         self.inner.list_projects().await
     }
 
+    async fn create_document(&self, document: &tidebreak_core::DocumentRecord) -> Result<()> {
+        self.inner.create_document(document).await
+    }
+
+    async fn get_document(
+        &self,
+        id: tidebreak_core::DocumentId,
+    ) -> Result<Option<tidebreak_core::DocumentRecord>> {
+        self.inner.get_document(id).await
+    }
+
+    async fn list_documents(
+        &self,
+        scope: tidebreak_core::DocumentScope,
+    ) -> Result<Vec<tidebreak_core::DocumentRecord>> {
+        self.inner.list_documents(scope).await
+    }
+
+    async fn list_document_summaries(
+        &self,
+        scope: tidebreak_core::DocumentScope,
+        after: Option<tidebreak_core::DocumentListCursor>,
+        limit: u64,
+    ) -> Result<Vec<tidebreak_core::DocumentSummaryRecord>> {
+        self.inner
+            .list_document_summaries(scope, after, limit)
+            .await
+    }
+
+    async fn delete_document(&self, id: tidebreak_core::DocumentId) -> Result<()> {
+        self.inner.delete_document(id).await
+    }
+
+    async fn upsert_document(
+        &self,
+        document: &tidebreak_core::DocumentUpsert,
+    ) -> Result<tidebreak_core::DocumentRecord> {
+        self.inner.upsert_document(document).await
+    }
+
+    async fn accept_document_source(
+        &self,
+        document: &tidebreak_core::DocumentSourceUpsert,
+    ) -> Result<tidebreak_core::DocumentRecord> {
+        self.inner.accept_document_source(document).await
+    }
+
+    async fn begin_root_attachment_change(
+        &self,
+        request: &tidebreak_core::BeginRootAttachmentChange,
+    ) -> Result<tidebreak_core::BeginRootAttachmentChangeOutcome> {
+        self.inner.begin_root_attachment_change(request).await
+    }
+
+    async fn finish_root_attachment_change(
+        &self,
+        id: tidebreak_core::RootAttachmentChangeId,
+        executor_id: Uuid,
+        terminal: &tidebreak_core::RootAttachmentChangeTerminal,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<tidebreak_core::FinishRootAttachmentChangeOutcome> {
+        self.inner
+            .finish_root_attachment_change(id, executor_id, terminal, finished_at)
+            .await
+    }
+
+    async fn get_root_attachment_change(
+        &self,
+        id: tidebreak_core::RootAttachmentChangeId,
+    ) -> Result<Option<tidebreak_core::RootAttachmentChange>> {
+        self.inner.get_root_attachment_change(id).await
+    }
+
+    async fn list_pending_root_attachment_changes(
+        &self,
+        executor_id: Uuid,
+        limit: u64,
+    ) -> Result<Vec<tidebreak_core::RootAttachmentChange>> {
+        self.inner
+            .list_pending_root_attachment_changes(executor_id, limit)
+            .await
+    }
+
     async fn create_chat(&self, chat: &Chat) -> Result<()> {
         self.inner.create_chat(chat).await
     }
