@@ -25,6 +25,7 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
+import { PrCard } from "./PrCard";
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
@@ -140,7 +141,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     const ok = await confirm({
       title: "Archive this workspace?",
       description:
-        "The worktree is removed. Leftover work on the branch is kept only if you cancel.",
+        "The worktree is removed. Commit, push, or create a pull request from the card on this page first if you want to keep the work.",
       confirmLabel: "Archive",
       destructive: true,
     });
@@ -151,7 +152,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       if (archiveForceKind(err)) {
         const forced = await confirm({
           title: "Discard leftover work?",
-          description: err instanceof Error ? err.message : String(err),
+          description: `${err instanceof Error ? err.message : String(err)} Commit and push from the pull-request card on this page, or discard.`,
           confirmLabel: "Discard and archive",
           destructive: true,
         });
@@ -273,6 +274,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
             hidden={!visible}
           >
+            {workspace && workspace.status !== "archived" && (
+              <div className="px-4 pt-3">
+                <PrCard client={client} workspaceId={workspace.id} />
+              </div>
+            )}
             {fenced && session?.fence_reason && (
               <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
                 <p>{fenceReasonText(session.fence_reason)}</p>

@@ -804,6 +804,11 @@ diffstat?: Diffstat, };
 export type CitationLocator = { "kind": "document" } | { "kind": "page", page: number, } | { "kind": "pages", start: number, end: number, } | { "kind": "lines", start: number, end: number, } | { "kind": "sheet", sheet: string, cells: string | null, };
 
 /**
+ * Bounded output of one named quick action. Never journaled.
+ */
+export type CodeActionSnapshot = { name: string, success: boolean, exit_code?: number, stdout: string, stderr: string, timed_out: boolean, };
+
+/**
  * `approve` or `deny`.
  */
 export type CodeApprovalDecision = "approve" | "deny";
@@ -856,6 +861,11 @@ harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested
  * State of a persisted approval.
  */
 export type CodeApprovalState = "pending" | "approved" | "denied";
+
+/**
+ * Result of staging and committing the workspace worktree.
+ */
+export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat, };
 
 /**
  * One event in an external agent-engine session's journal.
@@ -1104,6 +1114,11 @@ export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: n
 export type CodePermissionMode = "plan" | "ask" | "auto";
 
 /**
+ * Result of pushing the workspace branch.
+ */
+export type CodePushSnapshot = { branch: string, remote: string, };
+
+/**
  * A registered local git repository.
  */
 export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, created_at: string, };
@@ -1194,6 +1209,11 @@ export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffst
  * Bounded changed-file list for `GET /code/workspaces/{id}/files`.
  */
 export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, };
+
+/**
+ * PR + checks digest plus the local git facts the PR card needs.
+ */
+export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, };
 
 /**
  * One isolated workspace (worktree + branch) on a repo.

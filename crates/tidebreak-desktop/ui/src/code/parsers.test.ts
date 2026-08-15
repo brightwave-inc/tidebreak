@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   liveCodeSession,
+  parseCodeAction,
   parseCodeApproval,
+  parseCodeCommit,
+  parseCodePush,
   parseCodeSession,
   parseCodeSessionList,
   parseCodeTerminal,
@@ -12,6 +15,7 @@ import {
   parseCodeTurnList,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspacePr,
 } from "./parsers";
 
 const SESSION = {
@@ -181,6 +185,81 @@ describe("parseCodeTerminal", () => {
       ended: false,
     };
     expect(parseCodeTerminalRead(page)).toEqual(page);
+  });
+});
+
+describe("parseCodeWorkspacePr", () => {
+  const pr = {
+    dirty: false,
+    unpushed: true,
+    ahead: 2,
+    has_upstream: false,
+    suggested_commit_message: "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
+    gh_found: true,
+    gh_authenticated: true,
+    remediation: "",
+    pr: {
+      number: 12,
+      url: "https://github.com/example/demo/pull/12",
+      state: "open",
+      checks_summary: "1 passing, 0 pending, 0 failing",
+    },
+  };
+
+  it("accepts GET /code/workspaces/{id}/pr", () => {
+    expect(parseCodeWorkspacePr(pr)).toEqual(pr);
+  });
+
+  it("accepts the gh-absent remediation state", () => {
+    const absent = {
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: false,
+      suggested_commit_message: "Update workspace\n\n0 files changed, 0 insertions(+), 0 deletions(-)",
+      gh_found: false,
+      remediation: "gh is not installed. Install the GitHub CLI.",
+    };
+    expect(parseCodeWorkspacePr(absent)).toEqual(absent);
+  });
+
+  it("rejects a missing boolean", () => {
+    expect(parseCodeWorkspacePr({ ...pr, dirty: "yes" })).toBeNull();
+  });
+});
+
+describe("parseCodeCommit", () => {
+  it("accepts POST /code/workspaces/{id}/git/commit", () => {
+    const commit = {
+      sha: "abc123",
+      message: "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
+      stat: { files: 1, insertions: 1, deletions: 0, truncated: false },
+    };
+    expect(parseCodeCommit(commit)).toEqual(commit);
+    expect(parseCodeCommit({ ...commit, sha: "" })).toBeNull();
+  });
+});
+
+describe("parseCodePush", () => {
+  it("accepts POST /code/workspaces/{id}/git/push", () => {
+    expect(parseCodePush({ branch: "tidebreak/first", remote: "origin" })).toEqual({
+      branch: "tidebreak/first",
+      remote: "origin",
+    });
+  });
+});
+
+describe("parseCodeAction", () => {
+  it("accepts POST /code/workspaces/{id}/actions/{name}", () => {
+    const action = {
+      name: "echo",
+      success: true,
+      exit_code: 0,
+      stdout: "hello",
+      stderr: "",
+      timed_out: false,
+    };
+    expect(parseCodeAction(action)).toEqual(action);
   });
 });
 

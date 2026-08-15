@@ -118,11 +118,16 @@ import {
   type CodeUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  type CodeActionSnapshot as WireCodeActionSnapshot,
+  type CodeCommitSnapshot as WireCodeCommitSnapshot,
+  type CodePushSnapshot as WireCodePushSnapshot,
   type CodeFileChange as WireCodeFileChange,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  type PullRequestDigest as WirePullRequestDigest,
   type Diffstat as WireDiffstat,
   type FileChangeKind as WireFileChangeKind,
   type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
@@ -999,6 +1004,11 @@ export type FileChangeKind = WireFileChangeKind;
 export type CodeFileChange = WireCodeFileChange;
 export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
+export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
+export type CodeCommitSnapshot = WireCodeCommitSnapshot;
+export type CodePushSnapshot = WireCodePushSnapshot;
+export type CodeActionSnapshot = WireCodeActionSnapshot;
+export type PullRequestDigest = WirePullRequestDigest;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
 export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;

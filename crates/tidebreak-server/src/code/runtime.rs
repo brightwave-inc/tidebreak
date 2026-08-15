@@ -30,6 +30,9 @@ use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
     sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
 };
+use super::gh::{
+    self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
+};
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, journal_event, queue_follow_up, spawn_session_worker, WorkerCommand,
@@ -59,6 +62,9 @@ pub(crate) struct CodeRuntime {
     host: HostEnv,
     loopback_base: Mutex<Option<String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    pr_cache: PrDigestCache,
+    #[cfg(test)]
+    gh_search_path: Mutex<Option<String>>,
 }
 
 impl CodeRuntime {
@@ -72,6 +78,9 @@ impl CodeRuntime {
             host: HostEnv::from_process(),
             loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
+            pr_cache: PrDigestCache::default(),
+            #[cfg(test)]
+            gh_search_path: Mutex::new(None),
         }
     }
 
@@ -96,7 +105,15 @@ impl CodeRuntime {
             host: HostEnv::from_process(),
             loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
+            pr_cache: PrDigestCache::default(),
+            #[cfg(test)]
+            gh_search_path: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
+        *self.gh_search_path.lock().expect("gh search path") = path;
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -309,6 +326,7 @@ impl CodeRuntime {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
                 save_workspace(&self.db, &workspace).await?;
+                gh::run_auto_create_actions(&path, &repo.quick_actions).await;
                 Ok(workspace)
             }
             Err(err) => {
@@ -415,6 +433,121 @@ impl CodeRuntime {
         workspace.archived_at = Some(Utc::now());
         save_workspace(&self.db, &workspace).await?;
         Ok(workspace)
+    }
+
+    pub(crate) async fn commit_workspace(
+        &self,
+        id: WorkspaceId,
+        message: Option<String>,
+    ) -> Result<CommitOutcome, ServerError> {
+        let workspace = self.require_live_workspace(id).await?;
+        gh::commit_all(
+            std::path::Path::new(&workspace.worktree_path),
+            &workspace.title,
+            message.as_deref(),
+        )
+        .await
+        .map_err(map_gh)
+    }
+
+    pub(crate) async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
+        let workspace = self.require_live_workspace(id).await?;
+        gh::push_branch(
+            std::path::Path::new(&workspace.worktree_path),
+            &workspace.branch_name,
+        )
+        .await
+        .map_err(map_gh)
+    }
+
+    pub(crate) async fn workspace_pr(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let mut workspace = self.get_workspace(id).await?;
+        let gh_path = self.gh_search_path_owned();
+        let status = gh::workspace_git_status(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            &workspace.title,
+            &workspace.branch_name,
+            &workspace.base_ref,
+            workspace.pr.clone(),
+            &self.pr_cache,
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)?;
+        if status.pr != workspace.pr {
+            workspace.pr = status.pr.clone();
+            save_workspace(&self.db, &workspace).await?;
+        }
+        Ok(status)
+    }
+
+    pub(crate) async fn create_workspace_pr(
+        &self,
+        id: WorkspaceId,
+        title: Option<String>,
+        body: Option<String>,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let mut workspace = self.require_live_workspace(id).await?;
+        let gh_path = self.gh_search_path_owned();
+        let digest = gh::create_pull_request(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            &workspace.title,
+            &workspace.branch_name,
+            &workspace.base_ref,
+            title.as_deref(),
+            body.as_deref(),
+            &self.pr_cache,
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)?;
+        workspace.pr = Some(digest);
+        save_workspace(&self.db, &workspace).await?;
+        self.workspace_pr(id).await
+    }
+
+    pub(crate) async fn run_workspace_action(
+        &self,
+        id: WorkspaceId,
+        name: &str,
+    ) -> Result<ActionOutcome, ServerError> {
+        let workspace = self.require_live_workspace(id).await?;
+        let repo = self.get_repo(workspace.repo_id).await?;
+        gh::run_named_action(
+            std::path::Path::new(&workspace.worktree_path),
+            &repo.quick_actions,
+            name,
+        )
+        .await
+        .map_err(map_gh)
+    }
+
+    async fn require_live_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
+        let workspace = self.get_workspace(id).await?;
+        if workspace.status == CodeWorkspaceStatus::Archived {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                "workspace is archived",
+            ));
+        }
+        if !std::path::Path::new(&workspace.worktree_path).exists() {
+            return Err(ServerError::not_found("workspace worktree is gone"));
+        }
+        Ok(workspace)
+    }
+
+    fn gh_search_path_owned(&self) -> Option<String> {
+        #[cfg(test)]
+        {
+            return self.gh_search_path.lock().expect("gh search path").clone();
+        }
+        #[cfg(not(test))]
+        None
     }
 
     pub(crate) async fn create_session(
@@ -961,6 +1094,28 @@ fn map_checkpoint(err: CheckpointError) -> ServerError {
             }
         }
         CheckpointError::Internal(message) => ServerError::internal(message),
+    }
+}
+
+fn map_gh(err: GhError) -> ServerError {
+    match err {
+        GhError::NothingToCommit => ServerError::conflict_kind(
+            "nothing_to_commit",
+            "there is nothing to commit in this workspace",
+        ),
+        GhError::AuthFailed(message) => ServerError::conflict_kind("git_auth_failed", message),
+        GhError::GhAbsent { instructions } => ServerError::conflict_kind("gh_absent", instructions),
+        GhError::GhSignedOut { instructions } => {
+            ServerError::conflict_kind("gh_signed_out", instructions)
+        }
+        GhError::User(message) => {
+            if message.contains("no quick action") {
+                ServerError::not_found(message)
+            } else {
+                ServerError::bad_request_kind("git", message)
+            }
+        }
+        GhError::Internal(message) => ServerError::internal(message),
     }
 }
 
