@@ -62,6 +62,9 @@ an accepted boundary.
   listing claims and how entries are maintained.
 - [Model providers and cross-provider replay](model-providers.md) — provider
   tiers, switching routes mid-conversation, and flatten-on-switch.
+- [Code mode](code-mode.md) — the proposed second product surface: repos,
+  worktree workspaces, and structured sessions over external coding-agent
+  harnesses.
 
 ## Interfaces, deployment, and operations
 
