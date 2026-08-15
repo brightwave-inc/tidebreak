@@ -562,6 +562,151 @@ impl ModelProvider for ProviderSearchWithStandaloneControlProvider {
     }
 }
 
+struct MixedQuestionWithReasoningProvider {
+    calls: AtomicUsize,
+    seen: Arc<Mutex<Vec<Vec<Value>>>>,
+}
+
+#[async_trait]
+impl ModelProvider for MixedQuestionWithReasoningProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("mixed-question-with-reasoning")
+    }
+
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        self.seen.lock().unwrap().push(
+            req.messages
+                .iter()
+                .flat_map(|message| message.reasoning.blocks().to_vec())
+                .collect(),
+        );
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ProviderEvent::ReasoningBlock {
+                    data: serde_json::json!({
+                        "type": "thinking",
+                        "thinking": "I should ask which Aurora they mean.",
+                        "signature": "sig-mixed-1",
+                    }),
+                },
+                ProviderEvent::TextDelta {
+                    text: "I searched but could not find that issue.".into(),
+                },
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "ask_1".into(),
+                    name: crate::ASK_USER_QUESTIONS_TOOL.into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: r#"{"questions":[{"id":"target","header":"Target","question":"Which Aurora?","options":[{"id":"aws","label":"AWS Aurora","description":"The database."}]}]}"#.into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "Which Aurora do you mean?".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_mixed_control_step_does_not_replay_its_thinking_on_the_retry() {
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("mixed-question-thinking.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: Some(PermissionMode::Allow),
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat.id, "fake", "explain the aurora ttl")
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    store
+        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register_validated_foreground_client(
+        crate::ask_user_questions_tool_spec(),
+        ApprovalClass::ReadOnly,
+        crate::validate_ask_user_questions_arguments,
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(MixedQuestionWithReasoningProvider {
+        calls: AtomicUsize::new(0),
+        seen: seen.clone(),
+    });
+    let agent = Agent::new(
+        provider,
+        Arc::new(registry),
+        store.clone(),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 2,
+            ..AgentConfig::default()
+        },
+    )
+    .with_durable_steer(lease_token);
+    let (tx, rx) = unbounded();
+    let outcome = agent
+        .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+        .await
+        .unwrap();
+    drop(tx);
+    let events = emitted_events(rx.collect().await);
+    assert!(
+        matches!(
+            &outcome,
+            AgentTurnOutcome::Completed {
+                output,
+                stop_reason: StopReason::EndTurn,
+                ..
+            } if output.content == "Which Aurora do you mean?"
+        ),
+        "{outcome:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallCompleted { output, .. }
+            if output.is_error && output.content.contains("must be called alone")
+    )));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[1].is_empty(),
+        "retry must not carry the rejected step's thinking blocks: {seen:?}"
+    );
+}
+
 #[tokio::test]
 async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
     let db = tempfile::tempdir().unwrap();
