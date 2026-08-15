@@ -444,7 +444,8 @@ impl ToolRegistry {
     /// orchestration tools by the class declared at registration. The
     /// orchestration pair is `Sensitive`, so a plan turn drops it by that same
     /// rule: spawned agents execute, and executing is exactly what a plan turn
-    /// must not do.
+    /// must not do. `ask_user_questions` is read-only by class but parks a
+    /// user continuation, so it is carved out by name the same way.
     #[must_use]
     pub fn specs_for_surface(
         &self,
@@ -493,6 +494,14 @@ impl ToolRegistry {
                     // decision whose accept is meaningless.
                     RegisteredTool::ForegroundClient { registered, .. }
                         if !read_only && registered.spec.name == crate::EXIT_PLAN_MODE_TOOL =>
+                    {
+                        None
+                    }
+                    // Read-only by consent class, but it parks a user
+                    // continuation a plan driver cannot answer. A missing input
+                    // belongs in the plan.
+                    RegisteredTool::ForegroundClient { registered, .. }
+                        if read_only && registered.spec.name == crate::ASK_USER_QUESTIONS_TOOL =>
                     {
                         None
                     }

@@ -5815,6 +5815,135 @@ async fn plan_mode_standing_grant_does_not_bypass_the_refusal() {
         .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
 }
 
+/// A plan-mode turn that would ask a question must not park: a headless
+/// `--permission-mode plan` driver can decide a plan, not answer a card.
+/// The surface withholds the tool, so this provider emits it anyway — the
+/// same slip the live model made after listing folders and missing a file.
+struct PlanModeQuestionProvider;
+
+#[async_trait]
+impl ModelProvider for PlanModeQuestionProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("plan-mode-question")
+    }
+
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        if req.tool_choice == Some(ToolChoice::None) {
+            return Ok(stream::iter(vec![
+                ProviderEvent::TextDelta {
+                    text: "I'll list the missing file as a first step.".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ])
+            .boxed());
+        }
+        Ok(stream::iter(vec![
+            ProviderEvent::ToolCallStarted {
+                index: 0,
+                id: "question_1".into(),
+                name: crate::ASK_USER_QUESTIONS_TOOL.into(),
+            },
+            ProviderEvent::ToolCallArgsDelta {
+                index: 0,
+                fragment: r#"{"questions":[{"id":"missing","header":"File","question":"Where is buggy_sort.py?","options":[{"id":"scratch","label":"Scratch","description":"Look in private scratch."}],"allow_free_form":true}]}"#.into(),
+            },
+            ProviderEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ])
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn plan_mode_does_not_run_ask_user_questions() {
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("plan-questions.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: Some(PermissionMode::Plan),
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat.id, "fake", "find the missing file")
+        .await
+        .unwrap();
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    store
+        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .await
+        .unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register_validated_foreground_client(
+        crate::ask_user_questions_tool_spec(),
+        ApprovalClass::ReadOnly,
+        crate::validate_ask_user_questions_arguments,
+    );
+    let agent = Agent::new(
+        Arc::new(PlanModeQuestionProvider),
+        Arc::new(registry),
+        store.clone(),
+        AgentConfig {
+            model: "fake".into(),
+            max_steps: 1,
+            ..AgentConfig::default()
+        },
+    )
+    .with_durable_steer(lease_token)
+    .with_foreground_agent_orchestration();
+    let (tx, rx) = unbounded();
+    let outcome = agent
+        .run_claimed_turn(&chat, turn_id, MessageId::new(), 1, &tx)
+        .await
+        .unwrap();
+    drop(tx);
+    let events = emitted_events(rx.collect().await);
+
+    assert!(
+        !matches!(outcome, AgentTurnOutcome::ClientToolCall { .. }),
+        "plan mode must refuse, not park: {outcome:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. })),
+        "a declined question must not emit a parked card"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCallCompleted { output, .. }
+                if output.is_error
+                    && output.content.contains("plan mode")
+                    && output.content.contains("exit_plan_mode")
+        )),
+        "the model must be told to put the missing input in the plan: {events:?}"
+    );
+    assert!(
+        store.list_tool_calls(chat.id).await.unwrap().is_empty(),
+        "a declined question must not leave a durable continuation"
+    );
+}
+
 /// The plan surface advertises only read-only registrations, so the model
 /// is never offered a tool the turn would refuse.
 #[test]
@@ -5854,15 +5983,18 @@ fn plan_surface_advertises_only_read_only_tools() {
     names.sort();
     // `update_task_plan` is read-only by consent class but still commits a
     // durable row, and a plan-mode turn is drafting a proposal the reader has
-    // not accepted. It is carved out by name rather than by class.
-    assert_eq!(
-        names,
-        vec!["ask_user_questions", "read_connected_file", "read_file"]
-    );
+    // not accepted. `ask_user_questions` is the same shape: read-only, but it
+    // parks a continuation a plan driver cannot answer. Both are carved out
+    // by name rather than by class.
+    assert_eq!(names, vec!["read_connected_file", "read_file"]);
     assert!(tools
         .specs_for_surface(true, false)
         .iter()
         .any(|spec| spec.name == crate::UPDATE_TASK_PLAN_TOOL));
+    assert!(tools
+        .specs_for_surface(true, false)
+        .iter()
+        .any(|spec| spec.name == crate::ASK_USER_QUESTIONS_TOOL));
 }
 
 /// Stands in for the server-side task-plan tool: read-only class, real write.
