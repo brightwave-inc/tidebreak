@@ -216,6 +216,7 @@ mod tests {
         Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeTurn, CodeTurnId,
         CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
     };
+    use tidebreak_harness::HarnessAdapter;
 
     fn now() -> chrono::DateTime<Utc> {
         Utc::now()
@@ -224,6 +225,35 @@ mod tests {
     async fn seeded_running(
         pid: Option<i64>,
     ) -> (tempfile::TempDir, DbStore, CodeSessionId, CodeTurnId) {
+        let (directory, store, session_id) =
+            seeded_session(pid, CodeSessionLifecycle::Running).await;
+        let turn_id = CodeTurnId::new();
+        insert_turn(
+            &store,
+            &CodeTurn {
+                id: turn_id,
+                session_id,
+                ordinal: 1,
+                status: CodeTurnStatus::Running,
+                user_input: "hello".into(),
+                user_input_blob_id: None,
+                checkpoint_ref: None,
+                diffstat: None,
+                usage: None,
+                narrative: None,
+                started_at: now(),
+                ended_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        (directory, store, session_id, turn_id)
+    }
+
+    async fn seeded_session(
+        pid: Option<i64>,
+        lifecycle: CodeSessionLifecycle,
+    ) -> (tempfile::TempDir, DbStore, CodeSessionId) {
         let directory = tempfile::tempdir().unwrap();
         let store = DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
@@ -276,7 +306,7 @@ mod tests {
                 harness_version: Some("2.1.233".into()),
                 harness_resume_ref: None,
                 permission_mode: CodePermissionMode::Plan,
-                lifecycle: CodeSessionLifecycle::Running,
+                lifecycle,
                 fence_reason: None,
                 child_pid: pid,
                 spawn_epoch: 1,
@@ -287,27 +317,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let turn_id = CodeTurnId::new();
-        insert_turn(
-            &store,
-            &CodeTurn {
-                id: turn_id,
-                session_id,
-                ordinal: 1,
-                status: CodeTurnStatus::Running,
-                user_input: "hello".into(),
-                user_input_blob_id: None,
-                checkpoint_ref: None,
-                diffstat: None,
-                usage: None,
-                narrative: None,
-                started_at: now(),
-                ended_at: None,
-            },
-        )
-        .await
-        .unwrap();
-        (directory, store, session_id, turn_id)
+        (directory, store, session_id)
     }
 
     #[tokio::test]
@@ -376,6 +386,96 @@ mod tests {
         let _ = signaled;
         let _ = decoy.kill();
         let _ = decoy.wait();
+    }
+
+    #[tokio::test]
+    async fn a_pid_the_worker_recorded_mid_turn_fences_recovery() {
+        // The fence is only as good as the pid in the row. Adapters that spawn
+        // one child per turn have no pid to report at turn boundaries, so this
+        // drives a real worker turn and reads back what the worker itself
+        // wrote — seeding a pid here would test nothing.
+        let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Idle).await;
+        let store = Arc::new(store);
+        let bus = Arc::new(crate::code::bus::CodeEventBus::default());
+        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let sink = crate::code::session_worker::sink_for(
+            store.clone(),
+            bus.clone(),
+            session_id,
+            session.spawn_epoch,
+            None,
+        );
+        let child_pid = i64::from(std::process::id());
+        let engine = crate::scripted_harness::ScriptedAdapter::new(vec![
+            tidebreak_harness::HarnessEvent::TurnStarted,
+            tidebreak_harness::HarnessEvent::AssistantDelta {
+                text: "working".into(),
+            },
+        ])
+        .with_child_pid(child_pid)
+        // Long enough that the turn is unambiguously still in flight while
+        // recovery runs; the test never waits for it.
+        .with_delay(std::time::Duration::from_secs(30))
+        .launch(tidebreak_harness::SessionSpec {
+            worktree: _dir.path().join("wt"),
+            permission_mode: CodePermissionMode::Plan,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: None,
+            binary: std::path::PathBuf::from("/scripted/engine"),
+            sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+        })
+        .await
+        .unwrap();
+        let handle = crate::code::session_worker::spawn_session_worker(
+            store.clone(),
+            bus.clone(),
+            session,
+            engine,
+            sink,
+        );
+        let (reply, _turn) = tokio::sync::oneshot::channel();
+        handle
+            .commands
+            .send(crate::code::session_worker::WorkerCommand::RunTurn {
+                message: "hello".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        let recorded = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let current = get_session(&store, session_id).await.unwrap().unwrap();
+                if let Some(pid) = current.child_pid {
+                    return pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the worker must record the pid while the turn is in flight");
+        assert_eq!(recorded, child_pid);
+
+        let probed = Arc::new(AtomicBool::new(false));
+        let flag = probed.clone();
+        let actions = recover_running_sessions_with(&store, &bus, move |pid| {
+            assert_eq!(pid, child_pid);
+            flag.store(true, Ordering::SeqCst);
+            PidLiveness::Alive
+        })
+        .await
+        .unwrap();
+        assert!(
+            probed.load(Ordering::SeqCst),
+            "recovery must probe the recorded pid rather than assume the engine died"
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Fenced { .. }]
+        ));
     }
 
     #[tokio::test]

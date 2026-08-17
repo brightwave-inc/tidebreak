@@ -7,13 +7,18 @@
 //! `run_turn` does not own the command loop. While a turn is in flight the
 //! worker keeps selecting on [`WorkerCommand`] so `decide` and `interrupt`
 //! reach the engine mid-turn — every adapter rides this, not just Claude.
+//! Applying a control command runs *alongside* the turn, never in front of
+//! it: an interrupt's grace period is exactly when the child's stdout most
+//! needs draining.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::{mpsc, oneshot, Notify};
+use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
@@ -23,11 +28,11 @@ use tidebreak_core::db::code::{
 use tidebreak_core::{
     Attention, AttentionSource, BoundedError, CodeApproval, CodeApprovalId, CodeApprovalKind,
     CodeApprovalState, CodeEvent, CodeSession, CodeSessionId, CodeSessionLifecycle, CodeTurn,
-    CodeTurnId, CodeTurnStatus, DbStore,
+    CodeTurnId, CodeTurnStatus, DbStore, HarnessNoticeLevel,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
-    HarnessSession, TurnInput,
+    HarnessSession, TurnInput, TurnOutcome,
 };
 
 use super::bus::CodeEventBus;
@@ -287,6 +292,26 @@ enum ControlFlow {
     Shutdown,
 }
 
+/// Stop the engine's current turn, discarding the adapter's error: the turn
+/// is ending either way, and the outcome is what the worker journals.
+async fn interrupt_engine(engine: &dyn HarnessSession) -> ControlFlow {
+    let _ = engine.interrupt().await;
+    ControlFlow::Continue
+}
+
+/// The next pid the adapter publishes, or a future that never resolves when
+/// the adapter has no per-turn child to report.
+async fn next_child_pid(changes: Option<&mut watch::Receiver<Option<i64>>>) -> Option<i64> {
+    // A dropped sender (or no sender at all) has nothing more to say.
+    let Some(changes) = changes else {
+        return std::future::pending().await;
+    };
+    if changes.changed().await.is_err() {
+        return std::future::pending().await;
+    }
+    *changes.borrow()
+}
+
 async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> ControlFlow {
     match command {
         WorkerCommand::Decide {
@@ -407,23 +432,49 @@ async fn drive_turn(
 
     let run = engine.run_turn(TurnInput { text: message });
     tokio::pin!(run);
+    // Adapters that spawn one child per turn have no pid to report until the
+    // turn is under way. Record every transition as it happens: the session
+    // row's pid is what boot recovery probes, and a NULL pid there is read as
+    // "the engine is gone" — which would re-attach a worker to a worktree a
+    // live child is still writing to.
+    let mut pid_changes = engine.child_pid_changes();
+    // Control commands run concurrently with the turn. Awaiting one inline
+    // would stop draining the child's stdout — during an interrupt's grace
+    // period that is what turns a clean abort into a kill.
+    let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
+    let mut interrupted = false;
+    let mut commands_closed = false;
     let run = loop {
         tokio::select! {
             result = &mut run => break result,
-            command = commands.recv() => match command {
+            Some(flow) = controls.next(), if !controls.is_empty() => {
+                if flow == ControlFlow::Shutdown {
+                    interrupted = true;
+                    controls.push(Box::pin(interrupt_engine(engine)));
+                }
+            }
+            pid = next_child_pid(pid_changes.as_mut()) => {
+                if session.child_pid != pid {
+                    session.child_pid = pid;
+                    let _ = save_session(db, session).await;
+                }
+            }
+            command = commands.recv(), if !commands_closed => match command {
                 Some(command) => {
-                    if apply_control(engine, command).await == ControlFlow::Shutdown {
-                        let _ = engine.interrupt().await;
-                        break run.await;
-                    }
+                    interrupted |= matches!(command, WorkerCommand::Interrupt { .. });
+                    controls.push(Box::pin(apply_control(engine, command)));
                 }
                 None => {
-                    let _ = engine.interrupt().await;
-                    break run.await;
+                    commands_closed = true;
+                    interrupted = true;
+                    controls.push(Box::pin(interrupt_engine(engine)));
                 }
             }
         }
     };
+    // A control command still in flight has a caller waiting on its reply.
+    // Dropping it here would answer them with a dead channel.
+    while controls.next().await.is_some() {}
 
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
@@ -451,22 +502,52 @@ async fn drive_turn(
     }
 
     match run {
-        Ok(()) => {
-            if turn.status == CodeTurnStatus::Running {
-                turn.status = CodeTurnStatus::Completed;
-                turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, &turn).await;
+        Ok(outcome) => {
+            let detail = match outcome {
+                TurnOutcome::Clean => None,
+                TurnOutcome::Incomplete { detail } => Some(detail),
+            };
+            // An engine that died on us says why on stderr. That belongs in
+            // the journal, not only in a log line nobody reading the session
+            // will see. A stop the user asked for is not news.
+            if let (Some(detail), false) = (detail.as_ref(), interrupted) {
                 let _ = persist_and_publish(
                     db,
                     bus,
                     session.id,
                     session.spawn_epoch,
-                    CodeEvent::TurnCompleted {
-                        usage: turn.usage.clone().unwrap_or_default(),
-                        checkpoint: None,
+                    CodeEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Error,
+                        message: detail.clone(),
                     },
                 )
                 .await;
+            }
+            if turn.status == CodeTurnStatus::Running {
+                // The stream ended without closing the turn. Only the worker
+                // knows whether that was asked for.
+                let (status, event) = if interrupted {
+                    (CodeTurnStatus::Interrupted, CodeEvent::TurnInterrupted)
+                } else if let Some(detail) = detail {
+                    (
+                        CodeTurnStatus::Failed,
+                        CodeEvent::TurnFailed {
+                            error: BoundedError { message: detail },
+                        },
+                    )
+                } else {
+                    (
+                        CodeTurnStatus::Completed,
+                        CodeEvent::TurnCompleted {
+                            usage: turn.usage.clone().unwrap_or_default(),
+                            checkpoint: None,
+                        },
+                    )
+                };
+                turn.status = status;
+                turn.ended_at = Some(Utc::now());
+                let _ = save_turn(db, &turn).await;
+                let _ = persist_and_publish(db, bus, session.id, session.spawn_epoch, event).await;
             }
         }
         Err(err) => {

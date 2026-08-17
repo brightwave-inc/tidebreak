@@ -686,6 +686,103 @@ async fn interrupt_stops_a_running_scripted_turn() {
     assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
     let turn = turn.unwrap();
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        turn_statuses(&client, addr, &token, &session).await,
+        ["interrupted"]
+    );
+}
+
+/// A killed engine reaches EOF exactly like a finished one. Reading that as
+/// success journaled a Stop — and an OOM kill, or a signed-out engine — as a
+/// completed turn with zero tokens.
+#[tokio::test]
+async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
+    let (router, token, _runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "working".into(),
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(80))
+        .with_silent_interrupt(),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    let turn_req = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "slow" }));
+    let interrupt = async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        client
+            .post(format!(
+                "http://{addr}/code/sessions/{}/interrupt",
+                json_id(&session)
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+    };
+    let (turn, interrupted) = tokio::join!(turn_req.send(), interrupt);
+    assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(turn.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        turn_statuses(&client, addr, &token, &session).await,
+        ["interrupted"]
+    );
+}
+
+/// Turn statuses for a session, oldest first.
+async fn turn_statuses(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session: &serde_json::Value,
+) -> Vec<String> {
+    let listed: Vec<serde_json::Value> = client
+        .get(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(session)
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    listed
+        .iter()
+        .map(|turn| turn["status"].as_str().unwrap_or_default().to_owned())
+        .collect()
 }
 
 #[tokio::test]

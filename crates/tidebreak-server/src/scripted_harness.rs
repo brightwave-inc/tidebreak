@@ -10,11 +10,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tidebreak_core::{CapLevel, CodePermissionMode, HarnessCaps, HarnessKind};
+use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
     HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv, SessionSpec, TurnInput,
+    TurnOutcome,
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 
 /// Completer that records decisions and unparks a scripted turn.
 ///
@@ -78,6 +80,7 @@ pub(crate) struct ScriptedAdapter {
     auto_mode: CapLevel,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
+    silent_interrupt: bool,
     approver: Arc<ScriptedApprover>,
 }
 
@@ -92,6 +95,7 @@ impl ScriptedAdapter {
             auto_mode: CapLevel::Unsupported,
             child_pid: None,
             unrecognized_per_turn: 0,
+            silent_interrupt: false,
             approver: Arc::new(ScriptedApprover::default()),
         }
     }
@@ -126,6 +130,8 @@ impl ScriptedAdapter {
         self
     }
 
+    /// Publish this pid for the duration of each turn, the way an adapter
+    /// that spawns one child per turn does.
     #[allow(dead_code)]
     pub(crate) fn with_child_pid(mut self, pid: i64) -> Self {
         self.child_pid = Some(pid);
@@ -136,6 +142,14 @@ impl ScriptedAdapter {
     /// scripted session reports this many unrecognized events per turn.
     pub(crate) fn with_unrecognized_per_turn(mut self, count: u64) -> Self {
         self.unrecognized_per_turn = count;
+        self
+    }
+
+    /// Model an engine that dies without saying anything — a SIGKILLed child
+    /// reaches EOF exactly like a finished one.
+    #[allow(dead_code)]
+    pub(crate) fn with_silent_interrupt(mut self) -> Self {
+        self.silent_interrupt = true;
         self
     }
 }
@@ -186,6 +200,8 @@ impl HarnessAdapter for ScriptedAdapter {
             delay: self.delay,
             mid_turn_steering: self.mid_turn_steering,
             child_pid: self.child_pid,
+            silent_interrupt: self.silent_interrupt,
+            pid: ChildPid::new(),
             interrupt: Arc::new(AtomicBool::new(false)),
             steered: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
@@ -201,6 +217,8 @@ struct ScriptedSession {
     delay: Duration,
     mid_turn_steering: CapLevel,
     child_pid: Option<i64>,
+    silent_interrupt: bool,
+    pid: ChildPid,
     interrupt: Arc<AtomicBool>,
     steered: Mutex<Option<String>>,
     unrecognized: AtomicU64,
@@ -208,16 +226,12 @@ struct ScriptedSession {
     approver: Arc<ScriptedApprover>,
 }
 
-#[async_trait]
-impl HarnessSession for ScriptedSession {
-    async fn run_turn(&self, _input: TurnInput) -> Result<(), HarnessError> {
-        self.interrupt.store(false, Ordering::SeqCst);
-        self.unrecognized
-            .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);
+impl ScriptedSession {
+    /// Emit the script, stopping early when the worker interrupts.
+    async fn play_script(&self) -> TurnOutcome {
         for event in &self.events {
             if self.interrupt.load(Ordering::SeqCst) {
-                self.sink.emit(HarnessEvent::TurnInterrupted).await;
-                return Ok(());
+                return self.stopped().await;
             }
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
@@ -245,13 +259,42 @@ impl HarnessSession for ScriptedSession {
                     | HarnessEvent::TurnFailed { .. }
                     | HarnessEvent::TurnInterrupted
             ) {
-                return Ok(());
+                return TurnOutcome::Clean;
             }
         }
         if self.interrupt.load(Ordering::SeqCst) {
-            self.sink.emit(HarnessEvent::TurnInterrupted).await;
+            return self.stopped().await;
         }
-        Ok(())
+        TurnOutcome::Clean
+    }
+
+    /// How a stopped engine ends: either it reports the abort on the stream,
+    /// or — `silent_interrupt` — it dies with nothing to say, which is what a
+    /// SIGKILLed child does.
+    async fn stopped(&self) -> TurnOutcome {
+        if self.silent_interrupt {
+            return TurnOutcome::Incomplete {
+                detail: "the engine was terminated by signal 9".into(),
+            };
+        }
+        self.sink.emit(HarnessEvent::TurnInterrupted).await;
+        TurnOutcome::Clean
+    }
+}
+
+#[async_trait]
+impl HarnessSession for ScriptedSession {
+    async fn run_turn(&self, _input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        self.interrupt.store(false, Ordering::SeqCst);
+        self.unrecognized
+            .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);
+        // A per-turn child exists only while the turn runs; publish it the way
+        // a real one does so the worker records the pid mid-turn.
+        self.pid
+            .set(self.child_pid.map(|pid| pid as u32).filter(|pid| *pid != 0));
+        let outcome = self.play_script().await;
+        self.pid.clear();
+        Ok(outcome)
     }
 
     async fn decide(
@@ -285,7 +328,11 @@ impl HarnessSession for ScriptedSession {
     }
 
     fn child_pid(&self) -> Option<i64> {
-        self.child_pid
+        self.pid.get()
+    }
+
+    fn child_pid_changes(&self) -> Option<watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
     }
 
     fn unrecognized_events(&self) -> u64 {

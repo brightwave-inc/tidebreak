@@ -1,23 +1,25 @@
 //! One print-mode child per turn (`--prompt-file` + `--output-format streaming-json`).
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
+use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tracing::warn;
 
+use crate::child::{signal_interrupt, turn_outcome, ChildPid};
 use crate::grok::parse::GrokStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput,
+    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -30,7 +32,9 @@ pub struct GrokSession {
     resume_ref: Mutex<Option<String>>,
     version: String,
     child: AsyncMutex<Option<Child>>,
-    child_pid: AtomicU32,
+    pid: ChildPid,
+    /// Exit status of a child [`HarnessSession::interrupt`] already reaped.
+    reaped: Mutex<Option<ExitStatus>>,
     /// Unrecognized events summed across every turn's parser: each turn is a
     /// fresh child, so the per-turn count alone would reset on every prompt.
     unrecognized: AtomicU64,
@@ -44,7 +48,8 @@ impl GrokSession {
             resume_ref: Mutex::new(resume_ref),
             version,
             child: AsyncMutex::new(None),
-            child_pid: AtomicU32::new(0),
+            pid: ChildPid::new(),
+            reaped: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
         }
     }
@@ -121,7 +126,7 @@ pub(crate) fn compose_print_plan(
 
 #[async_trait]
 impl HarnessSession for GrokSession {
-    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         refuse_unhonored_mode(self.spec.permission_mode)?;
         let prompt_file = write_prompt_file(&input.text)?;
         let plan = match self.compose_plan(&prompt_file) {
@@ -147,8 +152,7 @@ impl HarnessSession for GrokSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        let pid = self.child_pid.load(Ordering::SeqCst);
-        if pid != 0 {
+        if let Some(pid) = self.pid.get() {
             signal_interrupt(pid);
         }
         let mut slot = self.child.lock().await;
@@ -156,17 +160,18 @@ impl HarnessSession for GrokSession {
             return Ok(());
         };
         match timeout(INTERRUPT_GRACE, child.wait()).await {
-            Ok(Ok(_)) => {
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
+            Ok(Ok(status)) => {
+                self.finish_child(slot, Some(status));
                 Ok(())
             }
             Ok(Err(err)) => Err(err.into()),
             Err(_) => {
                 warn!("engine did not exit after SIGINT; killing");
+                // `kill` already reaps; `try_wait` reads the status it left
+                // without risking a second wait on a reaped child.
                 child.kill().await?;
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
+                let status = child.try_wait().ok().flatten();
+                self.finish_child(slot, status);
                 Ok(())
             }
         }
@@ -177,10 +182,11 @@ impl HarnessSession for GrokSession {
     }
 
     fn child_pid(&self) -> Option<i64> {
-        match self.child_pid.load(Ordering::SeqCst) {
-            0 => None,
-            pid => Some(i64::from(pid)),
-        }
+        self.pid.get()
+    }
+
+    fn child_pid_changes(&self) -> Option<watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
     }
 
     fn unrecognized_events(&self) -> u64 {
@@ -196,7 +202,19 @@ impl HarnessSession for GrokSession {
 }
 
 impl GrokSession {
-    async fn spawn_and_read(&self, plan: &LaunchPlan) -> Result<(), HarnessError> {
+    /// Drop a child this session is done with, leaving its exit status for
+    /// `spawn_and_read` to report.
+    fn finish_child(
+        &self,
+        mut slot: tokio::sync::MutexGuard<'_, Option<Child>>,
+        status: Option<ExitStatus>,
+    ) {
+        *slot = None;
+        self.pid.clear();
+        *self.reaped.lock().expect("grok child exit") = status;
+    }
+
+    async fn spawn_and_read(&self, plan: &LaunchPlan) -> Result<TurnOutcome, HarnessError> {
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -221,8 +239,10 @@ impl GrokSession {
             .stderr
             .take()
             .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-        self.child_pid
-            .store(child.id().unwrap_or(0), Ordering::SeqCst);
+        self.reaped.lock().expect("grok child exit").take();
+        // Publish before the first await: the pid is what crash recovery
+        // probes, and the window it matters in opens here.
+        self.pid.set(child.id());
         *self.child.lock().await = Some(child);
 
         let stderr_task = tokio::spawn(async move { drain_capped(stderr, MAX_STDERR_BYTES).await });
@@ -271,9 +291,6 @@ impl GrokSession {
                 saw_terminal = true;
             }
         }
-        if !saw_terminal {
-            self.spec.sink.emit(HarnessEvent::TurnInterrupted).await;
-        }
         self.unrecognized
             .fetch_add(parser.unrecognized(), Ordering::SeqCst);
 
@@ -281,11 +298,14 @@ impl GrokSession {
         if !stderr.is_empty() {
             warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
-        if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.wait().await;
-        }
-        self.child_pid.store(0, Ordering::SeqCst);
-        Ok(())
+        // `interrupt` may already have reaped the child; it leaves the status
+        // behind so a stopped turn is still distinguishable from a finished one.
+        let status = match self.child.lock().await.take() {
+            Some(mut child) => child.wait().await.ok(),
+            None => self.reaped.lock().expect("grok child exit").take(),
+        };
+        self.pid.clear();
+        Ok(turn_outcome(status, saw_terminal, &stderr))
     }
 }
 
@@ -343,17 +363,4 @@ where
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn signal_interrupt(pid: u32) {
-    #[cfg(unix)]
-    {
-        let pid = pid as i32;
-        // SAFETY: the pid was recorded from a child we spawned this session.
-        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
 }

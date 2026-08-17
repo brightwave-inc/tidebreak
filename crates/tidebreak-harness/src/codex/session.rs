@@ -18,7 +18,7 @@ use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput,
+    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -340,7 +340,7 @@ impl CodexSession {
 
 #[async_trait]
 impl HarnessSession for CodexSession {
-    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         if self.child_pid.load(Ordering::SeqCst) == 0 {
             return Err(HarnessError::Other("engine child is not running".into()));
         }
@@ -357,7 +357,11 @@ impl HarnessSession for CodexSession {
             )
             .await?;
         let _ = id;
-        self.read_until_terminal_turn().await
+        // Long-lived child: its exit is a session-level failure, not a turn
+        // outcome, and `read_until_terminal_turn` already errors on a stream
+        // that ends without one.
+        self.read_until_terminal_turn().await?;
+        Ok(TurnOutcome::Clean)
     }
 
     async fn decide(
