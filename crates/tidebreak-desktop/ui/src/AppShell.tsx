@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Outlet, useNavigate } from "@tanstack/react-router";
+import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -22,6 +22,8 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { useCodeUiStore } from "./code/CodeUiStore";
+import { codeRepoIdFromPath, shellShortcutMode } from "./code/routes";
 import { useExperimentalFlags } from "./experimental";
 import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
@@ -39,7 +41,11 @@ import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
-import { useShellShortcuts, type ShellShortcutHandlers } from "./ShellShortcuts";
+import {
+  useShellShortcuts,
+  type ShellShortcutHandlers,
+  type ShellShortcutMode,
+} from "./ShellShortcuts";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
@@ -67,15 +73,17 @@ function GatedShellHooks({
   client,
   chatId,
   shortcuts,
+  shortcutMode,
 }: {
   client: ApiClient;
   chatId: string | null;
   shortcuts: ShellShortcutHandlers;
+  shortcutMode: () => ShellShortcutMode;
 }) {
   // Watched here rather than in the conversation, so that the agent parking a
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, chatId);
-  useShellShortcuts(shortcuts);
+  useShellShortcuts(shortcuts, shortcutMode);
   return null;
 }
 
@@ -116,6 +124,12 @@ export function AppShell() {
   const desktopUpdates = useDesktopUpdates();
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
+  // Read at keydown rather than subscribed to: which mode a shortcut fires in
+  // is the route's answer, and the shell has no other reason to re-render on
+  // every navigation.
+  const router = useRouter();
+  const currentShortcutMode = () =>
+    shellShortcutMode(router.state.location.pathname);
 
   // The native "Check for Updates…" menu item lands the reader on the
   // Updates settings panel and runs the same explicit check the panel's
@@ -142,8 +156,9 @@ export function AppShell() {
 
   // Shell shortcuts are defined here because these actions outlive any one
   // route: toggling the frame, starting a chat, reaching the composer, and
-  // scaling the window all work wherever the reader is. They are installed
-  // below the gate, by GatedShellHooks.
+  // scaling the window all work wherever the reader is. Mode-scoped ones act
+  // on whichever half of the app the route is in. They are installed below the
+  // gate, by GatedShellHooks.
   const shellShortcuts: ShellShortcutHandlers = {
     "history-back": () => {
       if (desktopNavigation.canGoBack) desktopNavigation.goBack();
@@ -153,6 +168,12 @@ export function AppShell() {
     },
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
     "new-chat": () => void onNewChat(),
+    "code-new-workspace": () => {
+      const { pathname } = router.state.location;
+      useCodeUiStore
+        .getState()
+        .startNewWorkspace(codeRepoIdFromPath(pathname));
+    },
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
@@ -601,6 +622,7 @@ export function AppShell() {
         client={client}
         chatId={openChatId}
         shortcuts={shellShortcuts}
+        shortcutMode={currentShortcutMode}
       />
       <AppContextProvider
         value={{

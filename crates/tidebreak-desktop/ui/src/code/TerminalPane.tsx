@@ -84,6 +84,9 @@ export function TerminalPane({
         editable: true,
         modalOpen: false,
         command,
+        // The terminal only exists inside a workspace, so the chords reaching
+        // it are always code mode's.
+        mode: "code",
       });
       if (!def) return;
       // Let the window listener fire the app shortcut; keep it out of xterm.

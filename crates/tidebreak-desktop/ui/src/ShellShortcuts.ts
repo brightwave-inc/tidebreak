@@ -13,6 +13,7 @@ export type ShellShortcutAction =
   | "history-forward"
   | "toggle-sidebar"
   | "new-chat"
+  | "code-new-workspace"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
@@ -20,13 +21,29 @@ export type ShellShortcutAction =
   | "reload-app"
   | "show-shortcuts";
 
+/**
+ * Which half of the app a shortcut belongs to.
+ *
+ * Chat and code are two modes of one app, and the same chord means the thing
+ * the reader is looking at: Cmd+N starts a conversation in chat and a
+ * workspace in code. Mode is derived from the route family rather than stored,
+ * so the shortcut and the screen can never disagree about which one is up.
+ */
+export type ShellShortcutMode = "chat" | "code";
+
 /** The heading a shortcut sits under in the help dialog. */
-export type ShellShortcutGroup = "Navigation" | "Chat" | "View" | "Help";
+export type ShellShortcutGroup =
+  | "Navigation"
+  | "Chat"
+  | "Code"
+  | "View"
+  | "Help";
 
 /** Group headings in the order the help dialog lists them. */
 export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
   "Navigation",
   "Chat",
+  "Code",
   "View",
   "Help",
 ];
@@ -74,6 +91,13 @@ export type ShellShortcutDef = ShellShortcutBinding & {
   /** Which heading the help dialog files it under. */
   group: ShellShortcutGroup;
   /**
+   * The mode the shortcut belongs to, or every mode when absent. Two
+   * definitions may share a chord only across scopes — that is the whole point
+   * of the field, and the only way one chord can mean the right thing on both
+   * sides of the app.
+   */
+  scope?: ShellShortcutMode;
+  /**
    * Whether the shortcut may fire while focus is in a text field. Chorded
    * combos (mod+key) are safe there — they are not something a reader types —
    * so the composer's own focus never swallows them.
@@ -111,6 +135,20 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     mod: true,
     description: "Start a new chat",
     group: "Chat",
+    scope: "chat",
+    allowInEditable: true,
+  },
+  {
+    // Cmd+N is "make me a new one of what I am looking at". In code mode the
+    // unit of work is a workspace — a worktree and a branch — so making a chat
+    // here would both do the wrong thing and navigate the reader out of the
+    // mode they were working in.
+    id: "code-new-workspace",
+    codes: ["KeyN"],
+    mod: true,
+    description: "New workspace",
+    group: "Code",
+    scope: "code",
     allowInEditable: true,
   },
   {
@@ -231,14 +269,17 @@ function shortcutKeyLabel(def: ShellShortcutDef): string {
  * The shortcuts under their headings, in the order the help dialog lists them.
  *
  * Grouping lives here rather than in the dialog so a shortcut cannot go missing
- * from the help by being filed under a heading nobody renders.
+ * from the help by being filed under a heading nobody renders. Filtered to the
+ * mode the reader is in: listing every scope would show two Cmd+N rows, only
+ * one of which is true where the dialog is being read.
  */
-export function groupedShellShortcuts(): Array<{
+export function groupedShellShortcuts(mode: ShellShortcutMode): Array<{
   group: ShellShortcutGroup;
   items: ShellShortcutDef[];
 }> {
   const byGroup = new Map<ShellShortcutGroup, ShellShortcutDef[]>();
   for (const def of SHELL_SHORTCUTS) {
+    if (!inScope(def, mode)) continue;
     const items = byGroup.get(def.group) ?? [];
     items.push(def);
     byGroup.set(def.group, items);
@@ -247,6 +288,11 @@ export function groupedShellShortcuts(): Array<{
     const items = byGroup.get(group);
     return items ? [{ group, items }] : [];
   });
+}
+
+/** Whether a definition is live in a mode — an unscoped one is live in all. */
+function inScope(def: ShellShortcutDef, mode: ShellShortcutMode): boolean {
+  return def.scope === undefined || def.scope === mode;
 }
 
 type ShortcutKeyEvent = Pick<
@@ -294,14 +340,23 @@ export function isEditableTarget(target: EventTarget | null): boolean {
  *
  * A modal dialog on screen suppresses every shell shortcut: the reader is
  * mid-decision, and toggling the frame or starting a new chat behind the
- * dialog would be a surprise. Kept pure so the guard is testable without a DOM.
+ * dialog would be a surprise. `mode` decides which scoped definitions are live,
+ * and is required rather than defaulted so every caller has to say which half
+ * of the app the key was pressed in. Kept pure so the guard is testable without
+ * a DOM.
  */
 export function resolveShellShortcut(
   event: ShortcutKeyEvent,
-  context: { editable: boolean; modalOpen: boolean; command: boolean },
+  context: {
+    editable: boolean;
+    modalOpen: boolean;
+    command: boolean;
+    mode: ShellShortcutMode;
+  },
 ): ShellShortcutDef | null {
   if (context.modalOpen) return null;
   for (const def of SHELL_SHORTCUTS) {
+    if (!inScope(def, context.mode)) continue;
     if (!matchesShellShortcut(event, def, context.command)) continue;
     if (context.editable && !def.allowInEditable) return null;
     return def;
@@ -325,10 +380,18 @@ export type ShellShortcutHandlers = Record<ShellShortcutAction, () => void>;
  *
  * Handlers are read through a ref so the listener registers once and never has
  * to be torn down and rebound as the callbacks change identity between renders.
+ * `mode` is a getter for the same reason, and because the mode is read from the
+ * route: asking for it at keydown keeps the shell out of a re-render on every
+ * navigation.
  */
-export function useShellShortcuts(handlers: ShellShortcutHandlers): void {
+export function useShellShortcuts(
+  handlers: ShellShortcutHandlers,
+  mode: () => ShellShortcutMode,
+): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   useEffect(() => {
     const command = usesCommandModifier(navigator.userAgent);
@@ -338,6 +401,7 @@ export function useShellShortcuts(handlers: ShellShortcutHandlers): void {
         editable: isEditableTarget(event.target),
         modalOpen: hasOpenModalDialog(document),
         command,
+        mode: modeRef.current(),
       });
       if (!def) return;
       event.preventDefault();

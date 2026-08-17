@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
@@ -8,7 +8,7 @@ import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
-import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
+import { useCodeUiStore } from "./CodeUiStore";
 import { WORKSPACE_STATUS_LABELS } from "./labels";
 
 /**
@@ -32,7 +32,9 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const digests = useCodeUpdatesStore((state) => state.byWorkspace);
-  const [open, setOpen] = useState(false);
+  // The dialog itself is mounted once, by the rail this page renders beside
+  // it, so that Cmd+N and the buttons all drive the same one.
+  const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
 
   useEffect(() => {
     void refresh(client);
@@ -57,7 +59,11 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
             Default base {repo.default_base_ref}
           </p>
         </div>
-        <Button type="button" size="sm" onClick={() => setOpen(true)}>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => startNewWorkspace(repoId)}
+        >
           New workspace
         </Button>
       </div>
@@ -96,12 +102,6 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
           </li>
         ))}
       </ul>
-      <NewWorkspaceDialog
-        open={open}
-        onOpenChange={setOpen}
-        repos={repos}
-        defaultRepoId={repoId}
-      />
     </div>
   );
 }
