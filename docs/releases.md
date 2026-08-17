@@ -107,6 +107,11 @@ The release-draft workflow keeps exactly one draft GitHub Release up to date:
    all PRs chooses the proposed version; the category labels do not
    independently change the version, and a maintenance-only release proposes a
    patch bump.
+4. The same job then collapses leftover drafts so publish still sees exactly
+   one. If Release Drafter cannot see the previous published release it falls
+   back to `v0.0.1` and creates a second draft; the job deletes that fallback
+   and fails so the next merge — or a manual **Release draft** dispatch with
+   **update-draft** — retries against the real baseline.
 
 The first release has no previous published release to use as a comparison
 baseline, so Release Drafter intentionally leaves that draft as a manual
