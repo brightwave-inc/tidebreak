@@ -71,6 +71,7 @@ use crate::state::{SandboxSteerGuard, SandboxSteerRefusal};
 #[derive(Default)]
 struct StepGate {
     started: Notify,
+    started_flag: AtomicBool,
     release: Notify,
 }
 
@@ -109,6 +110,7 @@ impl ScriptedProvider {
 
     /// The same provider, but stalling `delay` before answering each completion,
     /// so a drive spans several lease periods.
+    #[allow(dead_code)]
     fn slow(completions: Vec<String>, delay: Duration) -> Self {
         Self {
             delay,
@@ -136,7 +138,8 @@ impl ModelProvider for ScriptedProvider {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
         if index == 0 {
             if let Some(gate) = &self.gate {
-                gate.started.notify_one();
+                gate.started_flag.store(true, Ordering::SeqCst);
+                gate.started.notify_waiters();
                 gate.release.notified().await;
             }
         }
@@ -1072,10 +1075,9 @@ async fn store_with_pool(
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display());
     let mut options = ConnectOptions::new(url);
+    options.acquire_timeout(Duration::from_secs(120));
     if let Some(max_connections) = max_connections {
-        options
-            .max_connections(max_connections)
-            .acquire_timeout(Duration::from_secs(120));
+        options.max_connections(max_connections);
     }
     let store: Arc<dyn Store> = Arc::new(DbStore::connect_with_options(options).await.unwrap());
     let chat = Chat {
@@ -1107,6 +1109,8 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
     // Turn acceptance uses SQLite's authoritative clock rounded to the end of
     // its current millisecond. Claim just beyond that window so a same-tick
     // fixture setup cannot make the newly queued turn appear not due yet.
+    // Admission must use the same clock: a later wall-clock read can make the
+    // just-written `updated_at` look like it is still in the future (LeaseLost).
     let now = chrono::Utc::now() + chrono::Duration::milliseconds(1);
     let turn = store
         .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
@@ -1114,25 +1118,38 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
         .unwrap()
         .turn
         .expect("test turn should claim");
+    // SQLite's `datetime('now')` can be a millisecond ahead of the host clock
+    // we passed into the claim. Admission refuses `updated_at > now`, so use
+    // a time that is at least the row we just wrote.
+    let mut admit_at = now.max(turn.updated_at);
     let call = CallId::new();
-    match store
-        .admit_sandbox_container_agent_run(
-            turn.id,
-            call,
-            task,
-            lease,
-            turn.steer_revision,
-            AgentRun::MAX_CONCURRENCY_LIMIT,
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap()
-        .expect("container admission should resolve")
-    {
-        AdmitSandboxAgentRunOutcome::Accepted { child, .. }
-        | AdmitSandboxAgentRunOutcome::Existing { child, .. } => child.id,
-        outcome => panic!("unexpected container admission: {outcome:?}"),
+    for _ in 0..8 {
+        match store
+            .admit_sandbox_container_agent_run(
+                turn.id,
+                call,
+                task,
+                lease,
+                turn.steer_revision,
+                AgentRun::MAX_CONCURRENCY_LIMIT,
+                admit_at,
+            )
+            .await
+            .unwrap()
+            .expect("container admission should resolve")
+        {
+            AdmitSandboxAgentRunOutcome::Accepted { child, .. }
+            | AdmitSandboxAgentRunOutcome::Existing { child, .. } => return child.id,
+            AdmitSandboxAgentRunOutcome::LeaseLost => {
+                // The store compares `updated_at > now` against this caller
+                // clock. Advance past the written row and retry rather than
+                // treating a one-millisecond skew as a fixture failure.
+                admit_at += chrono::Duration::milliseconds(5);
+            }
+            outcome => panic!("unexpected container admission: {outcome:?}"),
+        }
     }
+    panic!("container admission still LeaseLost after clock retries; last admit_at={admit_at}");
 }
 
 /// Bind a loopback listener and serve the real in-container agent behind it: the
@@ -1264,6 +1281,91 @@ fn fast_worker_config() -> SandboxContainerRunWorkerConfig {
     }
 }
 
+/// Drive cadence that does not contend with the test's durable writes. Used
+/// when the assertion is about the run outcome, not about heartbeat or fence
+/// timing.
+fn quiet_drive_config() -> SandboxContainerRunConfig {
+    SandboxContainerRunConfig {
+        lease: Duration::from_secs(120),
+        heartbeat: Duration::from_secs(30),
+        durable_fence_interval: Duration::from_secs(30),
+        ..fast_config()
+    }
+}
+
+/// Heartbeat and durable-fence ticks are longer than any test hang-guard, so a
+/// prompt completion cannot be the next periodic tick. The test must wake the
+/// drive through an explicit signal.
+fn signal_woken_config() -> SandboxContainerRunConfig {
+    SandboxContainerRunConfig {
+        lease: Duration::from_secs(60),
+        heartbeat: Duration::from_secs(60 * 60),
+        durable_fence_interval: Duration::from_secs(60 * 60),
+        ..fast_config()
+    }
+}
+
+/// Poll `probe` until it returns `Ok`. The timeout is only a hang-guard: the
+/// proof is the observed transition, and a stuck wait prints the last snapshot
+/// instead of a bare elapsed-time expect.
+async fn wait_until<T, F, Fut>(timeout: Duration, description: &str, mut probe: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, String>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = String::from("not yet polled");
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{description}; last observed: {last}");
+        }
+        match probe().await {
+            Ok(value) => return value,
+            Err(observed) => last = observed,
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn wait_until_step_started(gate: &StepGate) {
+    wait_until(
+        Duration::from_secs(30),
+        "the first model call started",
+        || async {
+            if gate.started_flag.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("first completion not started".to_owned())
+            }
+        },
+    )
+    .await;
+}
+
+async fn wait_until_lease_expired(store: &Arc<dyn Store>, run_id: AgentRunId) {
+    wait_until(
+        Duration::from_secs(5),
+        "the fixture lease expired",
+        || async {
+            let run = store
+                .get_agent_run(run_id)
+                .await
+                .unwrap()
+                .expect("the fixture run exists");
+            match run.lease_expires_at {
+                Some(expiry) if expiry <= chrono::Utc::now() => Ok(()),
+                Some(expiry) => Err(format!(
+                    "status={:?} lease_expires_at={expiry} now={}",
+                    run.status,
+                    chrono::Utc::now()
+                )),
+                None => Err(format!("status={:?} lease_expires_at=None", run.status)),
+            }
+        },
+    )
+    .await;
+}
+
 // --- Tests --------------------------------------------------------------------
 
 /// The production service seam finds a durable queued container run without
@@ -1298,15 +1400,24 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
         // is that the container it provisioned is gone and its obligation is
         // discharged; the runner-level tests pin the exactly-once destroy on
         // the drive path, where nothing else is sweeping.
-        loop {
-            let run = store.get_agent_run(run_id).await.unwrap().unwrap();
-            let torn_down = backend.destroys.load(Ordering::SeqCst) >= 1
-                && store.list_sandbox_teardowns().await.unwrap().is_empty();
-            if run.status == AgentRunStatus::Completed && torn_down {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_until(
+            Duration::from_secs(25),
+            "the service drive completed and discharged teardown",
+            || async {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                let destroys = backend.destroys.load(Ordering::SeqCst);
+                let pending = store.list_sandbox_teardowns().await.unwrap().len();
+                if run.status == AgentRunStatus::Completed && destroys >= 1 && pending == 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "status={:?} destroys={destroys} pending_teardowns={pending}",
+                        run.status
+                    ))
+                }
+            },
+        )
+        .await;
 
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
@@ -1342,12 +1453,19 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
 
         // Let the immediate startup maintenance pass finish before creating the
         // obligation, so only a subsequent cadence can observe it.
-        loop {
-            if !backend.reclaim_live_sets.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_until(
+            Duration::from_secs(5),
+            "the service completed its startup reclaim pass",
+            || async {
+                let passes = backend.reclaim_live_sets.lock().unwrap().len();
+                if passes > 0 {
+                    Ok(())
+                } else {
+                    Err("no reclaim snapshot yet".to_owned())
+                }
+            },
+        )
+        .await;
 
         let run_id = Uuid::new_v4();
         store
@@ -1369,12 +1487,19 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
             .unwrap()
             .expect("the committed handle becomes a teardown obligation");
 
-        loop {
-            if store.list_sandbox_teardowns().await.unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_until(
+            Duration::from_secs(5),
+            "the service cadence discharged the pending teardown",
+            || async {
+                let pending = store.list_sandbox_teardowns().await.unwrap().len();
+                if pending == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("{pending} teardown(s) still pending"))
+                }
+            },
+        )
+        .await;
 
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
@@ -1415,12 +1540,7 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
             store.clone(),
             backend.clone(),
             resolver,
-            SandboxContainerRunConfig {
-                lease: Duration::from_secs(120),
-                heartbeat: Duration::from_secs(30),
-                durable_fence_interval: Duration::from_secs(30),
-                ..fast_config()
-            },
+            quiet_drive_config(),
         );
         let outcome = runner
             .drive(run_id)
@@ -1713,14 +1833,13 @@ async fn the_sweep_revokes_tokens_for_lapsed_and_reaped_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result() {
     // This path intentionally drives the sandbox through its full step budget.
-    // Under the parallel server suite, the nested runtime and durable writes can
-    // spend most of the ordinary 30-second guard waiting for scheduler time even
-    // though the same flow completes immediately in isolation. Keep a hard
-    // bound while leaving enough headroom for the integration-heavy suite.
     // Keep this pool at the minimum width the nested durable-operation path
     // needs: one connection can be held while another store operation advances,
     // but a wide pool only makes operation-log and run-accounting writes compete
     // for SQLite's single writer lock and exhaust its busy timeout under CI load.
+    // The quiet drive cadence is the other half of that: a 250 ms fence would
+    // contend for the same writer while eight model steps run, which is what
+    // made the hang-guard look like a flake.
     tokio::time::timeout(Duration::from_secs(60), async {
         let (_dir, store, chat) = store_with_pool(Some(2)).await;
         let run_id = admit_container_run(&store, chat.id, "never finishes").await;
@@ -1734,13 +1853,29 @@ async fn terminalizes_and_tears_down_when_the_agent_loop_ends_without_a_result()
         ]));
         let resolver = Arc::new(FixedResolver(provider.clone()));
 
-        let runner =
-            SandboxContainerRunner::new(store.clone(), backend.clone(), resolver, fast_config());
-        let outcome = runner
-            .drive(run_id)
-            .await
-            .expect("driving succeeds")
-            .expect("the container run is claimable");
+        let runner = SandboxContainerRunner::new(
+            store.clone(),
+            backend.clone(),
+            resolver,
+            quiet_drive_config(),
+        );
+        let outcome = match tokio::time::timeout(Duration::from_secs(55), runner.drive(run_id)).await
+        {
+            Ok(outcome) => outcome
+                .expect("driving succeeds")
+                .expect("the container run is claimable"),
+            Err(_) => {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                panic!(
+                    "resultless agent loop still {:?}/{:?}; provisions={} destroys={} provider_calls={}",
+                    run.status,
+                    run.last_error_code,
+                    backend.provisions.load(Ordering::SeqCst),
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                );
+            }
+        };
         assert_eq!(outcome, SandboxContainerRunOutcome::Failed(run_id));
 
         let failed = store.get_agent_run(run_id).await.unwrap().unwrap();
@@ -1788,7 +1923,7 @@ async fn stops_proxying_inference_at_the_runs_spend_budget() {
             resolver,
             SandboxContainerRunConfig {
                 max_inference_operations: 2,
-                ..fast_config()
+                ..quiet_drive_config()
             },
         );
         let outcome = runner
@@ -1864,7 +1999,7 @@ async fn recovered_drive_keeps_failed_provider_attempts_in_the_spend_budget() {
             Arc::new(FixedResolver(provider.clone())),
             SandboxContainerRunConfig {
                 max_inference_operations: 2,
-                ..fast_config()
+                ..quiet_drive_config()
             },
         );
 
@@ -1893,7 +2028,7 @@ async fn recovered_drive_keeps_failed_provider_attempts_in_the_spend_budget() {
 /// move forward before the model call is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "takes a while").await;
 
@@ -1914,7 +2049,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
         ));
         let resolver = Arc::new(FixedResolver(provider.clone()));
 
-        let runner = SandboxContainerRunner::new(
+        let runner = Arc::new(SandboxContainerRunner::new(
             store.clone(),
             backend.clone(),
             resolver,
@@ -1922,11 +2057,13 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
                 heartbeat: Duration::from_millis(100),
                 ..fast_config()
             },
-        );
+        ));
 
-        let drive = tokio::spawn(async move { runner.drive(run_id).await });
-
-        gate.started.notified().await;
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive(run_id).await }
+        });
+        wait_until_step_started(&gate).await;
         let initial = store
             .get_agent_run(run_id)
             .await
@@ -1935,27 +2072,32 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             .lease_expires_at
             .expect("a claimed run has a lease expiry");
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        let extended = loop {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            let run = store.get_agent_run(run_id).await.unwrap().unwrap();
-            assert_eq!(
-                run.status,
-                AgentRunStatus::Running,
-                "the run must stay live while its model call is held"
-            );
-            let expiry = run
-                .lease_expires_at
-                .expect("a running claimed run keeps a lease expiry");
-            if expiry > initial {
-                break expiry;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "lease expiry {expiry} did not move past {initial} while the model call was held"
-            );
-        };
-        assert!(extended > initial);
+        wait_until(
+            Duration::from_secs(10),
+            "the live drive completed at least one heartbeat",
+            || async {
+                let ticks = runner.heartbeat_ticks();
+                if ticks >= 1 {
+                    Ok(ticks)
+                } else {
+                    Err("no attached heartbeat yet".to_owned())
+                }
+            },
+        )
+        .await;
+        let after = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            AgentRunStatus::Running,
+            "the run must stay live while its model call is held"
+        );
+        let extended = after
+            .lease_expires_at
+            .expect("a running claimed run keeps a lease expiry");
+        assert!(
+            extended > initial,
+            "lease expiry {extended} did not move past {initial} after an observed heartbeat"
+        );
 
         gate.release.notify_one();
 
@@ -1991,7 +2133,7 @@ async fn the_in_process_reaper_leaves_an_expired_container_lease_alone() {
             .await
             .unwrap()
             .expect("the container claim should pick up the queued run");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_until_lease_expired(&store, run_id).await;
 
         let _ = store
             .claim_agent_run(Uuid::new_v4(), chrono::Duration::minutes(5), 4, 4)
@@ -2494,7 +2636,28 @@ async fn a_dead_drivers_container_run_is_recovered_to_completion() {
             .commit_sandbox_provision_handle(run_uuid, "abandoned-container")
             .await
             .unwrap());
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        wait_until(
+            Duration::from_secs(5),
+            "the dead driver's expired lease is reclaimable",
+            || async {
+                let reclaimable = store
+                    .list_reclaimable_container_agent_runs(chrono::Utc::now())
+                    .await
+                    .unwrap();
+                if reclaimable.iter().any(|run| run.id == run_id) {
+                    Ok(())
+                } else {
+                    let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                    Err(format!(
+                        "status={:?} lease_expires_at={:?} now={}",
+                        run.status,
+                        run.lease_expires_at,
+                        chrono::Utc::now()
+                    ))
+                }
+            },
+        )
+        .await;
 
         let provider = Arc::new(ScriptedProvider::new(vec![]));
         let runner = SandboxContainerRunner::new(
@@ -2865,14 +3028,22 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
         tokio::time::timeout(Duration::from_secs(2), first_failure)
             .await
             .expect("final accounting reaches the injected outage");
-        let until_original_expiry = original_expiry
-            .signed_duration_since(chrono::Utc::now())
-            .to_std()
-            .unwrap_or_default();
-        tokio::time::sleep(until_original_expiry + Duration::from_millis(75)).await;
-        assert!(chrono::Utc::now() > original_expiry);
-        let still_cancelling = store.get_agent_run(run_id).await.unwrap().unwrap();
-        assert_eq!(still_cancelling.status, AgentRunStatus::Cancelling);
+        let still_cancelling = wait_until(
+            Duration::from_secs(5),
+            "cancellation finalization renewed the lease past the original execution expiry",
+            || async {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                match (run.status, run.lease_expires_at) {
+                    (AgentRunStatus::Cancelling, Some(expiry)) if expiry > original_expiry => {
+                        Ok(run)
+                    }
+                    (status, expiry) => Err(format!(
+                        "status={status:?} lease_expires_at={expiry:?} original={original_expiry}"
+                    )),
+                }
+            },
+        )
+        .await;
         assert!(still_cancelling
             .lease_expires_at
             .is_some_and(|expiry| expiry > chrono::Utc::now()));
@@ -2912,16 +3083,18 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
         let run_id = admit_container_run(&store, chat.id, "cancelled mid-flight").await;
 
         let backend = MockBackend::spawning();
-        // Slow completions hold the drive open across several heartbeats, so
-        // the cancellation lands while the container is genuinely working.
-        let provider = Arc::new(ScriptedProvider::slow(vec![], Duration::from_secs(5)));
+        let gate = Arc::new(StepGate::default());
+        // Hold the first completion so cancellation lands while the container
+        // is genuinely attached and working, not after a guessed attach delay.
+        let provider = Arc::new(ScriptedProvider::gated(vec![], gate.clone()));
         let runner = Arc::new(SandboxContainerRunner::new(
             store.clone(),
             backend.clone(),
             Arc::new(FixedResolver(provider)),
             SandboxContainerRunConfig {
                 lease: Duration::from_secs(2),
-                heartbeat: Duration::from_millis(100),
+                heartbeat: Duration::from_millis(50),
+                durable_fence_interval: Duration::from_millis(50),
                 ..fast_config()
             },
         ));
@@ -2929,8 +3102,7 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
             let runner = runner.clone();
             async move { runner.drive(run_id).await }
         });
-        // Let the drive claim and attach, then cancel out from under it.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_until_step_started(&gate).await;
         store
             .request_agent_run_cancellation(run_id)
             .await
@@ -3409,7 +3581,7 @@ async fn failing_provision_intent_reconciles_remote_cancellation() {
 /// instead of treating the no-op as cancellation or lease loss.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "finish under a clamped lease").await;
         let lease_token = Uuid::new_v4();
@@ -3450,26 +3622,68 @@ async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
         );
 
         let backend = MockBackend::spawning();
-        let provider = Arc::new(ScriptedProvider::slow(
+        let gate = Arc::new(StepGate::default());
+        let provider = Arc::new(ScriptedProvider::gated(
             vec!["finished under the live claim".to_owned()],
-            Duration::from_millis(100),
+            gate.clone(),
         ));
-        let runner = SandboxContainerRunner::new(
+        let runner = Arc::new(SandboxContainerRunner::new(
             store.clone(),
             backend.clone(),
             Arc::new(FixedResolver(provider.clone())),
             SandboxContainerRunConfig {
                 lease: Duration::from_secs(2 * 60 * 60),
-                heartbeat: Duration::from_millis(10),
-                durable_fence_interval: Duration::from_millis(10),
+                heartbeat: Duration::from_millis(100),
+                durable_fence_interval: Duration::from_millis(100),
                 ..fast_config()
             },
-        );
+        ));
 
-        let outcome = runner
-            .drive_claimed(run, lease_token)
-            .await
-            .expect("driving succeeds despite no-op renewals");
+        let drive = tokio::spawn({
+            let runner = runner.clone();
+            async move { runner.drive_claimed(run, lease_token).await }
+        });
+        wait_until_step_started(&gate).await;
+        wait_until(
+            Duration::from_secs(5),
+            "the live drive issued at least one no-op heartbeat",
+            || async {
+                let ticks = runner.heartbeat_ticks();
+                if ticks >= 1 {
+                    Ok(ticks)
+                } else {
+                    Err("no attached heartbeat yet".to_owned())
+                }
+            },
+        )
+        .await;
+        assert!(
+            store
+                .validate_agent_run_execution(
+                    run_id,
+                    lease_token,
+                    AgentRunExecutionLocation::Container,
+                )
+                .await
+                .unwrap(),
+            "the exact execution claim remains live after the observed no-op"
+        );
+        gate.release.notify_one();
+
+        let outcome = match tokio::time::timeout(Duration::from_secs(10), drive).await {
+            Ok(joined) => joined
+                .expect("the drive task finished")
+                .expect("driving succeeds despite no-op renewals"),
+            Err(_) => {
+                panic!(
+                    "drive still outstanding after an observed no-op heartbeat; provisions={} destroys={} provider_calls={} heartbeats={}",
+                    backend.provisions.load(Ordering::SeqCst),
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                    runner.heartbeat_ticks(),
+                );
+            }
+        };
         assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
@@ -3563,7 +3777,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
 /// never start another provider call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before_heartbeat() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "cancel before heartbeat").await;
 
@@ -3583,14 +3797,10 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
                 store.clone(),
                 backend.clone(),
                 Arc::new(FixedResolver(provider.clone())),
-                SandboxContainerRunConfig {
-                    lease: Duration::from_secs(60),
-                    // Attachment below proves the registration/revalidation
-                    // heartbeat completed. The cancellation must finish long
-                    // before this next periodic heartbeat can fire.
-                    heartbeat: Duration::from_secs(30),
-                    ..fast_config()
-                },
+                // Periodic ticks are longer than the hang-guard, so a prompt
+                // finish cannot be the next heartbeat. The local cancel signal
+                // and the fenced reverse request are the observed wake.
+                signal_woken_config(),
             )
             .with_steering(steering.clone()),
         );
@@ -3639,7 +3849,12 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
             ),
         )
         .await
-        .expect("the post-cancellation reverse request settles or disconnects promptly");
+        .unwrap_or_else(|_| {
+            panic!(
+                "post-cancellation reverse request still outstanding; provider_calls={}",
+                provider.calls.load(Ordering::SeqCst)
+            )
+        });
         match late {
             ReverseOutcome::Disconnected => {}
             ReverseOutcome::Settled(Response::Error(error)) => {
@@ -3648,12 +3863,22 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
             other => panic!("post-cancellation reverse request returned {other:?}"),
         }
 
-        let outcome = tokio::time::timeout(Duration::from_secs(2), drive)
-            .await
-            .expect("cancellation must not wait for the 30-second heartbeat")
-            .unwrap()
-            .expect("driving succeeds")
-            .expect("the container run is claimable");
+        let outcome = match tokio::time::timeout(Duration::from_secs(10), drive).await {
+            Ok(joined) => joined
+                .expect("the drive task finished")
+                .expect("driving succeeds")
+                .expect("the container run is claimable"),
+            Err(_) => {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                panic!(
+                    "cancellation still outstanding after the reverse fence; status={:?} last_error={:?} destroys={} provider_calls={}",
+                    run.status,
+                    run.last_error_code,
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                );
+            }
+        };
         assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
@@ -3771,7 +3996,10 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
                     .await
             }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The late call may block on the still-held first stream. Give it a
+        // scheduler turn so it is in flight against the closed admission, then
+        // release Drop. Waiting for the call to settle here self-deadlocks.
+        tokio::task::yield_now().await;
         tokio::task::spawn_blocking(move || drop_gate.wait())
             .await
             .unwrap();
@@ -3952,7 +4180,7 @@ async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
                 store.clone(),
                 backend.clone(),
                 Arc::new(FixedResolver(provider.clone())),
-                fast_config(),
+                quiet_drive_config(),
             )
             .with_steering(steering.clone()),
         );
@@ -3971,7 +4199,7 @@ async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
 
         // The first model step proves the container is attached and working, so
         // the instruction below is genuinely mid-run.
-        gate.started.notified().await;
+        wait_until_step_started(&gate).await;
         steering
             .steer(run_id, INSTRUCTION.to_owned())
             .expect("a live attached run accepts steering");
@@ -4040,7 +4268,7 @@ async fn cancelling_an_unattached_container_child_enqueues_its_teardown() {
         .commit_sandbox_provision_handle(run_uuid, "unattended-container")
         .await
         .unwrap());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until_lease_expired(&store, run_id).await;
 
     store
         .request_agent_run_cancellation(run_id)

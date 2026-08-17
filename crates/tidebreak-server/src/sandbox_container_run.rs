@@ -37,6 +37,8 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -612,6 +614,11 @@ pub struct SandboxContainerRunner {
     /// and publishes the steering sink of every connection it holds. A driver
     /// assembled without the server's shared guard uses its own local guard.
     steering: Arc<SandboxSteerGuard>,
+    /// Attached-drive heartbeat ticks observed by tests. Not a clock: the
+    /// production loop still waits on `tokio::time::interval`. Tests wait on
+    /// this count instead of assuming a cadence elapsed.
+    #[cfg(test)]
+    heartbeat_ticks: AtomicUsize,
 }
 
 impl SandboxContainerRunner {
@@ -631,7 +638,15 @@ impl SandboxContainerRunner {
             config,
             token_issuer: Arc::new(GatewayScopedTokenIssuer),
             steering: Arc::new(SandboxSteerGuard::default()),
+            #[cfg(test)]
+            heartbeat_ticks: AtomicUsize::new(0),
         }
+    }
+
+    /// How many attached-drive heartbeat ticks this runner has issued.
+    #[cfg(test)]
+    pub(crate) fn heartbeat_ticks(&self) -> usize {
+        self.heartbeat_ticks.load(Ordering::SeqCst)
     }
 
     /// Publish this driver's exact-drive cancellation handle and live-connection
@@ -1691,6 +1706,8 @@ impl SandboxContainerRunner {
                             // host no longer owns. Teardown still runs.
                             break DriveEnd::LeaseLost;
                         }
+                        #[cfg(test)]
+                        self.heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
                     }
                 }
             }
