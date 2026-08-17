@@ -20,32 +20,66 @@ import { parseStagingVersion, stagingTag } from "./staging-version.mjs";
 // macOS ships one universal artifact whose signed updater archive is advertised
 // to both native architectures; see docs/releases.md.
 //
-// Windows packaging is paused (see docs/deferred.md), so no release currently
-// carries a Windows artifact. The descriptor is retained rather than deleted:
-// it shipped through v0.34.0, and resuming means moving it back into
-// RELEASE_PLATFORMS. Windows ships one unsigned NSIS installer, which is also
-// its Tauri updater artifact (Tauri v2 installs updates from the installer
-// itself, so the `.sig` covers those exact bytes).
-export const PAUSED_WINDOWS_PLATFORM = {
+const MACOS_PLATFORM = {
+  platform: "macos",
+  updaterPlatform: "darwin",
+  architectures: ["universal"],
+  updaterArchitectures: ["aarch64", "x86_64"],
+  formats: [
+    { extension: ".dmg", format: "dmg" },
+    { extension: ".app.zip", format: "app.zip" },
+    { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
+  ],
+};
+
+const WINDOWS_PLATFORM = {
   platform: "windows",
   updaterPlatform: "windows",
   architectures: ["x86_64"],
+  // Tauri v2 installs Windows updates from the NSIS installer itself, so the
+  // updater signature covers the exact bytes users download.
   formats: [{ extension: "-setup.exe", format: "nsis", updater: true }],
 };
 
+const LINUX_PLATFORM = {
+  platform: "linux",
+  updaterPlatform: "linux",
+  architectures: ["x86_64"],
+  formats: [
+    // Tauri selects Linux updates by the bundle format the running app was
+    // installed from. Publish distinct targets so a Debian install can never
+    // fall back to AppImage bytes (or vice versa).
+    {
+      extension: ".AppImage",
+      format: "appimage",
+      updater: true,
+      updaterKeySuffix: "appimage",
+    },
+    {
+      extension: ".deb",
+      format: "deb",
+      updater: true,
+      updaterKeySuffix: "deb",
+    },
+  ],
+};
+
 export const RELEASE_PLATFORMS = [
-  {
-    platform: "macos",
-    updaterPlatform: "darwin",
-    architectures: ["universal"],
-    updaterArchitectures: ["aarch64", "x86_64"],
-    formats: [
-      { extension: ".dmg", format: "dmg" },
-      { extension: ".app.zip", format: "app.zip" },
-      { extension: ".app.tar.gz", format: "app.tar.gz", updater: true },
-    ],
-  },
+  MACOS_PLATFORM,
+  WINDOWS_PLATFORM,
+  LINUX_PLATFORM,
 ];
+
+// Staging remains the signed macOS channel described by decision 16. Production
+// platform expansion must not make that independent workflow require packages
+// it does not build.
+export const STAGING_RELEASE_PLATFORMS = [MACOS_PLATFORM];
+
+function releasePlatforms(channel) {
+  return channel === "staging"
+    ? STAGING_RELEASE_PLATFORMS
+    : RELEASE_PLATFORMS;
+}
 
 function requiredOption(options, name) {
   const value = options.get(name);
@@ -83,28 +117,60 @@ function requireFile(file) {
   }
 }
 
-export function createLatestDocument({ version, publishedAt, artifacts }) {
+export function createLatestDocument({
+  version,
+  publishedAt,
+  artifacts,
+  platforms = RELEASE_PLATFORMS,
+}) {
   const updaterArtifacts = new Map();
-  for (const descriptor of RELEASE_PLATFORMS) {
-    const updaterFormat = descriptor.formats.find((format) => format.updater);
-    for (const artifact of artifacts) {
-      if (
-        artifact.platform !== descriptor.platform ||
-        artifact.format !== updaterFormat.format
-      ) {
-        continue;
-      }
-      if (
-        !descriptor.architectures.includes(artifact.arch) ||
-        typeof artifact.signature !== "string" ||
-        !artifact.signature
-      ) {
-        throw new Error(
-          `invalid ${descriptor.platform} updater artifact in release manifest`,
-        );
-      }
-      for (const arch of descriptor.updaterArchitectures ?? [artifact.arch]) {
-        updaterArtifacts.set(`${descriptor.updaterPlatform}-${arch}`, artifact);
+  const updaterKeys = [];
+  for (const descriptor of platforms) {
+    for (const updaterFormat of descriptor.formats.filter(
+      (format) => format.updater,
+    )) {
+      const updaterArchitectures =
+        descriptor.updaterArchitectures ?? descriptor.architectures;
+      const keysForFormat = updaterArchitectures.map((arch) =>
+        [
+          descriptor.updaterPlatform,
+          arch,
+          updaterFormat.updaterKeySuffix,
+        ]
+          .filter(Boolean)
+          .join("-"),
+      );
+      updaterKeys.push(...keysForFormat);
+
+      for (const artifact of artifacts) {
+        if (
+          artifact.platform !== descriptor.platform ||
+          artifact.format !== updaterFormat.format
+        ) {
+          continue;
+        }
+        if (
+          !descriptor.architectures.includes(artifact.arch) ||
+          typeof artifact.signature !== "string" ||
+          !artifact.signature
+        ) {
+          throw new Error(
+            `invalid ${descriptor.platform} updater artifact in release manifest`,
+          );
+        }
+        const artifactArchitectures = descriptor.updaterArchitectures ?? [
+          artifact.arch,
+        ];
+        for (const arch of artifactArchitectures) {
+          const key = [
+            descriptor.updaterPlatform,
+            arch,
+            updaterFormat.updaterKeySuffix,
+          ]
+            .filter(Boolean)
+            .join("-");
+          updaterArtifacts.set(key, artifact);
+        }
       }
     }
   }
@@ -113,20 +179,15 @@ export function createLatestDocument({ version, publishedAt, artifacts }) {
     version,
     pub_date: publishedAt,
     platforms: Object.fromEntries(
-      RELEASE_PLATFORMS.flatMap((descriptor) =>
-        (descriptor.updaterArchitectures ?? descriptor.architectures).map(
-          (arch) => {
-            const key = `${descriptor.updaterPlatform}-${arch}`;
-            const artifact = updaterArtifacts.get(key);
-            if (!artifact) {
-              throw new Error(
-                `missing ${key} updater artifact in release manifest`,
-              );
-            }
-            return [key, { signature: artifact.signature, url: artifact.url }];
-          },
-        ),
-      ),
+      updaterKeys.map((key) => {
+        const artifact = updaterArtifacts.get(key);
+        if (!artifact) {
+          throw new Error(
+            `missing ${key} updater artifact in release manifest`,
+          );
+        }
+        return [key, { signature: artifact.signature, url: artifact.url }];
+      }),
     ),
   };
 }
@@ -188,8 +249,9 @@ export function createReleaseManifests({
   }
   const distPath = path.resolve(dist);
   const artifacts = [];
+  const platforms = releasePlatforms(channel);
 
-  for (const platformDescriptor of RELEASE_PLATFORMS) {
+  for (const platformDescriptor of platforms) {
     for (const arch of platformDescriptor.architectures) {
       const directory = path.join(distPath, platformDescriptor.platform, arch);
       const baseName = `Tidebreak_${version}_${arch}`;
@@ -267,6 +329,7 @@ export function createReleaseManifests({
     version,
     publishedAt,
     artifacts,
+    platforms,
   });
 
   writeFileSync(

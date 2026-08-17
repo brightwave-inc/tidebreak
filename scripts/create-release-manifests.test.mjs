@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createReleaseManifests,
   RELEASE_PLATFORMS,
+  STAGING_RELEASE_PLATFORMS,
 } from "./create-release-manifests.mjs";
 import { STAGING_BASE_URL } from "./desktop-channel.mjs";
 import { preparePublishedRelease } from "./prepare-published-release.mjs";
@@ -17,9 +18,9 @@ const EXPECTED_ARTIFACT_COUNT = RELEASE_PLATFORMS.reduce(
   0,
 );
 
-function releaseFixture(version = "0.4.2") {
+function releaseFixture(version = "0.4.2", platforms = RELEASE_PLATFORMS) {
   const dist = mkdtempSync(path.join(tmpdir(), "tidebreak-release-"));
-  for (const descriptor of RELEASE_PLATFORMS) {
+  for (const descriptor of platforms) {
     for (const arch of descriptor.architectures) {
       const directory = path.join(dist, descriptor.platform, arch);
       mkdirSync(directory, { recursive: true });
@@ -30,7 +31,7 @@ function releaseFixture(version = "0.4.2") {
         if (format.updater) {
           writeFileSync(
             `${file}.sig`,
-            `signature-${descriptor.platform}-${arch}\n`,
+            `signature-${descriptor.platform}-${arch}-${format.format}\n`,
           );
         }
       }
@@ -55,6 +56,9 @@ test("creates a complete manifest and Tauri updater document", () => {
   assert.deepEqual(Object.keys(latest.platforms), [
     "darwin-aarch64",
     "darwin-x86_64",
+    "windows-x86_64",
+    "linux-x86_64-appimage",
+    "linux-x86_64-deb",
   ]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
@@ -62,11 +66,35 @@ test("creates a complete manifest and Tauri updater document", () => {
   );
   assert.equal(
     latest.platforms["darwin-aarch64"].signature,
-    "signature-macos-universal",
+    "signature-macos-universal-app.tar.gz",
   );
   assert.deepEqual(
     latest.platforms["darwin-x86_64"],
     latest.platforms["darwin-aarch64"],
+  );
+  assert.match(
+    latest.platforms["windows-x86_64"].url,
+    /releases\/v0\.4\.2\/windows\/x86_64\/Tidebreak_0\.4\.2_x86_64-setup\.exe$/,
+  );
+  assert.equal(
+    latest.platforms["windows-x86_64"].signature,
+    "signature-windows-x86_64-nsis",
+  );
+  assert.match(
+    latest.platforms["linux-x86_64-appimage"].url,
+    /releases\/v0\.4\.2\/linux\/x86_64\/Tidebreak_0\.4\.2_x86_64\.AppImage$/,
+  );
+  assert.equal(
+    latest.platforms["linux-x86_64-appimage"].signature,
+    "signature-linux-x86_64-appimage",
+  );
+  assert.match(
+    latest.platforms["linux-x86_64-deb"].url,
+    /releases\/v0\.4\.2\/linux\/x86_64\/Tidebreak_0\.4\.2_x86_64\.deb$/,
+  );
+  assert.equal(
+    latest.platforms["linux-x86_64-deb"].signature,
+    "signature-linux-x86_64-deb",
   );
 
   const diskManifest = JSON.parse(
@@ -127,7 +155,7 @@ test("rejects mismatched tags and non-production hosts", () => {
 
 test("staging manifests stay under the staging prefix", () => {
   const version = "0.0.0-staging.12";
-  const dist = releaseFixture(version);
+  const dist = releaseFixture(version, STAGING_RELEASE_PLATFORMS);
   const staging = {
     version,
     tag: "staging-12",
@@ -144,6 +172,10 @@ test("staging manifests stay under the staging prefix", () => {
     latest.platforms["darwin-aarch64"].url,
     /\/tidebreak\/staging\/releases\/v0\.0\.0-staging\.12\//,
   );
+  assert.deepEqual(Object.keys(latest.platforms), [
+    "darwin-aarch64",
+    "darwin-x86_64",
+  ]);
   assert.throws(
     () =>
       createReleaseManifests({

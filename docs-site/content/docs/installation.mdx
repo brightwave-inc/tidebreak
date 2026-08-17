@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Download Tidebreak for macOS, or build it from source.
+description: Download Tidebreak for macOS, Windows, or Linux, or build it from source.
 ---
 
 ## macOS
@@ -24,15 +24,33 @@ shasum -a 256 -c Tidebreak-macos-universal.dmg.sha256
 An installed macOS build keeps itself current. It checks for a newer signed
 release in the background and asks before restarting.
 
-## Windows and Linux
+## Windows
 
-There is no prebuilt package for either. Build from source.
+[Download for Windows](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe)
 
-Windows installers shipped through v0.34.0, but the Windows release build is
-paused: releases are macOS-only until it comes back. Nothing about Windows
-support has been withdrawn, and the code that produces the installer is still
-in the tree — it is the build that is parked, for cost reasons. A Windows user
-on the last packaged release has no upgrade path other than building.
+The x86_64 NSIS installer is not yet Authenticode-signed, so Windows SmartScreen
+may warn on first run. The release includes a `.sha256` sidecar for independent
+download verification.
+
+## Linux
+
+Choose the portable AppImage or the Debian package. Both are x86_64 builds.
+
+- [Download AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage)
+- [Download Debian package](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb)
+
+Make the AppImage executable before launching it:
+
+```sh
+chmod +x Tidebreak-linux-x86_64.AppImage
+./Tidebreak-linux-x86_64.AppImage
+```
+
+Windows and Linux packages run the desktop chat, files, connected-folder,
+provider, and remote-sandbox surfaces. Native local execution, managed Node and
+LibreOffice installation, computer use, and code mode remain unavailable where
+the app reports those platform capabilities as unsupported. Automatic updates
+currently run only on macOS; install a newer Windows or Linux package manually.
 
 ## Build from source
 
@@ -66,6 +84,7 @@ Tidebreak owns one application data directory, created on first launch:
 | --- | --- |
 | macOS | `~/Library/Application Support/io.brightwave.tidebreak` |
 | Windows | `%APPDATA%\io.brightwave.tidebreak` |
+| Linux | `~/.local/share/io.brightwave.tidebreak` |
 
 Inside it:
 

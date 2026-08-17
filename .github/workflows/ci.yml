@@ -480,10 +480,7 @@ jobs:
     # add `windows-ci` when the change reaches a Windows boundary; main and
     # scheduled/manual runs retain the automatic backstop.
     #
-    # The leading `false` parks the whole lane while Windows packaging is paused
-    # (see docs/deferred.md). The rest of the condition is the live gating
-    # policy, kept intact so resuming is one literal.
-    if: ${{ false && needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
+    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
     runs-on: windows-latest
     # Every Rust-scoped main push contains the prior main state, so the newest
     # Windows run proves everything an older in-progress one would have proven.

@@ -170,10 +170,10 @@ automatic.
    carries so the products they package are always linked from the tag's own
    sources. The macOS job then signs the app with the Developer ID identity,
    notarizes and staples the app and DMG, verifies them with Apple tooling, and
-   creates a signed Tauri updater archive. The parallel Windows job is parked
-   behind a literal `false` and never runs — see
-   [What comes after v1](deferred.md) — so a release currently produces macOS
-   artifacts only.
+   creates a signed Tauri updater archive. Parallel Windows and Linux jobs
+   produce the x86_64 NSIS, AppImage, and Debian packages; all three are signed
+   with the Tauri updater key after packaging. A fresh release cannot continue
+   unless all three operating-system builds succeed.
 8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
@@ -183,15 +183,15 @@ automatic.
    deliberately published as source-scoped metadata, not attested as a
    description of the packaged installers.
 9. Before publication, a credential-free job attaches the verified build
-   outputs and their `.sha256` sidecars to the draft GitHub Release — today that
-   is the notarized disk image as
+   outputs and their `.sha256` sidecars to the draft GitHub Release. Stable
+   download names include the notarized disk image as
    `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy
    `Tidebreak-macos-apple-silicon.dmg` alias that keeps the existing README URL
-   live through the transition. It retains the versioned app zip, signed updater
-   archive, updater signature, source SBOM, and checksum sidecars on GitHub as
-   recovery inputs. It would again include the Windows installer and updater
-   assets if the Windows lane were unparked. This job holds no signing or AWS
-   credentials. The two DMG names omit the version so that
+   live through the transition, `Tidebreak-windows-x86_64-setup.exe`,
+   `Tidebreak-linux-x86_64.AppImage`, and `Tidebreak-linux-x86_64.deb`. It also
+   retains the versioned packages, updater artifacts and signatures, source
+   SBOM, and checksum sidecars on GitHub as recovery inputs. This job holds no
+   signing or AWS credentials. The stable names omit the version so that
    `https://github.com/brightwave-inc/tidebreak/releases/latest/download/<name>`
    stays a permanent download link for the README; the release page and the
    app's own version string identify which build it is.
@@ -239,15 +239,7 @@ current platform set. A release published before this platform change cannot
 be re-dispatched: it fails on the artifact paths and updater keys instead of
 silently republishing a different release shape.
 
-### Windows: parked, unsigned x86_64 when it returns
-
-**The Windows release lane is currently parked**, so releases are macOS-only.
-`prepare_windows` and `build_windows` in `release.yml` are each gated behind a
-literal `false`, and the `windows` descriptor in
-`scripts/create-release-manifests.mjs` is retained outside `RELEASE_PLATFORMS`
-rather than deleted. The reason is release time, not a product decision — see
-[What comes after v1](deferred.md). The packaging below is what shipped through
-v0.34.0 and what resuming the lane restores; nothing in it has been removed.
+### Windows: unsigned x86_64 NSIS
 
 A release ships one `x86_64` Windows build as a single NSIS `-setup.exe`
 installer. NSIS is the one installer format for v1 because Tauri bundles it
@@ -260,13 +252,32 @@ That updater signature covers the exact installer bytes and feeds
 installer itself, so no separate updater archive exists on Windows. Packaged
 apps currently run the update loop only on macOS; the Windows metadata is
 published so updater-enabled Windows builds can adopt it without a manifest
-change. While the lane is parked, `latest.json` carries no `windows-x86_64`
-key at all, so a Windows user on v0.34.0 has no upgrade path until it returns.
+change.
 
 Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
 `prepare_windows` job compiles the tag from scratch (or from an earlier
 release's prepared cache) and is the single writer of the Windows Cargo
 registry and prepared-build caches.
+
+### Linux: x86_64 AppImage and Debian package
+
+A release ships one portable AppImage and one `.deb` for x86_64 Linux. Both
+carry Tauri updater signatures over their exact bytes, and `latest.json`
+publishes separate `linux-x86_64-appimage` and `linux-x86_64-deb` entries so an
+installed package can only select its own format. Neither package is
+distribution-signed in this first shipping slice.
+
+Packaged apps currently run the update loop only on macOS. The Linux updater
+metadata is published now so enabling verified AppImage or Debian updates later
+does not require changing the public manifest shape. Native local execution,
+managed Node and LibreOffice installation, computer use, and code mode remain
+governed by their existing platform capability checks; packaging the desktop
+does not claim those features on Linux.
+
+Like Windows, Linux uses a credential-free `prepare_linux` job to compile the
+tag and save only Cargo intermediates and unsigned products. The packaging job
+restores that source-pinned cache, discards linked binaries, relinks from the
+release tag, builds both formats, and signs each package only after packaging.
 
 The public download contract is rooted at:
 
@@ -280,16 +291,19 @@ Each release has an immutable prefix:
 tidebreak/releases/vMAJOR.MINOR.PATCH/
 ├── manifest.json
 ├── macos/
-│   └── aarch64/
-└── windows/          (absent while the Windows lane is parked)
+│   └── universal/
+├── windows/
+│   └── x86_64/
+└── linux/
     └── x86_64/
 ```
 
-Each macOS architecture directory contains a notarized DMG, a zip of the
-notarized app, a signed `.app.tar.gz` updater archive, its signature, and
-SHA-256 files. A Windows architecture directory, when the lane produces one,
-contains an unsigned NSIS installer, its Tauri updater signature, and SHA-256
-files. The immutable release root also contains
+The macOS directory contains a notarized DMG, a zip of the notarized app, a
+signed `.app.tar.gz` updater archive, its signature, and SHA-256 files. The
+Windows directory contains an unsigned NSIS installer, its Tauri updater
+signature, and SHA-256 files. The Linux directory contains an AppImage, a
+Debian package, both updater signatures, and SHA-256 files. The immutable
+release root also contains
 `Tidebreak_VERSION_source.spdx.json` and its checksum. The root `manifest.json`
 inside each versioned prefix is immutable; only the unversioned
 Tauri-compatible `manifest.json` and `latest.json` pointers are mutable. The
@@ -300,7 +314,7 @@ After the repository is public, verify the independently signed provenance for
 any downloaded artifact with GitHub CLI:
 
 ```sh
-gh attestation verify Tidebreak-macos-apple-silicon.dmg \
+gh attestation verify Tidebreak-macos-universal.dmg \
   --repo brightwave-inc/tidebreak
 ```
 
@@ -420,9 +434,10 @@ write access is only `tidebreak/staging/*`. A role that can also write
 
 Before the first public release, protect the environment as appropriate, verify
 all configuration values, and exercise the workflow with the intended first
-tag. The workflow references Apple signing secrets only in the macOS jobs; the
-parked Windows jobs receive only the Tauri updater key, and publishing uses
-short-lived AWS credentials obtained through OIDC.
+tag. The workflow references Apple signing secrets only in the macOS jobs.
+Windows and Linux receive only the Tauri updater key in their artifact
+verification steps, and publishing uses short-lived AWS credentials obtained
+through OIDC.
 
 ### Release CI and cache security
 
@@ -537,7 +552,8 @@ see exactly what a change to either lockfile adds to the product's obligations.
   `Contents/Resources/legal/` of the app bundle. The DMG, the `.app.zip`, and
   the updater archive are all derived from that bundle, so the release lane
   verifies the bundled bytes match the checked-in files once, after signing.
-  When the Windows lanes resume they inherit the same resource map.
+  Windows and Linux packages inherit the same resource map; their packaging
+  jobs verify the shared release inputs before producing artifacts.
 
 ## Before 1.0
 
@@ -568,9 +584,9 @@ its local profile until this checklist is complete:
    in a real migration chain, and `reset_pre_v1_state` stops being reachable.
    The lifecycle must preserve supported data, migrate transactionally, fail
    safely, and test upgrades from the latest 0.x state.
-3. Verify the provisioned signed, notarized, hosted macOS pipeline with clean
-   install and 0.x upgrade smoke tests. Add other supported platforms before
-   claiming support for them.
+3. Verify the provisioned release pipeline with clean install and 0.x upgrade
+   smoke tests on macOS and Windows, clean install and launch checks for the
+   Linux Debian package, and AppImage launch checks on a second distribution.
 4. Update `SECURITY.md` with supported release lines, security-fix policy, and
    end-of-support expectations. Document backup, migration, and rollback.
 5. In the same readiness work, change the `semver:breaking` version resolver's
@@ -610,11 +626,9 @@ non-required: the required `semantic PR title` job already fails unless the
 managed release labels match the title, so requiring the label job too would
 add nothing.
 
-`Windows cargo check` is intentionally separate from the required contexts, and
-is currently parked behind a literal `false` along with the release lanes — see
-[What comes after v1](deferred.md) — so the `windows-ci` label does nothing
-today. When it is unparked it runs automatically for Rust-scoped pushes to
-`main`, weekly schedules, and manual dispatches, while pull requests opt in with
+`Windows cargo check` is intentionally separate from the required contexts. It
+runs automatically for Rust-scoped pushes to `main`, weekly schedules, and
+manual dispatches, while pull requests opt in with
 `windows-ci` when they touch a native Windows boundary. Keep it non-required so
 pull requests do not wait for long-running native platform coverage; the
 post-merge and scheduled runs remain the backstop.
