@@ -236,6 +236,16 @@ purpose:
 - **Multiple sessions per workspace.** The data model keeps room for
   follow-up and successor sessions in one worktree; v1 runs one active
   session per workspace.
+- **Changing a session's permission mode after it starts.** The mode is
+  chosen at session creation, refused per harness capability there
+  ([record 33](decisions/0033-code-mode-approvals.md),
+  [record 38](decisions/0038-auto-is-a-declared-capability.md)), and composed
+  into the engine's launch; no adapter can renegotiate it on an attached
+  session. Changing it means tearing the engine down and relaunching it on a
+  resume ref — new semantics for spawn epochs, in-flight turns, and pending
+  approvals — so the composer states the session's mode rather than offering
+  it. Revisit when relaunch-on-resume is a proven path, or when a harness
+  protocol carries a mode change directly.
 - **An in-app code editor.** V1 reviews server-produced diffs and hands
   editing to the user's editor via the worktree path. An embedded editor is
   a heavyweight dependency with its own product surface; it needs demand
