@@ -32,7 +32,7 @@ type CodeCatalogStore = CodeCatalogState & {
     "listCodeRepos" | "listCodeWorkspaces" | "getHarnessDoctor"
   >) => Promise<void>;
   rememberSession: (session: CodeSessionSnapshot) => void;
-  forgetWorkspace: (workspaceId: string) => void;
+  forgetWorkspaceSession: (workspaceId: string) => void;
   upsertRepo: (repo: CodeRepoSnapshot) => void;
   upsertWorkspace: (workspace: CodeWorkspaceSnapshot) => void;
   reset: () => void;
@@ -68,13 +68,10 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       },
     });
   },
-  forgetWorkspace: (workspaceId) => {
+  forgetWorkspaceSession: (workspaceId) => {
     const { [workspaceId]: _removed, ...sessionsByWorkspace } =
       get().sessionsByWorkspace;
-    set({
-      sessionsByWorkspace,
-      workspaces: get().workspaces.filter((item) => item.id !== workspaceId),
-    });
+    set({ sessionsByWorkspace });
   },
   upsertRepo: (repo) => {
     set({
