@@ -226,6 +226,37 @@ describe("projectWorkbookForReadOnlyDisplay", () => {
     });
   });
 
+  it("projects data bars from baked formula results, not empty cached values", async () => {
+    formulaEngine.evaluateUncachedFormulasWithDuke.mockResolvedValue({
+      "0:D1": { type: "number", value: 0 },
+      "0:D2": { type: "number", value: 0.5 },
+      "0:D3": { type: "number", value: 1 },
+    });
+
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      `<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dashboard" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/></Relationships>`,
+    );
+    zip.file(
+      "xl/worksheets/sheet1.xml",
+      `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="D1"><f>A1</f><v/></c></row><row r="2"><c r="D2"><f>A2</f><v/></c></row><row r="3"><c r="D3"><f>A3</f><v/></c></row></sheetData><conditionalFormatting sqref="D1:D3"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF2979FF"/></dataBar></cfRule></conditionalFormatting></worksheet>`,
+    );
+
+    const source = await zip.generateAsync({ type: "arraybuffer" });
+    const projection = await projectWorkbookForReadOnlyDisplay(source);
+
+    expect(projection.conditionalStylesBySheet[0]).toMatchObject({
+      D1: { dataBar: { color: "#2979ff", widthPercent: 0 } },
+      D2: { dataBar: { color: "#2979ff", widthPercent: 50 } },
+      D3: { dataBar: { color: "#2979ff", widthPercent: 100 } },
+    });
+  });
+
   it("reads Excel packaging parts that start with a UTF-8 BOM", async () => {
     const zip = new JSZip();
     zip.file(

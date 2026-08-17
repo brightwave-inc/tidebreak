@@ -82,11 +82,6 @@ async function projectWorkbookDisplayCopy(
         const document = parseXml(await entry.async("string"), path);
         const formulas: Record<string, string> = {};
         const uncached: { address: string; cell: Element }[] = [];
-        const conditionalStyles = projectConditionalStyles(document);
-
-        if (Object.keys(conditionalStyles).length > 0) {
-          conditionalStylesBySheet[sheetIndex] = conditionalStyles;
-        }
 
         for (const cell of localElements(document, "c")) {
           const formula = localChild(cell, "f");
@@ -151,6 +146,11 @@ async function projectWorkbookDisplayCopy(
       }
     }
 
+    const conditionalStyles = projectConditionalStyles(sheet.document);
+    if (Object.keys(conditionalStyles).length > 0) {
+      conditionalStylesBySheet[sheet.sheetIndex] = conditionalStyles;
+    }
+
     if (sheetChanged) {
       zip.file(sheet.path, new XMLSerializer().serializeToString(sheet.document));
       changed = true;
@@ -179,11 +179,8 @@ function projectConditionalStyles(
 
   for (const cell of localElements(document, "c")) {
     const address = cell.getAttribute("r")?.replaceAll("$", "").toUpperCase();
-    const rawValue = localChild(cell, "v")?.textContent;
-    const value =
-      rawValue === null || rawValue === undefined
-        ? Number.NaN
-        : Number(rawValue);
+    const rawValue = cellCachedValue(cell);
+    const value = rawValue === null ? Number.NaN : Number(rawValue);
     if (address && Number.isFinite(value)) numericValues.set(address, value);
   }
 
