@@ -938,23 +938,27 @@ impl CodeRuntime {
             if let Some(handle) = handle {
                 Self::shut_down_worker(session.id, handle).await;
             }
+            // The outgoing worker still holds this epoch, so a persist during
+            // the wait can overwrite Ended. Re-assert from a fresh load.
+            let mut current = self.get_session(session.id).await?;
+            current.lifecycle = CodeSessionLifecycle::Ended;
+            current.child_pid = None;
+            current.fence_reason = None;
+            if !super::attention::persist_session(&self.db, &self.bus, &current).await? {
+                return Err(ServerError::conflict_kind(
+                    "session_not_ended",
+                    "the session did not stay ended after the worker stopped",
+                ));
+            }
         }
         Ok(())
     }
 
-    /// Ask a superseded worker to stop, and wait for it to finish unwinding.
-    ///
-    /// The worker drops its command receiver as its last act — after the engine
-    /// is shut down and its final writes have landed — so the sender seeing the
-    /// receiver close is exactly "the worker is gone". One `Shutdown` is enough:
-    /// an idle worker leaves the loop on it, and a worker mid-turn interrupts
-    /// the turn and then leaves at the top of the next iteration because the
-    /// caller marked the session ended first. Resending would only replay
-    /// `interrupt` into an engine that is already stopping.
-    ///
-    /// The wait is bounded so an engine that never returns cannot hold an
-    /// archive or a reap open; the epoch fence on the session row keeps a late
-    /// writer harmless either way.
+    /// Ask a superseded worker to stop, and wait for its command receiver to
+    /// close — that is the last thing the worker does. One `Shutdown` is
+    /// enough; resending would only replay `interrupt` into an engine that is
+    /// already stopping. The wait is bounded so a wedged engine cannot hold
+    /// an archive or a reap open.
     async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) {
         const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         let commands = handle.commands.clone();
