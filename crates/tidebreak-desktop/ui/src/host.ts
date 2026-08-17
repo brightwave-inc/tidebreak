@@ -20,6 +20,13 @@ export function hasNativeHost(): boolean {
   return isTauri();
 }
 
+/** Native directory picker for code-mode repo registration and clone destinations. */
+export async function pickCodeDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const path = await invoke<string | null>("pick_code_directory");
+  return path ?? null;
+}
+
 /** Best-effort only; durable pending-question polling remains authoritative. */
 export async function requestUserAttention(): Promise<void> {
   if (!isTauri()) return;

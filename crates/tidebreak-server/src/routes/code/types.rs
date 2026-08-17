@@ -198,6 +198,49 @@ pub struct HarnessDoctorEntry {
     pub unrecognized_event_count: i64,
 }
 
+/// Body of `POST /code/repos/clone`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloneRepoBody {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub github: Option<String>,
+    pub parent_dir: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Snapshot of an in-flight or finished clone job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCloneJobSnapshot {
+    pub id: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub percent: Option<u8>,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo_id: Option<RepoId>,
+}
+
+/// Remembered clone destination plus observed `gh` status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCloneDefaults {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_dir: Option<String>,
+    pub gh_found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gh_authenticated: Option<bool>,
+    pub gh_remediation: String,
+}
+
 /// Body of `POST /code/repos`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -577,9 +620,35 @@ pub enum CodeUpdateNotice {
         workspace_id: WorkspaceId,
         terminal_id: CodeTerminalId,
     },
+    /// Progress of one `git clone` job. Not restated on connect.
+    CloneProgress {
+        job: String,
+        phase: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        percent: Option<u8>,
+        done: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        repo_id: Option<RepoId>,
+    },
 }
 
 impl CodeUpdateNotice {
+    pub(crate) fn clone_progress(progress: crate::code::bus::CloneProgress) -> Self {
+        Self::CloneProgress {
+            job: progress.job,
+            phase: progress.phase,
+            percent: progress.percent,
+            done: progress.done,
+            error: progress.error,
+            repo_id: progress.repo_id,
+        }
+    }
+
     pub(crate) fn digest(digest: crate::code::bus::SessionDigest) -> Self {
         let wire = CodeSessionDigest::from(digest);
         Self::Digest {

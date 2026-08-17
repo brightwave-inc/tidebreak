@@ -126,6 +126,50 @@ pub(crate) struct ActionOutcome {
     pub timed_out: bool,
 }
 
+/// Resolve `owner/repo` to a clone URL.
+///
+/// When `gh` is signed in, the URL is whatever `gh repo view --json url`
+/// reports. Otherwise the HTTPS GitHub URL is constructed. Credentials are
+/// never read or stored.
+pub(crate) async fn resolve_github_clone_url(
+    owner_repo: &str,
+    search_path: Option<&str>,
+) -> Result<String, GhError> {
+    let gh = observe_gh(search_path).await;
+    if gh.found && gh.authenticated == Some(true) {
+        let binary = gh.binary.as_ref().ok_or_else(|| GhError::GhAbsent {
+            instructions: gh.remediation.clone(),
+        })?;
+        let json = run_gh(
+            Path::new("."),
+            binary,
+            &["repo", "view", owner_repo, "--json", "url"],
+            GH_TIMEOUT,
+        )
+        .await
+        .map_err(|err| GhError::user(format!("could not resolve {owner_repo}: {err}")))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+        let url = parsed
+            .get("url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| GhError::user(format!("gh did not report a url for {owner_repo}")))?;
+        return Ok(github_clone_url(url));
+    }
+    Ok(format!("https://github.com/{owner_repo}.git"))
+}
+
+fn github_clone_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.ends_with(".git") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.git")
+    }
+}
+
 /// Observed `gh` availability. Tokens are never read or stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhObservation {
@@ -523,7 +567,7 @@ fn parse_count(text: &str) -> u64 {
     text.trim().parse().unwrap_or(0)
 }
 
-async fn observe_gh(search_path: Option<&str>) -> GhObservation {
+pub(crate) async fn observe_gh(search_path: Option<&str>) -> GhObservation {
     let Some(binary) = find_gh(search_path) else {
         return GhObservation {
             found: false,
@@ -1147,5 +1191,35 @@ exit 3
         assert!(timed.timed_out);
         assert!(!timed.success);
         assert!(timed.stderr.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn resolve_github_uses_gh_url_when_signed_in() {
+        let shim_dir = TempDir::new().unwrap();
+        write_executable(
+            &shim_dir.path().join("gh"),
+            r#"#!/bin/sh
+if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = repo ] && [ "$2" = view ]; then
+  echo '{"url":"https://github.com/acme/demo"}'
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 3
+"#,
+        );
+        let url = resolve_github_clone_url("acme/demo", Some(shim_dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(url, "https://github.com/acme/demo.git");
+    }
+
+    #[tokio::test]
+    async fn resolve_github_constructs_https_when_gh_is_absent() {
+        let empty = TempDir::new().unwrap();
+        let url = resolve_github_clone_url("acme/demo", Some(empty.path().to_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(url, "https://github.com/acme/demo.git");
     }
 }

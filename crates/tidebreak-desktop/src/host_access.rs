@@ -1152,15 +1152,46 @@ async fn confirm_folder_widening(
         .map_err(|_| "folder permission prompt closed unexpectedly".to_owned())
 }
 
+/// Grant-free directory picker for code-mode repo registration and clone
+/// destinations. The path is returned as a string; the server validates it.
+#[tauri::command]
+pub(crate) async fn pick_code_directory(
+    app: AppHandle,
+    state: State<'_, HostAccess>,
+) -> Result<Option<String>, String> {
+    let _picker = state
+        .picker
+        .try_lock()
+        .map_err(|_| "a folder picker is already open".to_owned())?;
+    let path = pick_folder_titled(&app, None, "Choose a folder").await?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !path.is_absolute() {
+        return Err("the folder picker returned an invalid path".to_owned());
+    }
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 pub(super) async fn pick_folder(
     app: &AppHandle,
     starting_directory: Option<PathBuf>,
 ) -> Result<Option<PathBuf>, String> {
+    pick_folder_titled(
+        app,
+        starting_directory,
+        "Choose a folder Tidebreak can read",
+    )
+    .await
+}
+
+async fn pick_folder_titled(
+    app: &AppHandle,
+    starting_directory: Option<PathBuf>,
+    title: &str,
+) -> Result<Option<PathBuf>, String> {
     let (tx, rx) = oneshot::channel();
-    let mut picker = app
-        .dialog()
-        .file()
-        .set_title("Choose a folder Tidebreak can read");
+    let mut picker = app.dialog().file().set_title(title);
     if let Some(starting_directory) = starting_directory {
         picker = picker.set_directory(starting_directory);
     }

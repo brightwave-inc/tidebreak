@@ -27,6 +27,7 @@ server_info: hands the renderer the embedded server's address and per-launch tok
 request_user_attention: native window attention hint when a parked question needs the user.
 
 # OS pickers, drops, and save dialogs
+pick_code_directory: native directory picker for code-mode repo registration and clone destinations; grant-free — the path is handed to the server for validation (ADR 0030).
 attach_chat_files: opens the OS file picker; only the native shell can turn a user's file choice into readable paths.
 attach_dropped_chat_files: claims the operating-system drop this window received and routes the dropped paths through the same ingest.
 export_library_document: writes a source document's bytes wherever the native save dialog sends them.

@@ -33,7 +33,7 @@ afterEach(() => {
 
 describe("reduceCodeUpdates", () => {
   it("replaces the map on snapshot and upserts a digest", () => {
-    const empty = { byWorkspace: {}, viewedWorkspaceId: null };
+    const empty = { byWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
     const afterSnapshot = reduceCodeUpdates(empty, {
       type: "snapshot",
       sessions: [digest(), digest({ workspace: "ws-2", session: "sess-2", title: "other" })],
@@ -88,6 +88,23 @@ describe("reduceCodeUpdates", () => {
         terminal_id: "term-1",
       }),
     ).toBeNull();
+    expect(
+      noticeToAction({
+        type: "clone_progress",
+        job: "job-1",
+        phase: "receiving objects",
+        percent: 40,
+        done: false,
+      }),
+    ).toEqual({
+      type: "clone_progress",
+      job: {
+        id: "job-1",
+        phase: "receiving objects",
+        percent: 40,
+        done: false,
+      },
+    });
   });
 });
 

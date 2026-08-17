@@ -610,6 +610,7 @@ pub fn run() {
             client_execution::computer_use::computer_use_state,
             client_execution::computer_use::stop_computer_use_control,
             client_execution::computer_use::resume_computer_use_control,
+            host_access::pick_code_directory,
             host_access::connect_folder,
             host_access::connect_approved_folder,
             host_access::list_approved_folders,

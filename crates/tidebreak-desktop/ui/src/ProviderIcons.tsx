@@ -52,6 +52,24 @@ export function GeminiIcon(props: IconProps) {
   );
 }
 
+/**
+ * opencode. The mark is monochrome in its own brand usage, so it takes the
+ * surrounding text color.
+ */
+export function OpenCodeIcon(props: IconProps) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M12 2.4 19.6 6.8v10.4L12 21.6 4.4 17.2V6.8L12 2.4zm0 2.3L6.4 7.9v8.2L12 19.3l5.6-3.2V7.9L12 4.7zm0 3.1a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4zm0 1.8a2.4 2.4 0 1 0 .001 4.801A2.4 2.4 0 0 0 12 6.5z" />
+    </svg>
+  );
+}
+
 export function XaiIcon(props: IconProps) {
   return (
     <svg

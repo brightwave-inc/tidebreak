@@ -1,13 +1,11 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { RouteFrame } from "@/RouteFrame";
-import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { AddRepoPalette } from "./AddRepoPalette";
 import { CodeSidebar } from "./CodeSidebar";
 import { DoctorList } from "./DoctorList";
 import { isHarnessReady } from "./labels";
@@ -39,10 +37,7 @@ function CodeHomeBody() {
   const loaded = useCodeCatalogStore((state) => state.loaded);
   const error = useCodeCatalogStore((state) => state.error);
   const refresh = useCodeCatalogStore((state) => state.refresh);
-  const upsertRepo = useCodeCatalogStore((state) => state.upsertRepo);
-  const [path, setPath] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [registering, setRegistering] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
@@ -57,26 +52,6 @@ function CodeHomeBody() {
       await refresh(client);
     } finally {
       setRefreshing(false);
-    }
-  }
-
-  async function register(event: FormEvent) {
-    event.preventDefault();
-    if (!path.trim()) return;
-    setRegistering(true);
-    try {
-      const repo = await client.createCodeRepo({
-        path: path.trim(),
-        display_name: displayName.trim() || undefined,
-      });
-      upsertRepo(repo);
-      setPath("");
-      setDisplayName("");
-      await navigate({ to: "/code/r/$repoId", params: { repoId: repo.id } });
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not register that repo"));
-    } finally {
-      setRegistering(false);
     }
   }
 
@@ -108,29 +83,13 @@ function CodeHomeBody() {
       {ready && (
         <>
           <section className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">Register a repo</h2>
-            <form className="flex flex-col gap-3" onSubmit={register}>
-              <label className="flex flex-col gap-1 text-sm">
-                <span className="font-medium">Path</span>
-                <Input
-                  value={path}
-                  onChange={(event) => setPath(event.target.value)}
-                  placeholder="/Users/you/src/app"
-                  disabled={registering}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm">
-                <span className="font-medium">Display name</span>
-                <Input
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  disabled={registering}
-                />
-              </label>
-              <Button type="submit" disabled={registering || !path.trim()} className="self-start">
-                {registering ? "Registering…" : "Register"}
-              </Button>
-            </form>
+            <h2 className="text-lg font-semibold">Add a repo</h2>
+            <p className="text-muted-foreground text-sm">
+              Browse a local folder, or clone from a git URL or GitHub.
+            </p>
+            <Button type="button" className="self-start" onClick={() => setAddOpen(true)}>
+              Add repo
+            </Button>
           </section>
           <section className="flex flex-col gap-3">
             <h2 className="text-lg font-semibold">Repos</h2>
@@ -162,6 +121,7 @@ function CodeHomeBody() {
           </section>
         </>
       )}
+      <AddRepoPalette open={addOpen} onOpenChange={setAddOpen} />
     </div>
   );
 }

@@ -42,7 +42,6 @@ import { TerminalPane } from "./TerminalPane";
 import {
   fenceReasonText,
   HARNESS_LABELS,
-  isHarnessReady,
   LIFECYCLE_LABELS,
 } from "./labels";
 
@@ -191,8 +190,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   const fenced =
     session?.lifecycle === "fenced" || session?.fence_reason !== undefined;
-  const readyHarnesses =
-    catalog.doctor?.harnesses.filter((entry) => isHarnessReady(entry)) ?? [];
+  const doctorHarnesses = catalog.doctor?.harnesses ?? [];
 
   return (
     <>
@@ -308,7 +306,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             )}
             {!session && workspace?.status === "active" && (
               <StartSessionPrompt
-                harnesses={readyHarnesses}
+                harnesses={doctorHarnesses}
                 starting={starting}
                 selectedMode={createMode}
                 onSelectMode={setCreateMode}

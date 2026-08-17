@@ -38,6 +38,8 @@ import type {
   ToolOutcome,
   CodeSessionDigest,
   CodeUpdateNotice,
+  CodeCloneDefaults,
+  CodeCloneJobSnapshot,
   PullRequestDigest,
 } from "../api/types";
 import type {
@@ -65,6 +67,8 @@ import type {
   ToolDetail as WireToolDetail,
   CodeSessionDigest as WireCodeSessionDigest,
   CodeUpdateNotice as WireCodeUpdateNotice,
+  CodeCloneDefaults as WireCodeCloneDefaults,
+  CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
 } from "../generated/wire";
 
 /**
@@ -127,6 +131,65 @@ const ATTENTION_SOURCES = new Set<AttentionSource>([
   "lifecycle",
   "user",
 ]);
+
+export function parseCodeCloneJob(value: unknown): CodeCloneJobSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCloneJobSnapshot>(value, [
+      "id",
+      "phase",
+      "percent",
+      "done",
+      "error",
+      "repo_id",
+    ]) ||
+    !nonEmpty(value.id) ||
+    typeof value.phase !== "string" ||
+    typeof value.done !== "boolean" ||
+    (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
+    !optionalString(value.error) ||
+    !optionalString(value.repo_id)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    phase: value.phase,
+    done: value.done,
+    ...(value.percent !== undefined ? { percent: value.percent } : {}),
+    ...(value.error !== undefined ? { error: value.error } : {}),
+    ...(value.repo_id !== undefined ? { repo_id: value.repo_id } : {}),
+  };
+}
+
+export function parseCodeCloneDefaults(
+  value: unknown,
+): CodeCloneDefaults | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCloneDefaults>(value, [
+      "parent_dir",
+      "gh_found",
+      "gh_authenticated",
+      "gh_remediation",
+    ]) ||
+    !optionalString(value.parent_dir) ||
+    typeof value.gh_found !== "boolean" ||
+    typeof value.gh_remediation !== "string" ||
+    (value.gh_authenticated !== undefined &&
+      typeof value.gh_authenticated !== "boolean")
+  ) {
+    return null;
+  }
+  return {
+    gh_found: value.gh_found,
+    gh_remediation: value.gh_remediation,
+    ...(value.parent_dir !== undefined ? { parent_dir: value.parent_dir } : {}),
+    ...(value.gh_authenticated !== undefined
+      ? { gh_authenticated: value.gh_authenticated }
+      : {}),
+  };
+}
 
 export function parseCodeRepo(value: unknown): CodeRepoSnapshot | null {
   if (
@@ -1282,6 +1345,31 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         title: value.title,
         turn_count: value.turn_count,
         ...(pr_state ? { pr_state } : {}),
+      };
+    }
+    case "clone_progress": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "clone_progress" }>>(
+          value,
+          ["type", "job", "phase", "percent", "done", "error", "repo_id"],
+        ) ||
+        !nonEmpty(value.job) ||
+        typeof value.phase !== "string" ||
+        typeof value.done !== "boolean" ||
+        (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
+        !optionalString(value.error) ||
+        !optionalString(value.repo_id)
+      ) {
+        return null;
+      }
+      return {
+        type: "clone_progress",
+        job: value.job,
+        phase: value.phase,
+        done: value.done,
+        ...(value.percent !== undefined ? { percent: value.percent } : {}),
+        ...(value.error !== undefined ? { error: value.error } : {}),
+        ...(value.repo_id !== undefined ? { repo_id: value.repo_id } : {}),
       };
     }
     case "terminal_activity": {

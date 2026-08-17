@@ -863,6 +863,16 @@ harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested
 export type CodeApprovalState = "pending" | "approved" | "denied";
 
 /**
+ * Remembered clone destination plus observed `gh` status.
+ */
+export type CodeCloneDefaults = { parent_dir?: string, gh_found: boolean, gh_authenticated?: boolean, gh_remediation: string, };
+
+/**
+ * Snapshot of an in-flight or finished clone job.
+ */
+export type CodeCloneJobSnapshot = { id: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
+
+/**
  * Result of staging and committing the workspace worktree.
  */
 export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat, };
@@ -1193,7 +1203,7 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.

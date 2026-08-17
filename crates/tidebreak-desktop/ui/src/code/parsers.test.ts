@@ -4,10 +4,13 @@ import {
   liveCodeSession,
   parseCodeAction,
   parseCodeApproval,
+  parseCodeCloneDefaults,
+  parseCodeCloneJob,
   parseCodeCommit,
   parseCodePush,
   parseCodeSession,
   parseCodeSessionList,
+  parseCodeUpdateNotice,
   parseCodeTerminal,
   parseCodeTerminalList,
   parseCodeTerminalRead,
@@ -270,5 +273,48 @@ describe("liveCodeSession", () => {
     expect(ended && live).toBeTruthy();
     expect(liveCodeSession([ended!, live!])?.id).toBe("sess-1");
     expect(liveCodeSession([ended!])).toBeNull();
+  });
+});
+
+describe("clone wire parsers", () => {
+  it("accepts a clone job snapshot and defaults payload", () => {
+    const job = {
+      id: "job-1",
+      phase: "receiving objects",
+      percent: 40,
+      done: false,
+    };
+    expect(parseCodeCloneJob(job)).toEqual(job);
+    expect(
+      parseCodeCloneDefaults({
+        parent_dir: "/tmp/src",
+        gh_found: false,
+        gh_remediation: "gh is not installed.",
+      }),
+    ).toEqual({
+      parent_dir: "/tmp/src",
+      gh_found: false,
+      gh_remediation: "gh is not installed.",
+    });
+  });
+
+  it("accepts a clone_progress update notice", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "clone_progress",
+        job: "job-1",
+        phase: "done",
+        percent: 100,
+        done: true,
+        repo_id: "repo-1",
+      }),
+    ).toEqual({
+      type: "clone_progress",
+      job: "job-1",
+      phase: "done",
+      percent: 100,
+      done: true,
+      repo_id: "repo-1",
+    });
   });
 });

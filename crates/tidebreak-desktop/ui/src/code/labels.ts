@@ -23,6 +23,14 @@ export const HARNESS_LABELS: Record<HarnessKind, string> = {
   grok: "Grok CLI",
 };
 
+/** One-line product gloss for the picker. Not how the adapter works. */
+export const HARNESS_SUBTITLES: Record<HarnessKind, string> = {
+  claude_code: "Anthropic's coding agent",
+  codex: "OpenAI's coding agent",
+  opencode: "Open-source coding agent",
+  grok: "xAI's coding agent",
+};
+
 export const HARNESS_TIER_LABELS: Record<HarnessTier, string> = {
   reference: "Reference",
   secondary: "Secondary",
@@ -67,6 +75,31 @@ export function isHarnessReady(entry: {
   authenticated?: boolean;
 }): boolean {
   return entry.found && entry.authenticated !== false;
+}
+
+/** True when create can post at least one permission mode this engine honors. */
+export function harnessHonorsAnyCreateMode(entry: {
+  caps: { plan_mode: CapLevel; structured_approvals: CapLevel };
+}): boolean {
+  return (
+    entry.caps.plan_mode === "supported" ||
+    harnessHonorsStructuredApprovals(entry.caps.structured_approvals)
+  );
+}
+
+/**
+ * Why a picker row is not selectable. Ready rows return null.
+ * Versions, paths, and capability names stay on the doctor.
+ */
+export function harnessUnusableReason(entry: {
+  found: boolean;
+  authenticated?: boolean;
+  caps: { plan_mode: CapLevel; structured_approvals: CapLevel };
+}): string | null {
+  if (!entry.found) return "Not installed";
+  if (entry.authenticated === false) return "Sign in via your terminal";
+  if (!harnessHonorsAnyCreateMode(entry)) return "Not available yet";
+  return null;
 }
 
 /** Ask/Auto need a structured approval channel. Plan does not. */

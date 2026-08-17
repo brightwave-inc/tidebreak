@@ -689,6 +689,12 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::create_repo).get(routes::code::list_repos),
         )
         .route(
+            "/code/repos/clone-defaults",
+            get(routes::code::clone_defaults),
+        )
+        .route("/code/repos/clone", post(routes::code::start_clone))
+        .route("/code/repos/clone/{job}", get(routes::code::get_clone_job))
+        .route(
             "/code/repos/{id}",
             get(routes::code::get_repo)
                 .patch(routes::code::patch_repo)

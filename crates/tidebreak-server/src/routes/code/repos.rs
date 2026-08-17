@@ -2,14 +2,26 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use std::path::PathBuf;
+use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 use super::require_code;
-use super::types::{CodeRepoSnapshot, CreateRepoBody, PatchRepoBody};
+use super::types::{
+    CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CreateRepoBody,
+    PatchRepoBody,
+};
 use tidebreak_core::RepoId;
+
+fn require_code_arc(state: &AppState) -> Result<Arc<crate::code::CodeRuntime>, ServerError> {
+    state
+        .code
+        .clone()
+        .ok_or_else(|| ServerError::internal("code mode is not configured on this server"))
+}
 
 pub async fn create_repo(
     State(state): State<AppState>,
@@ -93,4 +105,33 @@ pub async fn delete_repo(
 ) -> Result<StatusCode, ServerError> {
     require_code(&state)?.delete_repo(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn clone_defaults(
+    State(state): State<AppState>,
+) -> Result<Json<CodeCloneDefaults>, ServerError> {
+    Ok(Json(require_code(&state)?.clone_defaults().await?))
+}
+
+pub async fn start_clone(
+    State(state): State<AppState>,
+    Json(body): Json<CloneRepoBody>,
+) -> Result<(StatusCode, Json<CodeCloneJobSnapshot>), ServerError> {
+    let runtime = require_code_arc(&state)?;
+    let job = runtime
+        .start_clone(crate::code::clone::CloneRequest {
+            url: body.url,
+            github: body.github,
+            parent_dir: body.parent_dir,
+            name: body.name,
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+pub async fn get_clone_job(
+    State(state): State<AppState>,
+    Path(job): Path<Uuid>,
+) -> Result<Json<CodeCloneJobSnapshot>, ServerError> {
+    Ok(Json(require_code(&state)?.get_clone_job(job)?))
 }

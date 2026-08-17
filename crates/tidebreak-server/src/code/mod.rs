@@ -8,6 +8,7 @@ pub(crate) mod approval_bridge;
 pub(crate) mod attention;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
+pub(crate) mod clone;
 pub(crate) mod gh;
 pub(crate) mod recovery;
 pub(crate) mod runtime;

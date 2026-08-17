@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { ApiClient } from "../api/client";
 import type {
   Attention,
+  CodeCloneJobSnapshot,
   CodeSessionDigest,
   CodeSessionLifecycle,
   CodeUpdateNotice,
@@ -25,17 +26,20 @@ import { requestUserAttention } from "../host";
 
 export type CodeUpdatesState = {
   byWorkspace: Record<string, CodeSessionDigest>;
+  cloneJobs: Record<string, CodeCloneJobSnapshot>;
   viewedWorkspaceId: string | null;
 };
 
 export type CodeUpdatesAction =
   | { type: "snapshot"; sessions: CodeSessionDigest[] }
   | { type: "digest"; digest: CodeSessionDigest }
+  | { type: "clone_progress"; job: CodeCloneJobSnapshot }
   | { type: "view"; workspaceId: string | null }
   | { type: "reset" };
 
 const EMPTY: CodeUpdatesState = {
   byWorkspace: {},
+  cloneJobs: {},
   viewedWorkspaceId: null,
 };
 
@@ -57,6 +61,14 @@ export function reduceCodeUpdates(
         byWorkspace: {
           ...state.byWorkspace,
           [action.digest.workspace]: action.digest,
+        },
+      };
+    case "clone_progress":
+      return {
+        ...state,
+        cloneJobs: {
+          ...state.cloneJobs,
+          [action.job.id]: action.job,
         },
       };
     case "view":
@@ -99,6 +111,19 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
         title: notice.title,
         turn_count: notice.turn_count,
         ...(notice.pr_state !== undefined ? { pr_state: notice.pr_state } : {}),
+      },
+    };
+  }
+  if (notice.type === "clone_progress") {
+    return {
+      type: "clone_progress",
+      job: {
+        id: notice.job,
+        phase: notice.phase,
+        done: notice.done,
+        ...(notice.percent !== undefined ? { percent: notice.percent } : {}),
+        ...(notice.error !== undefined ? { error: notice.error } : {}),
+        ...(notice.repo_id !== undefined ? { repo_id: notice.repo_id } : {}),
       },
     };
   }

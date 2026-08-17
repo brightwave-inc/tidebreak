@@ -28,11 +28,11 @@ import {
 import { friendlyErrorMessage } from "@/lib/utils";
 import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { HarnessPicker } from "./HarnessPicker";
 import {
   createPermissionModes,
   defaultCreatePermissionMode,
-  HARNESS_LABELS,
-  isHarnessReady,
+  harnessUnusableReason,
 } from "./labels";
 
 /**
@@ -40,8 +40,8 @@ import {
  *
  * Permission mode defaults to Ask when the doctor reports structured
  * approvals, otherwise Plan — create always has a mode the harness can honor.
- * The harness picker is the doctor: only engines that are installed (and
- * signed in, when the doctor knows) can be chosen.
+ * The harness picker lists every doctor entry. Ready rows are selectable;
+ * unusable ones stay visible and dimmed.
  */
 
 export function NewWorkspaceDialog({
@@ -69,8 +69,10 @@ export function NewWorkspaceDialog({
   );
   const [creating, setCreating] = useState(false);
 
-  const readyHarnesses =
-    doctor?.harnesses.filter((entry) => isHarnessReady(entry)) ?? [];
+  const allHarnesses = doctor?.harnesses ?? [];
+  const readyHarnesses = allHarnesses.filter(
+    (entry) => !harnessUnusableReason(entry),
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -178,23 +180,12 @@ export function NewWorkspaceDialog({
           </label>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Harness</span>
-            <Select
-              value={readyHarnesses.some((entry) => entry.kind === harness) ? harness : undefined}
-              onValueChange={(value) => setHarness(value as HarnessKind)}
-              disabled={creating || readyHarnesses.length === 0}
-            >
-              <SelectTrigger aria-label="Harness">
-                <SelectValue placeholder="No ready harness" />
-              </SelectTrigger>
-              <SelectContent scrollButtons={false}>
-                {readyHarnesses.map((entry) => (
-                  <SelectItem key={entry.kind} value={entry.kind}>
-                    {HARNESS_LABELS[entry.kind]}
-                    {entry.version ? ` ${entry.version}` : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <HarnessPicker
+              harnesses={allHarnesses}
+              value={harness}
+              onChange={setHarness}
+              disabled={creating}
+            />
           </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>
