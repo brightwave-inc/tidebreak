@@ -262,9 +262,7 @@ async fn run_interactive_login_shell(
         .map_err(|err| ProbeError::Shell(err.to_string()))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if stderr.len() > MAX_STDERR_BYTES {
-        stderr.truncate(MAX_STDERR_BYTES);
-    }
+    crate::text::truncate_on_char_boundary(&mut stderr, MAX_STDERR_BYTES);
     Ok(ShellOutput {
         stdout,
         stderr,
