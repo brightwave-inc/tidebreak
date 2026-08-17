@@ -75,6 +75,7 @@ pub(crate) struct ScriptedAdapter {
     delay: Duration,
     mid_turn_steering: CapLevel,
     structured_approvals: CapLevel,
+    auto_mode: CapLevel,
     child_pid: Option<i64>,
     approver: Arc<ScriptedApprover>,
 }
@@ -87,13 +88,24 @@ impl ScriptedAdapter {
             delay: Duration::ZERO,
             mid_turn_steering: CapLevel::Unsupported,
             structured_approvals: CapLevel::Unsupported,
+            auto_mode: CapLevel::Unsupported,
             child_pid: None,
             approver: Arc::new(ScriptedApprover::default()),
         }
     }
 
+    /// Sets the approval channel and, with it, the supervised auto posture —
+    /// the coupling every real approval-carrying adapter has.
     pub(crate) fn with_approvals(mut self, level: CapLevel) -> Self {
         self.structured_approvals = level;
+        self.auto_mode = level;
+        self
+    }
+
+    /// Overrides the auto posture independently of the approval channel,
+    /// for exercising the mode gate's per-flag refusals.
+    pub(crate) fn with_auto_mode(mut self, level: CapLevel) -> Self {
+        self.auto_mode = level;
         self
     }
 
@@ -143,6 +155,7 @@ impl HarnessAdapter for ScriptedAdapter {
             structured_approvals: self.structured_approvals,
             mid_turn_steering: self.mid_turn_steering,
             plan_mode: CapLevel::Supported,
+            auto_mode: self.auto_mode,
             reasoning_levels: CapLevel::Unsupported,
             native_file_change_events: CapLevel::Unsupported,
             native_interrupt: CapLevel::Supported,

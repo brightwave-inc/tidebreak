@@ -582,6 +582,7 @@ pub fn supported_caps_summary(caps: &HarnessCaps) -> String {
         ("approvals", caps.structured_approvals),
         ("steering", caps.mid_turn_steering),
         ("plan", caps.plan_mode),
+        ("auto", caps.auto_mode),
         ("reasoning", caps.reasoning_levels),
         ("file_events", caps.native_file_change_events),
         ("interrupt", caps.native_interrupt),

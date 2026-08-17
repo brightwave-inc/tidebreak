@@ -69,6 +69,14 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             },
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
+            // `--permission-mode acceptEdits`; supervised by the approval
+            // channel, so it carries the same version gate — unsupervised
+            // Auto has not been probed on other versions.
+            auto_mode: if version_is_2_1_233(_probe.version.as_deref()) {
+                CapLevel::Supported
+            } else {
+                CapLevel::Unknown
+            },
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,

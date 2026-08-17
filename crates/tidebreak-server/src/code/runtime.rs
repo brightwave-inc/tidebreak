@@ -1108,20 +1108,26 @@ fn refuse_unhonored_mode(
     mode: CodePermissionMode,
     caps: &tidebreak_core::HarnessCaps,
 ) -> Result<(), ServerError> {
+    // Each mode stands on its own capability flag (decision 0038): Auto is
+    // never derived from the approval channel, so an engine whose only
+    // honest posture is unsupervised Auto can still be driven.
     let ok = match mode {
         CodePermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
-        CodePermissionMode::Ask | CodePermissionMode::Auto => {
-            caps.structured_approvals == CapLevel::Supported
-        }
+        CodePermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
+        CodePermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
     };
     if ok {
         return Ok(());
     }
     let reason = match mode {
         CodePermissionMode::Plan => format!("{harness} cannot honor plan mode"),
-        CodePermissionMode::Ask | CodePermissionMode::Auto => format!(
+        CodePermissionMode::Ask => format!(
             "{harness} cannot honor {mode}: structured approvals are {}",
             caps.structured_approvals.as_str()
+        ),
+        CodePermissionMode::Auto => format!(
+            "{harness} cannot honor {mode}: an auto posture is {}",
+            caps.auto_mode.as_str()
         ),
     };
     Err(ServerError::unprocessable_kind(

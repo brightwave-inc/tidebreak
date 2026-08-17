@@ -33,15 +33,17 @@ scenarios = [
 ]
 
 [permission_mode_mapping]
-# No Tidebreak permission mode is honored on 1.0.4 print mode.
-# Ask/Auto: no structured approval channel in streaming-json.
+# Auto is the default headless posture: no permission flags composed, the
+# engine executes routine work unprompted, and nothing escalates — offered
+# as unsupervised Auto and stated at selection (decision 0038).
+# Ask: no structured approval channel in streaming-json.
 # Plan: `--permission-mode plan` and `--sandbox read-only` both wrote
 # files in captured turns. `--deny Edit/Write/Bash` did refuse those
 # tools (see permission-denied) but is not composed as a Plan stand-in.
 # `--always-approve` / `--yolo` / `bypassPermissions` are denylisted.
 Plan = "refused"
 Ask = "refused"
-Auto = "refused"
+Auto = "default headless posture (no permission flags composed)"
 
 [redaction]
 notes = """
@@ -66,6 +68,7 @@ verified = [
   "--permission-mode plan wrote note.txt; --sandbox read-only wrote sandboxed.txt",
   "--deny Edit --deny Write --deny Bash failed write + run_terminal_command (Denied by permission policy)",
   "ACP: grok agent stdio initialize + session/new returned sessionId; no request_permission captured",
+  "re-probed 2026-08-17 on 1.0.4 (d846eb93): default headless (no permission flags) ran the write tool unprompted and the file landed; --permission-mode plan wrote again",
 ]
 not_verified = [
   "ACP session/request_permission request/response pair",

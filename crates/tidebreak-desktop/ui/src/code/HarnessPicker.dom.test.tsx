@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { cleanup, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessDoctorEntry } from "../api/types";
@@ -15,6 +16,7 @@ const CAPS = {
   streaming_deltas: "supported",
   mid_turn_steering: "unsupported",
   plan_mode: "supported",
+  auto_mode: "supported",
   reasoning_levels: "unknown",
   native_file_change_events: "unsupported",
   native_interrupt: "supported",
@@ -38,45 +40,57 @@ function entry(
 }
 
 describe("HarnessPicker", () => {
-  it("selects a ready row and dims unusable ones", async () => {
+  it("is a dropdown: ready rows select, unusable rows are disabled with a reason", async () => {
+    const user = userEvent.setup();
     const onChange = vi.fn();
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
           entry({ kind: "claude_code" }),
-          entry({ kind: "codex", found: false }),
+          entry({ kind: "codex" }),
+          entry({ kind: "opencode", found: false }),
+        ]}
+        value="claude_code"
+        onChange={onChange}
+      />,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Harness" });
+    expect(trigger).toHaveTextContent("Claude Code");
+    await user.click(trigger);
+    expect(
+      screen.getByRole("option", { name: /Not installed/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
+    expect(onChange).toHaveBeenCalledWith("codex");
+  });
+
+  it("keeps an Auto-only engine selectable and never renders doctor strings", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({ kind: "claude_code", version: "2.1.233" }),
           entry({
             kind: "grok",
-            caps: { ...CAPS, plan_mode: "unsupported", structured_approvals: "unsupported" },
+            version: "1.0.4",
+            caps: {
+              ...CAPS,
+              plan_mode: "unsupported",
+              structured_approvals: "unsupported",
+            },
           }),
         ]}
         value="claude_code"
         onChange={onChange}
       />,
     );
-    expect(screen.getByRole("option", { name: /Claude Code/ })).toBeEnabled();
-    expect(screen.getByRole("option", { name: /Not installed/ })).toBeDisabled();
-    expect(screen.getByRole("option", { name: /Not available yet/ })).toBeDisabled();
-    fireEvent.click(screen.getByRole("option", { name: /Claude Code/ }));
-    expect(onChange).toHaveBeenCalledWith("claude_code");
-  });
-
-  it("moves with the keyboard and never renders doctor version strings", async () => {
-    const onChange = vi.fn();
-    await renderWithRouter(
-      <HarnessPicker
-        harnesses={[
-          entry({ kind: "claude_code", version: "2.1.233" }),
-          entry({ kind: "codex", version: "0.80.0" }),
-        ]}
-        value="claude_code"
-        onChange={onChange}
-      />,
-    );
-    const list = screen.getByRole("listbox", { name: "Harness" });
-    expect(list.textContent).not.toMatch(/2\.1\.233|0\.80\.0|\/opt\/harness/);
-    fireEvent.keyDown(list, { key: "ArrowDown" });
-    fireEvent.keyDown(list, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith("codex");
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    const listbox = screen.getByRole("listbox");
+    expect(listbox.textContent).not.toMatch(/2\.1\.233|1\.0\.4|\/opt\/harness/);
+    const grokRow = screen.getByRole("option", { name: /Grok CLI/ });
+    expect(grokRow).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(grokRow);
+    expect(onChange).toHaveBeenCalledWith("grok");
   });
 });

@@ -844,6 +844,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "structured_approvals",
       "mid_turn_steering",
       "plan_mode",
+      "auto_mode",
       "reasoning_levels",
       "native_file_change_events",
       "native_interrupt",
@@ -853,6 +854,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.structured_approvals, CAP_LEVELS) ||
     !isMember(value.mid_turn_steering, CAP_LEVELS) ||
     !isMember(value.plan_mode, CAP_LEVELS) ||
+    !isMember(value.auto_mode, CAP_LEVELS) ||
     !isMember(value.reasoning_levels, CAP_LEVELS) ||
     !isMember(value.native_file_change_events, CAP_LEVELS) ||
     !isMember(value.native_interrupt, CAP_LEVELS)
@@ -865,6 +867,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     structured_approvals: value.structured_approvals,
     mid_turn_steering: value.mid_turn_steering,
     plan_mode: value.plan_mode,
+    auto_mode: value.auto_mode,
     reasoning_levels: value.reasoning_levels,
     native_file_change_events: value.native_file_change_events,
     native_interrupt: value.native_interrupt,

@@ -1773,6 +1773,15 @@ mid_turn_steering: CapLevel,
  */
 plan_mode: CapLevel, 
 /**
+ * The engine has a workspace-write / auto posture the adapter can select.
+ *
+ * Whether that posture is supervised is a separate question:
+ * with `structured_approvals` supported, sensitive actions still park on
+ * approval cards; without it, Auto runs unsupervised and the product
+ * states so where the mode is chosen (decision 0038).
+ */
+auto_mode: CapLevel, 
+/**
  * The engine accepts a reasoning-effort control.
  */
 reasoning_levels: CapLevel, 

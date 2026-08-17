@@ -1,10 +1,10 @@
 import type {
   Attention,
-  CapLevel,
   CodePermissionMode,
   CodeSessionLifecycle,
   CodeWorkspaceStatus,
   FenceReason,
+  HarnessCaps,
   HarnessKind,
   HarnessTier,
 } from "../api/types";
@@ -63,6 +63,16 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
   "this harness cannot honor that mode";
 
+/** Stated wherever unsupervised Auto is offered (decision 0038). */
+export const UNSUPERVISED_AUTO_NOTE =
+  "This engine has no approval channel: in Auto, every action runs without asking.";
+
+/** The capability flags the mode policy reads. */
+export type ModeCaps = Pick<
+  HarnessCaps,
+  "plan_mode" | "structured_approvals" | "auto_mode"
+>;
+
 export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "orphan_alive") {
     return "An engine process is still running from a previous session. Reap it before starting another turn.";
@@ -78,13 +88,8 @@ export function isHarnessReady(entry: {
 }
 
 /** True when create can post at least one permission mode this engine honors. */
-export function harnessHonorsAnyCreateMode(entry: {
-  caps: { plan_mode: CapLevel; structured_approvals: CapLevel };
-}): boolean {
-  return (
-    entry.caps.plan_mode === "supported" ||
-    harnessHonorsStructuredApprovals(entry.caps.structured_approvals)
-  );
+export function harnessHonorsAnyCreateMode(entry: { caps: ModeCaps }): boolean {
+  return createPermissionModes(entry.caps).length > 0;
 }
 
 /**
@@ -94,7 +99,7 @@ export function harnessHonorsAnyCreateMode(entry: {
 export function harnessUnusableReason(entry: {
   found: boolean;
   authenticated?: boolean;
-  caps: { plan_mode: CapLevel; structured_approvals: CapLevel };
+  caps: ModeCaps;
 }): string | null {
   if (!entry.found) return "Not installed";
   if (entry.authenticated === false) return "Sign in via your terminal";
@@ -102,18 +107,33 @@ export function harnessUnusableReason(entry: {
   return null;
 }
 
-/** Ask/Auto need a structured approval channel. Plan does not. */
-export function harnessHonorsStructuredApprovals(
-  structuredApprovals: CapLevel | undefined,
-): boolean {
-  return structuredApprovals === "supported";
+/**
+ * True when this engine's Auto runs with nobody to ask (decision 0038):
+ * it has an auto posture but no approval channel to escalate through.
+ */
+export function autoIsUnsupervised(caps: ModeCaps): boolean {
+  return caps.auto_mode === "supported" && caps.structured_approvals !== "supported";
 }
 
-/** Create default: Ask when the doctor says the harness can honor it, else Plan. */
-export function defaultCreatePermissionMode(
-  structuredApprovals: CapLevel | undefined,
-): CodePermissionMode {
-  return harnessHonorsStructuredApprovals(structuredApprovals) ? "ask" : "plan";
+/**
+ * Create default: Ask when the engine carries approvals, else Plan when it
+ * has one, else Auto when that is the only posture it honors. An engine
+ * honoring nothing still answers Plan — create is disabled before it posts.
+ */
+export function defaultCreatePermissionMode(caps: ModeCaps): CodePermissionMode {
+  if (caps.structured_approvals === "supported") return "ask";
+  if (caps.plan_mode === "supported") return "plan";
+  if (caps.auto_mode === "supported") return "auto";
+  return "plan";
+}
+
+/** The modes create may post for this engine, each on its own flag. */
+export function createPermissionModes(caps: ModeCaps): CodePermissionMode[] {
+  const modes: CodePermissionMode[] = [];
+  if (caps.plan_mode === "supported") modes.push("plan");
+  if (caps.structured_approvals === "supported") modes.push("ask");
+  if (caps.auto_mode === "supported") modes.push("auto");
+  return modes;
 }
 
 export function attentionLabel(attention: Attention): string {
@@ -131,12 +151,4 @@ export function attentionLabel(attention: Attention): string {
     case "manual":
       return attention.state.note || "Pinned";
   }
-}
-
-export function createPermissionModes(
-  structuredApprovals: CapLevel | undefined,
-): CodePermissionMode[] {
-  return harnessHonorsStructuredApprovals(structuredApprovals)
-    ? ["plan", "ask", "auto"]
-    : ["plan"];
 }

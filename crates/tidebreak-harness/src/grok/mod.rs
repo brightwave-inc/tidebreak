@@ -81,6 +81,11 @@ impl HarnessAdapter for GrokAdapter {
             // `--permission-mode plan` and `--sandbox read-only` both
             // wrote files in captured 1.0.4 turns.
             plan_mode: CapLevel::Unsupported,
+            // The default headless posture (no permission flags composed)
+            // executed a write tool unprompted — re-probed 2026-08-17 on
+            // 1.0.4 (d846eb93). Unsupervised: nothing escalates, which the
+            // product states where the mode is chosen (decision 0038).
+            auto_mode: CapLevel::Supported,
             // `--reasoning-effort` is documented and was used on capture.
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
@@ -270,15 +275,17 @@ mod tests {
         assert_eq!(caps.reasoning_levels, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Unsupported);
         assert_eq!(caps.plan_mode, CapLevel::Unsupported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unsupported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
     }
 
     #[test]
-    fn every_permission_mode_is_refused() {
-        for mode in CodePermissionMode::ALL {
-            let err = refuse_unhonored_mode(*mode).unwrap_err();
-            assert!(matches!(err, HarnessError::PermissionModeUnsupported(m) if m == *mode));
+    fn auto_is_honored_and_plan_and_ask_are_refused() {
+        assert!(refuse_unhonored_mode(CodePermissionMode::Auto).is_ok());
+        for mode in [CodePermissionMode::Plan, CodePermissionMode::Ask] {
+            let err = refuse_unhonored_mode(mode).unwrap_err();
+            assert!(matches!(err, HarnessError::PermissionModeUnsupported(m) if m == mode));
         }
     }
 
