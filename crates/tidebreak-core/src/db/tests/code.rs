@@ -8,7 +8,7 @@ use crate::code::{
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
     insert_approval, insert_repo, insert_session, insert_turn, insert_workspace, list_events,
-    CodeJournalError,
+    set_workspace_title_if, CodeJournalError,
 };
 use chrono::Utc;
 
@@ -100,6 +100,47 @@ async fn seeded_session() -> (
     .await
     .unwrap();
     (dir, store, session_id, turn_id)
+}
+
+/// Background workspace naming writes through this swap: it must replace
+/// exactly the placeholder it was derived against and lose to any other
+/// title, or a name the user typed could be silently overwritten.
+#[tokio::test]
+async fn workspace_title_swap_replaces_only_the_expected_title() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let workspace_id = get_session(&store, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    assert!(
+        set_workspace_title_if(&store, workspace_id, "first", "Derived name")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        get_workspace(&store, workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "Derived name"
+    );
+    // A second writer holding the stale expectation no longer matches: the
+    // title that landed first keeps the floor.
+    assert!(
+        !set_workspace_title_if(&store, workspace_id, "first", "Late derived name")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        get_workspace(&store, workspace_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "Derived name"
+    );
 }
 
 #[tokio::test]

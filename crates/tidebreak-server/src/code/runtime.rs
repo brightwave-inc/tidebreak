@@ -70,6 +70,12 @@ pub(crate) struct CodeRuntime {
     pub(crate) gh_search_path: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
     stall_started: AtomicBool,
+    /// Workspaces with a background naming call in flight.
+    ///
+    /// One call per workspace at a time; a second trigger is dropped rather
+    /// than queued, because the next turn on a still-unnamed workspace retries
+    /// anyway (`super::titling`).
+    pub(super) titling_in_flight: Mutex<std::collections::HashSet<tidebreak_core::WorkspaceId>>,
 }
 
 impl CodeRuntime {
@@ -89,6 +95,7 @@ impl CodeRuntime {
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
+            titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -119,6 +126,7 @@ impl CodeRuntime {
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
+            titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

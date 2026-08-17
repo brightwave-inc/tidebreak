@@ -78,7 +78,9 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
               }
             >
               <span className="flex min-w-0 items-center gap-2">
-                <span className="font-medium">{workspace.title}</span>
+                <span className="font-medium">
+                  {digests[workspace.id]?.title ?? workspace.title}
+                </span>
                 <span className="text-muted-foreground font-mono text-xs">
                   {workspace.branch_name}
                 </span>

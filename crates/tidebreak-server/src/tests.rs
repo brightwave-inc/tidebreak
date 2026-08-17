@@ -44,6 +44,7 @@ mod code;
 mod code_clone;
 mod code_git;
 mod code_terminals;
+mod code_titling;
 mod compaction;
 mod configuration;
 mod conformance;
