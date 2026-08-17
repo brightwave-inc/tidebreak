@@ -1,11 +1,32 @@
 // @vitest-environment jsdom
 
 import JSZip from "jszip";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const formulaEngine = vi.hoisted(() => ({
+  evaluateUncachedFormulasWithDuke: vi.fn<
+    (
+      source: ArrayBuffer,
+      cells: ReadonlyArray<{ address: string; sheetIndex: number }>,
+    ) => Promise<Record<string, { type: string; value: boolean | number | string }> | null>
+  >(async () => null),
+}));
+
+vi.mock("./readOnlyWorkbookFormulaEngine", () => ({
+  evaluateUncachedFormulasWithDuke:
+    formulaEngine.evaluateUncachedFormulasWithDuke,
+  formulaValueKey: (sheetIndex: number, address: string) =>
+    `${sheetIndex}:${address}`,
+}));
 
 import { projectWorkbookForReadOnlyDisplay } from "./readOnlyWorkbookProjection";
 
 describe("projectWorkbookForReadOnlyDisplay", () => {
+  beforeEach(() => {
+    formulaEngine.evaluateUncachedFormulasWithDuke.mockReset();
+    formulaEngine.evaluateUncachedFormulasWithDuke.mockResolvedValue(null);
+  });
+
   it("renders cached values while retaining original formulas for inspection", async () => {
     const zip = new JSZip();
     zip.file(
@@ -41,6 +62,82 @@ describe("projectWorkbookForReadOnlyDisplay", () => {
       "42",
     );
     expect(cells[1]?.getElementsByTagNameNS("*", "f")).toHaveLength(1);
+  });
+
+  it("does not treat an empty cached value as a formula result", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      `<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Model" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/></Relationships>`,
+    );
+    zip.file(
+      "xl/worksheets/sheet1.xml",
+      `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>Assumptions!B6/4</f><v/></c></row></sheetData></worksheet>`,
+    );
+
+    const source = await zip.generateAsync({ type: "arraybuffer" });
+    const projection = await projectWorkbookForReadOnlyDisplay(source);
+    const projectedZip = await JSZip.loadAsync(projection.data);
+    const sheetXml = await projectedZip
+      .file("xl/worksheets/sheet1.xml")!
+      .async("string");
+    const document = new DOMParser().parseFromString(
+      sheetXml,
+      "application/xml",
+    );
+    const cell = document.getElementsByTagNameNS("*", "c")[0];
+
+    expect(projection.formulasBySheet).toEqual({
+      0: { B2: "=Assumptions!B6/4" },
+    });
+    expect(cell?.getElementsByTagNameNS("*", "f")).toHaveLength(1);
+    expect(cell?.getElementsByTagNameNS("*", "v")).toHaveLength(0);
+  });
+
+  it("bakes calculated results into formula cells that have no cached value", async () => {
+    formulaEngine.evaluateUncachedFormulasWithDuke.mockResolvedValue({
+      "0:B2": { type: "number", value: 25.6 },
+    });
+
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      `<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="FCF Model" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/></Relationships>`,
+    );
+    zip.file(
+      "xl/worksheets/sheet1.xml",
+      `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><f>Assumptions!$B$6/4</f></c></row></sheetData></worksheet>`,
+    );
+
+    const source = await zip.generateAsync({ type: "arraybuffer" });
+    const projection = await projectWorkbookForReadOnlyDisplay(source);
+    const projectedZip = await JSZip.loadAsync(projection.data);
+    const sheetXml = await projectedZip
+      .file("xl/worksheets/sheet1.xml")!
+      .async("string");
+    const document = new DOMParser().parseFromString(
+      sheetXml,
+      "application/xml",
+    );
+    const cell = document.getElementsByTagNameNS("*", "c")[0];
+
+    expect(formulaEngine.evaluateUncachedFormulasWithDuke).toHaveBeenCalledWith(
+      source,
+      [{ address: "B2", sheetIndex: 0 }],
+    );
+    expect(projection.formulasBySheet).toEqual({
+      0: { B2: "=Assumptions!$B$6/4" },
+    });
+    expect(cell?.getElementsByTagNameNS("*", "f")).toHaveLength(0);
+    expect(cell?.getElementsByTagNameNS("*", "v")[0]?.textContent).toBe("25.6");
   });
 
   it("preserves border indices by expanding empty OOXML border records", async () => {
