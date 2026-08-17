@@ -14,8 +14,33 @@ import {
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { PanelSearch } from "@/panel/panelUrl";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
+
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class {
+    cols = 80;
+    rows = 24;
+    write(_data: string, cb?: () => void) {
+      cb?.();
+    }
+    loadAddon() {}
+    open() {}
+    dispose() {}
+    onData() {
+      return { dispose() {} };
+    }
+  },
+}));
+
+vi.mock("@xterm/addon-fit", () => ({
+  FitAddon: class {
+    fit() {}
+  },
+}));
+
+vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
@@ -84,6 +109,33 @@ function makeClient() {
           removeEventListener() {},
         }) as unknown as WebSocket,
     ),
+    listCodeTerminals: vi.fn(async () => []),
+    createCodeTerminal: vi.fn(async () => ({
+      id: "term-1",
+      workspace_id: "ws-1",
+      cols: 80,
+      rows: 24,
+      ended: false,
+      created_at: "2026-08-15T00:00:00.000Z",
+    })),
+    readCodeTerminal: vi.fn(async () => ({
+      id: "term-1",
+      workspace_id: "ws-1",
+      bytes: "",
+      cursor: 0,
+      overflow: false,
+      truncated: false,
+      ended: false,
+    })),
+    writeCodeTerminal: vi.fn(async () => undefined),
+    resizeCodeTerminal: vi.fn(async () => ({
+      id: "term-1",
+      workspace_id: "ws-1",
+      cols: 80,
+      rows: 24,
+      ended: false,
+      created_at: "2026-08-15T00:00:00.000Z",
+    })),
   };
 }
 
@@ -177,6 +229,7 @@ afterEach(() => {
   useCodeCatalogStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
+  useCodeUiStore.setState({ reviewSidebarOpen: true });
 });
 
 describe("CodeWorkspacePage", () => {
@@ -186,7 +239,7 @@ describe("CodeWorkspacePage", () => {
     const user = userEvent.setup();
 
     expect(
-      await screen.findByRole("heading", { name: "Fix login" }),
+      await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Archive" }));
@@ -200,7 +253,34 @@ describe("CodeWorkspacePage", () => {
     );
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
     expect(
-      screen.queryByRole("heading", { name: "Fix login" }),
+      screen.queryByRole("heading", { name: /Fix login/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps git and comments in the review sidebar, and opens the terminal as a drawer", async () => {
+    const client = makeClient();
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+
+    const inspector = screen.getByTestId("code-inspector");
+    expect(
+      within(inspector).getByRole("region", { name: "Pull request" }),
+    ).toBeInTheDocument();
+    expect(
+      within(inspector).getByRole("region", { name: "Comments" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Terminal" }));
+
+    expect(await screen.findByTestId("terminal-drawer")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
+    expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
+
+    await user.click(screen.getByRole("button", { name: "Hide review sidebar" }));
+    expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
   });
 });

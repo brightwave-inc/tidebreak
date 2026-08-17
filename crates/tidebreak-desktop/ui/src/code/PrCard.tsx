@@ -29,6 +29,7 @@ export function PrCard({
   client,
   workspaceId,
   contentRevision = 0,
+  framed = true,
 }: {
   client: Pick<
     ApiClient,
@@ -40,6 +41,8 @@ export function PrCard({
   workspaceId: string;
   /** Bumped by the session journal when the worktree may have moved. */
   contentRevision?: number;
+  /** When false, drop the card chrome — the host already frames this. */
+  framed?: boolean;
 }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<"commit" | "push" | "pr" | null>(null);
@@ -133,6 +136,7 @@ export function PrCard({
       message={message}
       busy={busy}
       refreshing={refreshing}
+      framed={framed}
       onMessageChange={setMessage}
       onCommit={() => void commit()}
       onPush={() => void push()}
@@ -148,6 +152,7 @@ export function PrCardView({
   message,
   busy,
   refreshing = false,
+  framed = true,
   onMessageChange,
   onCommit,
   onPush,
@@ -159,6 +164,7 @@ export function PrCardView({
   message: string;
   busy: "commit" | "push" | "pr" | null;
   refreshing?: boolean;
+  framed?: boolean;
   onMessageChange: (value: string) => void;
   onCommit: () => void;
   onPush: () => void;
@@ -181,7 +187,11 @@ export function PrCardView({
 
   return (
     <section
-      className="border-border bg-card flex flex-col gap-3 rounded-lg border px-3 py-3"
+      className={
+        framed
+          ? "border-border bg-card flex flex-col gap-3 rounded-lg border px-3 py-3"
+          : "flex flex-col gap-3"
+      }
       aria-label="Pull request"
     >
       <header className="flex flex-wrap items-center justify-between gap-2">

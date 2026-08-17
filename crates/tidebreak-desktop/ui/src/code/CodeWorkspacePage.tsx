@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { FileCode, Files, FolderOpen, SquareTerminal } from "lucide-react";
+import { FileCode, Files, FolderOpen, GitPullRequest, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
@@ -17,18 +17,27 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ClipboardCopyButton } from "@/ClipboardCopyButton";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { WithTooltip } from "@/components/ui/tooltip";
 import { openExternal } from "@/host";
 import { PanelLayout } from "@/panel/PanelLayout";
 import type { PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
 import { friendlyErrorMessage } from "@/lib/utils";
+import {
+  SHELL_SHORTCUTS,
+  shortcutKeycaps,
+  usesCommandModifier,
+  type ShellShortcutAction,
+} from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
+import { splitCodeChromeLayout } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { CodeInspector } from "./CodeInspector";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
-import { PrCard } from "./PrCard";
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
@@ -39,6 +48,7 @@ import { CodeTranscript } from "./CodeTranscript";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
 import { StartSessionPrompt } from "./StartSessionPrompt";
+import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeContentRevision } from "./useLiveContent";
 import {
@@ -72,7 +82,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const catalog = useCodeCatalogStore();
   const layout = useLayoutState();
-  const { openPanel } = usePanelNav();
+  const { openPanel, closeTab } = usePanelNav();
+  const chrome = splitCodeChromeLayout(layout);
+  const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
+  const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
+  const setReviewSidebarOpen = useCodeUiStore((state) => state.setReviewSidebarOpen);
+  const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
   const [session, setSession] = useState<CodeSessionSnapshot | null>(
@@ -154,7 +169,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     const ok = await confirm({
       title: "Archive this workspace?",
       description:
-        "The worktree is removed. Commit, push, or create a pull request from the card on this page first if you want to keep the work.",
+        "The worktree is removed. Commit, push, or create a pull request from the review sidebar first if you want to keep the work.",
       confirmLabel: "Archive",
       destructive: true,
     });
@@ -165,7 +180,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       if (archiveForceKind(err)) {
         const forced = await confirm({
           title: "Discard leftover work?",
-          description: `${err instanceof Error ? err.message : String(err)} Commit and push from the pull-request card on this page, or discard.`,
+          description: `${err instanceof Error ? err.message : String(err)} Commit and push from the review sidebar, or discard.`,
           confirmLabel: "Discard and archive",
           destructive: true,
         });
@@ -218,11 +233,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       <header className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <h1 className="truncate text-lg font-medium">
-              {digest?.title ?? workspace?.title ?? "Workspace"}
+            <h1 className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+              <span className="text-muted-foreground truncate">
+                {repo?.display_name ?? workspace?.repo_id ?? "Repo"}
+              </span>
+              <span className="text-muted-foreground/70 shrink-0">/</span>
+              <span className="truncate">
+                {digest?.title ?? workspace?.title ?? "Workspace"}
+              </span>
             </h1>
             <p className="text-muted-foreground truncate text-xs">
-              {repo?.display_name ?? workspace?.repo_id} · {workspace?.branch_name}
+              {workspace?.branch_name}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -261,15 +282,45 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               <FileCode />
               Diff
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => openPanel({ type: "terminal" })}
+            <WithTooltip
+              label={
+                chrome.terminal
+                  ? `Hide terminal ${shortcutHints.terminal}`
+                  : `Terminal ${shortcutHints.terminal}`
+              }
             >
-              <SquareTerminal />
-              Terminal
-            </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                aria-pressed={chrome.terminal !== null}
+                onClick={() => {
+                  if (chrome.terminal) closeTab(chrome.terminal);
+                  else openPanel({ type: "terminal" });
+                }}
+              >
+                <SquareTerminal />
+                Terminal
+              </Button>
+            </WithTooltip>
+            <WithTooltip
+              label={
+                reviewSidebarOpen
+                  ? `Hide review sidebar ${shortcutHints.review}`
+                  : `Review sidebar ${shortcutHints.review}`
+              }
+            >
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                aria-pressed={reviewSidebarOpen}
+                onClick={() => toggleReviewSidebar()}
+              >
+                <GitPullRequest />
+                Review
+              </Button>
+            </WithTooltip>
             {workspace && workspace.status !== "archived" && (
               <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
                 Archive
@@ -305,60 +356,89 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         )}
       </header>
       {error && <p className="text-critical px-4 py-2 text-sm">{error}</p>}
-      <PanelLayout
-        layout={layout}
-        renderChat={(visible) => (
-          // The panel slot this sits in is a plain block, so nothing stretches
-          // the pane to the slot's height — `flex-1` resolves to nothing and
-          // the transcript never becomes a scroller. It claims the height
-          // itself, the same way `.chat-pane` does.
-          <div
-            className="flex h-full min-h-0 flex-col overflow-hidden"
-            hidden={!visible}
-          >
-            {workspace && workspace.status !== "archived" && (
-              <div className="px-4 pt-3">
-                <PrCard
-                  client={client}
-                  workspaceId={workspace.id}
-                  contentRevision={contentRevision}
-                />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <PanelLayout
+            layout={chrome.panels}
+            framed={false}
+            renderChat={(visible) => (
+              // The panel slot this sits in is a plain block, so nothing stretches
+              // the pane to the slot's height — `flex-1` resolves to nothing and
+              // the transcript never becomes a scroller. It claims the height
+              // itself, the same way `.chat-pane` does.
+              <div
+                className="flex h-full min-h-0 flex-col overflow-hidden"
+                hidden={!visible}
+              >
+                {fenced && session?.fence_reason && (
+                  <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
+                    <p>{fenceReasonText(session.fence_reason)}</p>
+                    <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
+                      Reap
+                    </Button>
+                  </div>
+                )}
+                {!session && workspace?.status === "active" && (
+                  <StartSessionPrompt
+                    harnesses={doctorHarnesses}
+                    starting={starting}
+                    selectedMode={createMode}
+                    onSelectMode={setCreateMode}
+                    onStart={(harness, mode) => void startSession(harness, mode)}
+                  />
+                )}
+                {session && (
+                  <CodeSessionPane
+                    key={session.id}
+                    session={session}
+                    client={client}
+                    disabled={fenced || workspace?.status !== "active"}
+                    onOpenTurnDiff={(turnId) => openPanel({ type: "diff", turnId })}
+                  />
+                )}
               </div>
             )}
-            {fenced && session?.fence_reason && (
-              <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-                <p>{fenceReasonText(session.fence_reason)}</p>
-                <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
-                  Reap
-                </Button>
-              </div>
-            )}
-            {!session && workspace?.status === "active" && (
-              <StartSessionPrompt
-                harnesses={doctorHarnesses}
-                starting={starting}
-                selectedMode={createMode}
-                onSelectMode={setCreateMode}
-                onStart={(harness, mode) => void startSession(harness, mode)}
-              />
-            )}
-            {session && (
-              <CodeSessionPane
-                key={session.id}
-                session={session}
-                client={client}
-                disabled={fenced || workspace?.status !== "active"}
-                onOpenTurnDiff={(turnId) => openPanel({ type: "diff", turnId })}
-              />
-            )}
-          </div>
+            renderPanel={(panel) =>
+              renderCodePanel(panel, client, workspaceId, openPanel, contentRevision)
+            }
+          />
+          {chrome.terminal && (
+            <TerminalDrawer
+              client={client}
+              workspaceId={workspaceId}
+              shortcutHint={shortcutHints.terminal}
+              onClose={() => closeTab(chrome.terminal!)}
+            />
+          )}
+        </div>
+        {reviewSidebarOpen && (
+          <CodeInspector
+            client={client}
+            workspaceId={workspaceId}
+            workspace={workspace}
+            contentRevision={contentRevision}
+            shortcutHint={shortcutHints.review}
+            onClose={() => setReviewSidebarOpen(false)}
+          />
         )}
-        renderPanel={(panel) =>
-          renderCodePanel(panel, client, workspaceId, openPanel, contentRevision)
-        }
-      />
+      </div>
     </>
   );
+}
+
+function useCodeShortcutHints(): { review: string; terminal: string } {
+  return useMemo(() => {
+    const command = usesCommandModifier(navigator.userAgent);
+    return {
+      review: shortcutHint("toggle-code-review", command),
+      terminal: shortcutHint("toggle-code-terminal", command),
+    };
+  }, []);
+}
+
+function shortcutHint(id: ShellShortcutAction, command: boolean): string {
+  const def = SHELL_SHORTCUTS.find((item) => item.id === id);
+  return def ? shortcutKeycaps(def, command).join("") : "";
 }
 
 function renderCodePanel(

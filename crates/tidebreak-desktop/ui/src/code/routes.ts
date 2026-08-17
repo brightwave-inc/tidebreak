@@ -29,3 +29,15 @@ export function codeRepoIdFromPath(pathname: string): string | undefined {
   const match = /^\/code\/r\/([^/]+)$/.exec(pathname);
   return match?.[1];
 }
+
+/**
+ * The workspace a path is showing, when it is showing one.
+ *
+ * The terminal drawer and review-sidebar shortcuts only mean something on a
+ * workspace, so the shell reads the id from here the same way Cmd+N reads
+ * the repo.
+ */
+export function codeWorkspaceIdFromPath(pathname: string): string | undefined {
+  const match = /^\/code\/w\/([^/]+)$/.exec(pathname);
+  return match?.[1];
+}
