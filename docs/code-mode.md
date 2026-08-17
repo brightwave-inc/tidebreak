@@ -295,8 +295,9 @@ boundary applies to `gh` exactly as to harnesses). Absent or signed-out
 Routes (code-defined, hash history, in `ui/src/router.tsx`): `/code` (repo
 rail, doctor-driven empty state), `/code/r/$repoId` (workspace list,
 new-workspace flow, repo settings), `/code/w/$workspaceId` (the main
-surface; files, diff, and terminal open through the existing panel system —
-new `PanelContent` variants).
+surface; files and diff open through the existing panel system; the
+terminal opens as a bottom drawer; git, pull-request state, and comments
+live in a review sidebar).
 
 `ui/src/code/`:
 
@@ -316,11 +317,12 @@ new `PanelContent` variants).
   code-mode `ToolDetail` renderer; new `CodeApprovalCard` (chat's approval
   visual language, deny opens a feedback field), `TurnReviewCard`
   (diffstat, duration, async narrative slot), `CodeComposer` (text,
-  permission-mode selector, interrupt), `PrCard` (status-quad chips),
+  permission-mode selector, interrupt), `PrCard` (status-quad chips, hosted
+  in the review sidebar), `CodeInspector` (git sync, PR state, comments),
   `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
   semantic status tokens; per-file grouping; per-turn anchoring),
-  `TerminalPane` (ephemeral renderer over the cursor-read API; replays
-  recent bytes on mount; chunked writes on a frame budget).
+  `TerminalDrawer`/`TerminalPane` (ephemeral renderer over the cursor-read
+  API; replays recent bytes on mount; chunked writes on a frame budget).
 - Settings: one new section, "Coding harnesses" — the doctor.
 - Wire: generated types plus hand-written validators in
   `ui/src/code/parsers.ts`, per [`docs/wire-types.md`](wire-types.md).

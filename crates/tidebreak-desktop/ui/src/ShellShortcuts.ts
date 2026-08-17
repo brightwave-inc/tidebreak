@@ -14,6 +14,8 @@ export type ShellShortcutAction =
   | "toggle-sidebar"
   | "new-chat"
   | "code-new-workspace"
+  | "toggle-code-review"
+  | "toggle-code-terminal"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
@@ -147,6 +149,24 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyN"],
     mod: true,
     description: "New workspace",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "toggle-code-review",
+    codes: ["KeyI"],
+    mod: true,
+    description: "Show or hide the review sidebar",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "toggle-code-terminal",
+    codes: ["KeyJ"],
+    mod: true,
+    description: "Show or hide the terminal",
     group: "Code",
     scope: "code",
     allowInEditable: true,

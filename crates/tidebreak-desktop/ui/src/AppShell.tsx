@@ -22,8 +22,14 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
+import { toggleTerminalLayout } from "./code/codeChrome";
 import { useCodeUiStore } from "./code/CodeUiStore";
-import { codeRepoIdFromPath, shellShortcutMode } from "./code/routes";
+import {
+  codeRepoIdFromPath,
+  codeWorkspaceIdFromPath,
+  shellShortcutMode,
+} from "./code/routes";
+import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panel/panelUrl";
 import { useExperimentalFlags } from "./experimental";
 import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
@@ -173,6 +179,20 @@ export function AppShell() {
       useCodeUiStore
         .getState()
         .startNewWorkspace(codeRepoIdFromPath(pathname));
+    },
+    "toggle-code-review": () => {
+      useCodeUiStore.getState().toggleReviewSidebar();
+    },
+    "toggle-code-terminal": () => {
+      const { pathname, search } = router.state.location;
+      const workspaceId = codeWorkspaceIdFromPath(pathname);
+      if (!workspaceId) return;
+      const next = toggleTerminalLayout(layoutFromSearch(search as PanelSearch));
+      void navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId },
+        search: searchFromLayout(next),
+      });
     },
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,

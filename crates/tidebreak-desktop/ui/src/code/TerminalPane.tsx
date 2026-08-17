@@ -26,6 +26,7 @@ const TRUNCATION_TEXT = "[output truncated]";
 export function TerminalPane({
   client,
   workspaceId,
+  hideHeader = false,
 }: {
   client: Pick<
     ApiClient,
@@ -36,6 +37,8 @@ export function TerminalPane({
     | "resizeCodeTerminal"
   >;
   workspaceId: string;
+  /** The drawer already names this surface. */
+  hideHeader?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -103,9 +106,13 @@ export function TerminalPane({
       }
     };
     window.addEventListener("resize", onResize);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
+    observer?.observe(host);
 
     return () => {
       window.removeEventListener("resize", onResize);
+      observer?.disconnect();
       host.removeEventListener("keydown", onKeyDownCapture, true);
       dataSub.dispose();
       term.dispose();
@@ -222,9 +229,11 @@ export function TerminalPane({
       className="flex min-h-0 flex-1 flex-col overflow-hidden"
       data-testid="terminal-pane"
     >
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
-        <h2 className="text-sm font-medium">Terminal</h2>
-      </header>
+      {!hideHeader && (
+        <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+          <h2 className="text-sm font-medium">Terminal</h2>
+        </header>
+      )}
       {overflow && (
         <p className="text-muted-foreground px-3 py-2 text-xs" data-testid="terminal-truncated">
           Output was truncated.

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { codeRepoIdFromPath, isCodeRoute, shellShortcutMode } from "./routes";
+import {
+  codeRepoIdFromPath,
+  codeWorkspaceIdFromPath,
+  isCodeRoute,
+  shellShortcutMode,
+} from "./routes";
 
 describe("code routes", () => {
   it("reads mode and repo from the path the reader is on", () => {
@@ -16,5 +21,9 @@ describe("code routes", () => {
     expect(codeRepoIdFromPath("/code/r/repo-1")).toBe("repo-1");
     expect(codeRepoIdFromPath("/code/w/ws-1")).toBeUndefined();
     expect(codeRepoIdFromPath("/code")).toBeUndefined();
+
+    expect(codeWorkspaceIdFromPath("/code/w/ws-1")).toBe("ws-1");
+    expect(codeWorkspaceIdFromPath("/code/r/repo-1")).toBeUndefined();
+    expect(codeWorkspaceIdFromPath("/code")).toBeUndefined();
   });
 });

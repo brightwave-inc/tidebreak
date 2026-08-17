@@ -301,6 +301,7 @@ beforeEach(() => {
     newWorkspaceOpen: false,
     newWorkspaceRepoId: undefined,
     addRepoOpen: false,
+    reviewSidebarOpen: true,
   });
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would

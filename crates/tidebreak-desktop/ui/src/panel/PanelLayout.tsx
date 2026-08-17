@@ -33,6 +33,7 @@ export function PanelLayout({
   tabLabel,
   renderChat,
   renderPanel,
+  framed = true,
 }: {
   layout: LayoutState;
   /** Name tabs after the things they show; see {@link PanelTabs}. */
@@ -45,6 +46,12 @@ export function PanelLayout({
   renderChat: (visible: boolean) => ReactNode;
   /** Only the tab showing is rendered; the rest are addresses, not mounts. */
   renderPanel: (panel: PanelContent) => ReactNode;
+  /**
+   * The card chrome. Chat relies on this group being the card. A host that
+   * already frames the workspace — header, review rail, terminal drawer —
+   * turns it off so the group is only the split.
+   */
+  framed?: boolean;
 }) {
   const groupRef = useRef<ImperativePanelGroupHandle>(null);
   const [dragging, setDragging] = useState(false);
@@ -76,7 +83,8 @@ export function PanelLayout({
         // min-w-0 stops the group's content-driven min-content width from
         // pushing the row wider than its flex basis, which is what let panel
         // content squeeze the sidebar rail beside it.
-        "content-container min-h-0 w-full max-w-full min-w-0 flex-1 overflow-clip",
+        "min-h-0 w-full max-w-full min-w-0 flex-1 overflow-clip",
+        framed && "content-container",
       )}
       data-dragging={dragging || undefined}
     >

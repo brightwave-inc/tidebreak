@@ -78,6 +78,30 @@ describe("shell shortcut resolution", () => {
     expect(resolveShellShortcut(cmdN, context({ mode: "code" }))?.id).toBe(
       "code-new-workspace",
     );
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "i", code: "KeyI" }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("toggle-code-review");
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "j", code: "KeyJ" }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("toggle-code-terminal");
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "i", code: "KeyI" }),
+        context({ mode: "chat" }),
+      ),
+    ).toBeNull();
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "j", code: "KeyJ" }),
+        context({ mode: "chat" }),
+      ),
+    ).toBeNull();
     // Unscoped shortcuts are the frame's and act the same on both sides.
     expect(
       resolveShellShortcut(keyEvent({}), context({ mode: "code" }))?.id,
