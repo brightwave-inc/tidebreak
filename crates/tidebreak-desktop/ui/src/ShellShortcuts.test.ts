@@ -9,6 +9,7 @@ import {
   shortcutKeycaps,
   usesCommandModifier,
   type ShellShortcutAction,
+  type ShellShortcutMode,
 } from "./ShellShortcuts";
 
 function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
@@ -23,9 +24,15 @@ function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
   } as KeyboardEvent;
 }
 
-/** The default context: a mac-style keyboard, nothing in the way. */
+/** The default context: a mac-style keyboard in chat, nothing in the way. */
 function context(overrides: Partial<Parameters<typeof resolveShellShortcut>[1]> = {}) {
-  return { editable: true, modalOpen: false, command: true, ...overrides };
+  return {
+    editable: true,
+    modalOpen: false,
+    command: true,
+    mode: "chat" as ShellShortcutMode,
+    ...overrides,
+  };
 }
 
 describe("shell shortcut resolution", () => {
@@ -58,6 +65,23 @@ describe("shell shortcut resolution", () => {
       const resolved = resolveShellShortcut(keyEvent(event), context());
       expect(resolved?.id).toBe(id);
     }
+  });
+
+  it("gives Cmd+N to whichever mode the reader is in", () => {
+    // One chord, two modes: a conversation in chat, a workspace in code. The
+    // regression this pins is Cmd+N in code mode creating a chat and taking
+    // the reader out of the mode they were working in.
+    const cmdN = keyEvent({ key: "n", code: "KeyN" });
+    expect(resolveShellShortcut(cmdN, context({ mode: "chat" }))?.id).toBe(
+      "new-chat",
+    );
+    expect(resolveShellShortcut(cmdN, context({ mode: "code" }))?.id).toBe(
+      "code-new-workspace",
+    );
+    // Unscoped shortcuts are the frame's and act the same on both sides.
+    expect(
+      resolveShellShortcut(keyEvent({}), context({ mode: "code" }))?.id,
+    ).toBe("toggle-sidebar");
   });
 
   it("leaves Alt+Arrow to the field the reader is typing in", () => {
@@ -150,6 +174,7 @@ describe("shell shortcut resolution", () => {
       editable: false,
       modalOpen: true,
       command: true,
+      mode: "chat",
     });
     expect(resolved).toBeNull();
   });
@@ -173,8 +198,44 @@ describe("shortcut help", () => {
   it("files every shortcut under a heading the dialog renders", () => {
     // A shortcut grouped under a heading nobody lists would vanish from the
     // help while still firing — the exact drift the dialog exists to prevent.
-    const listed = groupedShellShortcuts().flatMap(({ items }) => items);
-    expect(listed).toHaveLength(SHELL_SHORTCUTS.length);
-    expect(new Set(listed)).toEqual(new Set(SHELL_SHORTCUTS));
+    // Per mode, because the help lists what fires where it is being read.
+    for (const mode of ["chat", "code"] as ShellShortcutMode[]) {
+      const listed = groupedShellShortcuts(mode).flatMap(({ items }) => items);
+      const live = SHELL_SHORTCUTS.filter(
+        (def) => def.scope === undefined || def.scope === mode,
+      );
+      expect(listed).toHaveLength(live.length);
+      expect(new Set(listed)).toEqual(new Set(live));
+    }
+  });
+});
+
+describe("shortcut table", () => {
+  it("binds each chord to one action per mode", () => {
+    // Scoping makes it possible for two definitions to share a chord, which is
+    // the point — and also the way a shortcut silently stops firing, because
+    // resolution takes the first match in table order. Sharing is allowed only
+    // across modes; within one, a chord means exactly one thing.
+    const owners = new Map<string, ShellShortcutAction>();
+    for (const def of SHELL_SHORTCUTS) {
+      const modes: ShellShortcutMode[] = def.scope
+        ? [def.scope]
+        : ["chat", "code"];
+      // "any" shift matches held and unheld alike, so it occupies both.
+      const shifts = def.shift === "any" ? [true, false] : [def.shift ?? false];
+      const keys = def.codes
+        ? def.codes.map((code) => `code:${code}`)
+        : def.keys.map((key) => `key:${key}`);
+      for (const mode of modes) {
+        for (const shift of shifts) {
+          for (const key of keys) {
+            const chord = [mode, def.mod, def.alt ?? false, shift, key].join("|");
+            const owner = owners.get(chord);
+            expect(owner, `${chord} is bound twice`).toBeUndefined();
+            owners.set(chord, def.id);
+          }
+        }
+      }
+    }
   });
 });

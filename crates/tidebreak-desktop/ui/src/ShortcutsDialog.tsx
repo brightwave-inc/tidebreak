@@ -1,4 +1,5 @@
 import { Fragment, useMemo } from "react";
+import { useRouterState } from "@tanstack/react-router";
 
 import {
   Dialog,
@@ -8,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { shellShortcutMode } from "./code/routes";
 import {
   groupedShellShortcuts,
   shortcutKeycaps,
@@ -50,7 +52,9 @@ function ShortcutRow({
  *
  * Rendering from the table the listener matches on is the point: a hand-written
  * second copy would drift the first time a binding changed, and a help dialog
- * that misstates the keys is worse than no dialog at all.
+ * that misstates the keys is worse than no dialog at all. Listed for the mode
+ * the route is in, for the same reason: Cmd+N is one row, and which one is true
+ * depends on where the reader pressed it.
  */
 export function ShortcutsDialog({
   open,
@@ -60,7 +64,10 @@ export function ShortcutsDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
-  const groups = useMemo(() => groupedShellShortcuts(), []);
+  const mode = useRouterState({
+    select: (state) => shellShortcutMode(state.location.pathname),
+  });
+  const groups = useMemo(() => groupedShellShortcuts(mode), [mode]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

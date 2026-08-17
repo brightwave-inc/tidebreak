@@ -4,6 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useChatListStore } from "./ChatListStore";
+import { useCodeCatalogStore } from "./code/CodeCatalogStore";
+import { useCodeUiStore } from "./code/CodeUiStore";
+import { useExperimentalFlags } from "./experimental";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useProjectListStore } from "./ProjectListStore";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -59,6 +62,24 @@ const createProject = vi.fn(async (title: string) => ({
   root_attachments: [],
   created_at: "2026-08-13T12:00:00Z",
 }));
+const getSettings = vi.fn(async () => ({
+  model: null,
+  has_api_key: false,
+  code_mode_enabled: false,
+}));
+const listCodeRepos = vi.fn(async () => [
+  {
+    id: "repo-1",
+    root_path: "/tmp/app",
+    display_name: "app",
+    default_base_ref: "main",
+    branch_prefix: "tidebreak",
+    quick_actions: [],
+    created_at: "2026-08-16T00:00:00.000Z",
+  },
+]);
+const listCodeWorkspaces = vi.fn(async () => [] as unknown[]);
+const getHarnessDoctor = vi.fn(async () => ({ harnesses: [] }));
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listInbox = vi.fn(async () => [] as unknown[]);
@@ -106,9 +127,14 @@ vi.mock("./api", () => ({
     gatewaySignIn = vi.fn(async () => ({ authorization_url: "http://gw/authorize" }));
     listModels = vi.fn(async () => ({ models: [], roles: [] }));
     listProviders = vi.fn(async () => ({ providers: [] }));
-    getSettings = vi.fn(async () => ({
-      model: null,
-      has_api_key: false,
+    getSettings = getSettings;
+    listCodeRepos = listCodeRepos;
+    listCodeWorkspaces = listCodeWorkspaces;
+    getHarnessDoctor = getHarnessDoctor;
+    openCodeUpdates = vi.fn(() => ({
+      close() {},
+      addEventListener() {},
+      removeEventListener() {},
     }));
     listChats = listChats;
     createChat = createChat;
@@ -259,6 +285,23 @@ beforeEach(() => {
   getPolicy.mockClear();
   getPolicy.mockResolvedValue(unmanaged);
   getGatewayStatus.mockClear();
+  getSettings.mockClear();
+  getSettings.mockResolvedValue({
+    model: null,
+    has_api_key: false,
+    code_mode_enabled: false,
+  });
+  listCodeRepos.mockClear();
+  listCodeWorkspaces.mockClear();
+  // Code mode is opt-in and its catalog outlives a render, so a test that
+  // turned it on must not decide the next one's routes.
+  useExperimentalFlags.setState({ loaded: false, codeModeEnabled: false });
+  useCodeCatalogStore.getState().reset();
+  useCodeUiStore.setState({
+    newWorkspaceOpen: false,
+    newWorkspaceRepoId: undefined,
+    addRepoOpen: false,
+  });
   usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
@@ -585,7 +628,9 @@ describe("app shell", () => {
     await mountApp();
 
     expect(await screen.findByText("Sign in to continue")).toBeInTheDocument();
-    await user.keyboard("{Meta>}n{/Meta}");
+    // Ctrl is the command modifier under jsdom's non-mac user agent; pressing
+    // Meta here would prove nothing, because nothing is bound to it.
+    await user.keyboard("{Control>}n{/Control}");
 
     expect(createChat).not.toHaveBeenCalled();
     expect(listInbox).not.toHaveBeenCalled();
@@ -636,4 +681,39 @@ describe("app shell", () => {
     );
     expect(screen.getByRole("button", { name: "Research" })).toBeInTheDocument();
   });
+
+  it(
+    "opens a workspace rather than a chat for Cmd+N in code mode",
+    { timeout: 15000 },
+    async () => {
+      // Shell shortcuts are mode-scoped, and the mode is the route family. The
+      // regression this pins is Cmd+N on a /code route creating a chat and
+      // navigating the reader out of the mode they were working in.
+      getSettings.mockResolvedValue({
+        model: null,
+        has_api_key: false,
+        code_mode_enabled: true,
+      });
+      const user = userEvent.setup();
+      const { router } = await mountApp({ at: "/code" });
+
+      // The registered repo means the rail and the catalog are both up.
+      expect(
+        await screen.findByRole("button", { name: "app" }),
+      ).toBeInTheDocument();
+
+      // jsdom reports a non-mac user agent, so the platform's command modifier
+      // here is Ctrl — the same chord the app takes as Cmd on macOS.
+      await user.keyboard("{Control>}n{/Control}");
+
+      const dialog = await screen.findByRole("dialog");
+      expect(
+        within(dialog).getByText(
+          "One worktree and one session on the selected repo.",
+        ),
+      ).toBeInTheDocument();
+      expect(createChat).not.toHaveBeenCalled();
+      expect(router.state.location.pathname).toBe("/code");
+    },
+  );
 });

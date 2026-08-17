@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { FolderGit2, MessageSquare, Plus } from "lucide-react";
 
@@ -11,6 +11,7 @@ import {
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { connectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
@@ -22,6 +23,10 @@ import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
  * Built on the same frame and primitives as the chat rail so the two modes
  * share chrome. It must not touch chat session stores — that separation is
  * what later convergence merges rather than translates.
+ *
+ * It also hosts code mode's two dialogs. The rail is on screen for every
+ * `/code` route, so mounting them here is what makes them reachable from the
+ * keyboard anywhere in the mode without a second instance per page.
  */
 
 export function CodeSidebar() {
@@ -35,8 +40,16 @@ export function CodeSidebar() {
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const digests = useCodeUpdatesStore((state) => state.byWorkspace);
-  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
-  const [addRepoOpen, setAddRepoOpen] = useState(false);
+  const newWorkspaceOpen = useCodeUiStore((state) => state.newWorkspaceOpen);
+  const newWorkspaceRepoId = useCodeUiStore(
+    (state) => state.newWorkspaceRepoId,
+  );
+  const addRepoOpen = useCodeUiStore((state) => state.addRepoOpen);
+  const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
+  const setNewWorkspaceOpen = useCodeUiStore(
+    (state) => state.setNewWorkspaceOpen,
+  );
+  const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
 
   useEffect(() => {
     void refresh(client);
@@ -123,7 +136,7 @@ export function CodeSidebar() {
             type="button"
             className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="New workspace"
-            onClick={() => setNewWorkspaceOpen(true)}
+            onClick={() => startNewWorkspace()}
           >
             <Plus size={14} />
           </button>
@@ -132,7 +145,7 @@ export function CodeSidebar() {
       {isCompact && (
         <SidebarButton
           aria-label="New workspace"
-          onClick={() => setNewWorkspaceOpen(true)}
+          onClick={() => startNewWorkspace()}
         >
           <Plus />
           <span>New workspace</span>
@@ -169,6 +182,7 @@ export function CodeSidebar() {
         open={newWorkspaceOpen}
         onOpenChange={setNewWorkspaceOpen}
         repos={repos}
+        defaultRepoId={newWorkspaceRepoId}
       />
       <AddRepoPalette open={addRepoOpen} onOpenChange={setAddRepoOpen} />
     </SidebarFrame>

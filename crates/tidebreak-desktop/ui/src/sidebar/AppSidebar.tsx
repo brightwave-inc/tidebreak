@@ -5,6 +5,7 @@ import { FolderGit2, LayoutGrid, Puzzle, SquarePen } from "lucide-react";
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
+import { isCodeRoute } from "@/code/routes";
 import { useExperimentalFlags } from "@/experimental";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
@@ -72,7 +73,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
           <RouteButton
             label="Code"
             icon={<FolderGit2 />}
-            active={pathname === "/code" || pathname.startsWith("/code/")}
+            active={isCodeRoute(pathname)}
             onClick={() => void navigate({ to: "/code" })}
           />
         )}
