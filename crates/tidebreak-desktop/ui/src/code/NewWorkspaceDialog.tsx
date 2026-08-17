@@ -38,6 +38,10 @@ import {
 /**
  * Create a workspace and its first session, then open it.
  *
+ * The title is optional: left blank, the server generates a two-word name and
+ * later replaces it with one derived from the first turn, the same way chats
+ * are named. Typing a title here is the way to opt out of that.
+ *
  * Permission mode defaults to Ask when the doctor reports structured
  * approvals, otherwise Plan — create always has a mode the harness can honor.
  * The harness picker lists every doctor entry. Ready rows are selectable;
@@ -96,8 +100,7 @@ export function NewWorkspaceDialog({
       ? permissionMode
       : defaultCreatePermissionMode(selectedHarness?.caps.structured_approvals);
   const canCreate =
-    Boolean(repoId && title.trim() && selectedRepo && readyHarnesses.length > 0) &&
-    !creating;
+    Boolean(repoId && selectedRepo && readyHarnesses.length > 0) && !creating;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -106,7 +109,7 @@ export function NewWorkspaceDialog({
     try {
       const workspace = await client.createCodeWorkspace({
         repo_id: repoId,
-        title: title.trim(),
+        title: title.trim() || undefined,
         base_ref: baseRef.trim() || undefined,
       });
       upsertWorkspace(workspace);
@@ -166,6 +169,7 @@ export function NewWorkspaceDialog({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               disabled={creating}
+              placeholder="Named automatically"
               autoFocus
             />
           </label>

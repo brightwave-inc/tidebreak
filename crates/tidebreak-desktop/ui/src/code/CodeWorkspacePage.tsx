@@ -199,7 +199,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <h1 className="truncate text-lg font-medium">
-              {workspace?.title ?? "Workspace"}
+              {digest?.title ?? workspace?.title ?? "Workspace"}
             </h1>
             <p className="text-muted-foreground truncate text-xs">
               {repo?.display_name ?? workspace?.repo_id} · {workspace?.branch_name}

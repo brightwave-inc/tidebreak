@@ -21,6 +21,11 @@
 //! is still "hi" keeps "New chat" rather than being permanently named after a
 //! greeting: the title outlives the exchange that produced it, so declining is
 //! the better answer while there is nothing to name.
+//!
+//! The request/normalize machinery in this module is shared with code-mode
+//! workspace naming ([`crate::code::titling`]), which follows the same rules
+//! against a different store: same utility model, same nullable-title schema,
+//! same "an explicit name always wins" write discipline.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -50,7 +55,7 @@ const MAX_TITLE_SOURCE_MESSAGES: usize = 10;
 /// A pasted document is a legitimate first message, and its opening lines say
 /// what it is. Together with the message cap this bounds the request without
 /// budgeting it against the model's context window.
-const MAX_TITLE_SOURCE_MESSAGE_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_TITLE_SOURCE_MESSAGE_BYTES: usize = 2 * 1024;
 
 /// Upper bound on tokens one titling call generates.
 ///
@@ -76,9 +81,9 @@ const MAX_TITLE_COMPLETION_BYTES: usize = 4 * 1024;
 /// The sidebar is narrow: a title that has to be truncated to be shown may as
 /// well have been shorter. [`MAX_CHAT_TITLE_CHARS`] is the contract; this is the
 /// shape we want inside it.
-const TITLE_TARGET_CHARS: usize = 60;
+pub(crate) const TITLE_TARGET_CHARS: usize = 60;
 
-/// Name the titling call's output constraint carries on the wire.
+/// Name the chat titling call's output constraint carries on the wire.
 ///
 /// The Anthropic adapter turns it into a tool name, so it stays within
 /// `^[a-zA-Z0-9_-]{1,64}$`.
@@ -91,22 +96,22 @@ const CHAT_TITLE_SCHEMA_NAME: &str = "chat_title";
 /// including for an exchange that has nothing to name yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ChatTitleProposal {
+pub(crate) struct TitleProposal {
     /// A short name for the conversation, or `null` when it has no subject yet.
     #[schemars(length(max = MAX_CHAT_TITLE_CHARS))]
     title: Option<String>,
 }
 
-impl ChatTitleProposal {
-    /// The output constraint the titling call sends.
+impl TitleProposal {
+    /// The output constraint a titling call sends, carrying `name` on the wire.
     ///
     /// The system prompt states the shape in prose as well. That is not
     /// redundancy for its own sake: this covers any OpenAI-compatible endpoint,
     /// including local runtimes that accept `response_format` and then ignore
     /// it, and the prompt is what those runtimes have to go on.
-    fn response_format() -> ResponseFormat {
+    fn response_format(name: &str) -> ResponseFormat {
         ResponseFormat::JsonSchema {
-            name: CHAT_TITLE_SCHEMA_NAME.to_owned(),
+            name: name.to_owned(),
             schema: input_schema_for::<Self>(),
         }
     }
@@ -226,33 +231,15 @@ impl ChatTitler {
             return Ok(None);
         };
         let provider = self.resolver.resolve().await;
-        let mut attempt = 1;
-        let title = loop {
-            match request_title(provider.as_ref(), utility, &material).await {
-                Ok(None) => break None,
-                Ok(Some(proposed)) => match normalize_derived_title(&proposed) {
-                    Some(title) => break Some(title),
-                    None if attempt < TITLE_ATTEMPTS => {
-                        eprintln!(
-                            "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} returned an unusable title for chat {chat_id}: {proposed:?}"
-                        );
-                        attempt += 1;
-                    }
-                    None => {
-                        return Err(AgentError::msg(format!(
-                            "titling model returned an unusable title: {proposed:?}"
-                        )))
-                    }
-                },
-                Err(error) if attempt < TITLE_ATTEMPTS => {
-                    eprintln!(
-                        "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} failed for chat {chat_id}: {error}"
-                    );
-                    attempt += 1;
-                }
-                Err(error) => return Err(error),
-            }
-        };
+        let title = derive_title_with_retries(
+            provider.as_ref(),
+            utility,
+            &system_prompt(),
+            CHAT_TITLE_SCHEMA_NAME,
+            &material,
+            &format!("chat {chat_id}"),
+        )
+        .await?;
         let Some(title) = title else {
             return Ok(None);
         };
@@ -357,7 +344,50 @@ fn user_message_digest(messages: &[Message]) -> Option<String> {
     (!digest.is_empty()).then_some(digest)
 }
 
-/// Ask `provider` to name the conversation `material` describes.
+/// Ask for a name and retry the transient ways a call comes back unusable.
+///
+/// `Ok(None)` is the model declining to name the subject; `subject` labels the
+/// log lines ("chat 42", "workspace ab12…"). The bounded retry policy is
+/// [`TITLE_ATTEMPTS`], shared by every consumer so a background naming call is
+/// equally patient wherever it runs.
+pub(crate) async fn derive_title_with_retries(
+    provider: &dyn ModelProvider,
+    utility: &UtilityModel,
+    system_prompt: &str,
+    schema_name: &str,
+    material: &str,
+    subject: &str,
+) -> Result<Option<String>> {
+    let mut attempt = 1;
+    loop {
+        match request_title(provider, utility, system_prompt, schema_name, material).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(proposed)) => match normalize_derived_title(&proposed) {
+                Some(title) => return Ok(Some(title)),
+                None if attempt < TITLE_ATTEMPTS => {
+                    eprintln!(
+                        "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} returned an unusable title for {subject}: {proposed:?}"
+                    );
+                    attempt += 1;
+                }
+                None => {
+                    return Err(AgentError::msg(format!(
+                        "titling model returned an unusable title: {proposed:?}"
+                    )))
+                }
+            },
+            Err(error) if attempt < TITLE_ATTEMPTS => {
+                eprintln!(
+                    "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} failed for {subject}: {error}"
+                );
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Ask `provider` to name the subject `material` describes.
 ///
 /// `Ok(None)` is the model declining to name it. An answer that is not a title
 /// at all — a tool call, a refusal, an unparsable payload — is an error, since
@@ -365,13 +395,15 @@ fn user_message_digest(messages: &[Message]) -> Option<String> {
 async fn request_title(
     provider: &dyn ModelProvider,
     utility: &UtilityModel,
+    system_prompt: &str,
+    schema_name: &str,
     material: &str,
 ) -> Result<Option<String>> {
     let request = ChatRequest {
         provider: utility.provider.clone(),
         model: utility.model.clone(),
         reasoning_model: utility.reasoning_model,
-        system: Some(system_prompt()),
+        system: Some(system_prompt.to_owned()),
         messages: vec![ChatMessage::text(Role::User, material)],
         tools: Vec::new(),
         max_tokens: Some(TITLE_MAX_OUTPUT_TOKENS),
@@ -379,7 +411,7 @@ async fn request_title(
         // schema already constrains the answer's shape.
         temperature: None,
         reasoning_effort: utility.reasoning_effort,
-        response_format: Some(ChatTitleProposal::response_format()),
+        response_format: Some(TitleProposal::response_format(schema_name)),
         // One call, one prompt nothing else re-sends: cache writes here would
         // be a premium paid for entries that expire unread.
         prompt_cache: PromptCacheMode::OneShot,
@@ -428,8 +460,8 @@ async fn request_title(
     if !completed {
         return Err(AgentError::msg("titling stream ended without a stop event"));
     }
-    let proposal: ChatTitleProposal = serde_json::from_str(strip_json_fence(content.trim()))
-        .map_err(|error| {
+    let proposal: TitleProposal =
+        serde_json::from_str(strip_json_fence(content.trim())).map_err(|error| {
             AgentError::msg(format!("titling model returned invalid JSON: {error}"))
         })?;
     Ok(proposal.title)
@@ -458,7 +490,7 @@ fn normalize_derived_title(proposed: &str) -> Option<String> {
 }
 
 /// The leading `max_bytes` of `text`, cut on a character boundary.
-fn head(text: &str, max_bytes: usize) -> &str {
+pub(crate) fn head(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
         return text;
     }
@@ -497,7 +529,9 @@ mod tests {
     /// exactly the shape strict mode is fussiest about.
     #[test]
     fn the_title_schema_has_a_strict_form_that_still_allows_no_title() {
-        let ResponseFormat::JsonSchema { schema, .. } = ChatTitleProposal::response_format() else {
+        let ResponseFormat::JsonSchema { schema, .. } =
+            TitleProposal::response_format(CHAT_TITLE_SCHEMA_NAME)
+        else {
             panic!("the titling constraint is a JSON schema");
         };
         let strict = strict_json_schema(&schema, OptionalProperties::AcceptNull)

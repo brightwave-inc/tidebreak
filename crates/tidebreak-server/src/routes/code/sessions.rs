@@ -52,6 +52,10 @@ pub async fn submit_turn(
     if message.is_empty() {
         return Err(ServerError::bad_request("message must not be empty"));
     }
+    // From the front of the submit, like chat titling from the front of a
+    // turn: a code turn can run for minutes, and the derived name should land
+    // while the engine works, not after.
+    crate::code::titling::spawn_for_turn(&state, id, message.clone());
     match require_code(&state)?
         .submit_turn(id, message.clone())
         .await?

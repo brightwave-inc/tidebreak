@@ -156,7 +156,9 @@ export function CodeSidebar() {
               }
             >
               <FolderGit2 />
-              <span>{workspace.title}</span>
+              {/* The digest restates the title on every notice, so a
+                  background rename lands here without a catalog refresh. */}
+              <span>{digest?.title ?? workspace.title}</span>
               <AttentionBadge attention={digest?.attention} compact />
             </SidebarButton>
           );

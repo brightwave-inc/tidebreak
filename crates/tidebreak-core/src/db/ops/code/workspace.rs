@@ -101,6 +101,30 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
     Ok(result.rows_affected == 1)
 }
 
+/// Set a workspace's title only while it still reads `expected`.
+///
+/// The compare half is what lets background naming lose to a rename: a derived
+/// title replaces the generated placeholder it was derived against, and nothing
+/// else, no matter when the write lands. Returns whether the row changed.
+pub async fn set_workspace_title_if(
+    store: &DbStore,
+    id: WorkspaceId,
+    expected: &str,
+    title: &str,
+) -> Result<bool> {
+    let result = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::Title,
+            sea_orm::sea_query::Expr::value(title.to_owned()),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Title.eq(expected))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Delete a workspace row. Used to roll back a failed create that left no checkout.
 pub async fn delete_workspace(store: &DbStore, id: WorkspaceId) -> Result<bool> {
     let result = entities::code_workspace::Entity::delete_by_id(id.0)
