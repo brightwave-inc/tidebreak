@@ -71,10 +71,10 @@
   --container-margin: 0.5rem;
   --container-border: 1px;
 
-  /* Sidebar rail: a fixed 224px until the window is wide enough to spend more. */
-  --sidebar-expanded-min: calc(var(--spacing) * 56);
-  --sidebar-expanded-max: calc(var(--spacing) * 80);
-  --sidebar-expanded-flex: 0 0 var(--sidebar-expanded-min);
+  /* Sidebar rail: reader-resizable; JS sets --sidebar-expanded-width on the shell. */
+  --sidebar-expanded-min: 200px;
+  --sidebar-expanded-max: 480px;
+  --sidebar-expanded-width: 280px;
   --sidebar-compact-width: calc(var(--spacing) * 14);
   /* macOS overlay traffic lights at trafficLightPosition (16, 20), plus a
      gap before the history buttons. The compact rail is narrower than this. */
@@ -250,15 +250,6 @@
   --shadow-lg: var(--shadow-lg);
   --shadow-xl: var(--shadow-lg);
   --shadow-2xl: var(--shadow-lg);
-}
-
-/* Above 1600px the sidebar is allowed to grow with the window rather than
-   leaving an increasingly wide gutter beside a fixed rail. */
-@media (min-width: 1600px) {
-  :root {
-    --sidebar-expanded-flex: 0 1
-      clamp(var(--sidebar-expanded-min), 15%, var(--sidebar-expanded-max));
-  }
 }
 
 * {
@@ -1619,7 +1610,7 @@ body {
   left: 0;
   z-index: 40;
   display: flex;
-  width: var(--sidebar-expanded-min);
+  width: var(--sidebar-expanded-width);
   height: 40px;
   align-items: center;
   gap: 0.5rem;
