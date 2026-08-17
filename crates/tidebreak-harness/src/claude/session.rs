@@ -1,7 +1,7 @@
 //! One print-mode child per turn.
 
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,6 +29,9 @@ pub struct ClaudeSession {
     resume_ref: Mutex<Option<String>>,
     child: AsyncMutex<Option<Child>>,
     child_pid: AtomicU32,
+    /// Unrecognized events summed across every turn's parser: each turn is a
+    /// fresh child, so the per-turn count alone would reset on every prompt.
+    unrecognized: AtomicU64,
 }
 
 impl ClaudeSession {
@@ -39,6 +42,7 @@ impl ClaudeSession {
             resume_ref: Mutex::new(resume_ref),
             child: AsyncMutex::new(None),
             child_pid: AtomicU32::new(0),
+            unrecognized: AtomicU64::new(0),
         }
     }
 
@@ -178,6 +182,8 @@ impl HarnessSession for ClaudeSession {
             let pending = lines.pending().to_owned();
             emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await;
         }
+        self.unrecognized
+            .fetch_add(parser.unrecognized(), Ordering::SeqCst);
 
         let _ = stdin_task.await;
         let stderr = stderr_task.await.unwrap_or_default();
@@ -242,6 +248,10 @@ impl HarnessSession for ClaudeSession {
             0 => None,
             pid => Some(i64::from(pid)),
         }
+    }
+
+    fn unrecognized_events(&self) -> u64 {
+        self.unrecognized.load(Ordering::SeqCst)
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {

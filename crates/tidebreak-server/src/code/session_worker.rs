@@ -8,6 +8,7 @@
 //! worker keeps selecting on [`WorkerCommand`] so `decide` and `interrupt`
 //! reach the engine mid-turn — every adapter rides this, not just Claude.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -70,11 +71,24 @@ pub(crate) struct LiveSink {
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
+    /// Engine-lifetime unrecognized count already folded onto the session row.
+    ///
+    /// The engine's own count is cumulative for as long as it is attached, and
+    /// the sink is created once per attachment, so the two share a lifetime.
+    flushed_unrecognized: AtomicU64,
 }
 
 impl LiveSink {
     pub(crate) fn set_turn(&self, turn_id: CodeTurnId) {
         *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
+    }
+
+    /// How many unrecognized events the engine has counted since the last
+    /// flush. Reporting a total below the watermark (an engine that reset its
+    /// own counter) yields zero rather than a negative correction.
+    fn take_unrecognized_delta(&self, total: u64) -> u64 {
+        let flushed = self.flushed_unrecognized.swap(total, Ordering::SeqCst);
+        total.saturating_sub(flushed)
     }
 
     async fn record_approval(
@@ -419,6 +433,15 @@ async fn drive_turn(
     if let Some(resume) = engine.resume_ref() {
         session.harness_resume_ref = Some(resume);
     }
+    // End of turn is where the parser's unrecognized count becomes durable.
+    // The engine reports a running total, so only the delta since the last
+    // flush is added — the row accumulates across engine restarts.
+    let dropped = sink.take_unrecognized_delta(engine.unrecognized_events());
+    if dropped > 0 {
+        session.unrecognized_event_count = session
+            .unrecognized_event_count
+            .saturating_add(i64::try_from(dropped).unwrap_or(i64::MAX));
+    }
 
     // Re-read the turn: the sink may have already closed it.
     if let Ok(Some(updated)) = get_open_turn(db, session.id).await {
@@ -585,6 +608,7 @@ pub(crate) fn sink_for(
         session_id,
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
+        flushed_unrecognized: AtomicU64::new(0),
     })
 }
 

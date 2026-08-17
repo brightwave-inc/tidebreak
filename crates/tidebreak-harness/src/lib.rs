@@ -307,6 +307,15 @@ pub trait HarnessSession: Send + Sync {
         None
     }
 
+    /// How many stream events this session could not map to a
+    /// [`HarnessEvent`], counted since it was launched.
+    ///
+    /// Monotonic for the life of the session; the worker flushes the delta
+    /// onto the session row after each turn so the count survives a restart.
+    /// Deliberately has no default: an adapter that dropped part of a stream
+    /// must say so rather than inherit a silent zero (decision 0031).
+    fn unrecognized_events(&self) -> u64;
+
     /// Tear the session down.
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
 }

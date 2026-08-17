@@ -163,9 +163,18 @@ pub trait HarnessSession: Send {
                     decision: ApprovalDecision) -> Result<(), HarnessError>;
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
     fn resume_ref(&self) -> Option<String>;
+    /// Stream events this build could not map, counted since launch (0031).
+    fn unrecognized_events(&self) -> u64;
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
 }
 ```
+
+The session worker folds the unrecognized count onto `code_session`
+(`unrecognized_event_count`) at the end of every turn, adding the delta
+since the last flush so the row accumulates across engine restarts. The
+workspace header shows it per session and the doctor page sums it per
+harness: a stream this build only partly understood has to say so, because
+a partly-read transcript is otherwise indistinguishable from a complete one.
 
 Process models the trait absorbs:
 

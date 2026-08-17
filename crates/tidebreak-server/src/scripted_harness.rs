@@ -77,6 +77,7 @@ pub(crate) struct ScriptedAdapter {
     structured_approvals: CapLevel,
     auto_mode: CapLevel,
     child_pid: Option<i64>,
+    unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
 }
 
@@ -90,6 +91,7 @@ impl ScriptedAdapter {
             structured_approvals: CapLevel::Unsupported,
             auto_mode: CapLevel::Unsupported,
             child_pid: None,
+            unrecognized_per_turn: 0,
             approver: Arc::new(ScriptedApprover::default()),
         }
     }
@@ -127,6 +129,13 @@ impl ScriptedAdapter {
     #[allow(dead_code)]
     pub(crate) fn with_child_pid(mut self, pid: i64) -> Self {
         self.child_pid = Some(pid);
+        self
+    }
+
+    /// Stands in for a parser that could not map part of the stream: the
+    /// scripted session reports this many unrecognized events per turn.
+    pub(crate) fn with_unrecognized_per_turn(mut self, count: u64) -> Self {
+        self.unrecognized_per_turn = count;
         self
     }
 }
@@ -180,6 +189,7 @@ impl HarnessAdapter for ScriptedAdapter {
             interrupt: Arc::new(AtomicBool::new(false)),
             steered: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
+            unrecognized_per_turn: self.unrecognized_per_turn,
             approver: self.approver.clone(),
         }))
     }
@@ -194,6 +204,7 @@ struct ScriptedSession {
     interrupt: Arc<AtomicBool>,
     steered: Mutex<Option<String>>,
     unrecognized: AtomicU64,
+    unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
 }
 
@@ -201,6 +212,8 @@ struct ScriptedSession {
 impl HarnessSession for ScriptedSession {
     async fn run_turn(&self, _input: TurnInput) -> Result<(), HarnessError> {
         self.interrupt.store(false, Ordering::SeqCst);
+        self.unrecognized
+            .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);
         for event in &self.events {
             if self.interrupt.load(Ordering::SeqCst) {
                 self.sink.emit(HarnessEvent::TurnInterrupted).await;
@@ -275,8 +288,11 @@ impl HarnessSession for ScriptedSession {
         self.child_pid
     }
 
+    fn unrecognized_events(&self) -> u64 {
+        self.unrecognized.load(Ordering::SeqCst)
+    }
+
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
-        let _ = self.unrecognized;
         Ok(())
     }
 }

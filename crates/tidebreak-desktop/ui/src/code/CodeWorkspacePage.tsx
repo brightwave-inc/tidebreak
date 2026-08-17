@@ -216,6 +216,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   client={client}
                 />
                 <PendingApprovalBadge sessionId={session.id} client={client} />
+                <UnrecognizedEventsBadge session={session} />
                 <SessionLifecycleBadge
                   session={session}
                   client={client}
@@ -496,6 +497,34 @@ function PendingApprovalBadge({
   return (
     <Badge variant="warning" size="sm" data-testid="pending-approval-badge">
       {pending} {pending === 1 ? "approval" : "approvals"}
+    </Badge>
+  );
+}
+
+/**
+ * The engine dropped part of its own stream. Saying so where the session is
+ * read is the point of counting it at all — a silently degraded transcript
+ * looks exactly like a complete one (decision 0031). The count comes from the
+ * session row, so it settles at the end of a turn rather than mid-stream.
+ */
+function UnrecognizedEventsBadge({
+  session,
+}: {
+  session: CodeSessionSnapshot;
+}) {
+  const dropped = session.unrecognized_event_count;
+  if (dropped <= 0) return null;
+  return (
+    <Badge
+      variant="warning"
+      size="sm"
+      data-testid="unrecognized-events-badge"
+      title={
+        `${dropped} engine ${dropped === 1 ? "event" : "events"} could not be read by this ` +
+        "build and are missing from the transcript. Check the harness doctor page."
+      }
+    >
+      {dropped} unread {dropped === 1 ? "event" : "events"}
     </Badge>
   );
 }

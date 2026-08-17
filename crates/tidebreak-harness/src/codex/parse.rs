@@ -291,6 +291,9 @@ impl CodexStreamParser {
             .and_then(Value::as_str)
             .unwrap_or("");
         match status {
+            "completed" => vec![HarnessEvent::TurnCompleted {
+                usage: self.last_usage.clone(),
+            }],
             "interrupted" => vec![HarnessEvent::TurnInterrupted],
             "failed" => {
                 let message = params
@@ -303,9 +306,29 @@ impl CodexStreamParser {
                     },
                 }]
             }
-            _ => vec![HarnessEvent::TurnCompleted {
-                usage: self.last_usage.clone(),
-            }],
+            // The manifest records the observed set as
+            // `completed | interrupted | failed`. A fourth value still ends
+            // the turn, so it closes as completed — but counted and stated,
+            // never folded in silently (decision 0031).
+            other => {
+                let label = if other.is_empty() { "missing" } else { other };
+                self.count_unrecognized(&format!("turn/completed/{label}"), params);
+                vec![
+                    HarnessEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Warning,
+                        message: bound(
+                            &format!(
+                                "the engine ended the turn with an unrecognized status \
+                                 ({label}); it was recorded as completed"
+                            ),
+                            MAX_NOTICE_CHARS,
+                        ),
+                    },
+                    HarnessEvent::TurnCompleted {
+                        usage: self.last_usage.clone(),
+                    },
+                ]
+            }
         }
     }
 
@@ -498,5 +521,27 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn an_unknown_turn_status_is_counted_and_stated_before_the_turn_closes() {
+        // The turn still has to end — the plausible wrong implementation folds
+        // a fourth status into a plain completion and says nothing.
+        let input = r#"
+{"dir":"in","msg":{"method":"turn/completed","params":{"turn":{"status":"abandoned"}}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 1);
+        assert!(matches!(
+            out.events.first(),
+            Some(HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Warning,
+                ..
+            })
+        ));
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
     }
 }

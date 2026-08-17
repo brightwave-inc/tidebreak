@@ -8,8 +8,8 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, HarnessKind, ToolDetail, ToolOutcome, MAX_EVENT_TEXT_CHARS,
-    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    BoundedError, CodeUsage, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
 use crate::HarnessEvent;
@@ -179,6 +179,10 @@ impl GrokStreamParser {
     }
 
     fn parse_tool_call_update(&mut self, value: &Value) -> Vec<HarnessEvent> {
+        // `status: null` is the documented progress frame — the manifest
+        // records the observed set as `null (progress) | completed | failed`.
+        // It carries no state we normalize, so dropping it is a deliberate
+        // no-op rather than an unrecognized event.
         let Some(status) = value.get("status").and_then(Value::as_str) else {
             return Vec::new();
         };
@@ -228,9 +232,31 @@ impl GrokStreamParser {
             .unwrap_or("");
         match stop {
             "cancelled" => events.push(HarnessEvent::TurnInterrupted),
-            _ => events.push(HarnessEvent::TurnCompleted {
+            "end_turn" => events.push(HarnessEvent::TurnCompleted {
                 usage: self.last_usage.clone(),
             }),
+            // A stop reason this build has never seen still ends the turn —
+            // the child has exited and something must close it out. Folding it
+            // into a plain completion without a word would be exactly the
+            // silent normalization decision 0031 forbids, so it is counted and
+            // stated before the turn closes.
+            other => {
+                let label = if other.is_empty() { "missing" } else { other };
+                self.count_unrecognized(&format!("end/stopReason/{label}"), value);
+                events.push(HarnessEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Warning,
+                    message: bound(
+                        &format!(
+                            "the engine ended the turn with an unrecognized stop reason \
+                             ({label}); it was recorded as completed"
+                        ),
+                        MAX_NOTICE_CHARS,
+                    ),
+                });
+                events.push(HarnessEvent::TurnCompleted {
+                    usage: self.last_usage.clone(),
+                });
+            }
         }
         events
     }
@@ -416,5 +442,30 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn an_unknown_stop_reason_is_counted_and_stated_while_a_progress_frame_is_not() {
+        // `status: null` on tool_call_update is the manifest's documented
+        // progress frame: a deliberate no-op, not a drop. An unheard-of stop
+        // reason is the opposite — it still ends the turn, but it is counted.
+        let input = r#"
+{"type":"tool_call","toolCallId":"call-1","toolName":"read_file","rawInput":{}}
+{"type":"tool_call_update","toolCallId":"call-1","status":null}
+{"type":"end","stopReason":"budget_exhausted","sessionId":"abc"}
+"#;
+        let out = GrokStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 1);
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Warning,
+                ..
+            }
+        )));
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
     }
 }
