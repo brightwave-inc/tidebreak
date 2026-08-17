@@ -255,7 +255,17 @@ test("release-drafter retains a stable draft tag after formatting", () => {
   assert.match(releaseDrafterConfig, /^tag-prefix: "v"$/m);
 
   const draftJob = workflowJob(workflows["release-draft.yml"], "draft");
-  assert.match(draftJob, /id: release_drafter/);
+  const requireBaselineAt = draftJob.indexOf(
+    "node scripts/require-release-baseline.mjs",
+  );
+  const releaseDrafterAt = draftJob.indexOf("id: release_drafter");
+  assert.notEqual(requireBaselineAt, -1);
+  assert.notEqual(releaseDrafterAt, -1);
+  assert.ok(
+    requireBaselineAt < releaseDrafterAt,
+    "the published baseline must be confirmed before Release Drafter runs",
+  );
+  assert.match(draftJob, /git ls-remote --tags origin 'v\*'/);
   assert.match(
     draftJob,
     /RELEASE_TAG: v\$\{\{ steps\.release_drafter\.outputs\.resolved_version \}\}/,
