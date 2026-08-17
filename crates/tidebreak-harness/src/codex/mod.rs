@@ -79,6 +79,8 @@ impl HarnessAdapter for CodexAdapter {
             // `thread/start` sandbox workspace-write + approvalPolicy
             // on-request; supervised by the captured approval channel.
             auto_mode: CapLevel::Supported,
+            // `thread/start` sandbox danger-full-access + approvalPolicy never.
+            allow_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
@@ -263,6 +265,8 @@ mod tests {
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.native_interrupt, CapLevel::Supported);
         assert_eq!(caps.plan_mode, CapLevel::Supported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.reasoning_levels, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
@@ -281,10 +285,18 @@ mod tests {
             .argv
             .iter()
             .any(|arg| arg.contains("dangerously-bypass")));
-        for mode in CodePermissionMode::ALL {
-            let (sandbox, approval) = thread_start_policy(*mode);
+        for mode in [
+            CodePermissionMode::Plan,
+            CodePermissionMode::Ask,
+            CodePermissionMode::Auto,
+        ] {
+            let (sandbox, approval) = thread_start_policy(mode);
             assert_ne!(sandbox, "danger-full-access");
             assert_ne!(approval, "never");
         }
+        assert_eq!(
+            thread_start_policy(CodePermissionMode::Allow),
+            ("danger-full-access", "never")
+        );
     }
 }

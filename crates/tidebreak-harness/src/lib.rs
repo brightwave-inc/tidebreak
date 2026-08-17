@@ -32,7 +32,9 @@ mod text;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
 pub use child::ChildPid;
-pub use launch::{validate_launch_plan, BypassFlagError, LaunchPlan};
+pub use launch::{
+    validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
+};
 pub use probe::{
     filter_child_env, observe_version, probe_shell, resolve_binary, HostEnv, ProbeCapture,
     ProbeError,

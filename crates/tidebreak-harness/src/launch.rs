@@ -30,9 +30,30 @@ const DENIED_EXACT: &[&str] = &[
 /// Bypass mode values that can appear as a `--permission-mode` argument.
 const DENIED_VALUES: &[&str] = &["bypassPermissions"];
 
+/// Whether a composed launch plan may include the engine's bypass flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BypassPolicy {
+    /// Plan / Ask / Auto: no known bypass flag may appear, including extras.
+    Forbidden,
+    /// Allow: the adapter may compose the engine's documented bypass.
+    Permitted,
+}
+
 /// Reject a composed launch plan that includes a permission-bypass flag,
-/// including user-supplied extras.
+/// including user-supplied extras. Use [`validate_launch_plan_with`] when
+/// the session is in Allow.
 pub fn validate_launch_plan(plan: &LaunchPlan) -> Result<(), BypassFlagError> {
+    validate_launch_plan_with(plan, BypassPolicy::Forbidden)
+}
+
+/// Reject a composed launch plan under the given bypass policy.
+pub fn validate_launch_plan_with(
+    plan: &LaunchPlan,
+    policy: BypassPolicy,
+) -> Result<(), BypassFlagError> {
+    if policy == BypassPolicy::Permitted {
+        return Ok(());
+    }
     for arg in &plan.argv {
         if DENIED_VALUES.contains(&arg.as_str()) {
             return Err(BypassFlagError(arg.clone()));
@@ -118,6 +139,19 @@ mod tests {
         let err = validate_launch_plan(&plan(&["claude", "--dangerously-bypass-permissions"]))
             .unwrap_err();
         assert!(err.0.contains("dangerous"));
+    }
+
+    #[test]
+    fn allow_mode_may_compose_a_bypass_flag() {
+        validate_launch_plan_with(
+            &plan(&[
+                "claude",
+                "--dangerously-skip-permissions",
+                "--allow-dangerously-skip-permissions",
+            ]),
+            BypassPolicy::Permitted,
+        )
+        .unwrap();
     }
 
     #[test]

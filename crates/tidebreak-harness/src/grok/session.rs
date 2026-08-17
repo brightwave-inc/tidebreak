@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::child::{signal_interrupt, turn_outcome, ChildPid};
 use crate::grok::parse::GrokStreamParser;
-use crate::launch::{validate_launch_plan, LaunchPlan};
+use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
     HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
@@ -62,26 +62,27 @@ impl GrokSession {
             &self.spec.extra_env,
             self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
+            self.spec.permission_mode,
         )
     }
 }
 
-/// 1.0.4 honors Auto only, as its default headless posture.
+/// 1.0.4 honors Auto and Allow.
 ///
 /// Auto composes no permission flags: the default print-mode posture
 /// executes routine work unprompted (re-probed 2026-08-17 — a write tool
 /// ran without asking), which is exactly an unsupervised workspace-write
-/// auto. Ask needs a structured approval channel and headless
-/// `streaming-json` has none (`grok agent stdio` ACP was probed; no
-/// request/response pair was captured). Plan's `--permission-mode plan`
+/// auto. Allow composes `--always-approve`, the engine's documented
+/// allow-everything flag. Ask needs a structured approval channel and
+/// headless `streaming-json` has none (`grok agent stdio` ACP was probed;
+/// no request/response pair was captured). Plan's `--permission-mode plan`
 /// and `--sandbox read-only` both wrote files in captured and re-probed
-/// turns. Composing `--always-approve` / `--yolo` / `bypassPermissions`
-/// is forbidden. Composing `--deny` rules as a stand-in for Plan would
+/// turns. Composing `--deny` rules as a stand-in for Plan would
 /// approximate a posture the engine's own plan/read-only flags did not
 /// honor.
 pub(crate) fn refuse_unhonored_mode(mode: CodePermissionMode) -> Result<(), HarnessError> {
     match mode {
-        CodePermissionMode::Auto => Ok(()),
+        CodePermissionMode::Auto | CodePermissionMode::Allow => Ok(()),
         CodePermissionMode::Plan | CodePermissionMode::Ask => {
             Err(HarnessError::PermissionModeUnsupported(mode))
         }
@@ -97,6 +98,7 @@ pub(crate) fn compose_print_plan(
     extra_env: &[(String, String)],
     resume_ref: Option<&str>,
     prompt_file: &Path,
+    mode: CodePermissionMode,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -108,6 +110,9 @@ pub(crate) fn compose_print_plan(
         cwd.to_string_lossy().into_owned(),
         "--no-auto-update".into(),
     ];
+    if mode == CodePermissionMode::Allow {
+        argv.push("--always-approve".into());
+    }
     if let Some(resume) = resume_ref {
         argv.push("--resume".into());
         argv.push(resume.to_owned());
@@ -115,12 +120,18 @@ pub(crate) fn compose_print_plan(
     argv.extend(extra_argv.iter().cloned());
     let mut env = extra_env.to_vec();
     env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+    let policy = match mode {
+        CodePermissionMode::Allow => BypassPolicy::Permitted,
+        CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
+            BypassPolicy::Forbidden
+        }
+    };
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
         env,
     };
-    validate_launch_plan(&plan)?;
+    validate_launch_plan_with(&plan, policy)?;
     Ok(plan)
 }
 

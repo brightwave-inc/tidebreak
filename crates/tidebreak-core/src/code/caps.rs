@@ -68,6 +68,9 @@ pub struct HarnessCaps {
     /// approval cards; without it, Auto runs unsupervised and the product
     /// states so where the mode is chosen (decision 0038).
     pub auto_mode: CapLevel,
+    /// The engine has an allow-everything / bypass posture the adapter can
+    /// select. Composed only when the session is in Allow (decision 0039).
+    pub allow_mode: CapLevel,
     /// The engine accepts a reasoning-effort control.
     pub reasoning_levels: CapLevel,
     /// The engine emits native file-change events.
@@ -90,6 +93,7 @@ mod tests {
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
             auto_mode: CapLevel::Unknown,
+            allow_mode: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,

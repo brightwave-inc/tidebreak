@@ -137,7 +137,7 @@ usage: tidebreak serve
        tidebreak code ws list [--repo <id|path>]
        tidebreak code ws show <id>
        tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
        tidebreak code session show <id>
        tidebreak code session reap <id>
        tidebreak code run (--session <id> | --ws <id>) [<message>]

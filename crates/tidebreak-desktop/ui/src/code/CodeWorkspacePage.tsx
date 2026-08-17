@@ -670,7 +670,7 @@ function CodeSessionPane({
   // row yet, show everything and let the server refuse.
   const availableModes: CodePermissionMode[] = doctorEntry
     ? createPermissionModes(doctorEntry.caps)
-    : ["plan", "ask", "auto"];
+    : ["plan", "ask", "auto", "allow"];
 
   // `items` is a fresh array on every streamed delta, so keying the fetch on it
   // would list approvals again for every token of a turn. Only an approval

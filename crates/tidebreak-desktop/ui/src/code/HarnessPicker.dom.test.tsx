@@ -17,6 +17,7 @@ const CAPS = {
   mid_turn_steering: "unsupported",
   plan_mode: "supported",
   auto_mode: "supported",
+  allow_mode: "supported",
   reasoning_levels: "unknown",
   native_file_change_events: "unsupported",
   native_interrupt: "supported",

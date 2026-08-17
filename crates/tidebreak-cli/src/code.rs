@@ -48,7 +48,7 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code ws list [--repo <id|path>]
        tidebreak code ws show <id>
        tidebreak code ws archive <id> [--force]
-       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
        tidebreak code session show <id>
        tidebreak code session reap <id>
        tidebreak code run (--session <id> | --ws <id>) [<message>]
@@ -799,6 +799,9 @@ async fn resolve_start_mode(
         }
         CodePermissionMode::Auto => Some(
             "starting in auto mode — this engine has no approval channel; every action proceeds without asking",
+        ),
+        CodePermissionMode::Allow => Some(
+            "starting in allow mode — this engine's permission system is off; every action runs without asking",
         ),
         CodePermissionMode::Ask => None,
     };
@@ -2189,7 +2192,7 @@ fn parse_harness(value: &str) -> std::result::Result<HarnessKind, String> {
 
 fn parse_mode(value: &str) -> std::result::Result<CodePermissionMode, String> {
     CodePermissionMode::from_str(value)
-        .ok_or_else(|| "--mode expects plan, ask, or auto".to_owned())
+        .ok_or_else(|| "--mode expects plan, ask, auto, or allow".to_owned())
 }
 
 fn parse_on_approval(value: &str) -> std::result::Result<OnApproval, String> {
@@ -2489,6 +2492,7 @@ mod tests {
                 mid_turn_steering: CapLevel::Unknown,
                 plan_mode,
                 auto_mode,
+                allow_mode: CapLevel::Unknown,
                 reasoning_levels: CapLevel::Unknown,
                 native_file_change_events: CapLevel::Unknown,
                 native_interrupt: CapLevel::Supported,

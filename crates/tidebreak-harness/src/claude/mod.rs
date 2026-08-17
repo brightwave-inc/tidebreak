@@ -77,6 +77,13 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             } else {
                 CapLevel::Unknown
             },
+            // `--dangerously-skip-permissions` is documented on 2.1.233;
+            // same version gate as the rest of the permission mapping.
+            allow_mode: if version_is_2_1_233(_probe.version.as_deref()) {
+                CapLevel::Supported
+            } else {
+                CapLevel::Unknown
+            },
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
@@ -270,6 +277,8 @@ mod tests {
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
         assert_eq!(caps.native_interrupt, CapLevel::Supported);
         assert_eq!(caps.plan_mode, CapLevel::Supported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
@@ -287,5 +296,31 @@ mod tests {
             env: Vec::new(),
         });
         assert_eq!(caps.structured_approvals, CapLevel::Unknown);
+        assert_eq!(caps.allow_mode, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn permission_mode_mapping_is_explicit() {
+        use crate::claude::session::permission_mode_flags;
+        use tidebreak_core::CodePermissionMode;
+        assert_eq!(
+            permission_mode_flags(CodePermissionMode::Plan),
+            ["--permission-mode", "plan"]
+        );
+        assert_eq!(
+            permission_mode_flags(CodePermissionMode::Ask),
+            ["--permission-mode", "manual"]
+        );
+        assert_eq!(
+            permission_mode_flags(CodePermissionMode::Auto),
+            ["--permission-mode", "acceptEdits"]
+        );
+        assert_eq!(
+            permission_mode_flags(CodePermissionMode::Allow),
+            [
+                "--dangerously-skip-permissions",
+                "--allow-dangerously-skip-permissions"
+            ]
+        );
     }
 }

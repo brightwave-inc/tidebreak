@@ -83,9 +83,9 @@ a new version.
 
 The capture bin writes the prompt to a file in the throwaway repo and tees
 stdout until the child exits. SIGINT on a live child produces a truncated
-stream with no `end` event (exit 130). `--always-approve`, `--yolo`, and
-`--permission-mode bypassPermissions` are denylisted and must not appear on
-a composed launch plan.
+stream with no `end` event (exit 130). `--yolo` and
+`--permission-mode bypassPermissions` are denylisted on Plan / Ask / Auto.
+Allow composes `--always-approve`.
 
 Re-capture the whole version directory when the engine version moves.
 

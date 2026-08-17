@@ -94,7 +94,7 @@ const HARNESS_TIERS = new Set<HarnessTier>([
   "best_effort",
 ]);
 const CAP_LEVELS = new Set<CapLevel>(["supported", "unsupported", "unknown"]);
-const PERMISSION_MODES = new Set<CodePermissionMode>(["plan", "ask", "auto"]);
+const PERMISSION_MODES = new Set<CodePermissionMode>(["plan", "ask", "auto", "allow"]);
 const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "created",
   "idle",
@@ -884,6 +884,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "mid_turn_steering",
       "plan_mode",
       "auto_mode",
+      "allow_mode",
       "reasoning_levels",
       "native_file_change_events",
       "native_interrupt",
@@ -894,6 +895,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.mid_turn_steering, CAP_LEVELS) ||
     !isMember(value.plan_mode, CAP_LEVELS) ||
     !isMember(value.auto_mode, CAP_LEVELS) ||
+    !isMember(value.allow_mode, CAP_LEVELS) ||
     !isMember(value.reasoning_levels, CAP_LEVELS) ||
     !isMember(value.native_file_change_events, CAP_LEVELS) ||
     !isMember(value.native_interrupt, CAP_LEVELS)
@@ -907,6 +909,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     mid_turn_steering: value.mid_turn_steering,
     plan_mode: value.plan_mode,
     auto_mode: value.auto_mode,
+    allow_mode: value.allow_mode,
     reasoning_levels: value.reasoning_levels,
     native_file_change_events: value.native_file_change_events,
     native_interrupt: value.native_interrupt,

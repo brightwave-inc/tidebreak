@@ -57,6 +57,7 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
   plan: "Plan",
   ask: "Ask",
   auto: "Auto",
+  allow: "Allow all",
 };
 
 /** Shown when the selected harness cannot honor Ask or Auto. */
@@ -67,10 +68,14 @@ export const PERMISSION_MODE_UNAVAILABLE_REASON =
 export const UNSUPERVISED_AUTO_NOTE =
   "This engine has no approval channel: in Auto, every action runs without asking.";
 
+/** Stated wherever Allow is offered (decision 0039). */
+export const ALLOW_ALL_NOTE =
+  "This engine's permission system is off: every action runs without asking.";
+
 /** The capability flags the mode policy reads. */
 export type ModeCaps = Pick<
   HarnessCaps,
-  "plan_mode" | "structured_approvals" | "auto_mode"
+  "plan_mode" | "structured_approvals" | "auto_mode" | "allow_mode"
 >;
 
 export function fenceReasonText(reason: FenceReason): string {
@@ -136,6 +141,7 @@ export function createPermissionModes(caps: ModeCaps): CodePermissionMode[] {
   if (caps.plan_mode === "supported") modes.push("plan");
   if (caps.structured_approvals === "supported") modes.push("ask");
   if (caps.auto_mode === "supported") modes.push("auto");
+  if (caps.allow_mode === "supported") modes.push("allow");
   return modes;
 }
 

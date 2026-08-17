@@ -81,6 +81,8 @@ impl HarnessAdapter for OpencodeAdapter {
             // Workspace-write ruleset with sensitive actions still asking
             // over the permission API; supervised Auto.
             auto_mode: CapLevel::Supported,
+            // build agent with every permission rule allow; not `--auto`.
+            allow_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Unknown,
             // session.diff was empty arrays; file.edited was not seen.
             native_file_change_events: CapLevel::Unknown,
@@ -273,6 +275,8 @@ mod tests {
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.native_interrupt, CapLevel::Supported);
         assert_eq!(caps.plan_mode, CapLevel::Supported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
@@ -292,10 +296,23 @@ mod tests {
             .argv
             .iter()
             .any(|arg| arg.contains("dangerous") || arg == "--auto"));
-        for mode in CodePermissionMode::ALL {
-            let body = session_create_body(*mode);
+        for mode in [
+            CodePermissionMode::Plan,
+            CodePermissionMode::Ask,
+            CodePermissionMode::Auto,
+        ] {
+            let body = session_create_body(mode);
             assert_ne!(body.get("agent").and_then(|v| v.as_str()), Some(""));
+            if let Some(rules) = body["permission"].as_array() {
+                assert!(
+                    !rules.iter().all(|rule| rule["action"] == "allow"),
+                    "{mode} must not allow every permission"
+                );
+            }
         }
+        let allow = session_create_body(CodePermissionMode::Allow);
+        let rules = allow["permission"].as_array().unwrap();
+        assert!(rules.iter().all(|rule| rule["action"] == "allow"));
     }
 
     #[test]

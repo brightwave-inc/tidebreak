@@ -1,10 +1,10 @@
 //! Permission modes for an external agent-engine session.
 //!
 //! Variant names match the chat product's [`crate::model::PermissionMode`]
-//! vocabulary (`Plan`, `Ask`, `Auto`) so a future unification is a merge, not
-//! a translation. There is no `Allow` here: a session that needs bypass
-//! behavior must choose it explicitly at the product layer, never as a
-//! composed default.
+//! vocabulary (`Plan`, `Ask`, `Auto`, `Allow`) so a future unification is a
+//! merge, not a translation. `Allow` is the explicit per-session bypass
+//! reserved by decision 0033 and named by decision 0039 — never a composed
+//! default.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -29,11 +29,15 @@ pub enum CodePermissionMode {
     /// sensitive actions still escalate to approval. The adapter must select
     /// the engine's workspace-write posture, not a bypass flag.
     Auto,
+    /// The engine's allow-everything posture: its permission system is off.
+    /// The adapter must compose the engine's documented bypass — never as a
+    /// default, only when this mode is the session's explicit choice.
+    Allow,
 }
 
 impl CodePermissionMode {
     /// Every mode, in ascending order of autonomy.
-    pub const ALL: &'static [Self] = &[Self::Plan, Self::Ask, Self::Auto];
+    pub const ALL: &'static [Self] = &[Self::Plan, Self::Ask, Self::Auto, Self::Allow];
 
     /// The default for a new session.
     pub const DEFAULT: Self = Self::Ask;
@@ -45,6 +49,7 @@ impl CodePermissionMode {
             Self::Plan => "plan",
             Self::Ask => "ask",
             Self::Auto => "auto",
+            Self::Allow => "allow",
         }
     }
 
@@ -96,6 +101,10 @@ mod tests {
         assert_eq!(
             CodePermissionMode::Auto.as_str(),
             PermissionMode::Auto.as_str()
+        );
+        assert_eq!(
+            CodePermissionMode::Allow.as_str(),
+            PermissionMode::Allow.as_str()
         );
     }
 }

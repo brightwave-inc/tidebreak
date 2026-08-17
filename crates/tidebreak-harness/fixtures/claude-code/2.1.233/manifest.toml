@@ -41,7 +41,7 @@ verified = [
   "prompt request shape: {tool_name, input, tool_use_id}",
   "prompt response: single MCP text block {behavior: allow} | {behavior: deny, message}",
   "deny message is the tool_result the model reads (non_execution_kind: permission-rule)",
-  "Ask maps to --permission-mode manual; Auto to acceptEdits; Plan to plan",
+  "Ask maps to --permission-mode manual; Auto to acceptEdits; Plan to plan; Allow to --dangerously-skip-permissions",
 ]
 not_verified = [
   "mid-turn steering input",

@@ -12,8 +12,9 @@ function caps(
   plan_mode: ModeCaps["plan_mode"],
   structured_approvals: ModeCaps["structured_approvals"],
   auto_mode: ModeCaps["auto_mode"],
+  allow_mode: ModeCaps["allow_mode"] = "unsupported",
 ): ModeCaps {
-  return { plan_mode, structured_approvals, auto_mode };
+  return { plan_mode, structured_approvals, auto_mode, allow_mode };
 }
 
 describe("create-time permission mode", () => {
@@ -22,8 +23,8 @@ describe("create-time permission mode", () => {
       "ask",
     );
     expect(
-      createPermissionModes(caps("supported", "supported", "supported")),
-    ).toEqual(["plan", "ask", "auto"]);
+      createPermissionModes(caps("supported", "supported", "supported", "supported")),
+    ).toEqual(["plan", "ask", "auto", "allow"]);
   });
 
   it("falls back to Plan when structured approvals are not supported", () => {
@@ -41,6 +42,9 @@ describe("create-time permission mode", () => {
   it("offers only unsupervised Auto for a grok-shaped engine", () => {
     const grok = caps("unsupported", "unsupported", "supported");
     expect(createPermissionModes(grok)).toEqual(["auto"]);
+    expect(createPermissionModes(caps("unsupported", "unsupported", "supported", "supported"))).toEqual(
+      ["auto", "allow"],
+    );
     expect(defaultCreatePermissionMode(grok)).toBe("auto");
     expect(autoIsUnsupervised(grok)).toBe(true);
     // Supervised Auto rides the approval channel and needs no statement.

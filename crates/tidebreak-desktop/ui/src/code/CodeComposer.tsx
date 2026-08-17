@@ -23,7 +23,7 @@ import {
  * launch.
  */
 
-const MODES: CodePermissionMode[] = ["plan", "ask", "auto"];
+const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
 
 const QUEUED_NOTE = "Queued — runs after the current turn.";
 
@@ -34,7 +34,7 @@ const QUEUE_FULL_NOTE =
 /**
  * Pick the mode a session will be created under.
  *
- * Ask is the default. Plan and Auto stay on the same scale. A mode the
+ * Ask is the default. Plan, Auto, and Allow stay on the same scale. A mode the
  * chosen harness cannot honor is disabled with the refusal reason. This is a
  * creation-time control: the new-workspace dialog and the start-session
  * prompt use it, and an attached session shows `PermissionModeSummary`.

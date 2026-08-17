@@ -1252,6 +1252,7 @@ fn refuse_unhonored_mode(
         CodePermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
         CodePermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
         CodePermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
+        CodePermissionMode::Allow => caps.allow_mode == CapLevel::Supported,
     };
     if ok {
         return Ok(());
@@ -1265,6 +1266,10 @@ fn refuse_unhonored_mode(
         CodePermissionMode::Auto => format!(
             "{harness} cannot honor {mode}: an auto posture is {}",
             caps.auto_mode.as_str()
+        ),
+        CodePermissionMode::Allow => format!(
+            "{harness} cannot honor {mode}: an allow-all posture is {}",
+            caps.allow_mode.as_str()
         ),
     };
     Err(ServerError::unprocessable_kind(

@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::child::{signal_interrupt, turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
-use crate::launch::{validate_launch_plan, LaunchPlan};
+use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
     HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
@@ -24,6 +24,37 @@ use tidebreak_core::CodePermissionMode;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
+
+/// Per-mode flag mapping captured on 2.1.233:
+///   Plan  → --permission-mode plan        (mutations refused)
+///   Ask   → --permission-mode manual      (every tool parks on the prompt tool)
+///   Auto  → --permission-mode acceptEdits (workspace writes proceed; sensitive still parks)
+///   Allow → --dangerously-skip-permissions (engine permission system off)
+/// `--permission-mode auto` is the engine's classifier, not Auto.
+/// `--allow-dangerously-skip-permissions` is required for print mode to honor
+/// the skip flag.
+#[must_use]
+pub(crate) fn permission_mode_flags(mode: CodePermissionMode) -> Vec<String> {
+    match mode {
+        CodePermissionMode::Plan => vec!["--permission-mode".into(), "plan".into()],
+        CodePermissionMode::Ask => vec!["--permission-mode".into(), "manual".into()],
+        CodePermissionMode::Auto => vec!["--permission-mode".into(), "acceptEdits".into()],
+        CodePermissionMode::Allow => vec![
+            "--dangerously-skip-permissions".into(),
+            "--allow-dangerously-skip-permissions".into(),
+        ],
+    }
+}
+
+#[must_use]
+pub(crate) fn bypass_policy(mode: CodePermissionMode) -> BypassPolicy {
+    match mode {
+        CodePermissionMode::Allow => BypassPolicy::Permitted,
+        CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
+            BypassPolicy::Forbidden
+        }
+    }
+}
 
 /// Live Claude Code session: one child per [`HarnessSession::run_turn`].
 pub struct ClaudeSession {
@@ -63,27 +94,7 @@ impl ClaudeSession {
             "--verbose".into(),
             "--include-partial-messages".into(),
         ];
-        // Per-mode flag mapping captured on 2.1.233:
-        //   Plan → --permission-mode plan        (mutations refused)
-        //   Ask  → --permission-mode manual      (every tool parks on the prompt tool)
-        //   Auto → --permission-mode acceptEdits (workspace writes proceed; sensitive still parks)
-        // `--permission-mode auto` and `bypassPermissions` exist but are not
-        // these modes: `auto` is the engine's classifier, not Auto, and
-        // bypass is denylisted.
-        match self.spec.permission_mode {
-            CodePermissionMode::Plan => {
-                argv.push("--permission-mode".into());
-                argv.push("plan".into());
-            }
-            CodePermissionMode::Ask => {
-                argv.push("--permission-mode".into());
-                argv.push("manual".into());
-            }
-            CodePermissionMode::Auto => {
-                argv.push("--permission-mode".into());
-                argv.push("acceptEdits".into());
-            }
-        }
+        argv.extend(permission_mode_flags(self.spec.permission_mode));
         if let Some(channel) = &self.spec.approval {
             if let Some(flags) = crate::claude::approvals::launch_args_for_approval_channel(channel)
             {
@@ -102,7 +113,7 @@ impl ClaudeSession {
             cwd: self.spec.worktree.clone(),
             env,
         };
-        validate_launch_plan(&plan)?;
+        validate_launch_plan_with(&plan, bypass_policy(self.spec.permission_mode))?;
         Ok(plan)
     }
 

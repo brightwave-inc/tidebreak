@@ -32,6 +32,7 @@ scenarios = [
 Plan = { agent = "plan" }
 Ask = { agent = "build", permission = [{ permission = "bash", pattern = "*", action = "ask" }, { permission = "edit", pattern = "*", action = "ask" }, { permission = "read", pattern = "*", action = "allow" }] }
 Auto = { agent = "build", permission = [{ permission = "edit", pattern = "*", action = "allow" }, { permission = "read", pattern = "*", action = "allow" }, { permission = "bash", pattern = "*", action = "ask" }] }
+Allow = { agent = "build", permission = [{ permission = "bash", pattern = "*", action = "allow" }, { permission = "edit", pattern = "*", action = "allow" }, { permission = "read", pattern = "*", action = "allow" }] }
 
 [redaction]
 notes = """
