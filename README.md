@@ -27,6 +27,13 @@
   <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/tidebreak-hero-dark.png">
+    <img src="assets/tidebreak-hero-light.png" alt="Tidebreak coordinating four background agents and previewing the launch-readiness brief they produced">
+  </picture>
+</p>
+
 ---
 
 Tidebreak is a local-first desktop agent for work that ends in a file, not just
