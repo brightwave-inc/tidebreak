@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Reaper(Child);
 

@@ -838,6 +838,104 @@ async fn resolve_turn(
     }
 }
 
+/// Which frames `code run` owns. Extracted so the two ownership bugs have
+/// fixtures that do not need a live server.
+#[derive(Debug)]
+struct TurnGate {
+    expected: Option<CodeTurnId>,
+    ours: bool,
+    /// True after we have seen `TurnStarted` for `expected`. Replayed
+    /// history of earlier turns is ignored until then; live frames of an
+    /// attach-owned turn are accepted without it.
+    seen_start: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameAction {
+    Skip,
+    Render,
+    Terminal(i32),
+}
+
+impl TurnGate {
+    fn submit() -> Self {
+        Self {
+            expected: None,
+            ours: false,
+            seen_start: false,
+        }
+    }
+
+    /// Attach to a turn that is already running. Own it immediately so live
+    /// mid-turn frames are accepted; `TurnStarted` for that id already
+    /// happened and only arrives `replayed: true`.
+    fn attach(turn: CodeTurnId) -> Self {
+        Self {
+            expected: Some(turn),
+            ours: true,
+            seen_start: false,
+        }
+    }
+
+    fn ours(&self) -> bool {
+        self.ours
+    }
+
+    fn on_ran(&mut self, id: CodeTurnId) {
+        if self.ours && self.expected == Some(id) {
+            return;
+        }
+        if self.expected.is_some_and(|bound| bound != id) {
+            self.ours = false;
+            self.seen_start = false;
+        }
+        self.expected = Some(id);
+    }
+
+    /// After Queued, only a later *live* `TurnStarted` binds ownership.
+    fn on_queued(&mut self) {
+        self.expected = None;
+        self.ours = false;
+        self.seen_start = false;
+    }
+
+    fn will_claim(&self, turn_id: CodeTurnId, replayed: bool) -> bool {
+        match self.expected {
+            Some(id) if id == turn_id => !self.seen_start,
+            None => !replayed,
+            Some(_) => false,
+        }
+    }
+
+    fn on_frame(&mut self, replayed: bool, event: &CodeEvent) -> FrameAction {
+        if let CodeEvent::TurnStarted { turn_id } = event {
+            let matches_bound = self.expected == Some(*turn_id);
+            let live_unbound = self.expected.is_none() && !replayed;
+            if matches_bound || live_unbound {
+                self.expected = Some(*turn_id);
+                self.ours = true;
+                self.seen_start = true;
+            }
+        }
+
+        // Never accept a terminal while this submit has not bound a turn —
+        // a live `turn_completed` here belongs to the already-running
+        // previous turn, not to a Queued follow-up.
+        if self.expected.is_none() || !self.ours {
+            return FrameAction::Skip;
+        }
+        // Replayed history before our `TurnStarted` is some other turn.
+        // Live frames of an attach-owned turn are ours even without it.
+        if replayed && !self.seen_start {
+            return FrameAction::Skip;
+        }
+        if is_turn_terminal(event) {
+            return FrameAction::Terminal(turn_exit_code(event).unwrap_or(1));
+        }
+        FrameAction::Render
+    }
+}
+
 async fn run_turn(
     client: &Client,
     session: CodeSessionId,
@@ -877,11 +975,13 @@ async fn run_turn(
         Some(std::pin::pin!(client.submit_turn(session, message)))
     };
     let mut submit_done = attach_only;
-    let mut expected_turn = attach_turn;
+    let mut gate = match attach_turn {
+        Some(turn) => TurnGate::attach(turn),
+        None => TurnGate::submit(),
+    };
     let mut interrupt = Interrupt::watch().await;
     let deadline =
         timeout.map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
-    let mut ours = false;
     let mut dangling = false;
     let mut streamed_text = false;
 
@@ -898,12 +998,13 @@ async fn run_turn(
                 match submitted? {
                     SubmitTurnResponse::Ran(turn) => {
                         eprintln!("tidebreak: turn {}", turn.id);
-                        expected_turn = Some(turn.id);
+                        gate.on_ran(turn.id);
                     }
                     SubmitTurnResponse::Queued(_) => {
                         eprintln!(
                             "tidebreak: turn queued; waiting for the running turn to finish"
                         );
+                        gate.on_queued();
                     }
                 }
                 continue;
@@ -924,22 +1025,22 @@ async fn run_turn(
         let Some((raw, decoded)) = frame else {
             continue;
         };
-        // History from `after=0` is marked replayed. Skip it until this
-        // run's own turn has started; after that, replayed frames are
-        // reconnect catch-up and must be printed.
-        if decoded.replayed == Some(true) && !ours {
-            continue;
-        }
         if let CodeEvent::TurnStarted { turn_id } = &decoded.event {
-            if expected_turn.is_none_or(|id| id == *turn_id) {
-                if !ours {
-                    eprintln!("tidebreak: turn {turn_id}");
-                }
-                ours = true;
+            if gate.will_claim(*turn_id, decoded.replayed == Some(true)) && !gate.ours() {
+                eprintln!("tidebreak: turn {turn_id}");
             }
         }
-        if expected_turn.is_some() && !ours {
-            continue;
+        match gate.on_frame(decoded.replayed == Some(true), &decoded.event) {
+            FrameAction::Skip => continue,
+            FrameAction::Render => {}
+            FrameAction::Terminal(code) => {
+                if format == OutputFormat::Json {
+                    emit_line(&raw);
+                } else {
+                    dangling = render_event(&decoded.event, dangling, &mut streamed_text);
+                }
+                break Ok(code);
+            }
         }
         if format == OutputFormat::Json {
             emit_line(&raw);
@@ -951,9 +1052,6 @@ async fn run_turn(
             if on_approval == OnApproval::Fail {
                 break Ok(EXIT_APPROVAL_PARKED);
             }
-        }
-        if is_turn_terminal(&decoded.event) {
-            break Ok(turn_exit_code(&decoded.event).unwrap_or(1));
         }
     };
     if dangling {
@@ -2383,6 +2481,52 @@ mod tests {
             default_create_permission_mode(None),
             CodePermissionMode::Plan
         );
+    }
+
+    fn turn(n: u128) -> CodeTurnId {
+        CodeTurnId::from(uuid::Uuid::from_u128(n))
+    }
+
+    fn completed() -> CodeEvent {
+        CodeEvent::TurnCompleted {
+            usage: Default::default(),
+            checkpoint: None,
+        }
+    }
+
+    #[test]
+    fn a_queued_submit_does_not_exit_on_the_previous_turns_completion() {
+        let mut gate = TurnGate::submit();
+        assert_eq!(gate.on_frame(false, &completed()), FrameAction::Skip);
+        gate.on_queued();
+        assert_eq!(gate.on_frame(false, &completed()), FrameAction::Skip);
+        let ours = turn(2);
+        assert_eq!(
+            gate.on_frame(true, &CodeEvent::TurnStarted { turn_id: ours }),
+            FrameAction::Skip,
+            "replayed TurnStarted after Queued is not a later live start"
+        );
+        assert_eq!(
+            gate.on_frame(false, &CodeEvent::TurnStarted { turn_id: ours }),
+            FrameAction::Render
+        );
+        assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
+    }
+
+    #[test]
+    fn attach_owns_the_running_turn_without_waiting_for_its_start() {
+        let id = turn(7);
+        let mut gate = TurnGate::attach(id);
+        assert_eq!(
+            gate.on_frame(true, &completed()),
+            FrameAction::Skip,
+            "replayed terminal of an earlier turn is not this attach"
+        );
+        assert_eq!(
+            gate.on_frame(false, &CodeEvent::AssistantDelta { text: "hi".into() }),
+            FrameAction::Render
+        );
+        assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
     }
 
     #[test]
