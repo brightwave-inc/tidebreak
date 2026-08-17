@@ -64,6 +64,8 @@ pub(crate) enum GhError {
     NothingToCommit,
     #[error("{0}")]
     AuthFailed(String),
+    #[error("{0}")]
+    PushFailed(String),
     #[error("{instructions}")]
     GhAbsent { instructions: String },
     #[error("{instructions}")]
@@ -829,20 +831,27 @@ fn bound_text(text: &str) -> String {
 }
 
 fn classify_git(err: String, op: &str) -> GhError {
-    let lower = err.to_ascii_lowercase();
-    if lower.contains("authentication failed")
-        || lower.contains("could not read username")
-        || lower.contains("could not read password")
-        || lower.contains("permission denied")
-        || lower.contains("terminal prompts disabled")
-        || lower.contains("could not read from remote")
-        || (op == "push" && (lower.contains("403") || lower.contains("401")))
-    {
+    let bounded = bound_text(&err);
+    if is_git_auth_failure(&bounded) {
         return GhError::AuthFailed(format!(
-            "git could not authenticate to the remote. Configure your own git credentials (a credential helper, SSH key, or token) in a terminal, then try again. Tidebreak does not store git credentials.\n\n{err}"
+            "git could not authenticate to the remote. Configure your own git credentials (a credential helper, SSH key, or token) in a terminal, then try again. Tidebreak does not store git credentials.\n\n{bounded}"
         ));
     }
-    GhError::user(format!("git {op} failed: {err}"))
+    if op == "push" {
+        return GhError::PushFailed(format!("git push failed:\n{bounded}"));
+    }
+    GhError::user(format!("git {op} failed: {bounded}"))
+}
+
+/// Auth only. "Could not read from remote repository" is also printed for a
+/// missing or unresolvable remote URL, so it is not an auth signature.
+fn is_git_auth_failure(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("authentication")
+        || lower.contains("permission denied")
+        || lower.contains("403")
+        || lower.contains("terminal prompts disabled")
+        || lower.contains("publickey")
 }
 
 fn classify_gh(
@@ -1053,6 +1062,60 @@ mod tests {
 
         let again = commit_all(&work, "first change", None).await.unwrap_err();
         assert!(matches!(again, GhError::NothingToCommit));
+    }
+
+    #[test]
+    fn classify_git_treats_only_auth_signatures_as_auth() {
+        let repo_missing = "fatal: '../no-such-remote' does not appear to be a git repository\n\
+fatal: Could not read from remote repository.\n";
+        assert!(
+            matches!(
+                classify_git(repo_missing.into(), "push"),
+                GhError::PushFailed(_)
+            ),
+            "unresolvable remote must not be git_auth_failed"
+        );
+
+        for auth in [
+            "fatal: Authentication failed for 'https://example.test/repo.git'",
+            "Permission denied (publickey).",
+            "The requested URL returned error: 403",
+            "fatal: could not read Username for 'https://example.test': terminal prompts disabled",
+        ] {
+            assert!(
+                matches!(classify_git(auth.into(), "push"), GhError::AuthFailed(_)),
+                "expected auth for {auth}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn push_of_an_unresolvable_remote_is_not_auth() {
+        let (_dir, work, _bare) = init_paired_repos();
+        run(&work, &["git", "checkout", "-b", "tidebreak/push-fail"]);
+        std::fs::write(work.join("extra.txt"), "line\n").unwrap();
+        commit_all(&work, "first change", Some("msg"))
+            .await
+            .unwrap();
+        run(
+            &work,
+            &["git", "remote", "set-url", "origin", "../no-such-remote"],
+        );
+        let err = push_branch(&work, "tidebreak/push-fail").await.unwrap_err();
+        assert!(
+            !matches!(err, GhError::AuthFailed(_)),
+            "non-auth push classified as auth: {err}"
+        );
+        match err {
+            GhError::PushFailed(message) => {
+                let lower = message.to_ascii_lowercase();
+                assert!(
+                    lower.contains("does not appear") || lower.contains("repository"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected PushFailed, got {other}"),
+        }
     }
 
     #[tokio::test]

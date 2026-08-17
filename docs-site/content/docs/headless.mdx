@@ -48,13 +48,41 @@ tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 tidebreak mcp-server remove <name>
 tidebreak chat list
 tidebreak chat create
+
+tidebreak code doctor [--refresh]
+tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
+tidebreak code repo list
+tidebreak code repo rm <id>
+tidebreak code ws new --repo <id|path> [--title <title>] [--base-ref <ref>]
+tidebreak code ws list [--repo <id|path>]
+tidebreak code ws show <id>
+tidebreak code ws archive <id> [--force]
+tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
+tidebreak code session show <id>
+tidebreak code session reap <id>
+tidebreak code run (--session <id> | --ws <id>) [<message>] [--on-approval wait|fail] [--timeout <secs>]
+tidebreak code approvals [--session <id>]
+tidebreak code approve <approval-id>
+tidebreak code deny <approval-id> [-m <feedback>]
+tidebreak code interrupt --session <id>
+tidebreak code turns --session <id>
+tidebreak code diff --ws <id> [--turn N] [--file PATH]
+tidebreak code files --ws <id> [--turn N]
+tidebreak code git commit --ws <id> [-m MSG]
+tidebreak code git push --ws <id>
+tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
+tidebreak code git status --ws <id>
+tidebreak code action <name> --ws <id>
+tidebreak code watch [--once] [--timeout <secs>]
 ```
 
 A bare `tidebreak` with no arguments runs `serve`.
 
-`-p`, `output`, `attach`, and the setup commands additionally take
+`-p`, `output`, `attach`, the setup commands, and the code family additionally take
 `--server <url>` / `--server-token-env <var>`, or `--attach` — see
 [Attaching to a running server](#attaching-to-a-running-server).
+Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
+for `run` and `watch`).
 
 ### `serve`
 

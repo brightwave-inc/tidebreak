@@ -37,6 +37,11 @@
 //! See [`setup`]; secrets are read from stdin or a named environment variable,
 //! never from a command-line argument.
 //!
+//! `tidebreak code …` drives the code-mode surface — repos, workspaces,
+//! sessions, turns, approvals, diffs, and the git/PR flow — over the same
+//! `/code/*` routes the desktop uses. `--json` (or `--output-format json`)
+//! writes one object, or NDJSON for `code run` and `code watch`. See [`code`].
+//!
 //! `tidebreak folder connect|list|disconnect` is the headless equivalent of the
 //! desktop's folder picker: an operator records standing consent for a host
 //! folder, which the broker stamps as operator configuration. It is deliberate
@@ -69,6 +74,7 @@ use tidebreak_core::{
 };
 
 mod api;
+mod code;
 mod connect;
 mod folder;
 mod folder_executor;
@@ -123,19 +129,48 @@ usage: tidebreak serve
        tidebreak folder list [--chat <id>] [--output-format text|json]
        tidebreak folder disconnect <path-or-root-id> --chat <id> [--output-format text|json]
 
-The setup commands, the output family, and the folder commands take
---output-format text|json. A key is read from stdin, or from the environment
-variable named by --from-env — never from an argument, which every process on
-the machine can read.
+       tidebreak code doctor [--refresh]
+       tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
+       tidebreak code repo list
+       tidebreak code repo rm <id>
+       tidebreak code ws new --repo <id|path> [--title <title>] [--base-ref <ref>]
+       tidebreak code ws list [--repo <id|path>]
+       tidebreak code ws show <id>
+       tidebreak code ws archive <id> [--force]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
+       tidebreak code session show <id>
+       tidebreak code session reap <id>
+       tidebreak code run (--session <id> | --ws <id>) [<message>]
+                  [--on-approval wait|fail] [--timeout <secs>]
+       tidebreak code approvals [--session <id>]
+       tidebreak code approve <approval-id>
+       tidebreak code deny <approval-id> [-m <feedback>]
+       tidebreak code interrupt --session <id>
+       tidebreak code turns --session <id>
+       tidebreak code diff --ws <id> [--turn N] [--file PATH]
+       tidebreak code files --ws <id> [--turn N]
+       tidebreak code git commit --ws <id> [-m MSG]
+       tidebreak code git push --ws <id>
+       tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
+       tidebreak code git status --ws <id>
+       tidebreak code action <name> --ws <id>
+       tidebreak code watch [--once] [--timeout <secs>]
 
--p, output, attach, and the setup commands also take --server <url>
-[--server-token-env <var>] or --attach, which talks to a server that is already
-running instead of embedding one. --attach reads {TIDEBREAK_DATA_DIR}/listen.json
-(written by serve and the desktop). With --server the token comes from
-TIDEBREAK_SERVER_TOKEN, or from the named variable; it is never an argument
-either. The folder commands do not take --server/--attach: they provision local
-host consent in this machine's own broker and product store, and they can run
-while serve or the desktop already owns the data directory.";
+The setup commands, the output family, the folder commands, and the code
+family take --output-format text|json. Code commands also accept --json.
+A key is read from stdin, or from the environment variable named by
+--from-env — never from an argument, which every process on the machine
+can read.
+
+-p, output, attach, the setup commands, and the code family also take
+--server <url> [--server-token-env <var>] or --attach, which talks to a
+server that is already running instead of embedding one. --attach reads
+{TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop). With
+--server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
+variable; it is never an argument either. The folder commands do not take
+--server/--attach: they provision local host consent in this machine's own
+broker and product store, and they can run while serve or the desktop
+already owns the data directory.";
 
 #[tokio::main]
 async fn main() {
@@ -297,6 +332,15 @@ async fn run() -> Result<i32> {
             match folder::parse(args) {
                 Ok(command) => folder::run(command).await.map(|()| 0),
                 Err(message) => usage_error(&message),
+            }
+        }
+        Some(command) if command == OsStr::new("code") => {
+            match crate::code::parse(text_args(args)) {
+                Ok(command) => crate::code::run(command, server_flags.resolve()?).await,
+                Err(message) => {
+                    eprintln!("tidebreak: {message}\n\n{}", crate::code::USAGE);
+                    std::process::exit(2);
+                }
             }
         }
         Some(other) => {

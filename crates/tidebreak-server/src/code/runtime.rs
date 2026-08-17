@@ -1144,6 +1144,7 @@ fn map_gh(err: GhError) -> ServerError {
             "there is nothing to commit in this workspace",
         ),
         GhError::AuthFailed(message) => ServerError::conflict_kind("git_auth_failed", message),
+        GhError::PushFailed(message) => ServerError::conflict_kind("git_push_failed", message),
         GhError::GhAbsent { instructions } => ServerError::conflict_kind("gh_absent", instructions),
         GhError::GhSignedOut { instructions } => {
             ServerError::conflict_kind("gh_signed_out", instructions)

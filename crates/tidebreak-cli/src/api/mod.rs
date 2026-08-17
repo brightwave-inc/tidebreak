@@ -5,4 +5,5 @@
 //! consumes; [`wire`] decodes the event socket's frames forward-compatibly.
 
 pub mod client;
+pub mod code;
 pub mod wire;

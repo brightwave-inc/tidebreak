@@ -34,6 +34,8 @@ pub struct Client {
 /// The error body every route answers with on failure.
 #[derive(Deserialize)]
 struct ErrorBody {
+    #[serde(default)]
+    kind: Option<String>,
     message: String,
 }
 
@@ -573,19 +575,28 @@ impl Client {
     }
 
     /// Pass through a success, or lift the server's `{ kind, message }` body
-    /// into the error.
-    async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response> {
+    /// into the error. The kind is part of the message so a script can branch
+    /// on the typed failure without scraping status codes.
+    pub(crate) async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response> {
         if response.status().is_success() {
             return Ok(response);
         }
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<ErrorBody>(&body)
-            .map(|body| body.message)
-            .unwrap_or(body);
-        Err(AgentError::msg(format!(
-            "request failed ({status}): {message}"
-        )))
+        match serde_json::from_str::<ErrorBody>(&body) {
+            Ok(ErrorBody {
+                kind: Some(kind),
+                message,
+            }) if !kind.is_empty() => Err(AgentError::msg(format!(
+                "request failed ({status}): {kind}: {message}"
+            ))),
+            Ok(ErrorBody { message, .. }) => Err(AgentError::msg(format!(
+                "request failed ({status}): {message}"
+            ))),
+            Err(_) => Err(AgentError::msg(format!(
+                "request failed ({status}): {body}"
+            ))),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -738,7 +749,7 @@ impl Client {
     }
 
     /// GET a JSON body, lifting failures the way every other route does.
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
+    pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
         let response = self.http.get(url).send().await.map_err(request_error)?;
         Self::expect_success(response)
             .await?
@@ -748,7 +759,7 @@ impl Client {
     }
 
     /// PUT a JSON body and decode the route's answer.
-    async fn put_json<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn put_json<T: serde::de::DeserializeOwned>(
         &self,
         url: String,
         body: &serde_json::Value,
@@ -768,7 +779,10 @@ impl Client {
     }
 
     /// DELETE, decoding the route's answer.
-    async fn delete_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
+    pub(crate) async fn delete_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+    ) -> Result<T> {
         let response = self.http.delete(url).send().await.map_err(request_error)?;
         Self::expect_success(response)
             .await?
@@ -778,10 +792,65 @@ impl Client {
     }
 
     /// DELETE a route that answers `204`.
-    async fn delete_ok(&self, url: String) -> Result<()> {
+    pub(crate) async fn delete_ok(&self, url: String) -> Result<()> {
         let response = self.http.delete(url).send().await.map_err(request_error)?;
         Self::expect_success(response).await?;
         Ok(())
+    }
+
+    /// POST a JSON body and decode the route's answer.
+    pub(crate) async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response)
+            .await?
+            .json::<T>()
+            .await
+            .map_err(request_error)
+    }
+
+    /// POST a JSON body when the route answers with a status only.
+    pub(crate) async fn post_ok(&self, url: String, body: &serde_json::Value) -> Result<()> {
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response).await?;
+        Ok(())
+    }
+
+    /// Open a WebSocket against a path on this server, using the same
+    /// `tidebreak-v1` + token subprotocol the chat event socket uses.
+    pub(crate) async fn open_ws(&self, path_and_query: &str) -> Result<EventSocket> {
+        let url = format!("{}{path_and_query}", self.base.replacen("http", "ws", 1));
+        let mut request = url
+            .into_client_request()
+            .map_err(|error| AgentError::msg(format!("bad event socket URL: {error}")))?;
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(&format!("tidebreak-v1, tidebreak-token.{}", self.token))
+                .map_err(|error| AgentError::msg(format!("invalid subprotocol header: {error}")))?,
+        );
+        let (socket, _response) = connect_async(request)
+            .await
+            .map_err(|error| AgentError::msg(format!("event socket handshake failed: {error}")))?;
+        Ok(socket)
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base
     }
 }
 
