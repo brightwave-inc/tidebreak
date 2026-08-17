@@ -143,6 +143,10 @@ pub struct Settings {
     /// enabled. Read at boot; turning it off unregisters the tools on the next
     /// launch.
     pub computer_use_enabled: bool,
+    /// Whether the experimental code-mode surface is shown. Opt-in: default
+    /// off, flipped in Settings → Experimental. The flag gates the desktop's
+    /// navigation and pages, not the `/code/*` routes themselves.
+    pub code_mode_enabled: bool,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -190,6 +194,10 @@ pub struct SettingsUpdate {
     /// at the next boot (the tools register or not then).
     #[serde(default)]
     pub computer_use_enabled: Option<bool>,
+    /// Opt in to (or back out of) the experimental code-mode surface. Absent
+    /// leaves it unchanged; applies immediately.
+    #[serde(default)]
+    pub code_mode_enabled: Option<bool>,
 }
 
 /// Partial update for [`CompactionSettings`]. Absent fields leave the current
@@ -334,6 +342,15 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(enabled) = body.code_mode_enabled {
+        state
+            .store
+            .set_setting(
+                crate::routes::CODE_MODE_ENABLED_SETTING,
+                &serde_json::json!(enabled),
+            )
+            .await?;
+    }
     Ok(Json(
         read_settings(&state, &auth.principal.owner_id()).await?,
     ))
@@ -352,6 +369,7 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         compaction: read_compaction_settings(&*state.store).await?,
         model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
         computer_use_enabled: read_computer_use_enabled(&*state.store).await?,
+        code_mode_enabled: read_code_mode_enabled(&*state.store).await?,
     })
 }
 
@@ -363,6 +381,16 @@ pub(crate) async fn read_computer_use_enabled(store: &dyn Store) -> tidebreak_co
         .await?
         .and_then(|value| value.as_bool())
         .unwrap_or(true))
+}
+
+/// Whether the experimental code-mode surface is shown. Default **off** —
+/// the surface is opt-in, and only an explicit `true` reveals it.
+pub(crate) async fn read_code_mode_enabled(store: &dyn Store) -> tidebreak_core::Result<bool> {
+    Ok(store
+        .get_setting(crate::routes::CODE_MODE_ENABLED_SETTING)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false))
 }
 
 /// The largest number of stored visibility deviations.

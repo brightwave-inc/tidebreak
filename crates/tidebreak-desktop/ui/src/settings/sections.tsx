@@ -4,6 +4,7 @@ import {
   Blocks,
   Bot,
   Cpu,
+  FlaskConical,
   Gauge,
   Globe,
   KeyRound,
@@ -33,6 +34,7 @@ import { UpdatesPanel } from "./UpdatesPanel";
 import { WebSearchPanel } from "./WebSearchPanel";
 import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
+import { ExperimentalPanel } from "./ExperimentalPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -184,6 +186,11 @@ function CodingHarnessesSection() {
   return <CodingHarnessesPanel client={client} />;
 }
 
+function ExperimentalSection() {
+  const { client } = useApp();
+  return <ExperimentalPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -200,6 +207,9 @@ export type SettingsSectionDef = {
   /** Kept out of the rail on an unmanaged profile, same deep-link contract:
    * the route resolves and the panel renders its not-connected state. */
   unmanagedHidden?: boolean;
+  /** Kept out of the rail until the code-mode experiment is enabled, same
+   * deep-link contract: the route resolves either way. */
+  codeModeOnly?: boolean;
 };
 
 /**
@@ -246,6 +256,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     label: "Coding harnesses",
     icon: Terminal,
     Component: CodingHarnessesSection,
+    codeModeOnly: true,
   },
   {
     path: "connected-apps",
@@ -260,6 +271,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     Component: PermissionsSection,
   },
   { path: "appearance", label: "Appearance", icon: Palette, Component: AppearanceSection },
+  {
+    path: "experimental",
+    label: "Experimental",
+    icon: FlaskConical,
+    Component: ExperimentalSection,
+  },
   { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
 ];
 
@@ -272,10 +289,17 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  * where settings opens. An unmanaged profile has no gateway at all — policy
  * is the only gateway source, and connecting happens from the gateway's own
  * page — so the Model Gateway section is dropped from its rail instead.
+ * Sections belonging to the code-mode experiment leave the rail while it is
+ * opted out.
  */
-export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
-  return SETTINGS_SECTIONS.filter((section) =>
-    managed ? !section.managedHidden : !section.unmanagedHidden,
+export function settingsSectionsFor(
+  managed: boolean,
+  codeModeEnabled = false,
+): SettingsSectionDef[] {
+  return SETTINGS_SECTIONS.filter(
+    (section) =>
+      (managed ? !section.managedHidden : !section.unmanagedHidden) &&
+      (!section.codeModeOnly || codeModeEnabled),
   );
 }
 

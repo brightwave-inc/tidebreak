@@ -22,6 +22,7 @@ import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
+import { CodeModeGate } from "./code/CodeModeGate";
 import { CodeRepoPage } from "./code/CodeRepoPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
@@ -205,7 +206,11 @@ function ProjectRouteComponent() {
 const codeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code",
-  component: CodeHome,
+  component: () => (
+    <CodeModeGate>
+      <CodeHome />
+    </CodeModeGate>
+  ),
 });
 
 const codeRepoRoute = createRoute({
@@ -216,7 +221,11 @@ const codeRepoRoute = createRoute({
 
 function CodeRepoRouteComponent() {
   const { repoId } = codeRepoRoute.useParams();
-  return <CodeRepoPage key={repoId} repoId={repoId} />;
+  return (
+    <CodeModeGate>
+      <CodeRepoPage key={repoId} repoId={repoId} />
+    </CodeModeGate>
+  );
 }
 
 const codeWorkspaceRoute = createRoute({
@@ -228,7 +237,11 @@ const codeWorkspaceRoute = createRoute({
 
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
-  return <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />;
+  return (
+    <CodeModeGate>
+      <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />
+    </CodeModeGate>
+  );
 }
 
 export const settingsRoute = createRoute({

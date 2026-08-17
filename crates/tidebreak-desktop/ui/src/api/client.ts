@@ -374,6 +374,7 @@ export class ApiClient {
     sandbox_agent_checkin_steps?: number;
     sandbox_agent_error_checkin?: number;
     model_visibility_overrides?: Record<string, ModelVisibility>;
+    code_mode_enabled?: boolean;
     compaction?: {
       threshold_fraction?: number;
       target_fraction?: number;
