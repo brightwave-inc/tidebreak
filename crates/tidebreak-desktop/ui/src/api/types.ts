@@ -114,6 +114,7 @@ import {
   type CodeSessionSnapshot as WireCodeSessionSnapshot,
   type CodeTurnId as WireCodeTurnId,
   type CodeTurnSnapshot as WireCodeTurnSnapshot,
+  type QueuedCodeTurn as WireQueuedCodeTurn,
   type CodeTurnStatus as WireCodeTurnStatus,
   type CodeUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
@@ -1000,6 +1001,8 @@ export type AttentionSource = WireAttentionSource;
 
 /** One user→engine cycle. */
 export type CodeTurnSnapshot = WireCodeTurnSnapshot;
+/** A follow-up parked while the session is busy; it has no turn row yet. */
+export type QueuedCodeTurn = WireQueuedCodeTurn;
 export type CodeTurnId = WireCodeTurnId;
 export type CodeTurnStatus = WireCodeTurnStatus;
 export type CodeUsage = WireCodeUsage;

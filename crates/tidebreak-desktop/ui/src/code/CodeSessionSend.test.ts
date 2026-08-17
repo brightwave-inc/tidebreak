@@ -16,7 +16,10 @@ const TURN = {
 describe("submitAcceptedTurn", () => {
   it("inserts a turn-keyed user item only after the server accepts", async () => {
     const store = createCodeSessionStore();
-    await submitAcceptedTurn(store.getState().update, async () => TURN);
+    await submitAcceptedTurn(store.getState().update, async () => ({
+      kind: "ran" as const,
+      turn: TURN,
+    }));
     expect(store.getState().items).toEqual([
       {
         kind: "user",
@@ -44,7 +47,7 @@ describe("retry after a failed submit", () => {
     const submit = vi
       .fn()
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce(TURN);
+      .mockResolvedValueOnce({ kind: "ran" as const, turn: TURN });
     await expect(
       submitAcceptedTurn(store.getState().update, submit),
     ).rejects.toThrow("offline");
@@ -90,8 +93,8 @@ describe("accepted turn after the socket already painted", () => {
       deps,
     );
     await submitAcceptedTurn(store.getState().update, async () => ({
-      ...TURN,
-      status: "completed",
+      kind: "ran" as const,
+      turn: { ...TURN, status: "completed" as const },
     }));
     expect(store.getState().items.map((item) => item.kind)).toEqual([
       "user",

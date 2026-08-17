@@ -119,8 +119,9 @@ import {
   parseCodeRepo,
   parseCodeSession,
   parseCodeSessionList,
-  parseCodeTurn,
   parseCodeTurnList,
+  parseCodeTurnSubmission,
+  type CodeTurnSubmission,
   parseCodeAction,
   parseCodeCommit,
   parseCodePush,
@@ -1860,12 +1861,20 @@ export class ApiClient {
     return requireParsed(parseCodeTurnList(body), "code session turns");
   }
 
+  /**
+   * Submit a turn, or park it behind the one in flight.
+   *
+   * The route answers 202 either way: a turn snapshot when the session was
+   * idle, a queue receipt when it was busy. Both are accepted work — treating
+   * the receipt as a malformed turn would report a failure for a message the
+   * server holds, and a retry would double-send.
+   */
   async submitCodeTurn(
     sessionId: string,
     message: string,
-  ): Promise<CodeTurnSnapshot> {
+  ): Promise<CodeTurnSubmission> {
     return requireParsed(
-      parseCodeTurn(
+      parseCodeTurnSubmission(
         await this.json(
           `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
           {

@@ -622,14 +622,12 @@ function CodeSessionPane({
     };
   }, [client, session.id, approvalKey]);
 
-  async function send(message: string) {
-    try {
-      await submitAcceptedTurn(store.getState().update, () =>
-        client.submitCodeTurn(session.id, message),
-      );
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not send that turn"));
-    }
+  function send(message: string) {
+    // Outcome and refusal both belong to the composer: it says whether the
+    // message ran or queued, and it holds the draft when the server refuses.
+    return submitAcceptedTurn(store.getState().update, () =>
+      client.submitCodeTurn(session.id, message),
+    );
   }
 
   async function interrupt() {
