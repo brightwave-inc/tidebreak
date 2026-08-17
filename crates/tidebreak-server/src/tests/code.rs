@@ -2400,6 +2400,80 @@ async fn doctor_lists_the_scripted_adapter() {
     assert_eq!(report["harnesses"][0]["found"], true);
 }
 
+/// Decision 0031's honesty mechanism, end to end: a parser that could not read
+/// part of a stream must leave a durable, readable count behind. A build that
+/// counts drops but never persists them is indistinguishable from one that
+/// drops silently, which is the failure the record exists to prevent.
+#[tokio::test]
+async fn unread_engine_events_accumulate_on_the_session_row_and_reach_the_doctor() {
+    let (router, token, _runtime, dir) =
+        code_app_with(ScriptedAdapter::new(plain_text_script()).with_unrecognized_per_turn(2))
+            .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(session["unrecognized_event_count"], 0);
+
+    for message in ["hello", "again"] {
+        let turn = client
+            .post(format!(
+                "http://{addr}/code/sessions/{}/turns",
+                json_id(&session)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": message }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    }
+
+    // Both turns, not just the last: the row accumulates rather than being
+    // overwritten with whatever the newest turn happened to see.
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["unrecognized_event_count"], 4);
+
+    let report = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(report["harnesses"][0]["unrecognized_event_count"], 4);
+}
+
 #[allow(dead_code)]
 fn _types(
     _id: WorkspaceId,

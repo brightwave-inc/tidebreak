@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,6 +31,9 @@ pub struct GrokSession {
     version: String,
     child: AsyncMutex<Option<Child>>,
     child_pid: AtomicU32,
+    /// Unrecognized events summed across every turn's parser: each turn is a
+    /// fresh child, so the per-turn count alone would reset on every prompt.
+    unrecognized: AtomicU64,
 }
 
 impl GrokSession {
@@ -42,6 +45,7 @@ impl GrokSession {
             version,
             child: AsyncMutex::new(None),
             child_pid: AtomicU32::new(0),
+            unrecognized: AtomicU64::new(0),
         }
     }
 
@@ -179,6 +183,10 @@ impl HarnessSession for GrokSession {
         }
     }
 
+    fn unrecognized_events(&self) -> u64 {
+        self.unrecognized.load(Ordering::SeqCst)
+    }
+
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
@@ -266,6 +274,8 @@ impl GrokSession {
         if !saw_terminal {
             self.spec.sink.emit(HarnessEvent::TurnInterrupted).await;
         }
+        self.unrecognized
+            .fetch_add(parser.unrecognized(), Ordering::SeqCst);
 
         let stderr = stderr_task.await.unwrap_or_default();
         if !stderr.is_empty() {

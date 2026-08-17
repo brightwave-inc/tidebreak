@@ -449,6 +449,12 @@ impl HarnessSession for CodexSession {
         }
     }
 
+    fn unrecognized_events(&self) -> u64 {
+        // One long-lived parser per session, so its own count is already
+        // cumulative.
+        self.parser.lock().expect("codex parser").unrecognized()
+    }
+
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
