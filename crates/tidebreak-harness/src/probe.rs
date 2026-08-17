@@ -275,13 +275,28 @@ async fn run_interactive_login_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn write_exec(path: &Path, body: &str) {
-        std::fs::write(path, body).unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
+        // Write a sibling inode, fsync, then rename over `path` so execve
+        // never sees a file that still has a writer (Linux ETXTBSY).
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let staging = path.with_extension("writing");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&staging)
+            .unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        std::fs::rename(&staging, path).unwrap();
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent).unwrap();
+            dir.sync_all().unwrap();
+        }
     }
 
     /// Shim that prints profile noise, honors `-ilc`/`-c`, then evals the script.
@@ -329,39 +344,62 @@ eval "$cmd"
         assert!(matches!(err, ProbeError::NotFound(_)));
     }
 
+    async fn diagnose_probe_shim(host: &HostEnv) -> String {
+        let script = "printf '%s\\n' 'TIDEBREAK_PROBE_BEGIN_diag'; command -v claude || true; \
+             printf '%s\\n' 'TIDEBREAK_PROBE_ENV_diag'; \
+             if env -0 >/dev/null 2>&1; then env -0; else env; fi; \
+             printf '\\n%s\\n' 'TIDEBREAK_PROBE_END_diag'";
+        match run_interactive_login_shell(host, script).await {
+            Ok(out) => format!(
+                "shim status_ok={} stdout={:?} stderr={:?}",
+                out.status_ok, out.stdout, out.stderr
+            ),
+            Err(err) => format!("shim spawn failed: {err}"),
+        }
+    }
+
     #[tokio::test]
     async fn relative_path_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let empty_path = dir.path().join("empty-path");
+        let home = dir.path().join("home");
+        let tmp = dir.path().join("tmp");
         std::fs::create_dir(&empty_path).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&tmp).unwrap();
         let shell = dir.path().join("shell");
-        // Dedicated shim: honor `-ilc`/`-c`, then replace `command -v` with a
-        // hardcoded relative path. Do not eval the host `command` builtin or
-        // inherit PATH — both vary across runners.
+        // Closed-world fake shell: exact `-ilc`/`-c` matches, peel sentinels
+        // with simple POSIX expansions, print a relative path. Never eval the
+        // probe script or call host `command`/`env` — those differ by /bin/sh.
         write_exec(
             &shell,
             r#"#!/bin/sh
 cmd=
 while [ $# -gt 0 ]; do
   case "$1" in
-    -c) shift; cmd=$1; break ;;
-    -*c)
-      rest=${1#*c}
+    -c|-ilc|-lic|-icl|-lci|-cil|-cli)
       shift
-      if [ -n "$rest" ]; then cmd=$rest; else cmd=$1; fi
+      cmd=$1
       break
       ;;
-    -*) shift ;;
-    *) break ;;
+    -i|-l|-il|-li)
+      shift
+      ;;
+    *)
+      break
+      ;;
   esac
 done
-# Never invoke the host `command` builtin: rewrite the probe's
-# `command -v claude || true` to a relative path we control.
-prefix="${cmd%%command -v *}"
-suffix="${cmd#*command -v claude || true}"
-eval "$prefix"
+begin_tail=${cmd#*TIDEBREAK_PROBE_BEGIN_}
+begin_tok=${begin_tail%%[!0-9a-f]*}
+env_tail=${cmd#*TIDEBREAK_PROBE_ENV_}
+env_tok=${env_tail%%[!0-9a-f]*}
+end_tail=${cmd#*TIDEBREAK_PROBE_END_}
+end_tok=${end_tail%%[!0-9a-f]*}
+printf '%s\n' "TIDEBREAK_PROBE_BEGIN_${begin_tok}"
 printf '%s\n' "claude"
-eval "true$suffix"
+printf '%s\n' "TIDEBREAK_PROBE_ENV_${env_tok}"
+printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
 "#,
         );
         let host = HostEnv {
@@ -369,16 +407,20 @@ eval "true$suffix"
             env: vec![
                 ("SHELL".into(), shell.as_os_str().to_owned()),
                 ("PATH".into(), empty_path.as_os_str().to_owned()),
+                ("HOME".into(), home.as_os_str().to_owned()),
+                ("TMPDIR".into(), tmp.as_os_str().to_owned()),
+                ("LANG".into(), "C".into()),
+                ("LC_ALL".into(), "C".into()),
             ],
             clear_env: true,
         };
-        let err = resolve_binary(&host, "claude").await.unwrap_err();
-        match err {
-            ProbeError::RelativePath { name, path } => {
-                assert_eq!(name, "claude");
-                assert_eq!(path, "claude");
-            }
-            other => panic!("expected RelativePath, got {other:?}"),
+        match resolve_binary(&host, "claude").await {
+            Err(ProbeError::RelativePath { name, path })
+                if name == "claude" && path == "claude" => {}
+            other => panic!(
+                "expected RelativePath {{ name: \"claude\", path: \"claude\" }}, got {other:?}; {}",
+                diagnose_probe_shim(&host).await
+            ),
         }
     }
 
