@@ -42,7 +42,7 @@ use super::session_worker::{
 };
 use super::worktree::{
     self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
-    run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
+    run_archive_script, run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
 
@@ -467,19 +467,8 @@ impl CodeRuntime {
             return Ok(workspace);
         }
         let repo = self.get_repo(workspace.repo_id).await?;
-        if let Some(script) = repo.archive_script.as_deref() {
-            if let Err(err) = super::setup_script::run_workspace_script(
-                std::path::Path::new(&workspace.worktree_path),
-                script,
-            )
-            .await
-            {
-                return Err(ServerError::unprocessable_kind(
-                    "archive_script_failed",
-                    err,
-                ));
-            }
-        }
+        // Blockers first: a refused archive must leave the workspace exactly as
+        // it was, and running the hook script is not "exactly as it was".
         self.refuse_running_sessions(id, force).await?;
         let path = std::path::Path::new(&workspace.worktree_path);
         if path.exists() {
@@ -493,6 +482,17 @@ impl CodeRuntime {
                         "workspace has uncommitted or unpushed work; pass force to discard it",
                     ));
                 }
+            }
+            // Decision 0032: the archive script obeys the same
+            // failure-preserves rule as setup. A script that backs up or
+            // pushes state and exits non-zero must stop the archive, not have
+            // its checkout removed underneath it. A worktree that is already
+            // gone has nothing to run the script against.
+            if let Err(err) = run_archive_script(path, repo.archive_script.as_deref()).await {
+                return Err(ServerError::unprocessable_kind(
+                    "archive_script_failed",
+                    err.to_string(),
+                ));
             }
         }
         self.end_workspace_sessions(id).await?;
@@ -777,9 +777,16 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        if let Some(handle) = handle {
-            let _ = handle.commands.send(WorkerCommand::Shutdown).await;
-        }
+        let session = match handle {
+            // The outgoing worker writes its own final state as it stops, and
+            // the new spawn must not be started against a row it is still
+            // moving. Wait for it, then reap the row as it stands now.
+            Some(handle) => {
+                Self::shut_down_worker(id, handle).await;
+                self.get_session(id).await?
+            }
+            None => session,
+        };
         let session = recovery::reap_session(&self.db, &self.bus, session)
             .await
             .map_err(ServerError::from)?;
@@ -920,15 +927,53 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            if let Some(handle) = handle {
-                let _ = handle.commands.send(WorkerCommand::Shutdown).await;
-            }
+            // Mark the row ended before asking the worker to stop. A worker
+            // interrupted mid-turn re-reads the row on its way round the loop
+            // and leaves on its own when it finds the session ended, so one
+            // `Shutdown` is enough however busy it was.
             session.lifecycle = CodeSessionLifecycle::Ended;
             session.child_pid = None;
             session.fence_reason = None;
             super::attention::persist_session(&self.db, &self.bus, &session).await?;
+            if let Some(handle) = handle {
+                Self::shut_down_worker(session.id, handle).await;
+            }
         }
         Ok(())
+    }
+
+    /// Ask a superseded worker to stop, and wait for it to finish unwinding.
+    ///
+    /// The worker drops its command receiver as its last act — after the engine
+    /// is shut down and its final writes have landed — so the sender seeing the
+    /// receiver close is exactly "the worker is gone". One `Shutdown` is enough:
+    /// an idle worker leaves the loop on it, and a worker mid-turn interrupts
+    /// the turn and then leaves at the top of the next iteration because the
+    /// caller marked the session ended first. Resending would only replay
+    /// `interrupt` into an engine that is already stopping.
+    ///
+    /// The wait is bounded so an engine that never returns cannot hold an
+    /// archive or a reap open; the epoch fence on the session row keeps a late
+    /// writer harmless either way.
+    async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) {
+        const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+        let commands = handle.commands.clone();
+        drop(handle);
+        // Send and wait under one deadline: a worker that has stopped draining
+        // its commands would otherwise park the send itself once the channel
+        // filled up.
+        let stopped = tokio::time::timeout(GRACE, async {
+            let _ = commands.send(WorkerCommand::Shutdown).await;
+            commands.closed().await;
+        })
+        .await
+        .is_ok();
+        if !stopped {
+            tracing::warn!(
+                session = %id,
+                "code-mode: session worker did not stop in time; continuing without it"
+            );
+        }
     }
 
     async fn attach_and_spawn_worker(
