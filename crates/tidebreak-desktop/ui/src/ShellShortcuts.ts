@@ -403,6 +403,9 @@ export type ShellShortcutHandlers = Record<ShellShortcutAction, () => void>;
  * `mode` is a getter for the same reason, and because the mode is read from the
  * route: asking for it at keydown keeps the shell out of a re-render on every
  * navigation.
+ *
+ * Capture, not bubble: a focused PTY (and anything else that stops a keydown
+ * from bubbling) would otherwise swallow Cmd+J / Cmd+I before this ran.
  */
 export function useShellShortcuts(
   handlers: ShellShortcutHandlers,
@@ -427,7 +430,7 @@ export function useShellShortcuts(
       event.preventDefault();
       handlersRef.current[def.id]();
     }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, []);
 }

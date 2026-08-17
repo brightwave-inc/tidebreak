@@ -31,7 +31,12 @@ import {
   type ShellShortcutAction,
 } from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
-import { splitCodeChromeLayout } from "./codeChrome";
+import {
+  closeCodeChromeTab,
+  focusCodeChromeTab,
+  splitCodeChromeLayout,
+  toggleTerminalLayout,
+} from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector } from "./CodeInspector";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
@@ -82,7 +87,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const catalog = useCodeCatalogStore();
   const layout = useLayoutState();
-  const { openPanel, closeTab } = usePanelNav();
+  const { openPanel, closeTab, setLayout } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
@@ -294,10 +299,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 variant="ghost"
                 size="xs"
                 aria-pressed={chrome.terminal !== null}
-                onClick={() => {
-                  if (chrome.terminal) closeTab(chrome.terminal);
-                  else openPanel({ type: "terminal" });
-                }}
+                onClick={() => setLayout(toggleTerminalLayout(layout))}
               >
                 <SquareTerminal />
                 Terminal
@@ -361,6 +363,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           <PanelLayout
             layout={chrome.panels}
             framed={false}
+            onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
+            onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
             renderChat={(visible) => (
               // The panel slot this sits in is a plain block, so nothing stretches
               // the pane to the slot's height — `flex-1` resolves to nothing and

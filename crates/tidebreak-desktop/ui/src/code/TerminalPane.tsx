@@ -92,7 +92,8 @@ export function TerminalPane({
         mode: "code",
       });
       if (!def) return;
-      // Let the window listener fire the app shortcut; keep it out of xterm.
+      // The shell listener is on window capture, so it has already fired.
+      // Stopping here keeps the chord out of xterm.
       event.stopPropagation();
     }
     host.addEventListener("keydown", onKeyDownCapture, true);
