@@ -21,6 +21,7 @@ use tidebreak_core::{
 };
 
 pub mod budget;
+pub mod child;
 pub mod claude;
 pub mod codex;
 pub mod grok;
@@ -30,6 +31,7 @@ pub mod probe;
 mod text;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
+pub use child::ChildPid;
 pub use launch::{validate_launch_plan, BypassFlagError, LaunchPlan};
 pub use probe::{
     filter_child_env, observe_version, probe_shell, resolve_binary, HostEnv, ProbeCapture,
@@ -165,6 +167,28 @@ pub struct TurnInput {
     pub text: String,
 }
 
+/// How the engine process behind one turn ended.
+///
+/// An adapter that runs one child per turn must report the child's exit here:
+/// stdout reaching EOF says only that the pipe closed, and a killed, crashed,
+/// or signed-out engine reaches EOF exactly like a finished one. The worker,
+/// not the adapter, decides how to close the turn — it is the side that knows
+/// whether the stop was asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TurnOutcome {
+    /// A terminal turn event arrived, and any per-turn child exited
+    /// successfully. Adapters with a long-lived child (or none) report this.
+    #[default]
+    Clean,
+    /// The engine ended without a terminal turn event, exited non-zero, or
+    /// was signaled.
+    Incomplete {
+        /// Bounded description — exit code or signal, plus captured stderr.
+        /// Safe to journal.
+        detail: String,
+    },
+}
+
 /// Completes a parked engine approval. Implemented by the server bridge so
 /// [`HarnessSession::decide`] can run while `run_turn` is blocked on the child.
 #[async_trait]
@@ -273,7 +297,12 @@ pub trait HarnessAdapter: Send + Sync {
 pub trait HarnessSession: Send + Sync {
     /// Feed one user turn; normalized events flow to the sink until a
     /// terminal turn event arrives.
-    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError>;
+    ///
+    /// The returned [`TurnOutcome`] is how the *process* ended, which the
+    /// stream alone cannot say. Returning [`TurnOutcome::Clean`] for a child
+    /// that died is how an interrupted or crashed turn ends up journaled as a
+    /// success.
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError>;
 
     /// Resolve a pending approval through the engine's native channel.
     async fn decide(
@@ -305,6 +334,18 @@ pub trait HarnessSession: Send + Sync {
     /// is `None`: an adapter that does not spawn a child, or has not spawned
     /// one yet, must not invent a pid.
     fn child_pid(&self) -> Option<i64> {
+        None
+    }
+
+    /// Every transition of [`Self::child_pid`], for a watcher that must
+    /// record the pid while a turn is in flight.
+    ///
+    /// An adapter that spawns a child *per turn* has no pid to report at turn
+    /// boundaries — which is precisely the window a crash orphans a child in.
+    /// Such adapters publish here the moment the child exists and clear it
+    /// when the child exits. The default is `None`: an adapter whose pid is
+    /// already stable across the session has nothing to stream.
+    fn child_pid_changes(&self) -> Option<tokio::sync::watch::Receiver<Option<i64>>> {
         None
     }
 

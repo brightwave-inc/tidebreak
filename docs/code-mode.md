@@ -154,15 +154,22 @@ pub trait HarnessAdapter: Send + Sync {
 }
 
 #[async_trait]
-pub trait HarnessSession: Send {
+pub trait HarnessSession: Send + Sync {
     /// Feed one user turn; normalized events flow to the sink until a
-    /// terminal turn event arrives.
-    async fn run_turn(&mut self, input: TurnInput) -> Result<(), HarnessError>;
+    /// terminal turn event arrives. The outcome reports how the engine
+    /// *process* ended — stdout reaching EOF is not a completed turn.
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError>;
     /// Resolve a pending approval through the harness's native channel (0033).
-    async fn decide(&mut self, approval: HarnessApprovalRef,
+    async fn decide(&self, approval: HarnessApprovalRef,
                     decision: ApprovalDecision) -> Result<(), HarnessError>;
-    async fn interrupt(&mut self) -> Result<(), HarnessError>;
+    async fn interrupt(&self) -> Result<(), HarnessError>;
     fn resume_ref(&self) -> Option<String>;
+    /// Pid of a child this session spawned, and every transition of it. An
+    /// adapter with one child per turn publishes the pid the moment the child
+    /// exists: the session row's pid is what crash recovery probes (0032),
+    /// and it has to be there for the whole time a turn is in flight.
+    fn child_pid(&self) -> Option<i64>;
+    fn child_pid_changes(&self) -> Option<watch::Receiver<Option<i64>>>;
     /// Stream events this build could not map, counted since launch (0031).
     fn unrecognized_events(&self) -> u64;
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;

@@ -1,22 +1,24 @@
 //! One print-mode child per turn.
 
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
+use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tracing::warn;
 
+use crate::child::{signal_interrupt, turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput,
+    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -28,7 +30,10 @@ pub struct ClaudeSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
     child: AsyncMutex<Option<Child>>,
-    child_pid: AtomicU32,
+    pid: ChildPid,
+    /// Exit status of a child [`HarnessSession::interrupt`] already reaped, so
+    /// `run_turn` can still report how the turn ended.
+    reaped: Mutex<Option<ExitStatus>>,
     /// Unrecognized events summed across every turn's parser: each turn is a
     /// fresh child, so the per-turn count alone would reset on every prompt.
     unrecognized: AtomicU64,
@@ -41,7 +46,8 @@ impl ClaudeSession {
             spec,
             resume_ref: Mutex::new(resume_ref),
             child: AsyncMutex::new(None),
-            child_pid: AtomicU32::new(0),
+            pid: ChildPid::new(),
+            reaped: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
         }
     }
@@ -99,11 +105,23 @@ impl ClaudeSession {
         validate_launch_plan(&plan)?;
         Ok(plan)
     }
+
+    /// Drop a child this session is done with, leaving its exit status for
+    /// `run_turn` to report.
+    fn finish_child(
+        &self,
+        mut slot: tokio::sync::MutexGuard<'_, Option<Child>>,
+        status: Option<ExitStatus>,
+    ) {
+        *slot = None;
+        self.pid.clear();
+        *self.reaped.lock().expect("claude child exit") = status;
+    }
 }
 
 #[async_trait]
 impl HarnessSession for ClaudeSession {
-    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         let plan = self.compose_plan()?;
         let mut command = Command::new(&plan.argv[0]);
         command
@@ -133,8 +151,10 @@ impl HarnessSession for ClaudeSession {
             .stderr
             .take()
             .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-        self.child_pid
-            .store(child.id().unwrap_or(0), Ordering::SeqCst);
+        self.reaped.lock().expect("claude child exit").take();
+        // Publish before the first await: the pid is what crash recovery
+        // probes, and the window it matters in opens here.
+        self.pid.set(child.id());
         *self.child.lock().await = Some(child);
 
         let prompt = input.text.clone();
@@ -149,6 +169,7 @@ impl HarnessSession for ClaudeSession {
         let mut lines = StreamLineBuffer::new();
         let mut reader = stdout;
         let mut chunk = vec![0_u8; budget.chunk_size];
+        let mut saw_terminal = false;
         loop {
             let mut chunks_this_tick = 0;
             let mut eof = false;
@@ -167,7 +188,8 @@ impl HarnessSession for ClaudeSession {
                             );
                         }
                         for line in tick.lines {
-                            emit_parsed(&self.spec, &mut parser, &self.resume_ref, &line).await;
+                            saw_terminal |=
+                                emit_parsed(&self.spec, &mut parser, &self.resume_ref, &line).await;
                         }
                     }
                 }
@@ -180,7 +202,7 @@ impl HarnessSession for ClaudeSession {
         }
         if !lines.pending().is_empty() {
             let pending = lines.pending().to_owned();
-            emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await;
+            saw_terminal |= emit_parsed(&self.spec, &mut parser, &self.resume_ref, &pending).await;
         }
         self.unrecognized
             .fetch_add(parser.unrecognized(), Ordering::SeqCst);
@@ -190,11 +212,14 @@ impl HarnessSession for ClaudeSession {
         if !stderr.is_empty() {
             warn!(bytes = stderr.len(), "engine stderr (capped)");
         }
-        if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.wait().await;
-        }
-        self.child_pid.store(0, Ordering::SeqCst);
-        Ok(())
+        // `interrupt` may already have reaped the child; it leaves the status
+        // behind so a stopped turn is still distinguishable from a finished one.
+        let status = match self.child.lock().await.take() {
+            Some(mut child) => child.wait().await.ok(),
+            None => self.reaped.lock().expect("claude child exit").take(),
+        };
+        self.pid.clear();
+        Ok(turn_outcome(status, saw_terminal, &stderr))
     }
 
     async fn decide(
@@ -214,8 +239,7 @@ impl HarnessSession for ClaudeSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        let pid = self.child_pid.load(Ordering::SeqCst);
-        if pid != 0 {
+        if let Some(pid) = self.pid.get() {
             signal_interrupt(pid);
         }
         let mut slot = self.child.lock().await;
@@ -223,17 +247,18 @@ impl HarnessSession for ClaudeSession {
             return Ok(());
         };
         match timeout(INTERRUPT_GRACE, child.wait()).await {
-            Ok(Ok(_)) => {
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
+            Ok(Ok(status)) => {
+                self.finish_child(slot, Some(status));
                 Ok(())
             }
             Ok(Err(err)) => Err(err.into()),
             Err(_) => {
                 warn!("engine did not exit after SIGINT; killing");
+                // `kill` already reaps; `try_wait` reads the status it left
+                // without risking a second wait on a reaped child.
                 child.kill().await?;
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
+                let status = child.try_wait().ok().flatten();
+                self.finish_child(slot, status);
                 Ok(())
             }
         }
@@ -244,10 +269,11 @@ impl HarnessSession for ClaudeSession {
     }
 
     fn child_pid(&self) -> Option<i64> {
-        match self.child_pid.load(Ordering::SeqCst) {
-            0 => None,
-            pid => Some(i64::from(pid)),
-        }
+        self.pid.get()
+    }
+
+    fn child_pid_changes(&self) -> Option<watch::Receiver<Option<i64>>> {
+        Some(self.pid.subscribe())
     }
 
     fn unrecognized_events(&self) -> u64 {
@@ -262,12 +288,14 @@ impl HarnessSession for ClaudeSession {
     }
 }
 
+/// Emits one line's events, reporting whether any of them ended the turn.
 async fn emit_parsed(
     spec: &SessionSpec,
     parser: &mut ClaudeStreamParser,
     resume_ref: &Mutex<Option<String>>,
     line: &str,
-) {
+) -> bool {
+    let mut terminal = false;
     for event in parser.push_line(line) {
         if let HarnessEvent::SessionStarted {
             resume_ref: Some(resume),
@@ -276,8 +304,15 @@ async fn emit_parsed(
         {
             *resume_ref.lock().expect("claude resume") = Some(resume.clone());
         }
+        terminal |= matches!(
+            event,
+            HarnessEvent::TurnCompleted { .. }
+                | HarnessEvent::TurnFailed { .. }
+                | HarnessEvent::TurnInterrupted
+        );
         spec.sink.emit(event).await;
     }
+    terminal
 }
 
 async fn drain_capped<R>(mut reader: R, cap: usize) -> String
@@ -300,15 +335,68 @@ where
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn signal_interrupt(pid: u32) {
-    #[cfg(unix)]
-    {
-        let pid = pid as i32;
-        // SAFETY: the pid was recorded from a child we spawned this session.
-        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::HarnessEventSink;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    struct Discard;
+
+    #[async_trait]
+    impl HarnessEventSink for Discard {
+        async fn emit(&self, _event: HarnessEvent) {}
     }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
+
+    /// A failing engine is indistinguishable from a finished one on stdout
+    /// alone: both reach EOF. The exit status and stderr are the only signal
+    /// that the turn did not really complete, so they must leave the adapter.
+    #[tokio::test]
+    async fn a_failed_child_reports_its_exit_and_stderr_and_exposes_its_pid_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("engine.sh");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nsleep 0.5\necho 'auth expired' >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let session = ClaudeSession::new(SessionSpec {
+            worktree: dir.path().to_path_buf(),
+            permission_mode: CodePermissionMode::Plan,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: None,
+            binary,
+            sink: Arc::new(Discard),
+        });
+        assert!(
+            session.child_pid_changes().is_some(),
+            "an adapter with a per-turn child must stream its pid"
+        );
+
+        let run = session.run_turn(TurnInput {
+            text: "hello".into(),
+        });
+        let observe = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            session.child_pid()
+        };
+        let (outcome, mid_turn_pid) = tokio::join!(run, observe);
+        assert!(
+            mid_turn_pid.is_some(),
+            "the pid must be readable while the turn is in flight"
+        );
+        match outcome.expect("the adapter reports the exit rather than failing") {
+            TurnOutcome::Incomplete { detail } => {
+                assert!(detail.contains("status 3"), "{detail}");
+                assert!(detail.contains("auth expired"), "{detail}");
+            }
+            other => panic!("a child that exited 3 must not look clean: {other:?}"),
+        }
+        assert_eq!(session.child_pid(), None, "the pid is cleared on exit");
     }
 }

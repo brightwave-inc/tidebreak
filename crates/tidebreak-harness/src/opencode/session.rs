@@ -19,7 +19,7 @@ use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::opencode::parse::OpencodeStreamParser;
 use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput,
+    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -399,7 +399,7 @@ impl OpencodeSession {
 
 #[async_trait]
 impl HarnessSession for OpencodeSession {
-    async fn run_turn(&self, input: TurnInput) -> Result<(), HarnessError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         let session_id = self.resume_ref.lock().expect("opencode resume").clone();
         let Some(session_id) = session_id else {
             return Err(HarnessError::Other("session has no resume ref".into()));
@@ -417,7 +417,10 @@ impl HarnessSession for OpencodeSession {
         if status != 204 && !(200..300).contains(&status) {
             return Err(HarnessError::Other(format!("POST {path} status {status}")));
         }
-        self.read_until_terminal_turn().await
+        // Long-lived server child: its exit is a session-level failure, not a
+        // turn outcome.
+        self.read_until_terminal_turn().await?;
+        Ok(TurnOutcome::Clean)
     }
 
     async fn decide(
