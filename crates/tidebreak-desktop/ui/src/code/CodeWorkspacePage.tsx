@@ -483,9 +483,14 @@ function PendingApprovalBadge({
   client: ApiClient;
 }) {
   const store = useRegisteredCodeSession(sessionId, client);
-  const pending = store((state) =>
-    state.items.filter((item) => item.kind === "approval" && item.state === "pending"),
-  ).length;
+  // The selector must return a primitive: zustand v5 re-renders whenever the
+  // snapshot is not referentially stable, so a fresh array here loops forever.
+  const pending = store(
+    (state) =>
+      state.items.filter(
+        (item) => item.kind === "approval" && item.state === "pending",
+      ).length,
+  );
   if (pending === 0) return null;
   return (
     <Badge variant="warning" size="sm" data-testid="pending-approval-badge">
