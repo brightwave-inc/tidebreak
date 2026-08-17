@@ -1,5 +1,12 @@
 import JSZip from "jszip";
 
+import {
+  evaluateUncachedFormulasWithDuke,
+  formulaValueKey,
+  type EvaluatedFormulaMap,
+  type EvaluatedFormulaValue,
+} from "./readOnlyWorkbookFormulaEngine";
+
 const OFFICE_DOCUMENT_RELATIONSHIPS =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const DRAWINGML =
@@ -32,8 +39,10 @@ export interface ReadOnlyWorkbookProjection {
  * Excel stores both a formula and its last calculated value. Browser formula
  * engines cannot reproduce every Excel function, but a viewer does not need
  * to: it can paint the cached result with the cell's original number format
- * and keep the formula separately for inspection. The source bytes are never
- * changed or written back.
+ * and keep the formula separately for inspection. Formula cells with no
+ * authored cache are calculated into the display copy so they still paint
+ * when the viewer skips its own engine. The source bytes are never changed
+ * or written back.
  */
 export async function projectWorkbookForReadOnlyDisplay(
   source: ArrayBuffer,
@@ -64,45 +73,89 @@ async function projectWorkbookDisplayCopy(
   let changed = await normalizeEmptyBorders(zip);
   if (await normalizeImplicitChartSeriesColors(zip)) changed = true;
 
-  await Promise.all(
-    sheetPaths.map(async (path, sheetIndex) => {
-      const entry = zip.file(path);
-      if (!entry) return;
+  const parsedSheets = (
+    await Promise.all(
+      sheetPaths.map(async (path, sheetIndex) => {
+        const entry = zip.file(path);
+        if (!entry) return null;
 
-      const document = parseXml(await entry.async("string"), path);
-      const formulas: Record<string, string> = {};
-      const conditionalStyles = projectConditionalStyles(document);
-      let sheetChanged = false;
+        const document = parseXml(await entry.async("string"), path);
+        const formulas: Record<string, string> = {};
+        const uncached: { address: string; cell: Element }[] = [];
 
-      if (Object.keys(conditionalStyles).length > 0) {
-        conditionalStylesBySheet[sheetIndex] = conditionalStyles;
-      }
+        for (const cell of localElements(document, "c")) {
+          const formula = localChild(cell, "f");
+          if (!formula) continue;
 
-      for (const cell of localElements(document, "c")) {
-        const formula = localChild(cell, "f");
-        if (!formula) continue;
+          const address = cell.getAttribute("r")?.replaceAll("$", "").toUpperCase();
+          const formulaText = formula.textContent?.trim();
+          if (address && formulaText) formulas[address] = `=${formulaText}`;
 
-        const address = cell.getAttribute("r");
-        const formulaText = formula.textContent?.trim();
-        if (address && formulaText) formulas[address] = `=${formulaText}`;
-
-        // Only replace formulas that have an authored cached result. Formulas
-        // without one still go through the workbook engine as a best effort.
-        if (localChild(cell, "v")) {
-          cell.removeChild(formula);
-          sheetChanged = true;
+          // An empty `<v>` is not a cached result. openpyxl and uncalculated
+          // Excel files emit one; treating it as authored would strip the
+          // formula and leave a blank cell.
+          if (address && !cellCachedValue(cell)) {
+            uncached.push({ address, cell });
+          }
         }
-      }
 
-      if (Object.keys(formulas).length > 0) {
-        formulasBySheet[sheetIndex] = formulas;
-      }
-      if (sheetChanged) {
-        zip.file(path, new XMLSerializer().serializeToString(document));
-        changed = true;
-      }
-    }),
+        if (Object.keys(formulas).length > 0) {
+          formulasBySheet[sheetIndex] = formulas;
+        }
+
+        return { document, path, sheetIndex, uncached };
+      }),
+    )
+  ).filter((sheet): sheet is ParsedSheet => sheet !== null);
+
+  const uncachedCells = parsedSheets.flatMap((sheet) =>
+    sheet.uncached.map((cell) => ({
+      address: cell.address,
+      sheetIndex: sheet.sheetIndex,
+    })),
   );
+  const evaluated = await evaluateUncachedFormulas(source, uncachedCells);
+
+  for (const sheet of parsedSheets) {
+    let sheetChanged = false;
+
+    if (evaluated) {
+      for (const { address, cell } of sheet.uncached) {
+        const value = evaluated[formulaValueKey(sheet.sheetIndex, address)];
+        if (!value) continue;
+        writeCachedFormulaValue(sheet.document, cell, value);
+        sheetChanged = true;
+      }
+    }
+
+    for (const cell of localElements(sheet.document, "c")) {
+      const formula = localChild(cell, "f");
+      if (!formula) continue;
+
+      // Only replace formulas that have an authored or baked cached result.
+      // Formulas still without one stay in the display copy as a best effort.
+      if (cellCachedValue(cell)) {
+        cell.removeChild(formula);
+        sheetChanged = true;
+        continue;
+      }
+      const emptyValue = localChild(cell, "v");
+      if (emptyValue) {
+        cell.removeChild(emptyValue);
+        sheetChanged = true;
+      }
+    }
+
+    const conditionalStyles = projectConditionalStyles(sheet.document);
+    if (Object.keys(conditionalStyles).length > 0) {
+      conditionalStylesBySheet[sheet.sheetIndex] = conditionalStyles;
+    }
+
+    if (sheetChanged) {
+      zip.file(sheet.path, new XMLSerializer().serializeToString(sheet.document));
+      changed = true;
+    }
+  }
 
   if (!changed) {
     return { conditionalStylesBySheet, data: source, formulasBySheet };
@@ -126,11 +179,8 @@ function projectConditionalStyles(
 
   for (const cell of localElements(document, "c")) {
     const address = cell.getAttribute("r")?.replaceAll("$", "").toUpperCase();
-    const rawValue = localChild(cell, "v")?.textContent;
-    const value =
-      rawValue === null || rawValue === undefined
-        ? Number.NaN
-        : Number(rawValue);
+    const rawValue = cellCachedValue(cell);
+    const value = rawValue === null ? Number.NaN : Number(rawValue);
     if (address && Number.isFinite(value)) numericValues.set(address, value);
   }
 
@@ -604,6 +654,70 @@ function parseXml(xml: string, path: string): XMLDocument {
 
 function emptyProjection(data: ArrayBuffer): ReadOnlyWorkbookProjection {
   return { conditionalStylesBySheet: {}, data, formulasBySheet: {} };
+}
+
+interface ParsedSheet {
+  document: XMLDocument;
+  path: string;
+  sheetIndex: number;
+  uncached: { address: string; cell: Element }[];
+}
+
+async function evaluateUncachedFormulas(
+  source: ArrayBuffer,
+  cells: ReadonlyArray<{ address: string; sheetIndex: number }>,
+): Promise<EvaluatedFormulaMap | null> {
+  if (cells.length === 0) return null;
+  try {
+    return await evaluateUncachedFormulasWithDuke(source, cells);
+  } catch {
+    return null;
+  }
+}
+
+function cellCachedValue(cell: Element): string | null {
+  const raw = localChild(cell, "v")?.textContent?.trim();
+  return raw ? raw : null;
+}
+
+function writeCachedFormulaValue(
+  document: XMLDocument,
+  cell: Element,
+  value: EvaluatedFormulaValue,
+): void {
+  const existing = localChild(cell, "v");
+  if (existing) cell.removeChild(existing);
+
+  switch (value.type) {
+    case "number":
+      cell.removeAttribute("t");
+      break;
+    case "boolean":
+      cell.setAttribute("t", "b");
+      break;
+    case "error":
+      cell.setAttribute("t", "e");
+      break;
+    case "text":
+      cell.setAttribute("t", "str");
+      break;
+  }
+
+  const cached = namespacedSibling(document, cell, "v");
+  cached.textContent = serializedFormulaValue(value);
+  cell.appendChild(cached);
+}
+
+function serializedFormulaValue(value: EvaluatedFormulaValue): string {
+  switch (value.type) {
+    case "boolean":
+      return value.value ? "1" : "0";
+    case "error":
+    case "text":
+      return value.value;
+    case "number":
+      return String(value.value);
+  }
 }
 
 function localElements(document: Document | Element, name: string): Element[] {
