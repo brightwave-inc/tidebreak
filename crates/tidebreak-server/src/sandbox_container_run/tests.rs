@@ -16,7 +16,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -61,20 +61,53 @@ use crate::state::{SandboxSteerGuard, SandboxSteerRefusal};
 
 // --- Mock host model (the resolver the driver proxies inference through) ------
 
+/// A one-shot hold. The producer subscribes to `release` before publishing
+/// `entered`, so a faster test cannot fire `release` into a Notify that has
+/// not yet been polled.
+struct Handshake {
+    entered: AtomicBool,
+    release: Notify,
+}
+
+impl Handshake {
+    fn new() -> Self {
+        Self {
+            entered: AtomicBool::new(false),
+            release: Notify::new(),
+        }
+    }
+
+    fn entered(&self) -> bool {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn enter_and_wait(&self) {
+        let notified = self.release.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        self.entered.store(true, Ordering::SeqCst);
+        notified.await;
+    }
+}
+
+impl Default for Handshake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Holds the sandbox's first model step open so a test can act while the run is
+/// genuinely attached and working.
+type StepGate = Handshake;
+
 /// A provider that scripts one directive step then a final answer, counting how
 /// many completions it is asked for. Drives the real in-container loop: the first
 /// completion tells the sandbox to run a filesystem tool, the second is the
 /// final result the sandbox submits.
-/// Holds the sandbox's first model step open so a test can act while the run is
-/// genuinely attached and working: the provider announces the step on `started`
-/// and answers only once the test signals `release`.
-#[derive(Default)]
-struct StepGate {
-    started: Notify,
-    started_flag: AtomicBool,
-    release: Notify,
-}
-
 struct ScriptedProvider {
     completions: Mutex<Vec<String>>,
     calls: AtomicUsize,
@@ -138,9 +171,7 @@ impl ModelProvider for ScriptedProvider {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
         if index == 0 {
             if let Some(gate) = &self.gate {
-                gate.started_flag.store(true, Ordering::SeqCst);
-                gate.started.notify_waiters();
-                gate.release.notified().await;
+                gate.enter_and_wait().await;
             }
         }
         for message in &request.messages {
@@ -185,7 +216,7 @@ struct UsageThenPendingProvider {
     stalled: Arc<Notify>,
     dropped: Arc<AtomicBool>,
     drop_observed: Arc<Notify>,
-    drop_gate: Option<Arc<Barrier>>,
+    drop_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     calls: AtomicUsize,
     usage: tidebreak_core::Usage,
 }
@@ -194,7 +225,7 @@ struct UsageThenPendingStream {
     stalled: Arc<Notify>,
     dropped: Arc<AtomicBool>,
     drop_observed: Arc<Notify>,
-    drop_gate: Option<Arc<Barrier>>,
+    drop_release: Option<std::sync::mpsc::Receiver<()>>,
     usage: Option<tidebreak_core::Usage>,
     announced: bool,
 }
@@ -218,8 +249,13 @@ impl Drop for UsageThenPendingStream {
     fn drop(&mut self) {
         self.dropped.store(true, Ordering::SeqCst);
         self.drop_observed.notify_one();
-        if let Some(gate) = &self.drop_gate {
-            gate.wait();
+        if let Some(release) = self.drop_release.take() {
+            // Park off the runtime. A raw wait on this tokio worker starves
+            // DurableOperationStore's `block_in_place` peers under
+            // `--test-threads N`.
+            tokio::task::block_in_place(|| {
+                let _ = release.recv();
+            });
         }
     }
 }
@@ -236,7 +272,9 @@ impl ModelProvider for UsageThenPendingProvider {
             stalled: self.stalled.clone(),
             dropped: self.dropped.clone(),
             drop_observed: self.drop_observed.clone(),
-            drop_gate: (call_index == 0).then(|| self.drop_gate.clone()).flatten(),
+            drop_release: (call_index == 0)
+                .then(|| self.drop_release.lock().unwrap().take())
+                .flatten(),
             usage: Some(self.usage),
             announced: false,
         }
@@ -261,12 +299,10 @@ struct TerminalFaultStore {
     setup_fault: Option<SetupFault>,
     setup_claim_lock: tokio::sync::Mutex<()>,
     setup_claim_lock_held: AtomicBool,
-    setup_entered: Notify,
-    setup_release: Notify,
-    fence_entered: Notify,
+    setup: Handshake,
+    fence_entered: AtomicBool,
     block_next_result: AtomicBool,
-    result_entered: Notify,
-    result_release: Notify,
+    result: Handshake,
     fail_accounting: AtomicBool,
     accounting_failure_observed: Notify,
     accounting_calls: AtomicUsize,
@@ -302,12 +338,10 @@ impl TerminalFaultStore {
             setup_fault,
             setup_claim_lock: tokio::sync::Mutex::new(()),
             setup_claim_lock_held: AtomicBool::new(false),
-            setup_entered: Notify::new(),
-            setup_release: Notify::new(),
-            fence_entered: Notify::new(),
+            setup: Handshake::new(),
+            fence_entered: AtomicBool::new(false),
             block_next_result: AtomicBool::new(false),
-            result_entered: Notify::new(),
-            result_release: Notify::new(),
+            result: Handshake::new(),
             fail_accounting: AtomicBool::new(false),
             accounting_failure_observed: Notify::new(),
             accounting_calls: AtomicUsize::new(0),
@@ -437,8 +471,7 @@ impl Store for TerminalFaultStore {
 
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
         if self.setup_fault == Some(SetupFault::ModelResolution) {
-            self.setup_entered.notify_one();
-            self.setup_release.notified().await;
+            self.setup.enter_and_wait().await;
             return Err(AgentError::Store(
                 "injected model-resolution storage failure".into(),
             ));
@@ -531,8 +564,7 @@ impl Store for TerminalFaultStore {
             // still needs another poll to complete and release that lock.
             let claim_lock = self.setup_claim_lock.lock().await;
             self.setup_claim_lock_held.store(true, Ordering::SeqCst);
-            self.setup_entered.notify_one();
-            self.setup_release.notified().await;
+            self.setup.enter_and_wait().await;
             drop(claim_lock);
             self.setup_claim_lock_held.store(false, Ordering::SeqCst);
         }
@@ -540,8 +572,7 @@ impl Store for TerminalFaultStore {
             self.setup_fault,
             Some(SetupFault::ProvisionIntentDelayed | SetupFault::ProvisionIntentFailure)
         ) {
-            self.setup_entered.notify_one();
-            self.setup_release.notified().await;
+            self.setup.enter_and_wait().await;
         }
         if self.setup_fault == Some(SetupFault::ProvisionIntentFailure) {
             return Err(AgentError::Store(
@@ -619,7 +650,7 @@ impl Store for TerminalFaultStore {
             // A periodic durable fence contends on the same serialization lock
             // as the held setup transaction. The notification makes the
             // deadlock interleaving deterministic for the regression below.
-            self.fence_entered.notify_one();
+            self.fence_entered.store(true, Ordering::SeqCst);
             let _claim_lock = self.setup_claim_lock.lock().await;
         }
         self.inner
@@ -644,8 +675,7 @@ impl Store for TerminalFaultStore {
         text: &str,
     ) -> Result<Option<tidebreak_core::storage::SubmitAgentRunResultOutcome>> {
         if self.block_next_result.swap(false, Ordering::SeqCst) {
-            self.result_entered.notify_one();
-            self.result_release.notified().await;
+            self.result.enter_and_wait().await;
         }
         self.inner
             .submit_agent_run_result(id, lease_token, text)
@@ -915,15 +945,13 @@ impl SandboxBackend for MockBackend {
 /// A backend that holds the orphan sweep after it receives the live-tag
 /// snapshot, exposing obligations committed while that snapshot is in use.
 struct HeldReclaimBackend {
-    started: Notify,
-    release: Notify,
+    hold: Handshake,
 }
 
 impl HeldReclaimBackend {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            started: Notify::new(),
-            release: Notify::new(),
+            hold: Handshake::new(),
         })
     }
 }
@@ -952,8 +980,7 @@ impl SandboxBackend for HeldReclaimBackend {
         &self,
         _live_tags: &std::collections::HashSet<SandboxTag>,
     ) -> std::result::Result<Vec<SandboxHandle>, BackendError> {
-        self.started.notify_one();
-        self.release.notified().await;
+        self.hold.enter_and_wait().await;
         Ok(Vec::new())
     }
 }
@@ -964,8 +991,7 @@ impl SandboxBackend for HeldReclaimBackend {
 /// caller stops awaiting it; the tag sweep is the only portable cleanup seam in
 /// the backend contract when no handle was returned.
 struct HeldProvisionBackend {
-    started: Notify,
-    release: Notify,
+    hold: Handshake,
     provisions: AtomicUsize,
     returned: AtomicBool,
     dropped: Arc<AtomicBool>,
@@ -976,8 +1002,7 @@ struct HeldProvisionBackend {
 impl HeldProvisionBackend {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            started: Notify::new(),
-            release: Notify::new(),
+            hold: Handshake::new(),
             provisions: AtomicUsize::new(0),
             returned: AtomicBool::new(false),
             dropped: Arc::new(AtomicBool::new(false)),
@@ -1012,8 +1037,7 @@ impl SandboxBackend for HeldProvisionBackend {
             dropped: self.dropped.clone(),
             completed: false,
         };
-        self.started.notify_one();
-        self.release.notified().await;
+        self.hold.enter_and_wait().await;
         drop_guard.completed = true;
         self.returned.store(true, Ordering::SeqCst);
         Ok(SandboxHandle {
@@ -1327,19 +1351,19 @@ where
     }
 }
 
-async fn wait_until_step_started(gate: &StepGate) {
-    wait_until(
-        Duration::from_secs(30),
-        "the first model call started",
-        || async {
-            if gate.started_flag.load(Ordering::SeqCst) {
-                Ok(())
-            } else {
-                Err("first completion not started".to_owned())
-            }
-        },
-    )
+async fn wait_until_entered(handshake: &Handshake, description: &str) {
+    wait_until(Duration::from_secs(30), description, || async {
+        if handshake.entered() {
+            Ok(())
+        } else {
+            Err("not entered".to_owned())
+        }
+    })
     .await;
+}
+
+async fn wait_until_step_started(gate: &StepGate) {
+    wait_until_entered(gate, "the first model call started").await;
 }
 
 async fn wait_until_lease_expired(store: &Arc<dyn Store>, run_id: AgentRunId) {
@@ -2483,7 +2507,7 @@ async fn an_obligation_created_during_orphan_reclamation_survives_for_the_next_s
         let runner = runner.clone();
         async move { runner.sweep().await }
     });
-    backend.started.notified().await;
+    wait_until_entered(&backend.hold, "the orphan sweep started").await;
 
     let late_run = Uuid::new_v4();
     store
@@ -2505,7 +2529,7 @@ async fn an_obligation_created_during_orphan_reclamation_survives_for_the_next_s
         .unwrap()
         .expect("the late handle becomes a teardown obligation");
 
-    backend.release.notify_one();
+    backend.hold.release();
     sweep.await.unwrap().unwrap();
 
     let remaining = store.list_sandbox_teardowns().await.unwrap();
@@ -2909,13 +2933,13 @@ async fn a_result_fenced_by_cancellation_still_finishes_cancellation() {
             }
         });
 
-        fault_store.result_entered.notified().await;
+        wait_until_entered(&fault_store.result, "result commit entered").await;
         store
             .request_agent_run_cancellation(run_id)
             .await
             .unwrap()
             .expect("the cancellation request wins the durable race");
-        fault_store.result_release.notify_one();
+        fault_store.result.release();
 
         let outcome = finalize.await.unwrap().expect("finalization succeeds");
         assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
@@ -3154,7 +3178,7 @@ async fn cancellation_interrupts_held_provision_and_sweeps_its_tagged_side_effec
             async move { runner.drive(run_id).await }
         });
 
-        backend.started.notified().await;
+        wait_until_entered(&backend.hold, "held provision started").await;
         let intended = store
             .get_sandbox_provision(*run_id.as_uuid())
             .await
@@ -3267,7 +3291,7 @@ async fn cross_process_cancellation_interrupts_held_provision_without_a_local_si
             async move { runner.drive(run_id).await }
         });
 
-        backend.started.notified().await;
+        wait_until_entered(&backend.hold, "held provision started").await;
         let intended = store
             .get_sandbox_provision(*run_id.as_uuid())
             .await
@@ -3351,7 +3375,7 @@ async fn cross_process_cancellation_interrupts_blocked_model_resolution() {
             async move { runner.drive(run_id).await }
         });
 
-        fault_store.setup_entered.notified().await;
+        wait_until_entered(&fault_store.setup, "model resolution entered").await;
         store
             .request_agent_run_cancellation(run_id)
             .await
@@ -3435,9 +3459,20 @@ async fn pre_attach_fence_keeps_polling_setup_that_holds_the_claim_lock() {
             }
         });
 
-        fault_store.setup_entered.notified().await;
-        fault_store.fence_entered.notified().await;
-        fault_store.setup_release.notify_one();
+        wait_until_entered(&fault_store.setup, "provisioning hold entered").await;
+        wait_until(
+            Duration::from_secs(5),
+            "the durable fence contended on the held claim lock",
+            || async {
+                if fault_store.fence_entered.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("fence has not entered the claim lock".to_owned())
+                }
+            },
+        )
+        .await;
+        fault_store.setup.release();
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), wait)
             .await
@@ -3490,13 +3525,13 @@ async fn exact_provision_admission_refuses_a_remotely_cancelled_claim() {
             async move { runner.drive(run_id).await }
         });
 
-        fault_store.setup_entered.notified().await;
+        wait_until_entered(&fault_store.setup, "provision intent delayed").await;
         store
             .request_agent_run_cancellation(run_id)
             .await
             .unwrap()
             .expect("the remote cancellation commits before admission resumes");
-        fault_store.setup_release.notify_one();
+        fault_store.setup.release();
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
@@ -3547,13 +3582,13 @@ async fn failing_provision_intent_reconciles_remote_cancellation() {
             async move { runner.drive(run_id).await }
         });
 
-        fault_store.setup_entered.notified().await;
+        wait_until_entered(&fault_store.setup, "provision intent failure entered").await;
         store
             .request_agent_run_cancellation(run_id)
             .await
             .unwrap()
             .expect("the remote cancellation commits");
-        fault_store.setup_release.notify_one();
+        fault_store.setup.release();
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
@@ -3715,7 +3750,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             stalled: stalled.clone(),
             dropped: dropped.clone(),
             drop_observed: Arc::new(Notify::new()),
-            drop_gate: None,
+            drop_release: Mutex::new(None),
             calls: AtomicUsize::new(0),
             usage,
         });
@@ -3914,7 +3949,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
         let stalled = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
         let drop_observed = Arc::new(Notify::new());
-        let drop_gate = Arc::new(Barrier::new(2));
+        let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
         let usage = tidebreak_core::Usage {
             input_tokens: 13,
             output_tokens: 8,
@@ -3925,7 +3960,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             stalled: stalled.clone(),
             dropped: dropped.clone(),
             drop_observed: drop_observed.clone(),
-            drop_gate: Some(drop_gate.clone()),
+            drop_release: Mutex::new(Some(drop_release_rx)),
             calls: AtomicUsize::new(0),
             usage,
         });
@@ -4000,9 +4035,9 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
         // scheduler turn so it is in flight against the closed admission, then
         // release Drop. Waiting for the call to settle here self-deadlocks.
         tokio::task::yield_now().await;
-        tokio::task::spawn_blocking(move || drop_gate.wait())
-            .await
-            .unwrap();
+        drop_release_tx
+            .send(())
+            .expect("drop is waiting for release");
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
@@ -4070,7 +4105,7 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
             stalled: stalled.clone(),
             dropped: dropped.clone(),
             drop_observed: Arc::new(Notify::new()),
-            drop_gate: None,
+            drop_release: Mutex::new(None),
             calls: AtomicUsize::new(0),
             usage,
         });
