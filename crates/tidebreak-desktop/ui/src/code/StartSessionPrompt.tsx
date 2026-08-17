@@ -13,6 +13,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   harnessUnusableReason,
+  ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
 
@@ -66,6 +67,9 @@ export function StartSessionPrompt({
       />
       {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
         <p className="text-warning-foreground text-xs">{UNSUPERVISED_AUTO_NOTE}</p>
+      )}
+      {mode === "allow" && (
+        <p className="text-warning-foreground text-xs">{ALLOW_ALL_NOTE}</p>
       )}
       <Button
         type="button"

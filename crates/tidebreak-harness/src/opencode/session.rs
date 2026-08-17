@@ -116,6 +116,14 @@ pub(crate) fn session_create_body(mode: CodePermissionMode) -> Value {
                 {"permission": "bash", "pattern": "*", "action": "ask"}
             ]
         }),
+        CodePermissionMode::Allow => json!({
+            "agent": "build",
+            "permission": [
+                {"permission": "bash", "pattern": "*", "action": "allow"},
+                {"permission": "edit", "pattern": "*", "action": "allow"},
+                {"permission": "read", "pattern": "*", "action": "allow"}
+            ]
+        }),
     }
 }
 
@@ -647,5 +655,12 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
+        let allow = session_create_body(CodePermissionMode::Allow);
+        assert_eq!(allow["agent"], "build");
+        let rules = allow["permission"].as_array().unwrap();
+        assert!(rules.iter().all(|rule| rule["action"] == "allow"));
+        assert!(rules
+            .iter()
+            .any(|rule| { rule["permission"] == "bash" && rule["action"] == "allow" }));
     }
 }

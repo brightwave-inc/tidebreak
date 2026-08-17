@@ -1121,7 +1121,7 @@ export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: n
  * Each adapter maps these onto the engine's native flags. A mode the
  * engine cannot honor is refused at session creation — never approximated.
  */
-export type CodePermissionMode = "plan" | "ask" | "auto";
+export type CodePermissionMode = "plan" | "ask" | "auto" | "allow";
 
 /**
  * Result of pushing the workspace branch.
@@ -1786,6 +1786,11 @@ plan_mode: CapLevel,
  * states so where the mode is chosen (decision 0038).
  */
 auto_mode: CapLevel, 
+/**
+ * The engine has an allow-everything / bypass posture the adapter can
+ * select. Composed only when the session is in Allow (decision 0039).
+ */
+allow_mode: CapLevel, 
 /**
  * The engine accepts a reasoning-effort control.
  */

@@ -143,6 +143,7 @@ pub(crate) fn thread_start_policy(mode: CodePermissionMode) -> (&'static str, &'
         CodePermissionMode::Plan => ("read-only", "untrusted"),
         CodePermissionMode::Ask => ("workspace-write", "untrusted"),
         CodePermissionMode::Auto => ("workspace-write", "on-request"),
+        CodePermissionMode::Allow => ("danger-full-access", "never"),
     }
 }
 
@@ -610,6 +611,10 @@ mod tests {
         assert_eq!(
             thread_start_policy(CodePermissionMode::Auto),
             ("workspace-write", "on-request")
+        );
+        assert_eq!(
+            thread_start_policy(CodePermissionMode::Allow),
+            ("danger-full-access", "never")
         );
         let _ = PathBuf::from("/workspace");
     }

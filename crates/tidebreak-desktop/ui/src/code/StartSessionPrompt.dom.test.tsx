@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
-import { UNSUPERVISED_AUTO_NOTE } from "./labels";
+import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 
 afterEach(() => {
@@ -18,6 +18,7 @@ const CAPS = {
   mid_turn_steering: "unsupported",
   plan_mode: "supported",
   auto_mode: "supported",
+  allow_mode: "supported",
   reasoning_levels: "unknown",
   native_file_change_events: "unsupported",
   native_interrupt: "supported",
@@ -95,6 +96,7 @@ describe("StartSessionPrompt", () => {
           entry("grok", {
             plan_mode: "unsupported",
             structured_approvals: "unsupported",
+            allow_mode: "unsupported",
           }),
         ]}
         starting={false}
@@ -114,5 +116,26 @@ describe("StartSessionPrompt", () => {
     expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start session" }));
     expect(onStart).toHaveBeenCalledWith("grok", "auto");
+  });
+
+  it("states Allow all when that mode is chosen", async () => {
+    const user = userEvent.setup();
+    const onSelectMode = vi.fn();
+    await renderWithRouter(
+      <StartSessionPrompt
+        harnesses={[entry("claude_code", {})]}
+        starting={false}
+        selectedMode="allow"
+        onSelectMode={onSelectMode}
+        onStart={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Allow all" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Ask" }));
+    expect(onSelectMode).toHaveBeenCalledWith("ask");
   });
 });

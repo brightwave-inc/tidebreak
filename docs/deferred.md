@@ -239,7 +239,8 @@ purpose:
 - **Changing a session's permission mode after it starts.** The mode is
   chosen at session creation, refused per harness capability there
   ([record 33](decisions/0033-code-mode-approvals.md),
-  [record 38](decisions/0038-auto-is-a-declared-capability.md)), and composed
+  [record 38](decisions/0038-auto-is-a-declared-capability.md),
+  [record 39](decisions/0039-allow-is-a-first-class-code-permission-mode.md)), and composed
   into the engine's launch; no adapter can renegotiate it on an attached
   session. Changing it means tearing the engine down and relaunching it on a
   resume ref — new semantics for spawn epochs, in-flight turns, and pending

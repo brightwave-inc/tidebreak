@@ -2,17 +2,18 @@
 
 Status: implemented (first version). The decision records
 [`0030`](decisions/0030-code-mode-separate-surface.md) through
-[`0036`](decisions/0036-code-mode-auxiliary-terminals.md) carry the decisions
+[`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md) carry the decisions
 and are accepted; this page carries the working design detail in one place.
 Where this page and a decision record disagree, the record wins. The first
 version ships the full surface described here — repos, workspaces, sessions,
 approvals, checkpoints and review, auxiliary terminals, the git/PR flow, the
 updates channel, and adapters for Claude Code (reference tier), Codex CLI,
-opencode, and Grok CLI (the last honors Auto only, as its default headless
-posture: its captured 1.0.4 plan and sandbox flags do not confine and it has
-no approval channel, so Auto runs unsupervised and the product says so where
+opencode, and Grok CLI (the last honors Auto and Allow: its captured 1.0.4 plan and sandbox flags do
+not confine and it has no approval channel, so Auto is the unsupervised
+default headless posture and Allow is `--always-approve`, both stated where
 the mode is chosen — see
-[`0038`](decisions/0038-auto-is-a-declared-capability.md)) — with the
+[`0038`](decisions/0038-auto-is-a-declared-capability.md) and
+[`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)) — with the
 deliberately parked scope recorded in [`docs/deferred.md`](deferred.md).
 
 Code mode is Tidebreak's second product surface: pick a local git repository,
@@ -49,7 +50,7 @@ crates/tidebreak-core/src/code/
   event.rs       CodeEvent, SequencedCodeEvent (conventions of src/event.rs)
   attention.rs   AttentionState, AttentionSource, should_replace
   caps.rs        HarnessCaps, CapLevel, HarnessTier
-  permission.rs  CodePermissionMode { Plan, Ask, Auto } and its per-mode contract
+  permission.rs  CodePermissionMode { Plan, Ask, Auto, Allow } and its per-mode contract
 
 crates/tidebreak-core/src/db/entities.rs      six new entities (below)
 crates/tidebreak-core/src/db/ops/code/        repo.rs, workspace.rs, session.rs,

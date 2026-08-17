@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, CodePermissionMode, HarnessCaps, HarnessKind};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
 use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
@@ -78,6 +78,7 @@ pub(crate) struct ScriptedAdapter {
     mid_turn_steering: CapLevel,
     structured_approvals: CapLevel,
     auto_mode: CapLevel,
+    allow_mode: CapLevel,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
@@ -98,6 +99,7 @@ impl ScriptedAdapter {
             mid_turn_steering: CapLevel::Unsupported,
             structured_approvals: CapLevel::Unsupported,
             auto_mode: CapLevel::Unsupported,
+            allow_mode: CapLevel::Unsupported,
             child_pid: None,
             unrecognized_per_turn: 0,
             silent_interrupt: false,
@@ -143,6 +145,12 @@ impl ScriptedAdapter {
     /// for exercising the mode gate's per-flag refusals.
     pub(crate) fn with_auto_mode(mut self, level: CapLevel) -> Self {
         self.auto_mode = level;
+        self
+    }
+
+    /// Overrides the allow-everything posture independently of Auto.
+    pub(crate) fn with_allow_mode(mut self, level: CapLevel) -> Self {
+        self.allow_mode = level;
         self
     }
 
@@ -211,6 +219,7 @@ impl HarnessAdapter for ScriptedAdapter {
             mid_turn_steering: self.mid_turn_steering,
             plan_mode: CapLevel::Supported,
             auto_mode: self.auto_mode,
+            allow_mode: self.allow_mode,
             reasoning_levels: CapLevel::Unsupported,
             native_file_change_events: CapLevel::Unsupported,
             native_interrupt: CapLevel::Supported,
@@ -218,14 +227,6 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        if spec.permission_mode != CodePermissionMode::Plan
-            && spec.permission_mode != CodePermissionMode::Ask
-            && spec.permission_mode != CodePermissionMode::Auto
-        {
-            return Err(HarnessError::PermissionModeUnsupported(
-                spec.permission_mode,
-            ));
-        }
         self.launched_approvals
             .lock()
             .expect("scripted launches")

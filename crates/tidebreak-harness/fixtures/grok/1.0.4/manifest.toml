@@ -40,10 +40,12 @@ scenarios = [
 # Plan: `--permission-mode plan` and `--sandbox read-only` both wrote
 # files in captured turns. `--deny Edit/Write/Bash` did refuse those
 # tools (see permission-denied) but is not composed as a Plan stand-in.
-# `--always-approve` / `--yolo` / `bypassPermissions` are denylisted.
+# `--yolo` / `bypassPermissions` stay denylisted on Auto. Allow composes
+# `--always-approve` as the explicit allow-everything setting.
 Plan = "refused"
 Ask = "refused"
 Auto = "default headless posture (no permission flags composed)"
+Allow = "--always-approve"
 
 [redaction]
 notes = """
@@ -64,7 +66,7 @@ verified = [
   "end.sessionId is the resume handle; --resume <id> reused that id",
   "SIGINT mid-turn: child exits, stream truncated, no end/error line",
   "unknown model: single {type:error,message} line, exit 1",
-  "--always-approve, --yolo, --dangerously-skip-permissions accepted by CLI; denylisted",
+  "--always-approve, --yolo, --dangerously-skip-permissions accepted by CLI; Allow maps to --always-approve",
   "--permission-mode plan wrote note.txt; --sandbox read-only wrote sandboxed.txt",
   "--deny Edit --deny Write --deny Bash failed write + run_terminal_command (Denied by permission policy)",
   "ACP: grok agent stdio initialize + session/new returned sessionId; no request_permission captured",

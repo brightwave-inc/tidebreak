@@ -86,6 +86,8 @@ impl HarnessAdapter for GrokAdapter {
             // 1.0.4 (d846eb93). Unsupervised: nothing escalates, which the
             // product states where the mode is chosen (decision 0038).
             auto_mode: CapLevel::Supported,
+            // `--always-approve` accepted by the captured 1.0.4 CLI.
+            allow_mode: CapLevel::Supported,
             // `--reasoning-effort` is documented and was used on capture.
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
@@ -276,13 +278,15 @@ mod tests {
         assert_eq!(caps.structured_approvals, CapLevel::Unsupported);
         assert_eq!(caps.plan_mode, CapLevel::Unsupported);
         assert_eq!(caps.auto_mode, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unsupported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
     }
 
     #[test]
-    fn auto_is_honored_and_plan_and_ask_are_refused() {
+    fn auto_and_allow_are_honored_and_plan_and_ask_are_refused() {
         assert!(refuse_unhonored_mode(CodePermissionMode::Auto).is_ok());
+        assert!(refuse_unhonored_mode(CodePermissionMode::Allow).is_ok());
         for mode in [CodePermissionMode::Plan, CodePermissionMode::Ask] {
             let err = refuse_unhonored_mode(mode).unwrap_err();
             assert!(matches!(err, HarnessError::PermissionModeUnsupported(m) if m == mode));
@@ -290,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_plan_never_includes_bypass_flags() {
+    fn auto_launch_plan_never_includes_bypass_flags() {
         let plan = compose_print_plan(
             Path::new("/usr/bin/grok"),
             &[],
@@ -298,6 +302,7 @@ mod tests {
             &[],
             None,
             Path::new("/tmp/prompt.txt"),
+            CodePermissionMode::Auto,
         )
         .unwrap();
         assert!(!plan.argv.iter().any(|arg| {
@@ -316,6 +321,21 @@ mod tests {
             Some("streaming-json")
         );
         assert!(!plan.argv.iter().any(|arg| arg.contains("hello from")));
+    }
+
+    #[test]
+    fn allow_launch_plan_composes_always_approve() {
+        let plan = compose_print_plan(
+            Path::new("/usr/bin/grok"),
+            &[],
+            Path::new("/workspace"),
+            &[],
+            None,
+            Path::new("/tmp/prompt.txt"),
+            CodePermissionMode::Allow,
+        )
+        .unwrap();
+        assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));
     }
 
     #[test]

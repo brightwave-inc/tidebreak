@@ -147,7 +147,7 @@ pub(super) fn code_session_table() -> TableCreateStatement {
             Expr::col(CodeSession::Lifecycle)
                 .is_in(["created", "idle", "running", "fenced", "ended"]),
         )
-        .check(Expr::col(CodeSession::PermissionMode).is_in(["plan", "ask", "auto"]))
+        .check(Expr::col(CodeSession::PermissionMode).is_in(["plan", "ask", "auto", "allow"]))
         .check(Expr::col(CodeSession::SpawnEpoch).gte(0))
         .check(Expr::col(CodeSession::UnrecognizedEventCount).gte(0))
         .to_owned()

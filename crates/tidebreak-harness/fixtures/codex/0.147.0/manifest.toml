@@ -37,6 +37,7 @@ scenarios = [
 Plan = { sandbox = "read-only", approvalPolicy = "untrusted" }
 Ask = { sandbox = "workspace-write", approvalPolicy = "untrusted" }
 Auto = { sandbox = "workspace-write", approvalPolicy = "on-request" }
+Allow = { sandbox = "danger-full-access", approvalPolicy = "never" }
 
 [redaction]
 notes = """

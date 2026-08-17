@@ -34,6 +34,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   harnessUnusableReason,
+  ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
 
@@ -209,6 +210,9 @@ export function NewWorkspaceDialog({
                   {UNSUPERVISED_AUTO_NOTE}
                 </p>
               )}
+            {postedMode === "allow" && (
+              <p className="text-warning-foreground text-xs">{ALLOW_ALL_NOTE}</p>
+            )}
           </div>
           <DialogFooter>
             <Button
