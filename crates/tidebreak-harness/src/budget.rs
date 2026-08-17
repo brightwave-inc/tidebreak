@@ -43,6 +43,9 @@ pub struct BudgetTick {
 #[derive(Debug, Default)]
 pub struct StreamLineBuffer {
     pending: String,
+    /// Whether the line currently being buffered has already hit the cap, so
+    /// the rest of it is dropped until its newline arrives.
+    overflowing: bool,
     /// Total overflow chunks observed over the life of the buffer.
     pub overflow_chunks: u64,
 }
@@ -55,44 +58,55 @@ impl StreamLineBuffer {
     }
 
     /// Push `bytes` (lossy UTF-8) and take any complete lines.
+    ///
+    /// A line longer than `budget.max_partial_line` is emitted truncated at
+    /// its cap once its newline arrives, and the bytes beyond the cap are
+    /// counted as overflow. The stream keeps flowing either way: one oversized
+    /// line must never stop later lines from being delivered.
     pub fn push(&mut self, bytes: &[u8], budget: StreamBudget) -> BudgetTick {
-        let mut overflow_chunks = 0;
         let incoming = String::from_utf8_lossy(bytes);
-        if self.pending.len().saturating_add(incoming.len()) > budget.max_partial_line {
-            overflow_chunks += 1;
-            self.overflow_chunks += 1;
-            let room = budget.max_partial_line.saturating_sub(self.pending.len());
-            self.pending.push_str(&incoming[..incoming.len().min(room)]);
-            // Drop the rest of this chunk but keep looking for a newline so a
-            // later delimiter can flush the capped prefix.
-            if let Some(idx) = incoming.find('\n') {
-                let _ = idx;
-            } else {
-                return BudgetTick {
-                    lines: Vec::new(),
-                    overflow_chunks,
-                };
-            }
-        } else {
-            self.pending.push_str(&incoming);
-        }
-
+        let mut rest: &str = incoming.as_ref();
         let mut lines = Vec::new();
-        while let Some(idx) = self.pending.find('\n') {
-            let mut line = self.pending.drain(..=idx).collect::<String>();
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
+        let mut overflow_chunks = 0;
+
+        while !rest.is_empty() {
+            let (segment, tail) = match rest.find('\n') {
+                Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+                None => (rest, None),
+            };
+
+            if self.overflowing {
+                if !segment.is_empty() {
+                    overflow_chunks += 1;
+                    self.overflow_chunks += 1;
+                }
+            } else {
+                let room = budget.max_partial_line.saturating_sub(self.pending.len());
+                if segment.len() > room {
+                    let end = crate::text::floor_char_boundary(segment, room);
+                    self.pending.push_str(&segment[..end]);
+                    self.overflowing = true;
+                    overflow_chunks += 1;
+                    self.overflow_chunks += 1;
+                } else {
+                    self.pending.push_str(segment);
                 }
             }
-            lines.push(line);
+
+            match tail {
+                Some(tail) => {
+                    let mut line = std::mem::take(&mut self.pending);
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                    lines.push(line);
+                    self.overflowing = false;
+                    rest = tail;
+                }
+                None => rest = "",
+            }
         }
-        if self.pending.len() > budget.max_partial_line {
-            self.pending.truncate(budget.max_partial_line);
-            overflow_chunks += 1;
-            self.overflow_chunks += 1;
-        }
+
         BudgetTick {
             lines,
             overflow_chunks,
@@ -133,5 +147,40 @@ mod tests {
         assert!(tick.overflow_chunks >= 1);
         assert_eq!(buf.overflow_chunks, tick.overflow_chunks);
         assert!(buf.pending().len() <= 8);
+    }
+
+    #[test]
+    fn an_oversized_line_does_not_wedge_the_stream() {
+        let budget = StreamBudget {
+            chunk_size: 8,
+            max_chunks_per_tick: 1,
+            max_partial_line: 8,
+        };
+        let mut buf = StreamLineBuffer::new();
+
+        // An oversized line arriving in pieces, then a normal line behind it.
+        assert!(buf.push(b"aaaaaaaaaabbbb", budget).lines.is_empty());
+        assert!(buf.push(b"cccccccccc", budget).lines.is_empty());
+        let tick = buf.push(b"dddd\nnormal\n", budget);
+        assert_eq!(tick.lines, ["aaaaaaaa", "normal"]);
+        assert!(buf.overflow_chunks >= 1);
+        assert!(buf.pending().is_empty());
+
+        // And the buffer keeps working afterwards.
+        let tick = buf.push(b"after\n", budget);
+        assert_eq!(tick.lines, ["after"]);
+    }
+
+    #[test]
+    fn a_character_straddling_the_cap_is_dropped_not_split() {
+        let budget = StreamBudget {
+            chunk_size: 8,
+            max_chunks_per_tick: 1,
+            // "é" is two bytes, so a cap of 5 lands inside the third one.
+            max_partial_line: 5,
+        };
+        let mut buf = StreamLineBuffer::new();
+        let tick = buf.push("ééé\nplain\n".as_bytes(), budget);
+        assert_eq!(tick.lines, ["éé", "plain"]);
     }
 }

@@ -424,9 +424,7 @@ impl CodexStreamParser {
     fn count_unrecognized(&mut self, label: &str, payload: impl std::fmt::Display) {
         self.unrecognized += 1;
         let mut rendered = payload.to_string();
-        if rendered.len() > MAX_UNRECOGNIZED_LOG {
-            rendered.truncate(MAX_UNRECOGNIZED_LOG);
-        }
+        crate::text::truncate_on_char_boundary(&mut rendered, MAX_UNRECOGNIZED_LOG);
         tracing::debug!(
             target: "tidebreak_harness::codex",
             unrecognized = self.unrecognized,

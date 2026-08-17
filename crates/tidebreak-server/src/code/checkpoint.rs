@@ -524,9 +524,9 @@ async fn collect_changes(
     )
     .await
     .map_err(CheckpointError::internal)?;
-    let numstat = git_text(
+    let numstat = git_bytes(
         worktree,
-        &["diff", "--numstat", "--find-renames", from, to],
+        &["diff", "--numstat", "-z", "--find-renames", from, to],
         GIT_TIMEOUT,
     )
     .await
@@ -615,22 +615,34 @@ fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
     files
 }
 
-fn parse_numstat(text: &str) -> std::collections::HashMap<String, (u32, u32)> {
+/// Parse `git diff --numstat -z`, keyed by post-image path.
+///
+/// `-z` is what makes the keys line up with `--name-status -z`: without it git
+/// quotes and C-escapes any path outside ASCII, and collapses a rename into a
+/// single `old => new` field. Neither form ever matches a name-status path, so
+/// those files would silently carry zero insertions and deletions.
+///
+/// The NUL-delimited record is `<added>\t<deleted>\t<path>\0`, except for a
+/// rename or copy, where the path column is empty and the pre-image and
+/// post-image paths follow as two further NUL-terminated fields.
+fn parse_numstat(raw: &[u8]) -> std::collections::HashMap<String, (u32, u32)> {
+    let text = String::from_utf8_lossy(raw);
     let mut out = std::collections::HashMap::new();
-    for line in text.lines() {
-        let mut cols = line.split('\t');
+    let mut parts = text.split('\0').filter(|part| !part.is_empty());
+    while let Some(record) = parts.next() {
+        // A path may itself contain a tab, so only split off the two counts.
+        let mut cols = record.splitn(3, '\t');
         let insertions = parse_stat_count(cols.next().unwrap_or("0"));
         let deletions = parse_stat_count(cols.next().unwrap_or("0"));
         let path = cols.next().unwrap_or("");
         if path.is_empty() {
-            continue;
+            let (Some(_previous), Some(current)) = (parts.next(), parts.next()) else {
+                break;
+            };
+            out.insert(current.to_owned(), (insertions, deletions));
+        } else {
+            out.insert(path.to_owned(), (insertions, deletions));
         }
-        let key = path
-            .split_once(" => ")
-            .map(|(_, after)| after)
-            .unwrap_or(path)
-            .to_owned();
-        out.insert(key, (insertions, deletions));
     }
     out
 }
@@ -895,6 +907,64 @@ mod tests {
             "{}",
             diff.diff
         );
+    }
+
+    #[tokio::test]
+    async fn line_counts_survive_renames_and_non_ascii_paths() {
+        let (_dir, repo) = init_repo();
+        let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/alpha.rs"), &body).unwrap();
+        run(&repo, &["git", "add", "src/alpha.rs"]);
+        run(&repo, &["git", "commit", "-m", "alpha"]);
+
+        let tree = add_worktree(&repo, "numstat");
+        // A rename with one added line, and a path outside ASCII. Non-`-z`
+        // numstat renders the first as `src/{alpha.rs => beta.rs}` and quotes
+        // and escapes the second, so neither matched its name-status entry.
+        std::fs::rename(tree.join("src/alpha.rs"), tree.join("src/beta.rs")).unwrap();
+        std::fs::write(tree.join("src/beta.rs"), format!("{body}line 13\n")).unwrap();
+        std::fs::write(tree.join("café.txt"), "un\ndeux\n").unwrap();
+
+        let recorded = record_checkpoint(&tree, ws(), 1, None, "main")
+            .await
+            .unwrap();
+        let from = merge_base(&tree, "main").await.unwrap();
+        let files = list_changed_files(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+
+        let renamed = files
+            .files
+            .iter()
+            .find(|file| file.path == "src/beta.rs")
+            .unwrap_or_else(|| panic!("{:#?}", files.files));
+        assert_eq!(renamed.kind, FileChangeKind::Renamed);
+        assert_eq!(renamed.previous_path.as_deref(), Some("src/alpha.rs"));
+        assert_eq!((renamed.insertions, renamed.deletions), (1, 0));
+
+        // Matched by kind rather than by name: macOS and Linux disagree on the
+        // Unicode normalization of the path, but not on its line counts.
+        let accented = files
+            .files
+            .iter()
+            .find(|file| file.kind == FileChangeKind::Added)
+            .unwrap_or_else(|| panic!("{:#?}", files.files));
+        assert!(accented.path.contains("caf"), "{}", accented.path);
+        assert!(
+            !accented.path.starts_with('"'),
+            "path must not be quoted: {}",
+            accented.path
+        );
+        assert_eq!((accented.insertions, accented.deletions), (2, 0));
+
+        assert_eq!(files.stat.insertions, 3);
+        assert_eq!(files.stat.deletions, 0);
     }
 
     #[tokio::test]

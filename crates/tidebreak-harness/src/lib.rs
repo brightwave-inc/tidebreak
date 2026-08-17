@@ -27,6 +27,7 @@ pub mod grok;
 pub mod launch;
 pub mod opencode;
 pub mod probe;
+mod text;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
 pub use launch::{validate_launch_plan, BypassFlagError, LaunchPlan};
