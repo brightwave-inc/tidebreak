@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use crate::{
     filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
     HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
 };
-use tidebreak_core::CodePermissionMode;
+use tidebreak_core::{CodePermissionMode, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -29,6 +29,13 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 pub struct CodexSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
+    /// Whether a turn has actually run on this thread. Codex only writes the
+    /// thread's rollout once a turn starts, so a thread id from
+    /// `thread/start` alone is not resumable and must not be handed out as a
+    /// resume ref — see [`HarnessSession::resume_ref`] below.
+    thread_ran_a_turn: AtomicBool,
+    /// Detail from an engine error saying the resumed thread is gone.
+    resume_lost: Mutex<Option<String>>,
     child: AsyncMutex<Option<Child>>,
     child_pid: AtomicU32,
     stdin: Option<Arc<AsyncMutex<ChildStdin>>>,
@@ -50,6 +57,8 @@ impl CodexSession {
         Self {
             spec,
             resume_ref: Mutex::new(resume_ref),
+            thread_ran_a_turn: AtomicBool::new(false),
+            resume_lost: Mutex::new(None),
             child: AsyncMutex::new(None),
             child_pid: AtomicU32::new(0),
             stdin: None,
@@ -59,6 +68,11 @@ impl CodexSession {
             pending_approvals: Mutex::new(HashMap::new()),
             current_turn_id: Mutex::new(None),
         }
+    }
+
+    /// The detail of a lost resume observed on the stream, when any.
+    fn lost_resume(&self) -> Option<String> {
+        self.resume_lost.lock().expect("codex resume lost").clone()
     }
 
     fn next_rpc_id(&self) -> i64 {
@@ -210,6 +224,12 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
         };
     let thread_req = session.request(method, params).await?;
     session.read_until_rpc(thread_req).await?;
+    if let Some(detail) = session.lost_resume() {
+        // The stored thread is gone on the engine side. Every turn on this
+        // child would fail identically, so fail the launch with a reason the
+        // caller can act on instead of attaching a session that cannot run.
+        return Err(HarnessError::ResumeLost(detail));
+    }
     Ok(session)
 }
 
@@ -308,6 +328,12 @@ impl CodexSession {
                 .and_then(Value::as_str)
             {
                 *self.current_turn_id.lock().expect("codex turn") = Some(turn_id.to_owned());
+                // The engine acknowledged a turn on this thread, so it has
+                // written the thread's rollout: the id is resumable now.
+                self.thread_ran_a_turn.store(true, Ordering::SeqCst);
+            }
+            if let Some(detail) = lost_resume_detail(&value) {
+                *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
         }
         let events = self.parser.lock().expect("codex parser").push_line(line);
@@ -360,7 +386,13 @@ impl HarnessSession for CodexSession {
         // Long-lived child: its exit is a session-level failure, not a turn
         // outcome, and `read_until_terminal_turn` already errors on a stream
         // that ends without one.
-        self.read_until_terminal_turn().await?;
+        let terminal = self.read_until_terminal_turn().await;
+        if let Some(detail) = self.lost_resume() {
+            // The thread this session attached to is gone. Report the lost
+            // resume rather than a turn failure the caller would retry.
+            return Err(HarnessError::ResumeLost(detail));
+        }
+        terminal?;
         Ok(TurnOutcome::Clean)
     }
 
@@ -443,7 +475,17 @@ impl HarnessSession for CodexSession {
     }
 
     fn resume_ref(&self) -> Option<String> {
-        self.resume_ref.lock().expect("codex resume").clone()
+        // Codex 0.147.0 does not persist a thread that never ran a turn:
+        // `thread/resume` on such an id answers "thread not found". Report a
+        // thread id only once a turn has run on it, so a session whose engine
+        // dies before its first turn re-attaches with a fresh `thread/start`
+        // instead of resuming a thread the engine never wrote. A ref this
+        // session was handed at launch is already persisted state and stays
+        // reported as is.
+        if self.thread_ran_a_turn.load(Ordering::SeqCst) {
+            return self.resume_ref.lock().expect("codex resume").clone();
+        }
+        self.spec.resume_ref.clone()
     }
 
     fn child_pid(&self) -> Option<i64> {
@@ -465,6 +507,20 @@ impl HarnessSession for CodexSession {
         }
         Ok(())
     }
+}
+
+/// Detail of a JSON-RPC error that says the thread we are on is gone.
+///
+/// Codex 0.147.0 answers `thread/resume` and `turn/start` for an unknown
+/// thread with `thread not found: <id>`. Matching the wording is deliberate:
+/// every other engine error is a turn failure, and only this one means the
+/// stored resume ref is dead.
+fn lost_resume_detail(value: &Value) -> Option<String> {
+    let message = value.pointer("/error/message").and_then(Value::as_str)?;
+    message
+        .to_ascii_lowercase()
+        .contains("thread not found")
+        .then(|| message.chars().take(MAX_NOTICE_CHARS).collect())
 }
 
 fn line_is_rpc_id(line: &str, rpc_id: i64) -> bool {
@@ -556,5 +612,144 @@ mod tests {
             ("workspace-write", "on-request")
         );
         let _ = PathBuf::from("/workspace");
+    }
+
+    /// A stand-in `codex app-server --stdio` that speaks just enough of the
+    /// 0.147.0 protocol to reproduce the resume hazard: it answers
+    /// `thread/resume` for an unknown thread the way codex does, and records
+    /// every method it was asked for so a test can assert what was on the
+    /// wire. Recorded shapes come from `fixtures/codex/0.147.0/`.
+    #[cfg(unix)]
+    const FAKE_APP_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf 'initialize\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"userAgent":"fake/0.147.0"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf 'thread/start\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"error":{"code":-32603,"message":"thread not found: STALE-THREAD"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'turn/start\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"turn":{"id":"TURN-1","status":"inProgress"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"completed"}}}\n'
+      ;;
+  esac
+done
+"#;
+
+    #[cfg(unix)]
+    fn write_fake_app_server(path: &std::path::Path) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(path)
+            .unwrap();
+        file.write_all(FAKE_APP_SERVER.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    #[cfg(unix)]
+    struct SilentSink;
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl crate::HarnessEventSink for SilentSink {
+        async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    #[cfg(unix)]
+    fn spec_for(
+        dir: &std::path::Path,
+        binary: &std::path::Path,
+        resume_ref: Option<String>,
+    ) -> SessionSpec {
+        SessionSpec {
+            worktree: dir.to_path_buf(),
+            permission_mode: CodePermissionMode::Auto,
+            resume_ref,
+            extra_argv: Vec::new(),
+            extra_env: vec![(
+                "FAKE_CODEX_CALLS".into(),
+                dir.join("calls").to_string_lossy().into_owned(),
+            )],
+            env: Vec::new(),
+            approval: None,
+            binary: binary.to_path_buf(),
+            sink: Arc::new(SilentSink),
+        }
+    }
+
+    #[cfg(unix)]
+    fn calls(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The wedge from the app-server dying before its first turn: codex never
+    /// persisted the thread, so a thread id that has run no turn must not be
+    /// reported as a resume ref. The next attach then starts a clean thread.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_thread_that_ran_no_turn_is_not_a_resume_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_fake_app_server(&binary);
+
+        let session = attach(spec_for(dir.path(), &binary, None)).await.unwrap();
+        assert_eq!(calls(dir.path()), ["initialize", "thread/start"]);
+        assert_eq!(
+            session.resume_ref(),
+            None,
+            "a thread with no turns is not resumable and must not be persisted"
+        );
+
+        session
+            .run_turn(TurnInput {
+                text: "first turn".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(session.resume_ref().as_deref(), Some("THREAD-1"));
+    }
+
+    /// A resume ref the engine no longer knows is a lost resume, not a turn
+    /// failure: the server fences on this rather than failing every turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_resume_ref_reports_a_lost_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_fake_app_server(&binary);
+
+        let attached = attach(spec_for(
+            dir.path(),
+            &binary,
+            Some("STALE-THREAD".to_owned()),
+        ))
+        .await;
+        let Err(err) = attached else {
+            panic!("attaching to an unknown thread must not succeed");
+        };
+        assert_eq!(calls(dir.path()), ["initialize", "thread/resume"]);
+        let HarnessError::ResumeLost(detail) = err else {
+            panic!("expected a lost resume, got {err}");
+        };
+        assert!(detail.contains("thread not found"), "detail: {detail}");
     }
 }

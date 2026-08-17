@@ -18,11 +18,11 @@ use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    Diffstat, HarnessKind, RepoId, WorkspaceId,
+    Diffstat, FenceReason, HarnessKind, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
-    HarnessEvent, HarnessEventSink, HarnessProbe, HostEnv, SessionSpec,
+    HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HostEnv, SessionSpec,
 };
 
 use super::approval_bridge::ApprovalBridge;
@@ -981,10 +981,33 @@ impl CodeRuntime {
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
         };
-        let engine = adapter.launch(spec).await.map_err(|err| {
-            ServerError::internal(format!("failed to launch engine session: {err}"))
-        })?;
         let mut attached = attached;
+        let engine = match adapter.launch(spec).await {
+            Ok(engine) => engine,
+            Err(HarnessError::ResumeLost(detail)) => {
+                // The engine refused the stored resume ref. Fence with a
+                // reason the UI can explain — the fence drops the dead ref, so
+                // a reap re-attaches with a fresh engine session.
+                recovery::fence_session(
+                    &self.db,
+                    &self.bus,
+                    &mut attached,
+                    FenceReason::ResumeLost {
+                        detail: detail.clone(),
+                    },
+                )
+                .await?;
+                return Err(ServerError::conflict_kind(
+                    "session_resume_lost",
+                    format!("the engine no longer has this session: {detail}"),
+                ));
+            }
+            Err(err) => {
+                return Err(ServerError::internal(format!(
+                    "failed to launch engine session: {err}"
+                )));
+            }
+        };
         attached.child_pid = engine.child_pid();
         if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
             attached.harness_resume_ref = Some(resume);

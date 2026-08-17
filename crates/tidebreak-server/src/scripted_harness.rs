@@ -81,6 +81,7 @@ pub(crate) struct ScriptedAdapter {
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
+    lost_resume: Option<String>,
     approver: Arc<ScriptedApprover>,
     probes: Arc<AtomicU64>,
     /// Approval endpoint each launch was handed, `None` when it was handed no
@@ -100,6 +101,7 @@ impl ScriptedAdapter {
             child_pid: None,
             unrecognized_per_turn: 0,
             silent_interrupt: false,
+            lost_resume: None,
             approver: Arc::new(ScriptedApprover::default()),
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -120,6 +122,13 @@ impl ScriptedAdapter {
             .lock()
             .expect("scripted launches")
             .clone()
+    }
+
+    /// Fails every turn the way an engine does once it has lost the session
+    /// this one resumed: not a turn failure, a dead resume ref.
+    pub(crate) fn with_lost_resume(mut self, detail: &str) -> Self {
+        self.lost_resume = Some(detail.to_owned());
+        self
     }
 
     /// Sets the approval channel and, with it, the supervised auto posture —
@@ -233,6 +242,7 @@ impl HarnessAdapter for ScriptedAdapter {
             child_pid: self.child_pid,
             silent_interrupt: self.silent_interrupt,
             pid: ChildPid::new(),
+            lost_resume: self.lost_resume.clone(),
             interrupt: Arc::new(AtomicBool::new(false)),
             steered: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
@@ -250,6 +260,7 @@ struct ScriptedSession {
     child_pid: Option<i64>,
     silent_interrupt: bool,
     pid: ChildPid,
+    lost_resume: Option<String>,
     interrupt: Arc<AtomicBool>,
     steered: Mutex<Option<String>>,
     unrecognized: AtomicU64,
@@ -316,6 +327,9 @@ impl ScriptedSession {
 #[async_trait]
 impl HarnessSession for ScriptedSession {
     async fn run_turn(&self, _input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        if let Some(detail) = &self.lost_resume {
+            return Err(HarnessError::ResumeLost(detail.clone()));
+        }
         self.interrupt.store(false, Ordering::SeqCst);
         self.unrecognized
             .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);

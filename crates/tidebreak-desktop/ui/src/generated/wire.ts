@@ -1646,11 +1646,16 @@ export type ExecFileRejectionReason = "stale" | "snapshot_unavailable" | "staged
 export type ExecFileUndoAvailability = "available" | "already_undone" | "stale" | "not_available";
 
 /**
- * Why a session was fenced during crash recovery.
+ * Why a session is fenced: observed but not controlled, until an explicit
+ * user reap resolves it.
  */
 export type FenceReason = { "type": "orphan_alive" } | { "type": "probe_ambiguous", 
 /**
  * Bounded human-readable detail.
+ */
+detail: string, } | { "type": "resume_lost", 
+/**
+ * Bounded human-readable detail, as the engine reported it.
  */
 detail: string, };
 

@@ -57,7 +57,8 @@ impl AttentionSource {
     }
 }
 
-/// Why a session was fenced during crash recovery.
+/// Why a session is fenced: observed but not controlled, until an explicit
+/// user reap resolves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FenceReason {
@@ -66,6 +67,13 @@ pub enum FenceReason {
     /// A pid-reuse or probe ambiguity; safer to fence than to signal.
     ProbeAmbiguous {
         /// Bounded human-readable detail.
+        detail: String,
+    },
+    /// The engine no longer has the session this one resumed. The stored
+    /// resume ref is dropped when this is set, so a reap starts a fresh
+    /// engine session instead of resuming a ref that will fail again.
+    ResumeLost {
+        /// Bounded human-readable detail, as the engine reported it.
         detail: String,
     },
 }

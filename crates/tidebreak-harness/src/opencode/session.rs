@@ -252,6 +252,13 @@ impl OpencodeSession {
             let (status, body) = self
                 .http("GET", &path, &url, None, Some(query.as_slice()))
                 .await?;
+            if status == 404 {
+                // The server does not know this session any more: the stored
+                // ref is dead, not a transient failure.
+                return Err(HarnessError::ResumeLost(format!(
+                    "opencode has no session {resume}"
+                )));
+            }
             if !(200..300).contains(&status) {
                 return Err(HarnessError::Other(format!(
                     "resume GET {path} status {status}"

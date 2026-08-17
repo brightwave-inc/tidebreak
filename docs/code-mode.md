@@ -135,6 +135,16 @@ as `Interrupted` (journaled), session `Idle`, attention
 explicit reap. Never signal a pid not recorded at spawn; `EPERM` counts as
 alive.
 
+A resume ref is only worth persisting once it would actually resume:
+`HarnessSession::resume_ref` reports a token after the engine has committed
+it, not when the engine first names it. Codex, for instance, does not write a
+thread that has run no turn, so a thread id from `thread/start` alone stays
+unreported and a session whose engine dies before its first turn re-attaches
+with a fresh `thread/start`. When an engine does refuse a stored ref, the
+adapter reports `HarnessError::ResumeLost` and the session is
+`Fenced { ResumeLost }` — the fence drops the dead ref, so the reap it asks
+for starts a clean engine session instead of failing every turn identically.
+
 ## The adapter contract
 
 ```rust

@@ -2661,6 +2661,94 @@ async fn unread_engine_events_accumulate_on_the_session_row_and_reach_the_doctor
     assert_eq!(report["harnesses"][0]["unrecognized_event_count"], 4);
 }
 
+/// A resume ref the engine has lost wedges the session otherwise: every turn
+/// fails identically, the session stays idle, and nothing offers a reap.
+#[tokio::test]
+async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
+    let adapter =
+        ScriptedAdapter::new(plain_text_script()).with_lost_resume("thread not found: dead-thread");
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    // The session carries a ref from an earlier engine process.
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    row.harness_resume_ref = Some("dead-thread".into());
+    assert!(tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap());
+
+    let failed = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "carry on" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let after = listed[0].clone();
+    assert_eq!(after["lifecycle"], "fenced");
+    assert_eq!(after["fence_reason"]["type"], "resume_lost");
+    assert_eq!(
+        after["fence_reason"]["detail"],
+        "thread not found: dead-thread"
+    );
+    assert_eq!(after["attention"]["state"]["type"], "fenced");
+    assert!(
+        after["harness_resume_ref"].is_null(),
+        "the fence must drop the dead ref so a reap starts a fresh session: {after}"
+    );
+
+    // Fenced, so the next turn is refused with the reap the UI offers rather
+    // than another identical failure.
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "again" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let refused_body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(refused_body["kind"], "session_fenced");
+}
+
 #[allow(dead_code)]
 fn _types(
     _id: WorkspaceId,
