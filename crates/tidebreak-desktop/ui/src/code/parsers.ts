@@ -1262,6 +1262,9 @@ export function parseFenceReason(value: unknown): FenceReason | null {
   if (value.type === "probe_ambiguous" && typeof value.detail === "string") {
     return { type: "probe_ambiguous", detail: value.detail };
   }
+  if (value.type === "resume_lost" && typeof value.detail === "string") {
+    return { type: "resume_lost", detail: value.detail };
+  }
   return null;
 }
 

@@ -77,6 +77,9 @@ export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "orphan_alive") {
     return "An engine process is still running from a previous session. Reap it before starting another turn.";
   }
+  if (reason.type === "resume_lost") {
+    return `The engine no longer has this session, so it cannot continue (${reason.detail}). Reap it to start a fresh engine session in this workspace; the transcript above is kept.`;
+  }
   return reason.detail;
 }
 

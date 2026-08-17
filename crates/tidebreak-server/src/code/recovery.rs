@@ -56,6 +56,35 @@ pub(crate) async fn recover_running_sessions_with(
     Ok(actions)
 }
 
+/// Fence a live session, the runtime counterpart of the boot-time fence.
+///
+/// A [`FenceReason::ResumeLost`] also drops the stored resume ref: the engine
+/// has already refused it, so the reap this fence asks for must re-attach
+/// with a fresh engine session rather than resume the same dead ref.
+pub(crate) async fn fence_session(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    session: &mut CodeSession,
+    reason: FenceReason,
+) -> Result<(), tidebreak_core::AgentError> {
+    if matches!(reason, FenceReason::ResumeLost { .. }) {
+        session.harness_resume_ref = None;
+    }
+    session.lifecycle = CodeSessionLifecycle::Fenced;
+    session.fence_reason = Some(reason.clone());
+    session.child_pid = None;
+    replace_attention(
+        session,
+        Attention::new(
+            AttentionState::Fenced { reason },
+            AttentionSource::Lifecycle,
+        ),
+        false,
+    );
+    persist_session(store, bus, session).await?;
+    Ok(())
+}
+
 /// Resolve a fenced session after an explicit user reap. Never signals.
 pub(crate) async fn reap_session(
     store: &DbStore,

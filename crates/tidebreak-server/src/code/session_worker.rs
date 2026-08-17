@@ -28,7 +28,7 @@ use tidebreak_core::db::code::{
 use tidebreak_core::{
     Attention, AttentionSource, BoundedError, CodeApproval, CodeApprovalId, CodeApprovalKind,
     CodeApprovalState, CodeEvent, CodeSession, CodeSessionId, CodeSessionLifecycle, CodeTurn,
-    CodeTurnId, CodeTurnStatus, DbStore, HarnessNoticeLevel,
+    CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -569,6 +569,21 @@ async fn drive_turn(
                 .await;
             }
             if !session_was_ended(db, session).await {
+                if let HarnessError::ResumeLost(detail) = &err {
+                    // The engine has lost this session: every later turn would
+                    // fail the same way. Fence it so the user is offered a
+                    // reap instead of a session that is idle and broken.
+                    let _ = super::recovery::fence_session(
+                        db,
+                        bus,
+                        session,
+                        FenceReason::ResumeLost {
+                            detail: detail.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(WorkerError::Failed(err.to_string()));
+                }
                 session.lifecycle = CodeSessionLifecycle::Idle;
                 super::attention::replace_attention(
                     session,

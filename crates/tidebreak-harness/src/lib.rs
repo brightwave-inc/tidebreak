@@ -326,6 +326,10 @@ pub trait HarnessSession: Send + Sync {
     }
 
     /// Engine-native resume token, when the stream has reported one.
+    ///
+    /// Report a token only once it would actually resume: the caller persists
+    /// what this returns and hands it back on the next launch, so a token the
+    /// engine has not committed yet must stay unreported until it has.
     fn resume_ref(&self) -> Option<String>;
 
     /// Child pid recorded from a process this session spawned, when any.
@@ -392,6 +396,13 @@ pub enum HarnessError {
     /// The engine cannot honor the requested permission mode.
     #[error("permission mode {0} is not available on this engine")]
     PermissionModeUnsupported(CodePermissionMode),
+    /// The engine no longer knows the session this spec asked to resume.
+    ///
+    /// The stored resume ref is dead: retrying with it fails identically
+    /// forever, so the caller must drop it and start a fresh engine session
+    /// rather than treat this as one failed turn.
+    #[error("the engine no longer has this session: {0}")]
+    ResumeLost(String),
     /// I/O or spawn failure.
     #[error("engine io: {0}")]
     Io(#[from] std::io::Error),
