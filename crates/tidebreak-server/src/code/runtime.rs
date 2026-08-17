@@ -927,18 +927,17 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            if let Some(handle) = handle {
-                Self::shut_down_worker(session.id, handle).await;
-                // The worker writes its own final state on the way out. End the
-                // row as it stands now, not the snapshot taken before it left.
-                if let Some(current) = get_session(&self.db, session.id).await? {
-                    session = current;
-                }
-            }
+            // Mark the row ended before asking the worker to stop. A worker
+            // interrupted mid-turn re-reads the row on its way round the loop
+            // and leaves on its own when it finds the session ended, so one
+            // `Shutdown` is enough however busy it was.
             session.lifecycle = CodeSessionLifecycle::Ended;
             session.child_pid = None;
             session.fence_reason = None;
             super::attention::persist_session(&self.db, &self.bus, &session).await?;
+            if let Some(handle) = handle {
+                Self::shut_down_worker(session.id, handle).await;
+            }
         }
         Ok(())
     }
@@ -947,23 +946,24 @@ impl CodeRuntime {
     ///
     /// The worker drops its command receiver as its last act — after the engine
     /// is shut down and its final writes have landed — so the sender seeing the
-    /// receiver close is the completion signal. A `Shutdown` delivered while a
-    /// turn is running only ends that turn, so keep asking until the receiver is
-    /// gone. The wait is bounded: a wedged worker must not block an archive or a
-    /// reap, and the epoch fence on the session row keeps its late writes
-    /// harmless either way.
+    /// receiver close is exactly "the worker is gone". One `Shutdown` is enough:
+    /// an idle worker leaves the loop on it, and a worker mid-turn interrupts
+    /// the turn and then leaves at the top of the next iteration because the
+    /// caller marked the session ended first. Resending would only replay
+    /// `interrupt` into an engine that is already stopping.
+    ///
+    /// The wait is bounded so an engine that never returns cannot hold an
+    /// archive or a reap open; the epoch fence on the session row keeps a late
+    /// writer harmless either way.
     async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) {
         const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-        const RETRY: std::time::Duration = std::time::Duration::from_millis(50);
         let commands = handle.commands.clone();
         drop(handle);
+        // Send and wait under one deadline: a worker that has stopped draining
+        // its commands would otherwise park the send itself once the channel
+        // filled up.
         let stopped = tokio::time::timeout(GRACE, async {
-            while commands.send(WorkerCommand::Shutdown).await.is_ok() {
-                tokio::select! {
-                    _ = commands.closed() => return,
-                    _ = tokio::time::sleep(RETRY) => {}
-                }
-            }
+            let _ = commands.send(WorkerCommand::Shutdown).await;
             commands.closed().await;
         })
         .await
