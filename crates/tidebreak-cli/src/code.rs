@@ -30,8 +30,46 @@ use crate::print::OutputFormat;
 
 /// Exit status when `--on-approval fail` sees a parked approval.
 const EXIT_APPROVAL_PARKED: i32 = 3;
+/// Timed out waiting for a turn or a watch snapshot. Same number GNU
+/// `timeout(1)` uses, so a driver can treat both the same way.
+const EXIT_TIMEOUT: i32 = 124;
 /// SIGINT, following the shell's 128+signal convention and `-p`.
 const EXIT_INTERRUPTED: i32 = 130;
+
+/// Short usage for the `code` family. Parse errors print this instead of the
+/// whole CLI surface — a driving agent should not have to scrape 80 lines to
+/// see that `--session` was missing.
+pub const USAGE: &str = "\
+usage: tidebreak code doctor [--refresh]
+       tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
+       tidebreak code repo list
+       tidebreak code repo rm <id>
+       tidebreak code ws new --repo <id|path> [--title <title>] [--base-ref <ref>]
+       tidebreak code ws list [--repo <id|path>]
+       tidebreak code ws show <id>
+       tidebreak code ws archive <id> [--force]
+       tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
+       tidebreak code session show <id>
+       tidebreak code session reap <id>
+       tidebreak code run (--session <id> | --ws <id>) [<message>]
+                  [--on-approval wait|fail] [--timeout <secs>]
+       tidebreak code approvals [--session <id>]
+       tidebreak code approve <approval-id>
+       tidebreak code deny <approval-id> [-m <feedback>]
+       tidebreak code interrupt --session <id>
+       tidebreak code turns --session <id>
+       tidebreak code diff --ws <id> [--turn N] [--file PATH]
+       tidebreak code files --ws <id> [--turn N]
+       tidebreak code git commit --ws <id> [-m MSG]
+       tidebreak code git push --ws <id>
+       tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
+       tidebreak code git status --ws <id>
+       tidebreak code action <name> --ws <id>
+       tidebreak code watch [--once] [--timeout <secs>]
+
+Every verb takes --json (or --output-format json). run and watch stream NDJSON
+under --json. --timeout is seconds. watch --once prints the connect snapshot
+and exits.";
 
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -111,6 +149,7 @@ pub enum Command {
         workspace: Option<WorkspaceId>,
         message: String,
         on_approval: OnApproval,
+        timeout: Option<u64>,
         format: OutputFormat,
     },
     Approvals {
@@ -170,6 +209,8 @@ pub enum Command {
         format: OutputFormat,
     },
     Watch {
+        once: bool,
+        timeout: Option<u64>,
         format: OutputFormat,
     },
 }
@@ -432,10 +473,20 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
             workspace,
             message,
             on_approval,
+            timeout,
             format,
         } => {
             let session = resolve_run_session(client, session, workspace).await?;
-            run_turn(client, session, &message, on_approval, format).await
+            eprintln!("tidebreak: session {session}");
+            run_turn(
+                client,
+                session,
+                message.trim(),
+                on_approval,
+                timeout,
+                format,
+            )
+            .await
         }
         Command::Approvals { session, format } => {
             let approvals = client.list_approvals(session, true).await?;
@@ -622,7 +673,11 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                 Ok(1)
             }
         }
-        Command::Watch { format } => watch(client, format).await,
+        Command::Watch {
+            once,
+            timeout,
+            format,
+        } => watch(client, once, timeout, format).await,
     }
 }
 
@@ -646,7 +701,9 @@ async fn find_session(client: &Client, id: CodeSessionId) -> Result<CodeSessionS
             return Ok(session);
         }
     }
-    Err(AgentError::msg(format!("session {id} not found")))
+    Err(AgentError::msg(format!(
+        "not_found: session {id} not found"
+    )))
 }
 
 async fn resolve_repo(client: &Client, repo: &str) -> Result<RepoId> {
@@ -747,53 +804,111 @@ async fn run_turn(
     session: CodeSessionId,
     message: &str,
     on_approval: OnApproval,
+    timeout: Option<u64>,
     format: OutputFormat,
 ) -> Result<i32> {
+    // Subscribe first. `POST /turns` waits for the worker to finish the
+    // whole turn (or to queue), so a CLI that only reads after the POST
+    // returns never sees a live approval and cannot honor `--timeout`.
     let mut stream = CodeStream::open_session(client, session).await?;
-    let submitted = client.submit_turn(session, message).await?;
-    let expected_turn = match submitted {
-        SubmitTurnResponse::Ran(turn) => Some(turn.id),
-        SubmitTurnResponse::Queued(_) => {
-            if format == OutputFormat::Text {
-                eprintln!("tidebreak: turn queued; waiting for the running turn to finish");
+    let attach_only = message.is_empty();
+    let attach_turn = if attach_only {
+        let running = client
+            .list_session_turns(session)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|turn| turn.status == tidebreak_core::CodeTurnStatus::Running);
+        match running {
+            Some(turn) => {
+                eprintln!("tidebreak: attaching to turn {}", turn.id);
+                Some(turn.id)
             }
-            None
+            None => {
+                eprintln!("tidebreak: session {session} has no running turn");
+                return Ok(0);
+            }
         }
+    } else {
+        None
     };
+    let mut submit = if attach_only {
+        None
+    } else {
+        Some(std::pin::pin!(client.submit_turn(session, message)))
+    };
+    let mut submit_done = attach_only;
+    let mut expected_turn = attach_turn;
     let mut interrupt = Interrupt::watch().await;
-    let mut ours = expected_turn.is_none();
+    let deadline =
+        timeout.map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+    let mut ours = false;
     let mut dangling = false;
+    let mut streamed_text = false;
 
     let outcome = loop {
         let frame = tokio::select! {
             frame = stream.next_session(client, session) => frame?,
+            submitted = async {
+                match submit.as_mut() {
+                    Some(fut) if !submit_done => fut.await,
+                    _ => std::future::pending().await,
+                }
+            } => {
+                submit_done = true;
+                match submitted? {
+                    SubmitTurnResponse::Ran(turn) => {
+                        eprintln!("tidebreak: turn {}", turn.id);
+                        expected_turn = Some(turn.id);
+                    }
+                    SubmitTurnResponse::Queued(_) => {
+                        eprintln!(
+                            "tidebreak: turn queued; waiting for the running turn to finish"
+                        );
+                    }
+                }
+                continue;
+            }
             () = interrupt.fired() => {
                 let _ = client.interrupt_session(session).await;
                 break Ok(EXIT_INTERRUPTED);
+            }
+            () = sleep_until(deadline) => {
+                let _ = client.interrupt_session(session).await;
+                eprintln!(
+                    "tidebreak: timed out after {}s waiting for the turn to finish",
+                    timeout.unwrap_or(0)
+                );
+                break Ok(EXIT_TIMEOUT);
             }
         };
         let Some((raw, decoded)) = frame else {
             continue;
         };
-        if let Some(turn_id) = expected_turn {
-            if !ours {
-                if matches!(&decoded.event, CodeEvent::TurnStarted { turn_id: id } if *id == turn_id)
-                {
-                    ours = true;
-                } else {
-                    continue;
+        // History from `after=0` is marked replayed. Skip it until this
+        // run's own turn has started; after that, replayed frames are
+        // reconnect catch-up and must be printed.
+        if decoded.replayed == Some(true) && !ours {
+            continue;
+        }
+        if let CodeEvent::TurnStarted { turn_id } = &decoded.event {
+            if expected_turn.is_none_or(|id| id == *turn_id) {
+                if !ours {
+                    eprintln!("tidebreak: turn {turn_id}");
                 }
+                ours = true;
             }
+        }
+        if expected_turn.is_some() && !ours {
+            continue;
         }
         if format == OutputFormat::Json {
             emit_line(&raw);
         } else {
-            dangling = render_event(&decoded.event, dangling);
+            dangling = render_event(&decoded.event, dangling, &mut streamed_text);
         }
         if let CodeEvent::ApprovalRequested { approval_id } = &decoded.event {
-            if format == OutputFormat::Text {
-                print_approval_prompt(*approval_id);
-            }
+            print_approval_prompt(*approval_id);
             if on_approval == OnApproval::Fail {
                 break Ok(EXIT_APPROVAL_PARKED);
             }
@@ -808,28 +923,64 @@ async fn run_turn(
     outcome
 }
 
-async fn watch(client: &Client, format: OutputFormat) -> Result<i32> {
+async fn watch(
+    client: &Client,
+    once: bool,
+    timeout: Option<u64>,
+    format: OutputFormat,
+) -> Result<i32> {
     let mut stream = CodeStream::open_updates(client).await?;
     let mut interrupt = Interrupt::watch().await;
+    let deadline =
+        timeout.map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
     loop {
         let frame = tokio::select! {
             frame = stream.next_updates(client) => frame?,
             () = interrupt.fired() => return Ok(EXIT_INTERRUPTED),
+            () = sleep_until(deadline) => {
+                eprintln!(
+                    "tidebreak: timed out after {}s waiting for an update",
+                    timeout.unwrap_or(0)
+                );
+                return Ok(EXIT_TIMEOUT);
+            }
         };
         let Some((raw, notice)) = frame else {
             continue;
         };
         if format == OutputFormat::Json {
             emit_line(&raw);
-            continue;
+        } else {
+            render_update(&notice);
         }
-        render_update(&notice);
+        if once {
+            return Ok(0);
+        }
     }
 }
 
-fn render_event(event: &CodeEvent, dangling: bool) -> bool {
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> bool {
     match event {
-        CodeEvent::AssistantDelta { text } | CodeEvent::AssistantMessage { text } => {
+        CodeEvent::AssistantDelta { text } => {
+            *streamed_text = true;
+            let mut stdout = std::io::stdout().lock();
+            let _ = write!(stdout, "{text}");
+            let _ = stdout.flush();
+            return !text.ends_with('\n');
+        }
+        CodeEvent::AssistantMessage { text } => {
+            // Deltas already painted the same words; reprinting them as
+            // `pingping` is the usual stream+final pair.
+            if *streamed_text {
+                return dangling;
+            }
             let mut stdout = std::io::stdout().lock();
             let _ = write!(stdout, "{text}");
             let _ = stdout.flush();
@@ -1545,6 +1696,7 @@ fn parse_run(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     let mut session = None;
     let mut workspace = None;
     let mut on_approval = OnApproval::Wait;
+    let mut timeout = None;
     let mut flags = SharedFlags {
         format: OutputFormat::Text,
     };
@@ -1556,6 +1708,7 @@ fn parse_run(cursor: &mut Cursor) -> std::result::Result<Command, String> {
             "--on-approval" => {
                 on_approval = parse_on_approval(&cursor.value("--on-approval")?)?;
             }
+            "--timeout" => timeout = Some(parse_timeout(&cursor.value("--timeout")?)?),
             "--json" | "--output-format" => take_format(&mut flags, cursor, &arg)?,
             other if other.starts_with("--") => {
                 return Err(format!("unknown code run argument {other:?}"));
@@ -1566,14 +1719,12 @@ fn parse_run(cursor: &mut Cursor) -> std::result::Result<Command, String> {
     if session.is_none() && workspace.is_none() {
         return Err("code run requires --session <id> or --ws <id>".to_owned());
     }
-    if message_parts.is_empty() {
-        return Err("code run requires a message".to_owned());
-    }
     Ok(Command::Run {
         session,
         workspace,
         message: message_parts.join(" "),
         on_approval,
+        timeout,
         format: flags.format,
     })
 }
@@ -1785,15 +1936,32 @@ fn parse_action(cursor: &mut Cursor) -> std::result::Result<Command, String> {
 }
 
 fn parse_watch(cursor: &mut Cursor) -> std::result::Result<Command, String> {
+    let mut once = false;
+    let mut timeout = None;
     let mut flags = SharedFlags {
         format: OutputFormat::Text,
     };
     while let Some(arg) = cursor.next() {
-        take_format(&mut flags, cursor, &arg)?;
+        match arg.as_str() {
+            "--once" => once = true,
+            "--timeout" => timeout = Some(parse_timeout(&cursor.value("--timeout")?)?),
+            other => take_format(&mut flags, cursor, other)?,
+        }
     }
     Ok(Command::Watch {
+        once,
+        timeout,
         format: flags.format,
     })
+}
+
+fn parse_timeout(value: &str) -> std::result::Result<u64, String> {
+    let stripped = value.strip_suffix('s').unwrap_or(value);
+    stripped
+        .parse::<u64>()
+        .ok()
+        .filter(|secs| *secs > 0)
+        .ok_or_else(|| "--timeout expects a positive number of seconds".to_owned())
 }
 
 fn take_ws_flag(
@@ -2027,12 +2195,18 @@ mod tests {
             parse(args(&["action", "lint", "--ws", &ws])).unwrap(),
             Command::Action { .. }
         ));
-        assert!(matches!(
-            parse(args(&["watch", "--json"])).unwrap(),
+        match parse(args(&["watch", "--json", "--once", "--timeout", "5"])).unwrap() {
             Command::Watch {
-                format: OutputFormat::Json
+                once,
+                timeout,
+                format,
+            } => {
+                assert!(once);
+                assert_eq!(timeout, Some(5));
+                assert_eq!(format, OutputFormat::Json);
             }
-        ));
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -2045,7 +2219,7 @@ mod tests {
         assert!(parse(args(&["ws", "new"])).is_err());
         assert!(parse(args(&["session", "start", "--ws", &id()])).is_err());
         assert!(parse(args(&["run", "hello"])).is_err());
-        assert!(parse(args(&["run", "--session", &id()])).is_err());
+        assert!(parse(args(&["run"])).is_err());
         assert!(parse(args(&[
             "run",
             "--session",
@@ -2061,6 +2235,8 @@ mod tests {
         assert!(parse(args(&["action", "lint"])).is_err());
         assert!(parse(args(&["doctor", "--wat"])).is_err());
         assert!(parse(args(&["watch", "--output-format", "yaml"])).is_err());
+        assert!(parse(args(&["watch", "--timeout", "0"])).is_err());
+        assert!(parse(args(&["run", "--session", &id(), "--timeout", "nope", "x"])).is_err());
         assert!(parse(args(&[
             "session",
             "start",
@@ -2106,6 +2282,28 @@ mod tests {
                 assert_eq!(message, "hello");
                 assert_eq!(on_approval, OnApproval::Wait);
             }
+            other => panic!("{other:?}"),
+        }
+        match parse(args(&["run", "--session", &id()])).unwrap() {
+            Command::Run { message, .. } => assert!(message.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_timeout_and_watch_once_parse() {
+        let session = id();
+        match parse(args(&[
+            "run",
+            "--session",
+            &session,
+            "--timeout",
+            "30s",
+            "go",
+        ]))
+        .unwrap()
+        {
+            Command::Run { timeout, .. } => assert_eq!(timeout, Some(30)),
             other => panic!("{other:?}"),
         }
     }

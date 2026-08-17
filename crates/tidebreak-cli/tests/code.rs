@@ -215,6 +215,16 @@ fn attach_mode_doctor_and_repo_round_trip_over_json() {
         stderr.contains("not_found"),
         "typed error kind should be surfaced: {stderr}"
     );
+
+    let watch = code(&serving, &["watch", "--once", "--json", "--timeout", "10"]);
+    assert!(
+        watch.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&watch.stderr)
+    );
+    let notice: serde_json::Value = serde_json::from_slice(&watch.stdout).unwrap();
+    assert_eq!(notice["type"], "snapshot");
+    assert!(notice["sessions"].is_array(), "watch: {notice}");
 }
 
 #[test]
@@ -231,5 +241,13 @@ fn unknown_code_subcommand_is_a_usage_error() {
     assert!(
         stderr.contains("unknown code subcommand"),
         "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("tidebreak code doctor"),
+        "code parse errors should print the code family, not the whole CLI: {stderr}"
+    );
+    assert!(
+        !stderr.contains("tidebreak mcp-server add"),
+        "code parse errors must not dump the full CLI usage: {stderr}"
     );
 }

@@ -140,7 +140,8 @@ usage: tidebreak serve
        tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
        tidebreak code session show <id>
        tidebreak code session reap <id>
-       tidebreak code run (--session <id> | --ws <id>) <message> [--on-approval wait|fail]
+       tidebreak code run (--session <id> | --ws <id>) [<message>]
+                  [--on-approval wait|fail] [--timeout <secs>]
        tidebreak code approvals [--session <id>]
        tidebreak code approve <approval-id>
        tidebreak code deny <approval-id> [-m <feedback>]
@@ -153,7 +154,7 @@ usage: tidebreak serve
        tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
        tidebreak code git status --ws <id>
        tidebreak code action <name> --ws <id>
-       tidebreak code watch
+       tidebreak code watch [--once] [--timeout <secs>]
 
 The setup commands, the output family, the folder commands, and the code
 family take --output-format text|json. Code commands also accept --json.
@@ -336,7 +337,10 @@ async fn run() -> Result<i32> {
         Some(command) if command == OsStr::new("code") => {
             match crate::code::parse(text_args(args)) {
                 Ok(command) => crate::code::run(command, server_flags.resolve()?).await,
-                Err(message) => usage_error(&message),
+                Err(message) => {
+                    eprintln!("tidebreak: {message}\n\n{}", crate::code::USAGE);
+                    std::process::exit(2);
+                }
             }
         }
         Some(other) => {

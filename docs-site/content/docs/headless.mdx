@@ -60,7 +60,7 @@ tidebreak code ws archive <id> [--force]
 tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto]
 tidebreak code session show <id>
 tidebreak code session reap <id>
-tidebreak code run (--session <id> | --ws <id>) <message> [--on-approval wait|fail]
+tidebreak code run (--session <id> | --ws <id>) [<message>] [--on-approval wait|fail] [--timeout <secs>]
 tidebreak code approvals [--session <id>]
 tidebreak code approve <approval-id>
 tidebreak code deny <approval-id> [-m <feedback>]
@@ -73,7 +73,7 @@ tidebreak code git push --ws <id>
 tidebreak code git pr --ws <id> [--title <title>] [--body <body>]
 tidebreak code git status --ws <id>
 tidebreak code action <name> --ws <id>
-tidebreak code watch
+tidebreak code watch [--once] [--timeout <secs>]
 ```
 
 A bare `tidebreak` with no arguments runs `serve`.
