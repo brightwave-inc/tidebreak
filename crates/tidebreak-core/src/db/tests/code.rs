@@ -216,6 +216,36 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
         .unwrap();
 }
 
+/// Archive marks the row Ended without bumping spawn_epoch. A same-epoch
+/// worker persist of Running or Idle must not revive it, or a late write
+/// leaves an archived workspace with a live-looking session (and pid).
+#[tokio::test]
+async fn an_ended_session_cannot_be_revived_by_a_same_epoch_persist() {
+    let (_dir, store, session_id, _) = seeded_session().await;
+    let mut ended = get_session(&store, session_id).await.unwrap().unwrap();
+    ended.lifecycle = CodeSessionLifecycle::Ended;
+    ended.child_pid = None;
+    assert!(save_session(&store, &ended).await.unwrap());
+
+    let mut running = ended.clone();
+    running.lifecycle = CodeSessionLifecycle::Running;
+    running.child_pid = Some(4242);
+    assert!(!save_session(&store, &running).await.unwrap());
+
+    let mut idle = ended.clone();
+    idle.lifecycle = CodeSessionLifecycle::Idle;
+    idle.child_pid = Some(7);
+    assert!(!save_session(&store, &idle).await.unwrap());
+
+    let row = get_session(&store, session_id).await.unwrap().unwrap();
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(row.child_pid, None);
+    assert_eq!(row.spawn_epoch, 0);
+
+    // Re-asserting Ended at the same epoch is how archive writes after the wait.
+    assert!(save_session(&store, &ended).await.unwrap());
+}
+
 #[tokio::test]
 async fn journal_rejects_stale_spawn_epoch() {
     let (_dir, store, session_id, _) = seeded_session().await;
