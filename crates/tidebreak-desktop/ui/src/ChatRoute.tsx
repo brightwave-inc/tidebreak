@@ -884,7 +884,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   return (
     <RouteFrame sidebar={<AppSidebar chat={chat} />}>
       <div className="relative mr-2 flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pl-4 pr-1">
+        <header className="window-chrome-row mt-2 flex h-9 w-full shrink-0 items-center justify-between gap-2 pr-1">
           <ChatHeaderTitle chat={chat} />
           <div className="relative z-20 flex shrink-0 items-center gap-2 self-start">
             <ChatStatusChip

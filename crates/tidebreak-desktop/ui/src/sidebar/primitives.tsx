@@ -38,12 +38,12 @@ export function Sidebar({ className, children, ...props }: ComponentProps<"div">
           className,
         )}
         style={{
-          flex: isCompact ? "0 0 calc(var(--spacing) * 14)" : "var(--sidebar-expanded-flex)",
+          flex: isCompact ? "0 0 var(--sidebar-compact-width)" : "var(--sidebar-expanded-flex)",
           // Above 1600px, --sidebar-expanded-flex sets flex-shrink to 1 so the
           // rail can grow with the window. Without a min-width floor, that same
           // shrink lets a second open content panel squeeze the rail down to a
           // sliver instead of taking space from the panels themselves.
-          minWidth: isCompact ? "calc(var(--spacing) * 14)" : "var(--sidebar-expanded-min)",
+          minWidth: isCompact ? "var(--sidebar-compact-width)" : "var(--sidebar-expanded-min)",
         }}
         data-sidebar={width}
       >
