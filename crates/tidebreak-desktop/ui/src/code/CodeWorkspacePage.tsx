@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { FileCode, Files, FolderOpen, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -67,6 +68,7 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
 function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client } = useApp();
   const { confirm, dialog } = useConfirm();
+  const navigate = useNavigate();
   const catalog = useCodeCatalogStore();
   const layout = useLayoutState();
   const { openPanel } = usePanelNav();
@@ -183,10 +185,25 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     force: boolean,
   ) {
     const archived = await api.archiveCodeWorkspace(id, force);
+    // The archived row stays in the catalog — the rail filters archived
+    // workspaces out and the repo page lists them with their status — but the
+    // session it held is gone with the worktree.
     catalog.upsertWorkspace(archived);
-    catalog.forgetWorkspace(id);
+    catalog.forgetWorkspaceSession(id);
     setWorkspace(archived);
     toast.success("Workspace archived");
+    // This page is addressed by the workspace that was just archived, so
+    // staying here leaves the reader on a dead worktree. The repo lists it
+    // again, archived and labelled.
+    if (archived.repo_id) {
+      await navigate({
+        to: "/code/r/$repoId",
+        params: { repoId: archived.repo_id },
+        replace: true,
+      });
+    } else {
+      await navigate({ to: "/code", replace: true });
+    }
   }
 
   const fenced =
@@ -288,8 +305,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       <PanelLayout
         layout={layout}
         renderChat={(visible) => (
+          // The panel slot this sits in is a plain block, so nothing stretches
+          // the pane to the slot's height — `flex-1` resolves to nothing and
+          // the transcript never becomes a scroller. It claims the height
+          // itself, the same way `.chat-pane` does.
           <div
-            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            className="flex h-full min-h-0 flex-col overflow-hidden"
             hidden={!visible}
           >
             {workspace && workspace.status !== "archived" && (
@@ -533,6 +554,18 @@ function CodeSessionPane({
     ? createPermissionModes(doctorEntry.caps)
     : ["plan", "ask", "auto"];
 
+  // `items` is a fresh array on every streamed delta, so keying the fetch on it
+  // would list approvals again for every token of a turn. Only an approval
+  // appearing or changing state can change what the list would return.
+  const approvalKey = useMemo(
+    () =>
+      items
+        .filter((item) => item.kind === "approval")
+        .map((item) => `${item.approvalId}:${item.state}`)
+        .join(","),
+    [items],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -549,7 +582,7 @@ function CodeSessionPane({
     return () => {
       cancelled = true;
     };
-  }, [client, session.id, items]);
+  }, [client, session.id, approvalKey]);
 
   async function send(message: string) {
     try {
