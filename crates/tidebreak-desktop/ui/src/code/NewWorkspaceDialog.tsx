@@ -18,6 +18,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -128,25 +135,29 @@ export function NewWorkspaceDialog({
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-3" onSubmit={submit}>
-          <label className="flex flex-col gap-1 text-sm">
+          <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Repo</span>
-            <select
-              className="h-10 rounded-md border border-border bg-background px-3 text-sm"
-              value={repoId}
-              onChange={(event) => {
-                setRepoId(event.target.value);
-                const next = repos.find((repo) => repo.id === event.target.value);
+            <Select
+              value={repoId || undefined}
+              onValueChange={(value) => {
+                setRepoId(value);
+                const next = repos.find((repo) => repo.id === value);
                 if (next) setBaseRef(next.default_base_ref);
               }}
-              disabled={creating || Boolean(defaultRepoId)}
+              disabled={creating || Boolean(defaultRepoId) || repos.length === 0}
             >
-              {repos.map((repo) => (
-                <option key={repo.id} value={repo.id}>
-                  {repo.display_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              <SelectTrigger aria-label="Repo">
+                <SelectValue placeholder="No repos" />
+              </SelectTrigger>
+              <SelectContent scrollButtons={false}>
+                {repos.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.display_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <label className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Title</span>
             <Input
@@ -165,22 +176,26 @@ export function NewWorkspaceDialog({
               placeholder={selectedRepo?.default_base_ref}
             />
           </label>
-          <label className="flex flex-col gap-1 text-sm">
+          <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Harness</span>
-            <select
-              className="h-10 rounded-md border border-border bg-background px-3 text-sm"
-              value={harness}
-              onChange={(event) => setHarness(event.target.value as HarnessKind)}
+            <Select
+              value={readyHarnesses.some((entry) => entry.kind === harness) ? harness : undefined}
+              onValueChange={(value) => setHarness(value as HarnessKind)}
               disabled={creating || readyHarnesses.length === 0}
             >
-              {readyHarnesses.map((entry) => (
-                <option key={entry.kind} value={entry.kind}>
-                  {HARNESS_LABELS[entry.kind]}
-                  {entry.version ? ` ${entry.version}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+              <SelectTrigger aria-label="Harness">
+                <SelectValue placeholder="No ready harness" />
+              </SelectTrigger>
+              <SelectContent scrollButtons={false}>
+                {readyHarnesses.map((entry) => (
+                  <SelectItem key={entry.kind} value={entry.kind}>
+                    {HARNESS_LABELS[entry.kind]}
+                    {entry.version ? ` ${entry.version}` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>
             <PermissionModePicker
