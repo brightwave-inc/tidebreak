@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CodeWorkspacePrSnapshot } from "../api/types";
-import { PrCardView } from "./PrCard";
+import type {
+  CodeWorkspacePrSnapshot,
+  SequencedCodeEventFrame,
+} from "../api/types";
+import { PrCard, PrCardView } from "./PrCard";
+import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
+import { useCodeContentRevision } from "./useLiveContent";
 
 afterEach(() => {
   cleanup();
+  resetCodeSessionRegistry();
 });
 
 const hostMocks = vi.hoisted(() => ({ openExternal: vi.fn() }));
@@ -120,5 +126,62 @@ describe("PrCard", () => {
     expect(screen.getAllByText(/gh is not installed/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Copy instructions" })).toBeInTheDocument();
+  });
+
+  it("reloads git state when the session journal completes a turn", async () => {
+    // The regression: the card fetched once on mount, so a turn that dirtied
+    // the worktree left "No commits" on screen with Commit disabled until the
+    // whole page was reloaded.
+    const frames: Array<(frame: SequencedCodeEventFrame) => void> = [];
+    const client = {
+      getCodeWorkspacePr: vi
+        .fn()
+        .mockResolvedValueOnce(BASE)
+        .mockResolvedValue({ ...BASE, dirty: true }),
+      commitCodeWorkspace: vi.fn(),
+      pushCodeWorkspace: vi.fn(),
+      createCodePullRequest: vi.fn(),
+      listCodeSessionTurns: vi.fn().mockResolvedValue([]),
+      openCodeEvents: vi.fn(
+        (
+          _sessionId: string,
+          _after: number,
+          onFrame: (frame: SequencedCodeEventFrame) => void,
+        ) => {
+          frames.push(onFrame);
+          return { close: vi.fn() } as unknown as WebSocket;
+        },
+      ),
+    };
+
+    function Harness() {
+      const revision = useCodeContentRevision("session-1", client);
+      return (
+        <PrCard client={client} workspaceId="ws-1" contentRevision={revision} />
+      );
+    }
+
+    render(<Harness />);
+    expect(await screen.findByText("No commits")).toBeInTheDocument();
+    await waitFor(() => expect(frames).toHaveLength(1));
+
+    act(() => {
+      frames[0]?.({
+        seq: 1,
+        event: {
+          type: "turn_completed",
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      });
+    });
+
+    expect(await screen.findByText("Uncommitted")).toBeInTheDocument();
+    expect(client.getCodeWorkspacePr).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Commit" })).toBeEnabled();
   });
 });

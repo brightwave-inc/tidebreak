@@ -40,6 +40,7 @@ import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
+import { useCodeContentRevision } from "./useLiveContent";
 import {
   createPermissionModes,
   fenceReasonText,
@@ -82,6 +83,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const setViewedWorkspace = useCodeUpdatesStore((state) => state.setViewedWorkspace);
+  const contentRevision = useCodeContentRevision(session?.id ?? null, client);
 
   useEffect(() => {
     setViewedWorkspace(workspaceId);
@@ -315,7 +317,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           >
             {workspace && workspace.status !== "archived" && (
               <div className="px-4 pt-3">
-                <PrCard client={client} workspaceId={workspace.id} />
+                <PrCard
+                  client={client}
+                  workspaceId={workspace.id}
+                  contentRevision={contentRevision}
+                />
               </div>
             )}
             {fenced && session?.fence_reason && (
@@ -347,7 +353,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           </div>
         )}
         renderPanel={(panel) =>
-          renderCodePanel(panel, client, workspaceId, openPanel)
+          renderCodePanel(panel, client, workspaceId, openPanel, contentRevision)
         }
       />
     </>
@@ -359,6 +365,7 @@ function renderCodePanel(
   client: ApiClient,
   workspaceId: string,
   openPanel: (panel: PanelContent) => void,
+  contentRevision: number,
 ) {
   switch (panel.type) {
     case "files":
@@ -367,6 +374,7 @@ function renderCodePanel(
           client={client}
           workspaceId={workspaceId}
           turnId={panel.turnId}
+          contentRevision={contentRevision}
           onOpenFile={(file) =>
             openPanel({ type: "diff", turnId: panel.turnId, file })
           }
@@ -379,6 +387,7 @@ function renderCodePanel(
           workspaceId={workspaceId}
           turnId={panel.turnId}
           file={panel.file}
+          contentRevision={contentRevision}
         />
       );
     case "terminal":
