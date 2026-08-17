@@ -850,6 +850,7 @@ fn is_git_auth_failure(err: &str) -> bool {
     lower.contains("authentication")
         || lower.contains("permission denied")
         || lower.contains("403")
+        || lower.contains("401")
         || lower.contains("terminal prompts disabled")
         || lower.contains("publickey")
 }
@@ -1080,6 +1081,7 @@ fatal: Could not read from remote repository.\n";
             "fatal: Authentication failed for 'https://example.test/repo.git'",
             "Permission denied (publickey).",
             "The requested URL returned error: 403",
+            "The requested URL returned error: 401",
             "fatal: could not read Username for 'https://example.test': terminal prompts disabled",
         ] {
             assert!(
