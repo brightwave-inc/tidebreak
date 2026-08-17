@@ -22,7 +22,7 @@ use tidebreak_core::{
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
-    HarnessEvent, HarnessEventSink, HostEnv, SessionSpec,
+    HarnessEvent, HarnessEventSink, HarnessProbe, HostEnv, SessionSpec,
 };
 
 use super::approval_bridge::ApprovalBridge;
@@ -63,6 +63,8 @@ pub(crate) struct CodeRuntime {
     pub approvals: Arc<ApprovalBridge>,
     host: HostEnv,
     loopback_base: Mutex<Option<String>>,
+    /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
+    probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
     pr_cache: PrDigestCache,
     pub(crate) clone_jobs: CloneJobs,
@@ -88,6 +90,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
             loopback_base: Mutex::new(None),
+            probes: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -100,9 +103,30 @@ impl CodeRuntime {
     }
 
     /// Bound after listen so Claude can be pointed at the loopback MCP route.
-    pub(crate) fn set_loopback_base(&self, base: String) {
+    fn set_loopback_base(&self, base: String) {
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
+    }
+
+    /// Boot: publish the bound loopback base now, and hand back the recovery
+    /// pass to run.
+    ///
+    /// The two steps are one call because their order is load-bearing. Every
+    /// worker recovery re-attaches mints its approval MCP endpoint from this
+    /// base ([`Self::approval_channel`]), so recovering before the bound
+    /// address is known restores Ask- and Auto-mode sessions with no approval
+    /// channel at all — silently, since the channel is an `Option`. Recovery
+    /// comes back as a future rather than running here so the boot path can
+    /// keep it off the bind critical path; the base is published before that
+    /// future exists, so a session created while recovery is still in flight
+    /// is wired exactly like a recovered one.
+    pub(crate) fn start(
+        self: &Arc<Self>,
+        loopback_base: String,
+    ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
+        self.set_loopback_base(loopback_base);
+        let runtime = self.clone();
+        async move { runtime.recover().await }
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -119,6 +143,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
             loopback_base: Mutex::new(None),
+            probes: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -148,29 +173,71 @@ impl CodeRuntime {
         }
         // Recovery only mutates rows. Re-attach a worker for every session
         // that is still usable so submit_turn is not stuck after a restart.
-        for session in list_sessions(&self.db).await? {
-            if matches!(
-                session.lifecycle,
-                CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
-            ) {
-                continue;
-            }
-            if self
-                .workers
-                .lock()
-                .expect("code workers")
-                .contains_key(&session.id)
-            {
-                continue;
-            }
+        // Concurrently: each attach launches an engine child, so a serial pass
+        // charged app launch the sum of every restored session.
+        let resumable: Vec<CodeSession> = list_sessions(&self.db)
+            .await?
+            .into_iter()
+            .filter(|session| {
+                !matches!(
+                    session.lifecycle,
+                    CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+                ) && !self
+                    .workers
+                    .lock()
+                    .expect("code workers")
+                    .contains_key(&session.id)
+            })
+            .collect();
+        futures::future::join_all(resumable.into_iter().map(|session| async move {
             if let Err(error) = self.attach_and_spawn_worker(session).await {
                 tracing::warn!(
                     "code-mode: could not resume a recovered session worker: {}",
                     error.message()
                 );
             }
-        }
+        }))
+        .await;
         Ok(actions)
+    }
+
+    /// The probe for `adapter`, resolved once and memoized.
+    ///
+    /// Decision 0034 makes discovery a cached read rather than a per-request
+    /// one: a cold probe asks the user's shell in interactive login mode and
+    /// then runs a version and an authentication observation, which is seconds
+    /// of subprocess per harness. Re-probing is on demand — the doctor's
+    /// refresh calls [`Self::invalidate_probes`] — so a harness installed
+    /// while the app is running is picked up by the button that exists to say
+    /// so, not by paying for it on every code-mode navigation.
+    ///
+    /// The cache fills lazily. Nothing warms it at boot: recovery already
+    /// probes the kinds that have live sessions on its way to re-attaching
+    /// them, and warming the rest would spend four login shells on harnesses
+    /// this launch may never touch.
+    pub(crate) async fn probe(&self, adapter: &dyn HarnessAdapter) -> HarnessProbe {
+        let kind = adapter.kind();
+        let cached = self
+            .probes
+            .lock()
+            .expect("harness probes")
+            .get(&kind)
+            .cloned();
+        if let Some(probe) = cached {
+            return probe;
+        }
+        let probe = adapter.probe(&self.host).await;
+        self.probes
+            .lock()
+            .expect("harness probes")
+            .insert(kind, probe.clone());
+        probe
+    }
+
+    /// Drop every memoized probe so the next read is cold. The doctor's
+    /// refresh is the on-demand re-probe decision 0034 describes.
+    pub(crate) fn invalidate_probes(&self) {
+        self.probes.lock().expect("harness probes").clear();
     }
 
     pub(crate) fn adapter(
@@ -595,7 +662,7 @@ impl CodeRuntime {
             ));
         }
         let adapter = self.adapter(harness)?;
-        let probe = adapter.probe(&self.host).await;
+        let probe = self.probe(adapter.as_ref()).await;
         if !probe.found {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",
@@ -870,7 +937,9 @@ impl CodeRuntime {
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(session.workspace_id).await?;
         let adapter = self.adapter(session.harness_kind)?;
-        let probe = adapter.probe(&self.host).await;
+        // Cached, so the probe `create_session` already paid for is not paid
+        // again on the way into the worker.
+        let probe = self.probe(adapter.as_ref()).await;
         if !probe.found {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",

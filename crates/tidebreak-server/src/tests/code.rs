@@ -2383,11 +2383,17 @@ async fn next_json(
     }
 }
 
+/// The doctor serves memoized probes, and refresh is the on-demand re-probe
+/// (decision 0034). A cold probe spends an interactive login shell plus a
+/// version and an authentication subprocess per harness, and the code-mode
+/// surface reads this route on every navigation.
 #[tokio::test]
-async fn doctor_lists_the_scripted_adapter() {
-    let (router, token, _runtime, _dir) = code_app(plain_text_script()).await;
+async fn the_doctor_caches_probes_and_refresh_re_probes() {
+    let adapter = ScriptedAdapter::new(plain_text_script());
+    let (router, token, _runtime, _dir) = code_app_with(adapter.clone()).await;
     let addr = serve(router).await;
-    let report = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let report = client
         .get(format!("http://{addr}/code/harnesses"))
         .bearer_auth(&token)
         .send()
@@ -2398,6 +2404,90 @@ async fn doctor_lists_the_scripted_adapter() {
         .unwrap();
     assert_eq!(report["harnesses"][0]["kind"], "claude_code");
     assert_eq!(report["harnesses"][0]["found"], true);
+
+    let again = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(again["harnesses"][0]["found"], true);
+    assert_eq!(
+        adapter.probe_count(),
+        1,
+        "a second doctor read must be served from the cache"
+    );
+
+    let refreshed = client
+        .post(format!("http://{addr}/code/harnesses/refresh"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(refreshed["harnesses"][0]["found"], true);
+    assert_eq!(
+        adapter.probe_count(),
+        2,
+        "refresh must re-probe rather than repeat the cached answer"
+    );
+}
+
+/// A session restored at boot comes back supervised. Recovery re-attaches its
+/// worker, and that worker's approval endpoint is minted from the bound
+/// loopback address — so recovery has to run after the address is published.
+/// The other order silently restores Ask- and Auto-mode sessions with no
+/// approval channel: an engine that can never ask.
+#[tokio::test]
+async fn a_recovered_session_keeps_its_approval_channel() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_approvals(CapLevel::Supported),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_approvals(CapLevel::Supported);
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(adapter.clone()));
+    let restarted = Arc::new(CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        registry,
+    ));
+    restarted
+        .start("http://127.0.0.1:4242".into())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        adapter.launched_approvals(),
+        vec![Some(
+            "http://127.0.0.1:4242/code/mcp/approval-prompt".to_owned()
+        )],
+        "recovery must re-attach the session with a live approval endpoint"
+    );
 }
 
 /// Decision 0031's honesty mechanism, end to end: a parser that could not read
