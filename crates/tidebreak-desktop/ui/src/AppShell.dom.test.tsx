@@ -8,7 +8,7 @@ import { usePendingPrompts } from "./PendingPrompts";
 import { useProjectListStore } from "./ProjectListStore";
 import { useRefreshSignals } from "./RefreshSignals";
 import { useChatsSectionState } from "./sidebar/ChatsSection";
-import { useUiStore } from "./UiStore";
+import { SIDEBAR_DEFAULT_WIDTH, useUiStore } from "./UiStore";
 
 /**
  * The shell and the routing around it, exercised the way the app runs: boot
@@ -273,7 +273,7 @@ beforeEach(() => {
     savingProjectTitle: false,
     expandedProjectIds: [],
   });
-  useUiStore.setState({ sidebarCollapsed: false });
+  useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: SIDEBAR_DEFAULT_WIDTH });
   // Module-level chrome state survives a render, so a test that collapsed or
   // filtered the list would otherwise decide the next one's rail.
   useChatsSectionState.setState({ collapsed: false, filtering: false, query: "" });
