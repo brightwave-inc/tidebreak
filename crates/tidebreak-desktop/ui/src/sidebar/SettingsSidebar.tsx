@@ -1,6 +1,7 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { ArrowLeft, PanelLeftOpen } from "lucide-react";
 
+import { useExperimentalFlags } from "@/experimental";
 import { useManagedPolicy } from "@/managedPolicy";
 import { settingsSectionsFor } from "@/settings/sections";
 import { useUiStore } from "@/UiStore";
@@ -22,7 +23,8 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
   const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { managed } = useManagedPolicy();
-  const sections = settingsSectionsFor(managed);
+  const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
+  const sections = settingsSectionsFor(managed, codeModeEnabled);
 
   return (
     <Sidebar>

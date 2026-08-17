@@ -3051,7 +3051,13 @@ model_visibility_overrides: { [key in string]: ModelVisibility },
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
  */
-computer_use_enabled: boolean, };
+computer_use_enabled: boolean, 
+/**
+ * Whether the experimental code-mode surface is shown. Opt-in: default
+ * off, flipped in Settings → Experimental. The flag gates the desktop's
+ * navigation and pages, not the `/code/*` routes themselves.
+ */
+code_mode_enabled: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.

@@ -5,6 +5,7 @@ import { FolderGit2, LayoutGrid, Puzzle, SquarePen } from "lucide-react";
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
+import { useExperimentalFlags } from "@/experimental";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
 import { ProjectsSection } from "./ProjectsSection";
@@ -31,6 +32,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isCompact = useSidebarWidth() === "compact";
+  const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
 
   return (
     <SidebarFrame>
@@ -64,12 +66,16 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
           active={pathname === "/plugins" || pathname.startsWith("/plugins/")}
           onClick={() => void navigate({ to: "/plugins" })}
         />
-        <RouteButton
-          label="Code"
-          icon={<FolderGit2 />}
-          active={pathname === "/code" || pathname.startsWith("/code/")}
-          onClick={() => void navigate({ to: "/code" })}
-        />
+        {/* Experimental and opt-in: the rail lists Code only after the reader
+            enables it under Settings → Experimental. */}
+        {codeModeEnabled && (
+          <RouteButton
+            label="Code"
+            icon={<FolderGit2 />}
+            active={pathname === "/code" || pathname.startsWith("/code/")}
+            onClick={() => void navigate({ to: "/code" })}
+          />
+        )}
       </div>
 
       <ProjectsSection activeChatId={chat?.id} />

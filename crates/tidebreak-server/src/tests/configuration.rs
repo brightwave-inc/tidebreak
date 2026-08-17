@@ -93,6 +93,9 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["compaction"]["target_fraction"], 0.25);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 50000);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 5);
+    // Code mode is experimental and opt-in: the surface must not appear
+    // until the reader flips it, so the default is the decision.
+    assert_eq!(settings["code_mode_enabled"], false);
 
     // PUT a model, and it comes back.
     let response = router
@@ -114,7 +117,8 @@ async fn settings_default_then_update_roundtrips() {
                             "target_fraction": 0.3,
                             "min_threshold_tokens": 40000,
                             "protect_recent_messages": 8
-                        }
+                        },
+                        "code_mode_enabled": true
                     })
                     .to_string(),
                 ))
@@ -132,6 +136,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["compaction"]["target_fraction"], 0.3);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
+    assert_eq!(settings["code_mode_enabled"], true);
 
     // GET reflects the update.
     let response = router
