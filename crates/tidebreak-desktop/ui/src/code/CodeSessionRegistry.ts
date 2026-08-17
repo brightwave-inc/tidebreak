@@ -5,7 +5,11 @@ import {
   createCodeSessionStore,
   type CodeSessionStore,
 } from "./CodeSessionStore";
-import { hydrateCodeTurns, type CodeSessionDeps } from "./CodeSessionReducer";
+import {
+  applyAcceptedTurn,
+  hydrateCodeTurns,
+  type CodeSessionDeps,
+} from "./CodeSessionReducer";
 
 /**
  * Per-session stores and the sockets that feed them.
@@ -51,11 +55,37 @@ export function acquireCodeSession(
     return existing.store;
   }
   const store = createCodeSessionStore();
+  const fetchedPrompts = new Set<string>();
+  const fillPrompt = (turnId: string) => {
+    if (!hydrateTurns || fetchedPrompts.has(turnId)) return;
+    const state = store.getState();
+    if (
+      state.items.some((item) => item.kind === "user" && item.turnId === turnId)
+    ) {
+      return;
+    }
+    fetchedPrompts.add(turnId);
+    void hydrateTurns()
+      .then((turns) => {
+        const turn = turns.find((candidate) => candidate.id === turnId);
+        if (!turn) return;
+        store.getState().update((session) => applyAcceptedTurn(session, turn));
+      })
+      .catch(() => {
+        // The prompt lands on the next open. The turn itself still streams.
+      });
+  };
   const controller = new CodeSessionController({
     openSocket,
     getAfter: () => store.getState().lastSeq,
     onEvent: (frame) => {
-      store.getState().applyEvent(frame, deps);
+      // A turn the socket announces has no prompt bubble yet: submit answers
+      // only when the turn ends, and a queued follow-up is never answered
+      // with a turn at all. Pull the snapshot so the transcript shows what
+      // the engine is working on while it works.
+      for (const effect of store.getState().applyEvent(frame, deps)) {
+        if (effect.type === "turn_began") fillPrompt(effect.turnId);
+      }
     },
     onConnectionState: () => {},
     hydrateTurns,

@@ -16,6 +16,7 @@ import {
   parseCodeTerminalRead,
   parseCodeTurn,
   parseCodeTurnList,
+  parseCodeTurnSubmission,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspacePr,
@@ -84,6 +85,22 @@ describe("parseCodeTurnList", () => {
   it("rejects a non-array or a row the turn parser would drop", () => {
     expect(parseCodeTurnList({ turns: [TURN] })).toBeNull();
     expect(parseCodeTurnList([{ ...TURN, status: "paused" }])).toBeNull();
+  });
+});
+
+describe("parseCodeTurnSubmission", () => {
+  it("tells a turn that ran from a follow-up the server queued", () => {
+    // Both arrive as 202 on POST /code/sessions/{id}/turns. Reading the
+    // queue receipt as a malformed turn reports a failure for a message the
+    // server is holding, and the retry it invites double-sends.
+    expect(parseCodeTurnSubmission(TURN)).toEqual({ kind: "ran", turn: TURN });
+    const queued = {
+      session_id: "sess-1",
+      message: "and run the tests",
+      position: 1,
+    };
+    expect(parseCodeTurnSubmission(queued)).toEqual({ kind: "queued", queued });
+    expect(parseCodeTurnSubmission({ session_id: "sess-1" })).toBeNull();
   });
 });
 

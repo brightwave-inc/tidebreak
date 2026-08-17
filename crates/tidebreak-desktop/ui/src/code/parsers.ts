@@ -41,12 +41,14 @@ import type {
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
   PullRequestDigest,
+  QueuedCodeTurn,
 } from "../api/types";
 import type {
   CodeEvent as WireCodeEvent,
   CodeRepoSnapshot as WireCodeRepoSnapshot,
   CodeSessionSnapshot as WireCodeSessionSnapshot,
   CodeTurnSnapshot as WireCodeTurnSnapshot,
+  QueuedCodeTurn as WireQueuedCodeTurn,
   CodeTerminalRead as WireCodeTerminalRead,
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
@@ -562,6 +564,43 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     ...(diffstat ? { diffstat } : {}),
     ...(value.ended_at !== undefined ? { ended_at: value.ended_at } : {}),
   };
+}
+
+/**
+ * What `POST /code/sessions/{id}/turns` did with the message.
+ *
+ * The route answers 202 for both outcomes: a turn that ran, or a follow-up
+ * parked in the session's single queue slot while the current turn finishes.
+ * The two payloads share no required key, so the shape discriminates.
+ */
+export type CodeTurnSubmission =
+  | { kind: "ran"; turn: CodeTurnSnapshot }
+  | { kind: "queued"; queued: QueuedCodeTurn };
+
+export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireQueuedCodeTurn>(value, ["session_id", "message", "position"]) ||
+    !nonEmpty(value.session_id) ||
+    typeof value.message !== "string" ||
+    !isFiniteNumber(value.position)
+  ) {
+    return null;
+  }
+  return {
+    session_id: value.session_id,
+    message: value.message,
+    position: value.position,
+  };
+}
+
+export function parseCodeTurnSubmission(
+  value: unknown,
+): CodeTurnSubmission | null {
+  const turn = parseCodeTurn(value);
+  if (turn) return { kind: "ran", turn };
+  const queued = parseQueuedCodeTurn(value);
+  return queued ? { kind: "queued", queued } : null;
 }
 
 export function parseCodeWorkspaceFiles(

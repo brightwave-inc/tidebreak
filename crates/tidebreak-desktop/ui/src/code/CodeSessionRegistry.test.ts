@@ -109,4 +109,51 @@ describe("CodeSessionRegistry", () => {
       text: "README.md",
     });
   });
+
+  it("fills in the prompt of a turn the socket announces", async () => {
+    // A queued follow-up is promoted by the worker, so the client never sees
+    // a turn snapshot for it; the same is true of any turn started elsewhere.
+    const sockets: FakeSocket[] = [];
+    const openSocket = (after: number, onFrame: (frame: SequencedCodeEventFrame) => void) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    let calls = 0;
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: () => "2026-08-15T12:00:02.500Z" },
+      async () => {
+        calls += 1;
+        return calls === 1
+          ? []
+          : [
+              {
+                id: "t2",
+                session_id: "s1",
+                ordinal: 2,
+                status: "running" as const,
+                user_input: "and run the tests",
+                started_at: "2026-08-15T12:00:03.000Z",
+              },
+            ];
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    sockets[0]?.emit({ seq: 1, event: { type: "turn_started", turn_id: "t2" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.getState().items).toContainEqual({
+      kind: "user",
+      id: userItemId("t2"),
+      turnId: "t2",
+      text: "and run the tests",
+    });
+    expect(calls).toBe(2);
+  });
 });
