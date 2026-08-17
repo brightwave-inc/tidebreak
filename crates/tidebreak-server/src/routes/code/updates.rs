@@ -60,6 +60,14 @@ async fn stream_updates(mut socket: WebSocket, state: AppState) {
                         break;
                     }
                 }
+                Ok(CodeLiveUpdate::CloneProgress(progress)) => {
+                    if send_notice(&mut socket, &CodeUpdateNotice::clone_progress(progress))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Err(RecvError::Lagged(_)) => {
                     match list_digests(&runtime.db).await {
                         Ok(sessions) => {

@@ -91,6 +91,8 @@ import {
   type CodeWorkspaceFiles,
   type CodeWorkspacePrSnapshot,
   type CodeWorkspaceSnapshot,
+  type CodeCloneDefaults,
+  type CodeCloneJobSnapshot,
   type HarnessDoctorReport,
   type HarnessKind,
   type SequencedCodeEventFrame,
@@ -112,6 +114,8 @@ import {
 } from "./parsers";
 import {
   parseCodeApproval,
+  parseCodeCloneDefaults,
+  parseCodeCloneJob,
   parseCodeRepo,
   parseCodeSession,
   parseCodeSessionList,
@@ -1697,6 +1701,46 @@ export class ApiClient {
       method: "DELETE",
       headers: this.headers(),
     });
+  }
+
+  async getCodeCloneDefaults(): Promise<CodeCloneDefaults> {
+    return requireParsed(
+      parseCodeCloneDefaults(
+        await this.json("/code/repos/clone-defaults", {
+          headers: this.headers(),
+        }),
+      ),
+      "clone defaults",
+    );
+  }
+
+  async startCodeClone(body: {
+    url?: string;
+    github?: string;
+    parent_dir: string;
+    name?: string;
+  }): Promise<CodeCloneJobSnapshot> {
+    return requireParsed(
+      parseCodeCloneJob(
+        await this.json("/code/repos/clone", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "clone job",
+    );
+  }
+
+  async getCodeCloneJob(jobId: string): Promise<CodeCloneJobSnapshot> {
+    return requireParsed(
+      parseCodeCloneJob(
+        await this.json(`/code/repos/clone/${encodeURIComponent(jobId)}`, {
+          headers: this.headers(),
+        }),
+      ),
+      "clone job",
+    );
   }
 
   async getHarnessDoctor(): Promise<HarnessDoctorReport> {

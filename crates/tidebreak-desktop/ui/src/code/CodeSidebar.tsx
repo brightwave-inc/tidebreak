@@ -12,6 +12,7 @@ import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { connectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { AddRepoPalette } from "./AddRepoPalette";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 
 /**
@@ -35,6 +36,7 @@ export function CodeSidebar() {
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const digests = useCodeUpdatesStore((state) => state.byWorkspace);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [addRepoOpen, setAddRepoOpen] = useState(false);
 
   useEffect(() => {
     void refresh(client);
@@ -67,7 +69,25 @@ export function CodeSidebar() {
         </SidebarButton>
       </div>
 
-      {!isCompact && <SidebarSectionTitle>Repos</SidebarSectionTitle>}
+      {!isCompact && (
+        <div className="flex items-center justify-between px-2">
+          <SidebarSectionTitle className="px-0">Repos</SidebarSectionTitle>
+          <button
+            type="button"
+            className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Add repo"
+            onClick={() => setAddRepoOpen(true)}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+      )}
+      {isCompact && (
+        <SidebarButton aria-label="Add repo" onClick={() => setAddRepoOpen(true)}>
+          <Plus />
+          <span>Add repo</span>
+        </SidebarButton>
+      )}
       <div className="flex shrink-0 flex-col gap-0.5">
         {repos.map((repo) => {
           const active = pathname === `/code/r/${repo.id}`;
@@ -148,6 +168,7 @@ export function CodeSidebar() {
         onOpenChange={setNewWorkspaceOpen}
         repos={repos}
       />
+      <AddRepoPalette open={addRepoOpen} onOpenChange={setAddRepoOpen} />
     </SidebarFrame>
   );
 }

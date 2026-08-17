@@ -1,0 +1,669 @@
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { Folder, GitBranch, Link2 } from "lucide-react";
+
+import type { CodeCloneDefaults, CodeCloneJobSnapshot } from "../api/types";
+import { useApp } from "@/AppContext";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  OptionListbox,
+  optionElementId,
+  type OptionRow,
+} from "@/components/OptionListbox";
+import { Progress } from "@/components/ui/progress";
+import { SearchInput } from "@/components/SearchInput";
+import { hasNativeHost, pickCodeDirectory } from "@/host";
+import { friendlyErrorMessage } from "@/lib/utils";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+
+type Stage = "sources" | "local" | "git_url" | "github" | "progress";
+type SourceKey = "local" | "git_url" | "github";
+
+const SOURCES: OptionRow[] = [
+  {
+    key: "local",
+    label: "Local folder",
+    description: "Browse a folder on disk",
+    icon: Folder,
+  },
+  {
+    key: "git_url",
+    label: "Git URL",
+    description: "Clone from a remote URL",
+    icon: Link2,
+  },
+  {
+    key: "github",
+    label: "GitHub repository",
+    description: "Clone owner/repo",
+    icon: GitBranch,
+  },
+];
+
+/**
+ * Keyboard-first dialog for registering or cloning a repo.
+ *
+ * Stages stay inside one dialog: source list, a small form, then clone
+ * progress. Backspace returns a stage; Escape closes.
+ */
+export function AddRepoPalette({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const navigate = useNavigate();
+  const { client } = useApp();
+  const upsertRepo = useCodeCatalogStore((state) => state.upsertRepo);
+  const cloneJobs = useCodeUpdatesStore((state) => state.cloneJobs);
+  const [stage, setStage] = useState<Stage>("sources");
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const [path, setPath] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [url, setUrl] = useState("");
+  const [github, setGithub] = useState("");
+  const [parentDir, setParentDir] = useState("");
+  const [cloneName, setCloneName] = useState("");
+  const [defaults, setDefaults] = useState<CodeCloneDefaults | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const job = jobId ? cloneJobs[jobId] : undefined;
+  const rows = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return SOURCES;
+    return SOURCES.filter(
+      (row) =>
+        row.label.toLowerCase().includes(needle) ||
+        (row.description ?? "").toLowerCase().includes(needle),
+    );
+  }, [query]);
+
+  useEffect(() => {
+    if (!open) return;
+    setStage("sources");
+    setQuery("");
+    setActive(0);
+    setPath("");
+    setDisplayName("");
+    setUrl("");
+    setGithub("");
+    setCloneName("");
+    setJobId(null);
+    setBusy(false);
+    setError(null);
+    void client.getCodeCloneDefaults().then((next) => {
+      setDefaults(next);
+      setParentDir(next.parent_dir ?? "");
+    });
+  }, [open, client]);
+
+  useEffect(() => {
+    if (active >= rows.length) setActive(0);
+  }, [active, rows.length]);
+
+  useEffect(() => {
+    if (!job || stage !== "progress") return;
+    if (job.done && job.repo_id) {
+      void (async () => {
+        try {
+          const repo = await client.getCodeRepo(job.repo_id!);
+          upsertRepo(repo);
+          onOpenChange(false);
+          await navigate({
+            to: "/code/r/$repoId",
+            params: { repoId: repo.id },
+          });
+        } catch (err) {
+          setError(friendlyErrorMessage(err, "Cloned, but could not open the repo"));
+        }
+      })();
+    }
+  }, [job, stage, client, upsertRepo, navigate, onOpenChange]);
+
+  function goBack() {
+    if (stage === "sources") {
+      onOpenChange(false);
+      return;
+    }
+    if (stage === "progress") {
+      setStage(github.trim() ? "github" : url.trim() ? "git_url" : "sources");
+      setJobId(null);
+      setError(null);
+      return;
+    }
+    setStage("sources");
+    setError(null);
+  }
+
+  async function pickDirectory(into: "path" | "parent") {
+    const picked = await pickCodeDirectory();
+    if (!picked) return;
+    if (into === "path") setPath(picked);
+    else setParentDir(picked);
+  }
+
+  async function registerLocal() {
+    if (!path.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const repo = await client.createCodeRepo({
+        path: path.trim(),
+        display_name: displayName.trim() || undefined,
+      });
+      upsertRepo(repo);
+      onOpenChange(false);
+      await navigate({ to: "/code/r/$repoId", params: { repoId: repo.id } });
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Could not register that repo"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startClone(body: {
+    url?: string;
+    github?: string;
+    parent_dir: string;
+    name?: string;
+  }) {
+    if (!body.parent_dir.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const started = await client.startCodeClone({
+        ...body,
+        parent_dir: body.parent_dir.trim(),
+        name: body.name?.trim() || undefined,
+      });
+      useCodeUpdatesStore.getState().apply({
+        type: "clone_progress",
+        job: started,
+      });
+      setJobId(started.id);
+      setStage("progress");
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Could not start the clone"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function selectSource(index: number) {
+    const row = rows[index];
+    if (!row) return;
+    setActive(index);
+    if (row.key === "local") {
+      setStage("local");
+      if (hasNativeHost()) void pickDirectory("path");
+      return;
+    }
+    if (row.key === "git_url") setStage("git_url");
+    if (row.key === "github") setStage("github");
+  }
+
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onOpenChange(false);
+      return;
+    }
+    if (event.key === "Backspace") {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      if (typing && target.value.length > 0) return;
+      event.preventDefault();
+      goBack();
+      return;
+    }
+    if (stage !== "sources") return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive((current) => Math.min(current + 1, Math.max(rows.length - 1, 0)));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive((current) => Math.max(current - 1, 0));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      selectSource(active);
+    }
+  }
+
+  const title =
+    stage === "local"
+      ? "Local folder"
+      : stage === "git_url"
+        ? "Git URL"
+        : stage === "github"
+          ? "GitHub repository"
+          : stage === "progress"
+            ? "Cloning"
+            : "Add a repo";
+
+  return (
+    <Dialog open={open} onOpenChange={busy ? undefined : onOpenChange}>
+      <DialogContent
+        className="max-w-md gap-4 p-5"
+        onKeyDown={onKeyDown}
+        aria-busy={busy}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>
+            {stage === "sources"
+              ? "Register a local checkout or clone a remote."
+              : stage === "local"
+                ? "Pick a folder or paste its path."
+                : stage === "git_url"
+                  ? "Clone from a remote URL into a parent folder."
+                  : stage === "github"
+                    ? "Clone an owner/repo from GitHub."
+                    : "Cloning into the chosen folder."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {stage === "sources" && (
+          <div className="flex flex-col gap-2">
+            <SearchInput
+              value={query}
+              onValueChange={setQuery}
+              placeholder="Filter sources"
+              size="sm"
+              aria-controls="add-repo-sources"
+              aria-activedescendant={
+                rows[active]
+                  ? optionElementId("add-repo-sources", active)
+                  : undefined
+              }
+            />
+            <OptionListbox
+              listId="add-repo-sources"
+              label="Sources"
+              rows={rows}
+              activeIndex={active}
+              onPick={selectSource}
+              onHighlight={setActive}
+            />
+          </div>
+        )}
+
+        {stage === "local" && (
+          <LocalStage
+            path={path}
+            displayName={displayName}
+            busy={busy}
+            error={error}
+            onPath={setPath}
+            onDisplayName={setDisplayName}
+            onBrowse={() => void pickDirectory("path")}
+            onSubmit={() => void registerLocal()}
+          />
+        )}
+
+        {stage === "git_url" && (
+          <GitUrlStage
+            url={url}
+            parentDir={parentDir}
+            name={cloneName}
+            busy={busy}
+            error={error}
+            onUrl={setUrl}
+            onParentDir={setParentDir}
+            onName={setCloneName}
+            onBrowse={() => void pickDirectory("parent")}
+            onSubmit={() =>
+              void startClone({
+                url,
+                parent_dir: parentDir,
+                name: cloneName,
+              })
+            }
+          />
+        )}
+
+        {stage === "github" && (
+          <GithubStage
+            github={github}
+            parentDir={parentDir}
+            name={cloneName}
+            defaults={defaults}
+            busy={busy}
+            error={error}
+            onGithub={setGithub}
+            onParentDir={setParentDir}
+            onName={setCloneName}
+            onBrowse={() => void pickDirectory("parent")}
+            onSubmit={() =>
+              void startClone({
+                github,
+                parent_dir: parentDir,
+                name: cloneName,
+              })
+            }
+          />
+        )}
+
+        {stage === "progress" && (
+          <ProgressStage
+            job={job}
+            error={error ?? job?.error}
+            onRetry={() => {
+              setStage(github.trim() ? "github" : "git_url");
+              setJobId(null);
+              setError(null);
+            }}
+          />
+        )}
+
+        <footer className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <Hint keys={["↑", "↓"]} label="Navigate" />
+          <Hint keys={["Enter"]} label="Select" />
+          <Hint keys={["Backspace"]} label="Back" />
+          <Hint keys={["Esc"]} label="Close" />
+        </footer>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function LocalStage({
+  path,
+  displayName,
+  busy,
+  error,
+  onPath,
+  onDisplayName,
+  onBrowse,
+  onSubmit,
+}: {
+  path: string;
+  displayName: string;
+  busy: boolean;
+  error: string | null;
+  onPath: (value: string) => void;
+  onDisplayName: (value: string) => void;
+  onBrowse: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Path</span>
+        <div className="flex gap-2">
+          <Input
+            value={path}
+            onChange={(event) => onPath(event.target.value)}
+            placeholder="/Users/you/src/app"
+            disabled={busy}
+            autoFocus
+          />
+          {hasNativeHost() && (
+            <Button type="button" variant="outline" onClick={onBrowse} disabled={busy}>
+              Browse
+            </Button>
+          )}
+        </div>
+      </label>
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Display name</span>
+        <Input
+          value={displayName}
+          onChange={(event) => onDisplayName(event.target.value)}
+          disabled={busy}
+        />
+      </label>
+      {error && <p className="text-sm text-critical">{error}</p>}
+      <Button type="submit" disabled={busy || !path.trim()} className="self-start">
+        {busy ? "Registering…" : "Register"}
+      </Button>
+    </form>
+  );
+}
+
+function GitUrlStage({
+  url,
+  parentDir,
+  name,
+  busy,
+  error,
+  onUrl,
+  onParentDir,
+  onName,
+  onBrowse,
+  onSubmit,
+}: {
+  url: string;
+  parentDir: string;
+  name: string;
+  busy: boolean;
+  error: string | null;
+  onUrl: (value: string) => void;
+  onParentDir: (value: string) => void;
+  onName: (value: string) => void;
+  onBrowse: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">URL</span>
+        <Input
+          value={url}
+          onChange={(event) => onUrl(event.target.value)}
+          placeholder="https://example.com/acme/app.git"
+          disabled={busy}
+          autoFocus
+        />
+      </label>
+      <ParentDirField
+        value={parentDir}
+        busy={busy}
+        onChange={onParentDir}
+        onBrowse={onBrowse}
+      />
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Name</span>
+        <Input
+          value={name}
+          onChange={(event) => onName(event.target.value)}
+          placeholder="optional folder name"
+          disabled={busy}
+        />
+      </label>
+      {error && <p className="text-sm text-critical">{error}</p>}
+      <Button
+        type="submit"
+        disabled={busy || !url.trim() || !parentDir.trim()}
+        className="self-start"
+      >
+        {busy ? "Starting…" : "Clone"}
+      </Button>
+    </form>
+  );
+}
+
+function GithubStage({
+  github,
+  parentDir,
+  name,
+  defaults,
+  busy,
+  error,
+  onGithub,
+  onParentDir,
+  onName,
+  onBrowse,
+  onSubmit,
+}: {
+  github: string;
+  parentDir: string;
+  name: string;
+  defaults: CodeCloneDefaults | null;
+  busy: boolean;
+  error: string | null;
+  onGithub: (value: string) => void;
+  onParentDir: (value: string) => void;
+  onName: (value: string) => void;
+  onBrowse: () => void;
+  onSubmit: () => void;
+}) {
+  const ghHint =
+    defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
+      ? defaults.gh_remediation
+      : null;
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Repository</span>
+        <Input
+          value={github}
+          onChange={(event) => onGithub(event.target.value)}
+          placeholder="owner/repo"
+          disabled={busy}
+          autoFocus
+        />
+      </label>
+      {ghHint && (
+        <p className="text-muted-foreground text-xs" data-testid="gh-absent-hint">
+          {ghHint} You can still clone over HTTPS.
+        </p>
+      )}
+      <ParentDirField
+        value={parentDir}
+        busy={busy}
+        onChange={onParentDir}
+        onBrowse={onBrowse}
+      />
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Name</span>
+        <Input
+          value={name}
+          onChange={(event) => onName(event.target.value)}
+          placeholder="optional folder name"
+          disabled={busy}
+        />
+      </label>
+      {error && <p className="text-sm text-critical">{error}</p>}
+      <Button
+        type="submit"
+        disabled={busy || !github.trim() || !parentDir.trim()}
+        className="self-start"
+      >
+        {busy ? "Starting…" : "Clone"}
+      </Button>
+    </form>
+  );
+}
+
+function ParentDirField({
+  value,
+  busy,
+  onChange,
+  onBrowse,
+}: {
+  value: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onBrowse: () => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-sm">
+      <span className="font-medium">Destination folder</span>
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="/Users/you/src"
+          disabled={busy}
+        />
+        {hasNativeHost() && (
+          <Button type="button" variant="outline" onClick={onBrowse} disabled={busy}>
+            Browse
+          </Button>
+        )}
+      </div>
+    </label>
+  );
+}
+
+function ProgressStage({
+  job,
+  error,
+  onRetry,
+}: {
+  job: CodeCloneJobSnapshot | undefined;
+  error: string | null | undefined;
+  onRetry: () => void;
+}) {
+  const failed = Boolean(error) || job?.done === true && Boolean(job.error);
+  const percent = job?.percent ?? (job?.done && !job.error ? 100 : 0);
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-sm" data-testid="clone-phase">
+        {job?.phase ?? "starting"}
+      </p>
+      <Progress value={percent} />
+      {failed && (
+        <>
+          <pre className="bg-muted max-h-32 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap">
+            {error ?? job?.error}
+          </pre>
+          <Button type="button" variant="outline" className="self-start" onClick={onRetry}>
+            Retry
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Hint({ keys, label }: { keys: string[]; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {keys.map((key) => (
+        <kbd
+          key={key}
+          className="inline-flex h-5 min-w-5 items-center justify-center rounded border bg-muted/60 px-1 font-sans text-2xs leading-none font-medium text-foreground/80"
+        >
+          {key}
+        </kbd>
+      ))}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+export type { SourceKey };
+export { SOURCES };

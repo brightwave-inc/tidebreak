@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessDoctorEntry } from "../api/types";
+import { renderWithRouter } from "@/test/router";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 
 afterEach(() => {
@@ -35,9 +36,9 @@ function entry(
 }
 
 describe("StartSessionPrompt", () => {
-  it("defaults to Ask and posts Ask when the doctor supports structured approvals", () => {
+  it("defaults to Ask and posts Ask when the doctor supports structured approvals", async () => {
     const onStart = vi.fn();
-    render(
+    await renderWithRouter(
       <StartSessionPrompt
         harnesses={[entry("claude_code", "supported")]}
         starting={false}
@@ -50,13 +51,13 @@ describe("StartSessionPrompt", () => {
       "aria-pressed",
       "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+    fireEvent.click(screen.getByRole("option", { name: /Claude Code/ }));
     expect(onStart).toHaveBeenCalledWith("claude_code", "ask");
   });
 
-  it("falls back to Plan when structured approvals are not supported", () => {
+  it("falls back to Plan when structured approvals are not supported", async () => {
     const onStart = vi.fn();
-    render(
+    await renderWithRouter(
       <StartSessionPrompt
         harnesses={[entry("claude_code", "unsupported")]}
         starting={false}
@@ -71,13 +72,13 @@ describe("StartSessionPrompt", () => {
       "aria-pressed",
       "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
+    fireEvent.click(screen.getByRole("option", { name: /Claude Code/ }));
     expect(onStart).toHaveBeenCalledWith("claude_code", "plan");
   });
 
-  it("posts Plan for a harness that cannot honor a selected Ask mode", () => {
+  it("posts Plan for a harness that cannot honor a selected Ask mode", async () => {
     const onStart = vi.fn();
-    render(
+    await renderWithRouter(
       <StartSessionPrompt
         harnesses={[
           entry("claude_code", "supported"),
@@ -89,7 +90,7 @@ describe("StartSessionPrompt", () => {
         onStart={onStart}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Codex CLI" }));
+    fireEvent.click(screen.getByRole("option", { name: /Codex CLI/ }));
     expect(onStart).toHaveBeenCalledWith("codex", "plan");
   });
 });

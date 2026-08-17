@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tidebreak_core::{
-    Attention, CodeSessionId, CodeSessionLifecycle, PullRequestDigest, SequencedCodeEvent,
+    Attention, CodeSessionId, CodeSessionLifecycle, PullRequestDigest, RepoId, SequencedCodeEvent,
     WorkspaceId,
 };
 use tokio::sync::broadcast;
@@ -32,11 +32,24 @@ pub(crate) struct SessionDigest {
     pub pr_state: Option<PullRequestDigest>,
 }
 
+/// Progress of one in-flight `git clone` job.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CloneProgress {
+    pub job: String,
+    pub phase: String,
+    pub percent: Option<u8>,
+    pub done: bool,
+    pub error: Option<String>,
+    pub repo_id: Option<RepoId>,
+}
+
 /// One unsequenced notice on the install-wide updates channel.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CodeLiveUpdate {
     /// Cheap per-session digest, computed from rows.
     Digest(SessionDigest),
+    /// Clone job progress. Not restated on connect.
+    CloneProgress(CloneProgress),
 }
 
 /// Per-session broadcast channels for live journal events, plus the

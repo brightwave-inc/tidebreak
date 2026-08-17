@@ -3,12 +3,12 @@ import type {
   HarnessDoctorEntry,
   HarnessKind,
 } from "../api/types";
-import { Button } from "@/components/ui/button";
 import { PermissionModePicker } from "./CodeComposer";
+import { HarnessPicker } from "./HarnessPicker";
 import {
   createPermissionModes,
   defaultCreatePermissionMode,
-  HARNESS_LABELS,
+  harnessUnusableReason,
 } from "./labels";
 
 /**
@@ -29,7 +29,8 @@ export function StartSessionPrompt({
   onSelectMode: (mode: CodePermissionMode) => void;
   onStart: (harness: HarnessKind, mode: CodePermissionMode) => void;
 }) {
-  const anyAsk = harnesses.some((entry) =>
+  const usable = harnesses.filter((entry) => !harnessUnusableReason(entry));
+  const anyAsk = usable.some((entry) =>
     createPermissionModes(entry.caps.structured_approvals).includes("ask"),
   );
   const defaultMode: CodePermissionMode = anyAsk ? "ask" : "plan";
@@ -46,22 +47,16 @@ export function StartSessionPrompt({
         availableModes={availableModes}
         onChange={onSelectMode}
       />
-      <div className="flex flex-wrap gap-2">
-        {harnesses.map((entry) => {
-          const posted = modeForHarness(entry, mode);
-          return (
-            <Button
-              key={entry.kind}
-              type="button"
-              size="sm"
-              disabled={starting}
-              onClick={() => onStart(entry.kind, posted)}
-            >
-              {HARNESS_LABELS[entry.kind]}
-            </Button>
-          );
-        })}
-      </div>
+      <HarnessPicker
+        harnesses={harnesses}
+        value={null}
+        disabled={starting}
+        onChange={(kind) => {
+          const entry = harnesses.find((item) => item.kind === kind);
+          if (!entry) return;
+          onStart(entry.kind, modeForHarness(entry, mode));
+        }}
+      />
     </div>
   );
 }

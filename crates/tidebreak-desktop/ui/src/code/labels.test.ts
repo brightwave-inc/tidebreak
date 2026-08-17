@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createPermissionModes,
   defaultCreatePermissionMode,
+  harnessUnusableReason,
 } from "./labels";
 
 describe("create-time permission mode", () => {
@@ -17,5 +18,35 @@ describe("create-time permission mode", () => {
     expect(defaultCreatePermissionMode(undefined)).toBe("plan");
     expect(createPermissionModes("unsupported")).toEqual(["plan"]);
     expect(createPermissionModes("unknown")).toEqual(["plan"]);
+  });
+});
+
+describe("harnessUnusableReason", () => {
+  it("names the one reason a picker row cannot be chosen", () => {
+    expect(
+      harnessUnusableReason({
+        found: false,
+        caps: { plan_mode: "supported", structured_approvals: "supported" },
+      }),
+    ).toBe("Not installed");
+    expect(
+      harnessUnusableReason({
+        found: true,
+        authenticated: false,
+        caps: { plan_mode: "supported", structured_approvals: "supported" },
+      }),
+    ).toBe("Sign in via your terminal");
+    expect(
+      harnessUnusableReason({
+        found: true,
+        caps: { plan_mode: "unsupported", structured_approvals: "unsupported" },
+      }),
+    ).toBe("Not available yet");
+    expect(
+      harnessUnusableReason({
+        found: true,
+        caps: { plan_mode: "supported", structured_approvals: "unsupported" },
+      }),
+    ).toBeNull();
   });
 });

@@ -31,6 +31,7 @@ use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
     sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
 };
+use super::clone::CloneJobs;
 use super::gh::{
     self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
 };
@@ -64,8 +65,9 @@ pub(crate) struct CodeRuntime {
     loopback_base: Mutex<Option<String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
     pr_cache: PrDigestCache,
+    pub(crate) clone_jobs: CloneJobs,
     #[cfg(test)]
-    gh_search_path: Mutex<Option<String>>,
+    pub(crate) gh_search_path: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
     stall_started: AtomicBool,
 }
@@ -82,6 +84,7 @@ impl CodeRuntime {
             loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            clone_jobs: CloneJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
@@ -111,6 +114,7 @@ impl CodeRuntime {
             loopback_base: Mutex::new(None),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            clone_jobs: CloneJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),

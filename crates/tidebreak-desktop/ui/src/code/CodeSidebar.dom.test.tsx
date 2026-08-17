@@ -38,6 +38,10 @@ const client = {
     },
   ]),
   getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+  getCodeCloneDefaults: vi.fn(async () => ({
+    gh_found: false,
+    gh_remediation: "gh is not installed.",
+  })),
   openCodeUpdates: vi.fn(() => {
     return {
       close() {},
