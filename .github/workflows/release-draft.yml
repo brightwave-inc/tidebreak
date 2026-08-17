@@ -77,6 +77,43 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require a published release baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          attempt=1
+          max_attempts=5
+          while (( attempt <= max_attempts )); do
+            if gh api --paginate \
+                 -H 'Accept: application/vnd.github+json' \
+                 "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                 > "$RUNNER_TEMP/releases.raw.json" \
+              && jq -s '[.[][]]' "$RUNNER_TEMP/releases.raw.json" \
+                 > "$RUNNER_TEMP/releases.json" \
+              && git ls-remote --tags origin 'v*' \
+                 | awk '{print $2}' \
+                 | jq -R -s -c 'split("\n") | map(select(length>0))' \
+                 > "$RUNNER_TEMP/tags.json"
+            then
+              plan="$(node scripts/require-release-baseline.mjs \
+                --releases "$RUNNER_TEMP/releases.json" \
+                --tags "$RUNNER_TEMP/tags.json")"
+              echo "attempt ${attempt}: ${plan}"
+              if [[ "$(jq -r .action <<<"$plan")" != fail ]]; then
+                exit 0
+              fi
+              reason="$(jq -r .reason <<<"$plan")"
+            else
+              reason="failed to list GitHub releases or version tags"
+              echo "attempt ${attempt}: ${reason}"
+            fi
+            if (( attempt == max_attempts )); then
+              echo "$reason" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+            attempt=$((attempt + 1))
+          done
       - id: release_drafter
         uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
       - name: Keep exactly one native release draft
