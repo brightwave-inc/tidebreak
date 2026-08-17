@@ -146,6 +146,25 @@ pub(crate) async fn run_setup_script(
     worktree_path: &Path,
     script: Option<&str>,
 ) -> Result<(), WorktreeError> {
+    run_hook_script(worktree_path, script, "setup").await
+}
+
+/// Run the archive script, if any. Failure preserves the checkout, so the
+/// caller must not remove the worktree when this returns an error.
+pub(crate) async fn run_archive_script(
+    worktree_path: &Path,
+    script: Option<&str>,
+) -> Result<(), WorktreeError> {
+    run_hook_script(worktree_path, script, "archive").await
+}
+
+/// A non-zero exit is a failure, not a completed run: `run_workspace_script`
+/// only reports `Err` when the script could not be spawned or timed out.
+async fn run_hook_script(
+    worktree_path: &Path,
+    script: Option<&str>,
+    label: &str,
+) -> Result<(), WorktreeError> {
     let Some(script) = script.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
@@ -156,7 +175,7 @@ pub(crate) async fn run_setup_script(
         Ok(())
     } else {
         Err(WorktreeError::user(format!(
-            "setup script failed (exit {}): {}",
+            "{label} script failed (exit {}): {}",
             run.status
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".into()),

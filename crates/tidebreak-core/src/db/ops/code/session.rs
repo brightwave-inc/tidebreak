@@ -141,6 +141,18 @@ pub async fn list_sessions_by_lifecycle(
 }
 
 /// Persist mutable session fields. `id`, `workspace_id`, and `created_at` stay as stored.
+///
+/// The write is fenced on `spawn_epoch`, the same way journal appends are: a
+/// caller holding an epoch older than the stored row is a superseded worker
+/// unwinding, and its write is dropped rather than allowed to regress the row.
+/// Without the fence such a worker writes its own epoch back over a newer
+/// spawn's — un-fencing itself, making the live worker the stale one, and
+/// silently dropping everything the live worker appends afterwards. The same
+/// fence keeps a superseded worker from regressing lifecycle, attention, or
+/// the recorded child pid.
+///
+/// Returns `false` when nothing was written: either the row is gone or the
+/// caller has been superseded.
 pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool> {
     let result = entities::code_session::Entity::update_many()
         .col_expr(
@@ -191,10 +203,24 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
             sea_orm::sea_query::Expr::value(session.unrecognized_event_count),
         )
         .filter(entities::code_session::Column::Id.eq(session.id.0))
+        .filter(entities::code_session::Column::SpawnEpoch.lte(session.spawn_epoch))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
-    Ok(result.rows_affected == 1)
+    if result.rows_affected != 1 {
+        // Rare, and invisible without a word: distinguish a superseded writer
+        // from a row that is simply gone.
+        if let Some(current) = get_session(store, session.id).await? {
+            tracing::warn!(
+                session = %session.id,
+                attempted = session.spawn_epoch,
+                current = current.spawn_epoch,
+                "dropping a session write from a superseded code-session worker"
+            );
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {

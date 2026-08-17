@@ -1099,6 +1099,92 @@ async fn a_recovered_session_accepts_a_turn() {
     assert_eq!(after_body["user_input"], "after reap");
 }
 
+/// Decision 0032: the archive script obeys the same failure-preserves rule as
+/// setup. A script whose job is to back the workspace up must be able to stop
+/// the archive by failing, and a refused archive must not have run it at all.
+#[tokio::test]
+async fn a_failing_archive_script_preserves_the_worktree() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "path": repo,
+            "archive_script": "echo ran >> .archive-ran; exit 4",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "backed up on archive",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(path.join("dirty.txt"), "nope\n").unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        !path.join(".archive-ran").exists(),
+        "a refused archive must not run the archive script"
+    );
+
+    let failed = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = failed.json().await.unwrap();
+    assert_eq!(body["kind"], "archive_script_failed");
+    assert!(path.join(".archive-ran").is_file());
+    assert!(
+        path.join("dirty.txt").is_file(),
+        "a failed archive script must leave the worktree on disk"
+    );
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/workspaces?repo_id={}",
+            json_id(&repo_body)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["status"], "active");
+}
+
 #[tokio::test]
 async fn archive_ends_the_session_before_removing_the_worktree() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;

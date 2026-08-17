@@ -8,7 +8,7 @@ use crate::code::{
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
     insert_approval, insert_repo, insert_session, insert_turn, insert_workspace, list_events,
-    set_workspace_title_if, CodeJournalError,
+    save_session, set_workspace_title_if, CodeJournalError,
 };
 use chrono::Utc;
 
@@ -180,6 +180,40 @@ async fn entity_graph_round_trips() {
     .unwrap();
     let approval = get_approval(&store, approval_id).await.unwrap().unwrap();
     assert_eq!(approval.state, CodeApprovalState::Pending);
+}
+
+/// A worker that has been superseded still holds a snapshot of the row and
+/// writes it on the way out. If that write lands, it puts the old epoch back:
+/// the outgoing worker un-fences itself, the live worker becomes the stale one,
+/// and everything the live worker appends is dropped while the session still
+/// reads as healthy.
+#[tokio::test]
+async fn a_superseded_worker_cannot_regress_the_session_row() {
+    let (_dir, store, session_id, _) = seeded_session().await;
+    let outgoing = get_session(&store, session_id).await.unwrap().unwrap();
+    assert_eq!(
+        bump_spawn_epoch(&store, session_id, Some(99))
+            .await
+            .unwrap(),
+        1
+    );
+    let mut live = get_session(&store, session_id).await.unwrap().unwrap();
+    live.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &live).await.unwrap());
+
+    let mut unwinding = outgoing;
+    unwinding.lifecycle = CodeSessionLifecycle::Ended;
+    unwinding.child_pid = None;
+    assert!(!save_session(&store, &unwinding).await.unwrap());
+
+    let row = get_session(&store, session_id).await.unwrap().unwrap();
+    assert_eq!(row.spawn_epoch, 1);
+    assert_eq!(row.lifecycle, CodeSessionLifecycle::Running);
+    assert_eq!(row.child_pid, Some(99));
+    // The live worker is still the one that owns the journal.
+    append_event(&store, session_id, 1, &CodeEvent::TurnInterrupted)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
