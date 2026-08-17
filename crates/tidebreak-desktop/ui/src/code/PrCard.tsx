@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { HttpError, type ApiClient } from "../api/client";
@@ -6,20 +7,28 @@ import type { CodeWorkspacePrSnapshot } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ClipboardCopyButton } from "@/ClipboardCopyButton";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { openExternal } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { useLiveResource } from "./useLiveContent";
 
 /**
  * Commit, push, and pull-request card on a workspace.
  *
  * The default commit message is generated on the server from the worktree
  * diffstat and the workspace title. Creating a PR never merges it.
+ *
+ * Git state goes stale the moment the engine writes a file, so the card
+ * refetches whenever the session's content revision moves, and offers a manual
+ * refresh for edits Tidebreak never saw.
  */
 
 export function PrCard({
   client,
   workspaceId,
+  contentRevision = 0,
 }: {
   client: Pick<
     ApiClient,
@@ -29,48 +38,46 @@ export function PrCard({
     | "createCodePullRequest"
   >;
   workspaceId: string;
+  /** Bumped by the session journal when the worktree may have moved. */
+  contentRevision?: number;
 }) {
-  const [snapshot, setSnapshot] = useState<CodeWorkspacePrSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<"commit" | "push" | "pr" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  async function reload() {
-    const next = await client.getCodeWorkspacePr(workspaceId);
-    setSnapshot(next);
-    setMessage((current) =>
-      current.trim().length === 0 ? next.suggested_commit_message : current,
-    );
-    setError(null);
-    return next;
-  }
+  const load = useCallback(
+    () => client.getCodeWorkspacePr(workspaceId),
+    [client, workspaceId],
+  );
+  const {
+    data: snapshot,
+    error: loadError,
+    refreshing,
+    refresh,
+    adopt,
+  } = useLiveResource({
+    key: workspaceId,
+    revision: contentRevision,
+    load,
+    errorMessage: "Could not load pull-request status",
+  });
 
+  // The server's suggestion is a default, not an override: it fills an empty
+  // box and never clobbers what the operator has typed.
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const next = await client.getCodeWorkspacePr(workspaceId);
-        if (cancelled) return;
-        setSnapshot(next);
-        setMessage(next.suggested_commit_message);
-        setError(null);
-      } catch (err) {
-        if (!cancelled) {
-          setError(friendlyErrorMessage(err, "Could not load pull-request status"));
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [client, workspaceId]);
+    if (!snapshot) return;
+    setMessage((current) =>
+      current.trim().length === 0 ? snapshot.suggested_commit_message : current,
+    );
+  }, [snapshot]);
 
   async function commit() {
     setBusy("commit");
     try {
       await client.commitCodeWorkspace(workspaceId, message);
       setMessage("");
-      await reload();
+      setActionError(null);
+      await refresh();
       toast.success("Committed");
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not commit"));
@@ -83,7 +90,8 @@ export function PrCard({
     setBusy("push");
     try {
       await client.pushCodeWorkspace(workspaceId);
-      await reload();
+      setActionError(null);
+      await refresh();
       toast.success("Pushed");
     } catch (err) {
       if (err instanceof HttpError && err.kind === "git_auth_failed") {
@@ -100,7 +108,8 @@ export function PrCard({
     setBusy("pr");
     try {
       const next = await client.createCodePullRequest(workspaceId);
-      setSnapshot(next);
+      setActionError(null);
+      adopt(next);
       const url = next.pr?.url;
       if (url && !(await openExternal(url).catch(() => false))) {
         toast.message("Copy the pull-request URL to open it.");
@@ -108,7 +117,7 @@ export function PrCard({
       toast.success("Pull request created");
     } catch (err) {
       if (err instanceof HttpError && (err.kind === "gh_absent" || err.kind === "gh_signed_out")) {
-        setError(err.message);
+        setActionError(err.message);
       } else {
         toast.error(friendlyErrorMessage(err, "Could not create a pull request"));
       }
@@ -120,13 +129,15 @@ export function PrCard({
   return (
     <PrCardView
       snapshot={snapshot}
-      error={error}
+      error={actionError ?? loadError}
       message={message}
       busy={busy}
+      refreshing={refreshing}
       onMessageChange={setMessage}
       onCommit={() => void commit()}
       onPush={() => void push()}
       onCreatePr={() => void createPr()}
+      onRefresh={() => void refresh()}
     />
   );
 }
@@ -136,19 +147,23 @@ export function PrCardView({
   error,
   message,
   busy,
+  refreshing = false,
   onMessageChange,
   onCommit,
   onPush,
   onCreatePr,
+  onRefresh,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   error?: string | null;
   message: string;
   busy: "commit" | "push" | "pr" | null;
+  refreshing?: boolean;
   onMessageChange: (value: string) => void;
   onCommit: () => void;
   onPush: () => void;
   onCreatePr: () => void;
+  onRefresh?: () => void;
 }) {
   const ghMissing = snapshot ? !snapshot.gh_found : false;
   const ghSignedOut = snapshot?.gh_authenticated === false;
@@ -171,7 +186,25 @@ export function PrCardView({
     >
       <header className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-medium">Pull request</h2>
-        {snapshot && <GitStateChips snapshot={snapshot} />}
+        <div className="flex items-center gap-1">
+          {snapshot ? (
+            <GitStateChips snapshot={snapshot} />
+          ) : (
+            <Skeleton className="h-5 w-20" />
+          )}
+          {onRefresh && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Refresh git status"
+              disabled={refreshing || busy !== null}
+              onClick={onRefresh}
+            >
+              {refreshing ? <Spinner aria-hidden /> : <RefreshCw />}
+            </Button>
+          )}
+        </div>
       </header>
       {error && (
         <p className="text-critical text-sm" role="alert">

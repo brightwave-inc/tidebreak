@@ -92,6 +92,13 @@ export type CodeSessionState = {
   lastUsage: CodeUsage | null;
   /** Session lifecycle as the journal last stated it. */
   lifecycle: CodeSessionLifecycle | null;
+  /**
+   * Bumped whenever the journal says the worktree may have moved: a turn
+   * resolved, or a checkpoint was recorded. Views that read the worktree
+   * through the API (git status, changed files, the diff) treat a change here
+   * as "your copy is stale", so they do not need their own polling.
+   */
+  contentRevision: number;
 };
 
 export type CodeSessionEffect =
@@ -122,6 +129,7 @@ export function initialCodeSessionState(): CodeSessionState {
     harnessVersion: null,
     lastUsage: null,
     lifecycle: null,
+    contentRevision: 0,
   };
 }
 
@@ -401,6 +409,7 @@ export function reduceCodeSessionEvent(
         state: {
           ...state,
           items: applyDiffstat(state.items, event.turn_id, event.diffstat),
+          contentRevision: state.contentRevision + 1,
         },
         effects,
       };
@@ -447,6 +456,9 @@ export function reduceCodeSessionEvent(
           activeTurnId: null,
           turnStartedAt: null,
           lifecycle: "idle",
+          // A failed or interrupted turn still leaves whatever the engine
+          // wrote before it stopped, so every resolution is a content change.
+          contentRevision: state.contentRevision + 1,
         },
         effects,
       };
