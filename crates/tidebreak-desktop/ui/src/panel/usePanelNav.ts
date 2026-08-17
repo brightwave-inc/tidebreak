@@ -57,6 +57,11 @@ export function usePanelNav() {
   return {
     layout,
 
+    /** Replace the URL layout wholesale. Used when a host remaps a split. */
+    setLayout(next: LayoutState) {
+      go(next);
+    },
+
     /**
      * Show `panel` in the region beside the conversation.
      *
@@ -108,7 +113,8 @@ export function usePanelNav() {
     },
 
     /** Bring one of the open tabs forward. */
-    focusTab(index: number) {
+    focusTab(target: PanelContent | number) {
+      const index = typeof target === "number" ? target : indexOf(target);
       if (index < 0 || index >= layout.tabs.length || index === layout.activeIndex) return;
       go({ ...layout, activeIndex: index });
     },

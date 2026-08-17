@@ -34,6 +34,8 @@ export function PanelLayout({
   renderChat,
   renderPanel,
   framed = true,
+  onFocusTab,
+  onCloseTab,
 }: {
   layout: LayoutState;
   /** Name tabs after the things they show; see {@link PanelTabs}. */
@@ -52,10 +54,34 @@ export function PanelLayout({
    * turns it off so the group is only the split.
    */
   framed?: boolean;
+  /**
+   * The strip indexes the layout passed in, which a host may have filtered.
+   * Override these when that layout is not the URL's tab list.
+   */
+  onFocusTab?: (index: number) => void;
+  onCloseTab?: (index: number) => void;
 }) {
   const groupRef = useRef<ImperativePanelGroupHandle>(null);
   const [dragging, setDragging] = useState(false);
   const { focusTab, closeTab } = usePanelNav();
+
+  function handleSelect(index: number) {
+    if (onFocusTab) {
+      onFocusTab(index);
+      return;
+    }
+    const panel = layout.tabs[index];
+    if (panel) focusTab(panel);
+  }
+
+  function handleClose(index: number) {
+    if (onCloseTab) {
+      onCloseTab(index);
+      return;
+    }
+    const panel = layout.tabs[index];
+    if (panel) closeTab(panel);
+  }
 
   const hasTabs = layout.tabs.length > 0;
   const fullscreen = hasTabs && layout.fullscreen;
@@ -114,8 +140,8 @@ export function PanelLayout({
                 tabs={layout.tabs}
                 activeIndex={layout.activeIndex}
                 labelFor={tabLabel}
-                onSelect={focusTab}
-                onClose={closeTab}
+                onSelect={handleSelect}
+                onClose={handleClose}
               />
             </div>
             <div className="flex min-h-0 flex-1 flex-col">{renderPanel(panel)}</div>

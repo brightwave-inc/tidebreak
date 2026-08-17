@@ -109,6 +109,16 @@ function makeClient() {
           removeEventListener() {},
         }) as unknown as WebSocket,
     ),
+    listCodeWorkspaceFiles: vi.fn(async () => ({
+      files: [],
+      truncated: false,
+      stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    })),
+    getCodeWorkspaceDiff: vi.fn(async () => ({
+      diff: "",
+      truncated: false,
+      stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    })),
     listCodeTerminals: vi.fn(async () => []),
     createCodeTerminal: vi.fn(async () => ({
       id: "term-1",
@@ -178,7 +188,10 @@ function appContext(client: ReturnType<typeof makeClient>): AppContextValue {
  * marker instead, so an assertion can tell the two apart the way the running
  * app does.
  */
-async function mountWorkspace(client: ReturnType<typeof makeClient>) {
+async function mountWorkspace(
+  client: ReturnType<typeof makeClient>,
+  initialUrl = "/code/w/ws-1",
+) {
   const rootRoute = createRootRoute();
   const codeRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -217,7 +230,7 @@ async function mountWorkspace(client: ReturnType<typeof makeClient>) {
       codeRepoRoute,
       codeWorkspaceRoute,
     ]),
-    history: createMemoryHistory({ initialEntries: ["/code/w/ws-1"] }),
+    history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
   await router.load();
   const result = render(<RouterProvider router={router as never} />);
@@ -282,5 +295,75 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Hide review sidebar" }));
     expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
+  });
+
+  it("selects and closes the strip tab even when the terminal sits between them", async () => {
+    const client = makeClient();
+    const { router } = await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=files,terminal,diff",
+    );
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Diff" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        tabs: "files,terminal,diff",
+        active: "diff",
+      }),
+    );
+    expect(screen.getByRole("tab", { name: "Diff" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await screen.findByRole("heading", { name: "Diff" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close Diff" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "files,terminal" }),
+    );
+    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the visible files tab selected when the terminal drawer opens", async () => {
+    const client = makeClient();
+    const { router } = await mountWorkspace(client, "/code/w/ws-1?tabs=files,diff");
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Terminal" }));
+
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        tabs: "files,diff,terminal",
+      }),
+    );
+    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("heading", { name: "Changed files" })).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
   });
 });
