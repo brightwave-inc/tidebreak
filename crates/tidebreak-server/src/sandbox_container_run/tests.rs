@@ -61,19 +61,22 @@ use crate::state::{SandboxSteerGuard, SandboxSteerRefusal};
 
 // --- Mock host model (the resolver the driver proxies inference through) ------
 
-/// A one-shot hold. The producer subscribes to `release` before publishing
-/// `entered`, so a faster test cannot fire `release` into a Notify that has
-/// not yet been polled.
+/// A one-shot hold. The producer takes the receiver and publishes `entered`
+/// before awaiting, so a faster test cannot lose the release. A `oneshot`
+/// stores the send even when the receiver has not been polled yet.
 struct Handshake {
     entered: AtomicBool,
-    release: Notify,
+    release_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release_rx: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl Handshake {
     fn new() -> Self {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         Self {
             entered: AtomicBool::new(false),
-            release: Notify::new(),
+            release_tx: Mutex::new(Some(release_tx)),
+            release_rx: Mutex::new(Some(release_rx)),
         }
     }
 
@@ -82,15 +85,20 @@ impl Handshake {
     }
 
     fn release(&self) {
-        self.release.notify_one();
+        if let Some(tx) = self.release_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
     }
 
     async fn enter_and_wait(&self) {
-        let notified = self.release.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        let rx = self
+            .release_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("handshake is entered once");
         self.entered.store(true, Ordering::SeqCst);
-        notified.await;
+        let _ = rx.await;
     }
 }
 
@@ -213,21 +221,18 @@ impl ProviderResolver for FixedResolver {
 }
 
 struct UsageThenPendingProvider {
-    stalled: Arc<Notify>,
+    announced: Arc<AtomicBool>,
     dropped: Arc<AtomicBool>,
-    drop_observed: Arc<Notify>,
     drop_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     calls: AtomicUsize,
     usage: tidebreak_core::Usage,
 }
 
 struct UsageThenPendingStream {
-    stalled: Arc<Notify>,
+    announced: Arc<AtomicBool>,
     dropped: Arc<AtomicBool>,
-    drop_observed: Arc<Notify>,
     drop_release: Option<std::sync::mpsc::Receiver<()>>,
     usage: Option<tidebreak_core::Usage>,
-    announced: bool,
 }
 
 impl futures::Stream for UsageThenPendingStream {
@@ -237,10 +242,7 @@ impl futures::Stream for UsageThenPendingStream {
         if let Some(usage) = self.usage.take() {
             return Poll::Ready(Some(ProviderEvent::Usage(usage)));
         }
-        if !self.announced {
-            self.announced = true;
-            self.stalled.notify_one();
-        }
+        self.announced.store(true, Ordering::SeqCst);
         Poll::Pending
     }
 }
@@ -248,7 +250,6 @@ impl futures::Stream for UsageThenPendingStream {
 impl Drop for UsageThenPendingStream {
     fn drop(&mut self) {
         self.dropped.store(true, Ordering::SeqCst);
-        self.drop_observed.notify_one();
         if let Some(release) = self.drop_release.take() {
             // Park off the runtime. A raw wait on this tokio worker starves
             // DurableOperationStore's `block_in_place` peers under
@@ -269,14 +270,12 @@ impl ModelProvider for UsageThenPendingProvider {
     async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(UsageThenPendingStream {
-            stalled: self.stalled.clone(),
+            announced: self.announced.clone(),
             dropped: self.dropped.clone(),
-            drop_observed: self.drop_observed.clone(),
             drop_release: (call_index == 0)
                 .then(|| self.drop_release.lock().unwrap().take())
                 .flatten(),
             usage: Some(self.usage),
-            announced: false,
         }
         .boxed())
     }
@@ -1362,6 +1361,17 @@ async fn wait_until_entered(handshake: &Handshake, description: &str) {
     .await;
 }
 
+async fn wait_until_flag(flag: &AtomicBool, description: &str) {
+    wait_until(Duration::from_secs(30), description, || async {
+        if flag.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err("flag still false".to_owned())
+        }
+    })
+    .await;
+}
+
 async fn wait_until_step_started(gate: &StepGate) {
     wait_until_entered(gate, "the first model call started").await;
 }
@@ -2087,7 +2097,22 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             let runner = runner.clone();
             async move { runner.drive(run_id).await }
         });
-        wait_until_step_started(&gate).await;
+        wait_until(
+            Duration::from_secs(45),
+            "the first model call started",
+            || async {
+                if gate.entered() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "not entered; provisions={} provider_calls={}",
+                        backend.provisions.load(Ordering::SeqCst),
+                        provider.calls.load(Ordering::SeqCst)
+                    ))
+                }
+            },
+        )
+        .await;
         let initial = store
             .get_agent_run(run_id)
             .await
@@ -2123,7 +2148,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             "lease expiry {extended} did not move past {initial} after an observed heartbeat"
         );
 
-        gate.release.notify_one();
+        gate.release();
 
         let outcome = drive
             .await
@@ -3703,7 +3728,7 @@ async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
                 .unwrap(),
             "the exact execution claim remains live after the observed no-op"
         );
-        gate.release.notify_one();
+        gate.release();
 
         let outcome = match tokio::time::timeout(Duration::from_secs(10), drive).await {
             Ok(joined) => joined
@@ -3738,7 +3763,6 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
         let run_id = admit_container_run(&store, chat.id, "account before cancellation").await;
 
         let backend = MockBackend::spawning();
-        let stalled = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
         let usage = tidebreak_core::Usage {
             input_tokens: 11,
@@ -3747,9 +3771,8 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             cache_creation_input_tokens: 3,
         };
         let provider = Arc::new(UsageThenPendingProvider {
-            stalled: stalled.clone(),
+            announced: Arc::new(AtomicBool::new(false)),
             dropped: dropped.clone(),
-            drop_observed: Arc::new(Notify::new()),
             drop_release: Mutex::new(None),
             calls: AtomicUsize::new(0),
             usage,
@@ -3757,7 +3780,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
         let runner = Arc::new(SandboxContainerRunner::new(
             store.clone(),
             backend.clone(),
-            Arc::new(UsageThenPendingResolver(provider)),
+            Arc::new(UsageThenPendingResolver(provider.clone())),
             SandboxContainerRunConfig {
                 lease: Duration::from_secs(2),
                 heartbeat: Duration::from_millis(100),
@@ -3769,18 +3792,35 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             async move { runner.drive(run_id).await }
         });
 
-        stalled.notified().await;
+        wait_until_flag(
+            provider.announced.as_ref(),
+            "the reverse stream announced usage",
+        )
+        .await;
         store
             .request_agent_run_cancellation(run_id)
             .await
             .unwrap()
             .expect("the cancellation request lands");
 
-        let outcome = drive
-            .await
-            .unwrap()
-            .expect("driving succeeds")
-            .expect("the container run is claimable");
+        let outcome = match tokio::time::timeout(Duration::from_secs(15), drive).await {
+            Ok(joined) => joined
+                .expect("the drive task finished")
+                .expect("driving succeeds")
+                .expect("the container run is claimable"),
+            Err(_) => {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                panic!(
+                    "cancellation still outstanding after usage was observed; status={:?} last_error={:?} provisions={} destroys={} announced={} dropped={}",
+                    run.status,
+                    run.last_error_code,
+                    backend.provisions.load(Ordering::SeqCst),
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.announced.load(Ordering::SeqCst),
+                    dropped.load(Ordering::SeqCst),
+                );
+            }
+        };
         assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
         assert!(
             dropped.load(Ordering::SeqCst),
@@ -3946,9 +3986,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
         );
         let base_url = spawn_sandbox_run(sandbox.clone()).await;
         let backend = MockBackend::unreachable(base_url);
-        let stalled = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
-        let drop_observed = Arc::new(Notify::new());
         let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
         let usage = tidebreak_core::Usage {
             input_tokens: 13,
@@ -3957,9 +3995,8 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             cache_creation_input_tokens: 2,
         };
         let provider = Arc::new(UsageThenPendingProvider {
-            stalled: stalled.clone(),
+            announced: Arc::new(AtomicBool::new(false)),
             dropped: dropped.clone(),
-            drop_observed: drop_observed.clone(),
             drop_release: Mutex::new(Some(drop_release_rx)),
             calls: AtomicUsize::new(0),
             usage,
@@ -3997,10 +4034,12 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
                     .await
             }
         });
-        stalled.notified().await;
+        wait_until_flag(
+            provider.announced.as_ref(),
+            "the first reverse stream announced usage",
+        )
+        .await;
 
-        let first_drop = drop_observed.notified();
-        tokio::pin!(first_drop);
         store
             .request_agent_run_cancellation(run_id)
             .await
@@ -4012,7 +4051,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             .unwrap()
             .expect("the durable cancellation receipt names the exact drive");
         assert!(steering.cancel_container_drive(run_id, signal.lease_token));
-        first_drop.await;
+        wait_until_flag(dropped.as_ref(), "the first reverse stream entered Drop").await;
 
         // The first stream is now blocked in Drop, holding quiescence open.
         // Attempt a fresh request during that exact window. Before the fix the
@@ -4093,7 +4132,6 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
         );
         let base_url = spawn_sandbox_run(sandbox.clone()).await;
         let backend = MockBackend::unreachable(base_url);
-        let stalled = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicBool::new(false));
         let usage = tidebreak_core::Usage {
             input_tokens: 17,
@@ -4102,9 +4140,8 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
             cache_creation_input_tokens: 1,
         };
         let provider = Arc::new(UsageThenPendingProvider {
-            stalled: stalled.clone(),
+            announced: Arc::new(AtomicBool::new(false)),
             dropped: dropped.clone(),
-            drop_observed: Arc::new(Notify::new()),
             drop_release: Mutex::new(None),
             calls: AtomicUsize::new(0),
             usage,
@@ -4134,7 +4171,11 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
                     .await
             }
         });
-        stalled.notified().await;
+        wait_until_flag(
+            provider.announced.as_ref(),
+            "the pending reverse stream announced usage",
+        )
+        .await;
         sandbox
             .emit_result("terminal answer")
             .await
@@ -4241,7 +4282,7 @@ async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
         // Let the frame cross the socket while the sandbox is parked on its
         // model call, then release the step it was waiting on.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        gate.release.notify_one();
+        gate.release();
 
         let outcome = drive
             .await
