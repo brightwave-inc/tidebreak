@@ -13,7 +13,7 @@ use std::str::FromStr;
 
 use futures::StreamExt as _;
 use tidebreak_core::{
-    AgentError, Attention, AttentionState, CodeApprovalId, CodeApprovalKind, CodeEvent,
+    AgentError, Attention, AttentionState, CapLevel, CodeApprovalId, CodeApprovalKind, CodeEvent,
     CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessKind, RepoId,
     Result, WorkspaceId,
 };
@@ -69,7 +69,8 @@ usage: tidebreak code doctor [--refresh]
 
 Every verb takes --json (or --output-format json). run and watch stream NDJSON
 under --json. --timeout is seconds. watch --once prints the connect snapshot
-and exits.";
+and exits. session start without --mode uses ask when the doctor says
+structured approvals are supported, otherwise plan.";
 
 const RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -133,7 +134,10 @@ pub enum Command {
     SessionStart {
         workspace: WorkspaceId,
         harness: HarnessKind,
-        mode: CodePermissionMode,
+        /// `None` means the doctor-driven default: ask when this engine's
+        /// structured approvals are Supported, otherwise plan. An explicit
+        /// `--mode` is passed through verbatim.
+        mode: Option<CodePermissionMode>,
         format: OutputFormat,
     },
     SessionShow {
@@ -425,9 +429,13 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
             mode,
             format,
         } => {
+            let (mode, fallback_note) = resolve_start_mode(client, harness, mode).await?;
             let session = client.create_session(workspace, harness, mode).await?;
             if format == OutputFormat::Json {
                 return emit_ok(&session);
+            }
+            if let Some(note) = fallback_note {
+                println!("tidebreak: {note}");
             }
             println!(
                 "tidebreak: session {}  {}  {}",
@@ -752,6 +760,37 @@ async fn resolve_run_session(
     let sessions = client.list_workspace_sessions(workspace).await?;
     pick_active_session(&sessions)
         .ok_or_else(|| AgentError::msg(format!("workspace {workspace} has no active session")))
+}
+
+/// Desktop create default: Ask only when this engine's structured
+/// approvals are Supported. Anything else (Unsupported, Unknown, missing
+/// doctor row) is Plan — the mode a harness without a live approval
+/// channel can still honor.
+fn default_create_permission_mode(approvals: Option<CapLevel>) -> CodePermissionMode {
+    match approvals {
+        Some(CapLevel::Supported) => CodePermissionMode::Ask,
+        _ => CodePermissionMode::Plan,
+    }
+}
+
+async fn resolve_start_mode(
+    client: &Client,
+    harness: HarnessKind,
+    explicit: Option<CodePermissionMode>,
+) -> Result<(CodePermissionMode, Option<&'static str>)> {
+    if let Some(mode) = explicit {
+        return Ok((mode, None));
+    }
+    let report = client.list_harnesses().await?;
+    let approvals = report
+        .harnesses
+        .iter()
+        .find(|entry| entry.kind == harness)
+        .map(|entry| entry.caps.structured_approvals);
+    let mode = default_create_permission_mode(approvals);
+    let note = (mode == CodePermissionMode::Plan)
+        .then_some("starting in plan mode — approvals unavailable on this engine");
+    Ok((mode, note))
 }
 
 fn pick_active_session(sessions: &[CodeSessionSnapshot]) -> Option<CodeSessionId> {
@@ -1657,7 +1696,7 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
         "start" => {
             let mut workspace = None;
             let mut harness = None;
-            let mut mode = CodePermissionMode::DEFAULT;
+            let mut mode = None;
             let mut flags = SharedFlags {
                 format: OutputFormat::Text,
             };
@@ -1665,7 +1704,7 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
                 match arg.as_str() {
                     "--ws" => workspace = Some(parse_workspace_id(&cursor.value("--ws")?)?),
                     "--harness" => harness = Some(parse_harness(&cursor.value("--harness")?)?),
-                    "--mode" => mode = parse_mode(&cursor.value("--mode")?)?,
+                    "--mode" => mode = Some(parse_mode(&cursor.value("--mode")?)?),
                     other => take_format(&mut flags, cursor, other)?,
                 }
             }
@@ -2130,8 +2169,26 @@ mod tests {
                 ..
             } => {
                 assert_eq!(harness, HarnessKind::ClaudeCode);
-                assert_eq!(mode, CodePermissionMode::Ask);
+                assert_eq!(mode, None);
                 assert_eq!(format, OutputFormat::Text);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(args(&[
+            "session",
+            "start",
+            "--ws",
+            &ws,
+            "--harness",
+            "grok",
+            "--mode",
+            "ask",
+        ]))
+        .unwrap()
+        {
+            Command::SessionStart { mode, harness, .. } => {
+                assert_eq!(harness, HarnessKind::Grok);
+                assert_eq!(mode, Some(CodePermissionMode::Ask));
             }
             other => panic!("{other:?}"),
         }
@@ -2306,6 +2363,26 @@ mod tests {
             Command::Run { timeout, .. } => assert_eq!(timeout, Some(30)),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn omitted_mode_follows_the_desktop_doctor_default() {
+        assert_eq!(
+            default_create_permission_mode(Some(CapLevel::Supported)),
+            CodePermissionMode::Ask
+        );
+        assert_eq!(
+            default_create_permission_mode(Some(CapLevel::Unsupported)),
+            CodePermissionMode::Plan
+        );
+        assert_eq!(
+            default_create_permission_mode(Some(CapLevel::Unknown)),
+            CodePermissionMode::Plan
+        );
+        assert_eq!(
+            default_create_permission_mode(None),
+            CodePermissionMode::Plan
+        );
     }
 
     #[test]
