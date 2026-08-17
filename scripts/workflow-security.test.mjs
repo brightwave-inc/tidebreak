@@ -264,6 +264,10 @@ test("release-drafter retains a stable draft tag after formatting", () => {
     draftJob,
     /\{tag_name: \$tag, body: \$body\}/,
   );
+  assert.match(draftJob, /node scripts\/reconcile-release-drafts\.mjs/);
+  assert.match(draftJob, /Keep exactly one native release draft/);
+  assert.match(draftJob, /\.delete_ids\[\]/);
+  assert.match(draftJob, /jq -r \.action/);
 });
 
 test("workflow container images are pinned by digest", () => {

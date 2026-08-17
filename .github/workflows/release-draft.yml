@@ -79,6 +79,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: release_drafter
         uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
+      - name: Keep exactly one native release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
+          RESOLVED_VERSION: ${{ steps.release_drafter.outputs.resolved_version }}
+        run: |
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+            jq -s '[.[][]]' > "$RUNNER_TEMP/releases.json"
+          plan="$(node scripts/reconcile-release-drafts.mjs \
+            --releases "$RUNNER_TEMP/releases.json" \
+            --resolved-version "$RESOLVED_VERSION" \
+            --release-id "$RELEASE_ID")"
+          echo "$plan"
+          while IFS= read -r id; do
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/$id" >/dev/null
+            echo "Deleted extra draft $id"
+          done < <(jq -r '.delete_ids[]' <<<"$plan")
+          if [[ "$(jq -r .action <<<"$plan")" = fail ]]; then
+            jq -r .reason <<<"$plan" >&2
+            exit 1
+          fi
       - name: Group release notes by Conventional Commit scope
         env:
           GH_TOKEN: ${{ github.token }}
