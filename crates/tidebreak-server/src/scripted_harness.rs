@@ -78,6 +78,10 @@ pub(crate) struct ScriptedAdapter {
     auto_mode: CapLevel,
     child_pid: Option<i64>,
     approver: Arc<ScriptedApprover>,
+    probes: Arc<AtomicU64>,
+    /// Approval endpoint each launch was handed, `None` when it was handed no
+    /// channel at all. Lets a test see how a session was wired.
+    launched_approvals: Arc<std::sync::Mutex<Vec<Option<String>>>>,
 }
 
 impl ScriptedAdapter {
@@ -91,7 +95,25 @@ impl ScriptedAdapter {
             auto_mode: CapLevel::Unsupported,
             child_pid: None,
             approver: Arc::new(ScriptedApprover::default()),
+            probes: Arc::new(AtomicU64::new(0)),
+            launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// How many times this adapter has been probed. The runtime memoizes
+    /// probes, so this is how a test sees a cache hit from a cold read.
+    #[allow(dead_code)]
+    pub(crate) fn probe_count(&self) -> u64 {
+        self.probes.load(Ordering::SeqCst)
+    }
+
+    /// The approval endpoint each launched session was given, in order.
+    #[allow(dead_code)]
+    pub(crate) fn launched_approvals(&self) -> Vec<Option<String>> {
+        self.launched_approvals
+            .lock()
+            .expect("scripted launches")
+            .clone()
     }
 
     /// Sets the approval channel and, with it, the supervised auto posture —
@@ -138,6 +160,7 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     async fn probe(&self, _host: &HostEnv) -> HarnessProbe {
+        self.probes.fetch_add(1, Ordering::SeqCst);
         HarnessProbe {
             found: true,
             binary_path: Some(PathBuf::from("/scripted/engine")),
@@ -171,6 +194,14 @@ impl HarnessAdapter for ScriptedAdapter {
                 spec.permission_mode,
             ));
         }
+        self.launched_approvals
+            .lock()
+            .expect("scripted launches")
+            .push(
+                spec.approval
+                    .as_ref()
+                    .map(|channel| channel.mcp_endpoint_url.clone()),
+            );
         Ok(Box::new(ScriptedSession {
             sink: spec.sink,
             events: self.events.clone(),

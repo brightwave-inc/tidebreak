@@ -1382,9 +1382,8 @@ async fn bind_inner(
     }
     state.host_folders = host_folders;
     let code = Arc::new(code::CodeRuntime::new(db, state.config.data_dir.clone()));
-    if let Err(error) = code.recover().await {
-        tracing::warn!("code-mode recovery: {}", error.message());
-    }
+    // Recovery runs after the bind, below: the workers it re-attaches need the
+    // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
     // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
@@ -1537,7 +1536,20 @@ async fn bind_inner(
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
-    code.set_loopback_base(format!("http://{local_addr}"));
+    // Publish the loopback base and take the code-mode recovery pass, then run
+    // it in the background. It has to come after the bind — a session
+    // re-attached before the address is known comes back with no approval
+    // endpoint — and it should not gate launch, because it relaunches an
+    // engine child per restored session. The trade is a brief window where a
+    // restored session is listed but its worker is not attached yet, and a
+    // turn submitted into it is refused with `session_worker_missing`; before,
+    // the same wait was spent with the port closed and the app unusable.
+    let code_recovery = code.start(format!("http://{local_addr}"));
+    tokio::spawn(async move {
+        if let Err(error) = code_recovery.await {
+            tracing::warn!("code-mode recovery: {}", error.message());
+        }
+    });
     // Publish before workers start answering so an attach racing boot sees a
     // file that matches the bound address. It carries the primary bearer and
     // the narrow local-import capability, never the executor credential. See
