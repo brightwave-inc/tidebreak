@@ -78,6 +78,9 @@ impl HarnessAdapter for OpencodeAdapter {
             // OpenAPI; not captured.
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
+            // Workspace-write ruleset with sensitive actions still asking
+            // over the permission API; supervised Auto.
+            auto_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Unknown,
             // session.diff was empty arrays; file.edited was not seen.
             native_file_change_events: CapLevel::Unknown,

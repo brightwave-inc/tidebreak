@@ -57,17 +57,26 @@ impl GrokSession {
     }
 }
 
-/// 1.0.4 print mode cannot honor any Tidebreak permission mode.
+/// 1.0.4 honors Auto only, as its default headless posture.
 ///
-/// Ask/Auto need a structured approval channel. Headless `streaming-json`
-/// has none (`grok agent stdio` ACP was probed; no request/response pair
-/// was captured). Plan's `--permission-mode plan` and `--sandbox read-only`
-/// both wrote files in captured turns. Composing `--always-approve` /
-/// `--yolo` / `bypassPermissions` is forbidden. Composing `--deny` rules
-/// as a stand-in for Plan would approximate a posture the engine's own
-/// plan/read-only flags did not honor.
+/// Auto composes no permission flags: the default print-mode posture
+/// executes routine work unprompted (re-probed 2026-08-17 — a write tool
+/// ran without asking), which is exactly an unsupervised workspace-write
+/// auto. Ask needs a structured approval channel and headless
+/// `streaming-json` has none (`grok agent stdio` ACP was probed; no
+/// request/response pair was captured). Plan's `--permission-mode plan`
+/// and `--sandbox read-only` both wrote files in captured and re-probed
+/// turns. Composing `--always-approve` / `--yolo` / `bypassPermissions`
+/// is forbidden. Composing `--deny` rules as a stand-in for Plan would
+/// approximate a posture the engine's own plan/read-only flags did not
+/// honor.
 pub(crate) fn refuse_unhonored_mode(mode: CodePermissionMode) -> Result<(), HarnessError> {
-    Err(HarnessError::PermissionModeUnsupported(mode))
+    match mode {
+        CodePermissionMode::Auto => Ok(()),
+        CodePermissionMode::Plan | CodePermissionMode::Ask => {
+            Err(HarnessError::PermissionModeUnsupported(mode))
+        }
+    }
 }
 
 /// Argv for one print-mode child. The prompt lives in `prompt_file`, never

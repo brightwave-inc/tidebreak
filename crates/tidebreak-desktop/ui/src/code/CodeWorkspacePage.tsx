@@ -40,6 +40,7 @@ import { FilesPanel } from "./FilesPanel";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
 import {
+  createPermissionModes,
   fenceReasonText,
   HARNESS_LABELS,
   LIFECYCLE_LABELS,
@@ -520,7 +521,17 @@ function CodeSessionPane({
   );
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
-  const availableModes: CodePermissionMode[] = ["plan", "ask", "auto"];
+  const doctorEntry = useCodeCatalogStore(
+    (state) =>
+      state.doctor?.harnesses.find(
+        (entry) => entry.kind === session.harness_kind,
+      ) ?? null,
+  );
+  // Doctor caps decide what this engine's picker offers; without a doctor
+  // row yet, show everything and let the server refuse.
+  const availableModes: CodePermissionMode[] = doctorEntry
+    ? createPermissionModes(doctorEntry.caps)
+    : ["plan", "ask", "auto"];
 
   useEffect(() => {
     let cancelled = false;

@@ -8,10 +8,12 @@ Where this page and a decision record disagree, the record wins. The first
 version ships the full surface described here — repos, workspaces, sessions,
 approvals, checkpoints and review, auxiliary terminals, the git/PR flow, the
 updates channel, and adapters for Claude Code (reference tier), Codex CLI,
-opencode, and Grok CLI (the last currently refuses every permission mode:
-its captured 1.0.4 print surface honors none of them, and honesty beats
-approximation) — with the deliberately parked scope recorded in
-[`docs/deferred.md`](deferred.md).
+opencode, and Grok CLI (the last honors Auto only, as its default headless
+posture: its captured 1.0.4 plan and sandbox flags do not confine and it has
+no approval channel, so Auto runs unsupervised and the product says so where
+the mode is chosen — see
+[`0038`](decisions/0038-auto-is-a-declared-capability.md)) — with the
+deliberately parked scope recorded in [`docs/deferred.md`](deferred.md).
 
 Code mode is Tidebreak's second product surface: pick a local git repository,
 spin up isolated **workspaces** (one worktree + branch each), and run
@@ -177,8 +179,10 @@ Process models the trait absorbs:
   version.
 - **opencode** — a long-lived server child driven over HTTP with its event
   stream; permissions over its permission API.
-- **Grok CLI** — best-effort tier; capabilities honestly `Unsupported` or
-  `Unknown` where its surface does not carry them.
+- **Grok CLI** — best-effort tier; one print-mode child per turn; honors
+  Auto only, as its default headless posture (unsupervised — see
+  [`0038`](decisions/0038-auto-is-a-declared-capability.md)); capabilities
+  honestly `Unsupported` or `Unknown` where its surface does not carry them.
 
 All children are pipe-based `tokio::process` with `kill_on_drop`, the
 user's environment minus Tidebreak internals

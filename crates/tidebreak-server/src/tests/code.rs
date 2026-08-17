@@ -173,6 +173,69 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     addr
 }
 
+/// Auto is gated by its own capability flag (decision 0038): an engine with
+/// a live approval channel but no auto posture refuses Auto, and an engine
+/// whose only honest posture is unsupervised Auto creates an Auto session.
+/// A wrong implementation deriving Auto from the approval flag passes
+/// neither arm.
+#[tokio::test]
+async fn auto_stands_on_its_own_capability_flag() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_approvals(CapLevel::Supported)
+        .with_auto_mode(CapLevel::Unsupported);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "auto",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_unavailable");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("auto posture"),
+        "{}",
+        body["message"]
+    );
+
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_auto_mode(CapLevel::Supported);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "auto",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(session["permission_mode"], "auto");
+}
+
 #[tokio::test]
 async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;

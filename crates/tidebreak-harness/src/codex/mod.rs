@@ -76,6 +76,9 @@ impl HarnessAdapter for CodexAdapter {
             // `turn/steer` exists in the generated schema; not captured.
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
+            // `thread/start` sandbox workspace-write + approvalPolicy
+            // on-request; supervised by the captured approval channel.
+            auto_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,

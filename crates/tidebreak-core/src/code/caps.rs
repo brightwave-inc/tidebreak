@@ -61,6 +61,13 @@ pub struct HarnessCaps {
     pub mid_turn_steering: CapLevel,
     /// The engine has a read-only / plan posture the adapter can select.
     pub plan_mode: CapLevel,
+    /// The engine has a workspace-write / auto posture the adapter can select.
+    ///
+    /// Whether that posture is supervised is a separate question:
+    /// with `structured_approvals` supported, sensitive actions still park on
+    /// approval cards; without it, Auto runs unsupervised and the product
+    /// states so where the mode is chosen (decision 0038).
+    pub auto_mode: CapLevel,
     /// The engine accepts a reasoning-effort control.
     pub reasoning_levels: CapLevel,
     /// The engine emits native file-change events.
@@ -82,6 +89,7 @@ mod tests {
             structured_approvals: CapLevel::Unknown,
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
+            auto_mode: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,

@@ -14,8 +14,8 @@ use std::str::FromStr;
 use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, Attention, AttentionState, CapLevel, CodeApprovalId, CodeApprovalKind, CodeEvent,
-    CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessKind, RepoId,
-    Result, WorkspaceId,
+    CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessCaps, HarnessKind,
+    RepoId, Result, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -762,13 +762,18 @@ async fn resolve_run_session(
         .ok_or_else(|| AgentError::msg(format!("workspace {workspace} has no active session")))
 }
 
-/// Desktop create default: Ask only when this engine's structured
-/// approvals are Supported. Anything else (Unsupported, Unknown, missing
-/// doctor row) is Plan — the mode a harness without a live approval
-/// channel can still honor.
-fn default_create_permission_mode(approvals: Option<CapLevel>) -> CodePermissionMode {
-    match approvals {
-        Some(CapLevel::Supported) => CodePermissionMode::Ask,
+/// Desktop create default: Ask when this engine's structured approvals are
+/// Supported; else Plan when it has a plan posture; else Auto when that is
+/// the only posture it honors (grok-tier — unsupervised, and said so). A
+/// missing doctor row defaults to Plan and lets the server refuse.
+fn default_create_permission_mode(caps: Option<&HarnessCaps>) -> CodePermissionMode {
+    match caps {
+        Some(caps) if caps.structured_approvals == CapLevel::Supported => CodePermissionMode::Ask,
+        Some(caps)
+            if caps.plan_mode != CapLevel::Supported && caps.auto_mode == CapLevel::Supported =>
+        {
+            CodePermissionMode::Auto
+        }
         _ => CodePermissionMode::Plan,
     }
 }
@@ -782,14 +787,21 @@ async fn resolve_start_mode(
         return Ok((mode, None));
     }
     let report = client.list_harnesses().await?;
-    let approvals = report
+    let caps = report
         .harnesses
         .iter()
         .find(|entry| entry.kind == harness)
-        .map(|entry| entry.caps.structured_approvals);
-    let mode = default_create_permission_mode(approvals);
-    let note = (mode == CodePermissionMode::Plan)
-        .then_some("starting in plan mode — approvals unavailable on this engine");
+        .map(|entry| &entry.caps);
+    let mode = default_create_permission_mode(caps);
+    let note = match mode {
+        CodePermissionMode::Plan => {
+            Some("starting in plan mode — approvals unavailable on this engine")
+        }
+        CodePermissionMode::Auto => Some(
+            "starting in auto mode — this engine has no approval channel; every action proceeds without asking",
+        ),
+        CodePermissionMode::Ask => None,
+    };
     Ok((mode, note))
 }
 
@@ -2465,16 +2477,57 @@ mod tests {
 
     #[test]
     fn omitted_mode_follows_the_desktop_doctor_default() {
+        fn caps(
+            structured_approvals: CapLevel,
+            plan_mode: CapLevel,
+            auto_mode: CapLevel,
+        ) -> HarnessCaps {
+            HarnessCaps {
+                resume: CapLevel::Supported,
+                streaming_deltas: CapLevel::Supported,
+                structured_approvals,
+                mid_turn_steering: CapLevel::Unknown,
+                plan_mode,
+                auto_mode,
+                reasoning_levels: CapLevel::Unknown,
+                native_file_change_events: CapLevel::Unknown,
+                native_interrupt: CapLevel::Supported,
+            }
+        }
+        // Approval-carrying engines default to Ask.
         assert_eq!(
-            default_create_permission_mode(Some(CapLevel::Supported)),
+            default_create_permission_mode(Some(&caps(
+                CapLevel::Supported,
+                CapLevel::Supported,
+                CapLevel::Supported,
+            ))),
             CodePermissionMode::Ask
         );
+        // No approvals but a plan posture: Plan.
         assert_eq!(
-            default_create_permission_mode(Some(CapLevel::Unsupported)),
+            default_create_permission_mode(Some(&caps(
+                CapLevel::Unsupported,
+                CapLevel::Supported,
+                CapLevel::Unsupported,
+            ))),
             CodePermissionMode::Plan
         );
+        // Grok-tier: unsupervised Auto is the only honored posture.
         assert_eq!(
-            default_create_permission_mode(Some(CapLevel::Unknown)),
+            default_create_permission_mode(Some(&caps(
+                CapLevel::Unsupported,
+                CapLevel::Unsupported,
+                CapLevel::Supported,
+            ))),
+            CodePermissionMode::Auto
+        );
+        // Unknown everywhere, or no doctor row: Plan, and the server refuses.
+        assert_eq!(
+            default_create_permission_mode(Some(&caps(
+                CapLevel::Unknown,
+                CapLevel::Unknown,
+                CapLevel::Unknown,
+            ))),
             CodePermissionMode::Plan
         );
         assert_eq!(

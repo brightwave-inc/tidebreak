@@ -30,9 +30,11 @@ import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
+  autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   harnessUnusableReason,
+  UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
 
 /**
@@ -92,15 +94,17 @@ export function NewWorkspaceDialog({
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
   const selectedHarness = readyHarnesses.find((entry) => entry.kind === harness);
-  const availableModes = createPermissionModes(
-    selectedHarness?.caps.structured_approvals,
-  );
+  const availableModes = selectedHarness
+    ? createPermissionModes(selectedHarness.caps)
+    : [];
   const postedMode =
     permissionMode && availableModes.includes(permissionMode)
       ? permissionMode
-      : defaultCreatePermissionMode(selectedHarness?.caps.structured_approvals);
+      : selectedHarness
+        ? defaultCreatePermissionMode(selectedHarness.caps)
+        : "plan";
   const canCreate =
-    Boolean(repoId && selectedRepo && readyHarnesses.length > 0) && !creating;
+    Boolean(repoId && selectedRepo && selectedHarness) && !creating;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -198,6 +202,13 @@ export function NewWorkspaceDialog({
               availableModes={availableModes}
               onChange={setPermissionMode}
             />
+            {postedMode === "auto" &&
+              selectedHarness &&
+              autoIsUnsupervised(selectedHarness.caps) && (
+                <p className="text-warning-foreground text-xs">
+                  {UNSUPERVISED_AUTO_NOTE}
+                </p>
+              )}
           </div>
           <DialogFooter>
             <Button
