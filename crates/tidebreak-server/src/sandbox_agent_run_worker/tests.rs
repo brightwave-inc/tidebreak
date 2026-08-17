@@ -293,15 +293,21 @@ impl ModelProvider for ThreeCallStepThenFinalProvider {
 
 struct DelayedResolver {
     entered: Arc<Notify>,
-    release: Arc<Notify>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     provider: Arc<dyn ModelProvider>,
 }
 
 #[async_trait]
 impl ProviderResolver for DelayedResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
+        let release = self
+            .release
+            .lock()
+            .unwrap()
+            .take()
+            .expect("delayed resolver is entered once");
         self.entered.notify_one();
-        self.release.notified().await;
+        let _ = release.await;
         self.provider.clone()
     }
 }
@@ -496,6 +502,28 @@ async fn fixture() -> (
     (worker, store, provider, chat, dir)
 }
 
+/// Poll `probe` until it returns `Ok`. The timeout is only a hang guard; the
+/// proof is the observed durable transition, with the last snapshot retained
+/// for a useful failure message.
+async fn wait_until<T, F, Fut>(timeout: Duration, description: &str, mut probe: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, String>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = String::from("not yet polled");
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{description}; last observed: {last}");
+        }
+        match probe().await {
+            Ok(value) => return value,
+            Err(observed) => last = observed,
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn admit_sandbox(
     store: &Arc<dyn Store>,
     chat_id: tidebreak_core::ChatId,
@@ -513,7 +541,7 @@ async fn admit_sandbox(
         (turn, lease)
     } else {
         let turn_id = tidebreak_core::TurnId::new();
-        store
+        let queued = match store
             .accept_turn(
                 turn_id,
                 chat_id,
@@ -521,9 +549,18 @@ async fn admit_sandbox(
                 "sandbox test admission",
             )
             .await
-            .unwrap();
+            .unwrap()
+        {
+            tidebreak_core::AcceptTurnOutcome::Accepted(turn) => turn,
+            outcome => panic!("unexpected sandbox test turn acceptance: {outcome:?}"),
+        };
         let lease = uuid::Uuid::new_v4();
-        let now = Utc::now();
+        // Acceptance uses the database clock, which intentionally rounds
+        // SQLite to the end of its current millisecond. Derive the synthetic
+        // claim time from the committed row so an immediate test claim cannot
+        // land a few microseconds before `updated_at` and see no candidate.
+        let now = std::cmp::max(queued.available_at, queued.updated_at)
+            + chrono::Duration::microseconds(1);
         let turn = store
             .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
             .await
@@ -2104,13 +2141,13 @@ async fn cancellation_while_resolving_prevents_the_provider_request() {
     let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(call);
     admit_sandbox(&store, chat.id, call, "do not call provider").await;
     let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let worker = SandboxAgentRunWorker::new(
         store.clone(),
         test_secrets(),
         Arc::new(DelayedResolver {
             entered: entered.clone(),
-            release: release.clone(),
+            release: Mutex::new(Some(release_rx)),
             provider: provider.clone(),
         }),
         Arc::new(Notify::new()),
@@ -2130,9 +2167,9 @@ async fn cancellation_while_resolving_prevents_the_provider_request() {
     let execution = tokio::spawn(async move { worker.run_once().await });
     entered_wait.await;
     store.request_agent_run_cancellation(id).await.unwrap();
-    release.notify_one();
+    let _ = release_tx.send(());
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), execution)
+        tokio::time::timeout(Duration::from_secs(5), execution)
             .await
             .unwrap()
             .unwrap()
@@ -2507,17 +2544,29 @@ async fn local_cancellation_finalization_survives_accounting_failure_past_execut
             .await
             .expect("post-quiescence accounting reaches the injected outage");
         assert!(dropped.load(Ordering::SeqCst));
-        let until_original_expiry = original_expiry
-            .signed_duration_since(Utc::now())
-            .to_std()
-            .unwrap_or_default();
-        tokio::time::sleep(until_original_expiry + Duration::from_millis(75)).await;
-        assert!(Utc::now() > original_expiry);
-        let still_cancelling = store.get_agent_run(id).await.unwrap().unwrap();
+        let still_cancelling = wait_until(
+            Duration::from_secs(5),
+            "cancellation finalization renewed past the original execution lease",
+            || async {
+                let run = store.get_agent_run(id).await.unwrap().unwrap();
+                let now = Utc::now();
+                match (run.status, run.lease_expires_at) {
+                    (AgentRunStatus::Cancelling, Some(expiry))
+                        if now > original_expiry && expiry > original_expiry =>
+                    {
+                        Ok(run)
+                    }
+                    (status, expiry) => Err(format!(
+                        "status={status:?} lease_expires_at={expiry:?} original={original_expiry} now={now}"
+                    )),
+                }
+            },
+        )
+        .await;
         assert_eq!(still_cancelling.status, AgentRunStatus::Cancelling);
         assert!(still_cancelling
             .lease_expires_at
-            .is_some_and(|expiry| expiry > Utc::now()));
+            .is_some_and(|expiry| expiry > original_expiry));
 
         finalization_control.release_cancellation_accounting();
         assert_eq!(
@@ -2648,15 +2697,15 @@ async fn cancellation_before_local_registration_is_closed_by_first_heartbeat() {
 async fn resolver_delay_past_the_database_lease_prevents_provider_egress() {
     let (_unused, store, provider, chat, _dir) = fixture().await;
     let call = CallId::new();
-    admit_sandbox(&store, chat.id, call, "do not call provider after expiry").await;
+    let run = admit_sandbox(&store, chat.id, call, "do not call provider after expiry").await;
     let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let worker = SandboxAgentRunWorker::new(
-        store,
+        store.clone(),
         test_secrets(),
         Arc::new(DelayedResolver {
             entered: entered.clone(),
-            release: release.clone(),
+            release: Mutex::new(Some(release_rx)),
             provider: provider.clone(),
         }),
         Arc::new(Notify::new()),
@@ -2680,9 +2729,24 @@ async fn resolver_delay_past_the_database_lease_prevents_provider_egress() {
     // With periodic resolver heartbeats deliberately held for this test,
     // this expiry is fenced by the final DB-clock heartbeat immediately
     // before `provider.stream`.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    release.notify_one();
-    let outcome = tokio::time::timeout(Duration::from_secs(1), execution)
+    wait_until(
+        Duration::from_secs(5),
+        "the resolver-held lease expired",
+        || async {
+            let run = store.get_agent_run(run.id).await.unwrap().unwrap();
+            let now = Utc::now();
+            match run.lease_expires_at {
+                Some(expiry) if expiry <= now => Ok(()),
+                expiry => Err(format!(
+                    "status={:?} lease_expires_at={expiry:?} now={now}",
+                    run.status
+                )),
+            }
+        },
+    )
+    .await;
+    release_tx.send(()).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), execution)
         .await
         .unwrap()
         .unwrap()
