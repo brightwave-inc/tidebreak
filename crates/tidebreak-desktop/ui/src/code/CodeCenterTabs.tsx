@@ -71,7 +71,9 @@ export function CodeCenterTabs({
               ) : (
                 <FileCode className="size-3.5 shrink-0" />
               )}
-              <span className="max-w-40 truncate">{label}</span>
+              <span className="max-w-40 truncate" title={centerTabTitle(panel)}>
+                {label}
+              </span>
             </button>
             <button
               type="button"
@@ -86,6 +88,13 @@ export function CodeCenterTabs({
       })}
     </div>
   );
+}
+
+/** The whole path behind a tab whose label is only the file name. */
+function centerTabTitle(panel: PanelContent): string {
+  if (panel.type === "file") return panel.path;
+  if (panel.type === "diff" && panel.path) return `${panel.path} (diff)`;
+  return centerTabLabel(panel);
 }
 
 function centerTabLabel(panel: PanelContent): string {

@@ -144,6 +144,7 @@ export function CodeInspector({
               type="button"
               className="text-muted-foreground hover:text-foreground ml-auto truncate rounded-full border px-2 py-0.5 font-mono text-[11px]"
               aria-label={`Clear ${scope.label} scope`}
+              title={scope.label}
               onClick={() => setInspectorScope(null)}
             >
               {scope.label} ×
@@ -364,6 +365,7 @@ function PrTab({
               <a
                 href={pr.url}
                 className="text-foreground truncate text-sm font-semibold underline-offset-2 hover:underline"
+                title={pr.title ?? `#${pr.number}`}
                 onClick={(event) => {
                   event.preventDefault();
                   void openExternal(pr.url!).catch(() => undefined);
@@ -372,12 +374,18 @@ function PrTab({
                 {pr.title ?? `#${pr.number}`}
               </a>
             ) : (
-              <p className="truncate text-sm font-semibold">
+              <p
+                className="truncate text-sm font-semibold"
+                title={pr.title ?? `#${pr.number}`}
+              >
                 {pr.title ?? `#${pr.number}`}
               </p>
             )}
           </div>
-          <p className="text-muted-foreground mt-1 truncate text-xs">
+          <p
+            className="text-muted-foreground mt-1 truncate font-mono text-xs"
+            title={branchLine ?? undefined}
+          >
             #{pr.number}
             {branchLine ? ` · ${branchLine}` : ""}
           </p>
@@ -563,12 +571,12 @@ function CommentRow({ comment }: { comment: PullRequestComment }) {
           </span>
         )}
         {comment.kind === "inline" && comment.path && (
-          <span className="truncate font-mono">
+          <span className="truncate font-mono" title={comment.path}>
             {comment.path}
             {comment.line !== undefined ? `:${comment.line}` : ""}
           </span>
         )}
-        {when && <span className="ml-auto shrink-0">{when}</span>}
+        {when && <span className="ml-auto shrink-0 tabular-nums">{when}</span>}
       </div>
       <p className="text-xs leading-relaxed whitespace-pre-wrap">
         {comment.body}
@@ -589,24 +597,24 @@ function CheckList({
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        className="hover:bg-muted/50 flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-xs"
+        className="hover:bg-muted/50 -mx-1 flex items-center gap-2 rounded-md px-1 py-1 text-left text-xs"
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
       >
         <CheckCount
-          icon={<Check className="size-3" />}
+          icon={<Check className="size-3.5" />}
           count={counts.passing}
           label="passing"
           className="text-success"
         />
         <CheckCount
-          icon={<CircleDashed className="size-3" />}
+          icon={<CircleDashed className="size-3.5" />}
           count={counts.pending}
           label="pending"
           className="text-muted-foreground"
         />
         <CheckCount
-          icon={<X className="size-3" />}
+          icon={<X className="size-3.5" />}
           count={counts.failing}
           label="failing"
           className="text-critical"
@@ -632,7 +640,7 @@ function CheckCount({
   className: string;
 }) {
   return (
-    <span className={cn("flex items-center gap-1", className)}>
+    <span className={cn("flex items-center gap-1 tabular-nums", className)}>
       {icon}
       {count} {label}
     </span>
@@ -651,7 +659,9 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
   const body = (
     <>
       <Icon className={cn("size-3.5 shrink-0", tone)} />
-      <span className="min-w-0 flex-1 truncate">{check.name}</span>
+      <span className="min-w-0 flex-1 truncate" title={check.name}>
+        {check.name}
+      </span>
       {check.detail && (
         <span className="text-muted-foreground shrink-0 capitalize">
           {check.detail}
@@ -661,13 +671,13 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
   );
   if (!check.url) {
     return (
-      <div className="flex items-center gap-2 px-1 py-1 text-xs">{body}</div>
+      <div className="-mx-1 flex items-center gap-2 px-1 py-1 text-xs">{body}</div>
     );
   }
   return (
     <a
       href={check.url}
-      className="hover:bg-muted/50 flex items-center gap-2 rounded-md px-1 py-1 text-xs"
+      className="hover:bg-muted/50 -mx-1 flex items-center gap-2 rounded-md px-1 py-1 text-xs"
       onClick={(event) => {
         event.preventDefault();
         void openExternal(check.url!).catch(() => undefined);
