@@ -1179,7 +1179,14 @@ mod windows_tests {
         };
 
         let capture = probe_shell(&host, "claude").await.unwrap();
-        assert_eq!(capture.binary, shim);
+        assert!(
+            capture
+                .binary
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&shim.to_string_lossy()),
+            "expected {shim:?}, got {:?}",
+            capture.binary
+        );
         assert_eq!(
             observe_version(&capture.binary, &capture.env)
                 .await

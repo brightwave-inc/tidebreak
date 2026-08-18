@@ -867,8 +867,14 @@ fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), CodeE
     sync_dir(parent).map_err(|_| CodeExecutionError::AmbiguousExecution)
 }
 
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
