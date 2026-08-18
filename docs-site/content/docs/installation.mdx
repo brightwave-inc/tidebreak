@@ -39,11 +39,25 @@ Choose the portable AppImage or the Debian package. Both are x86_64 builds.
 - [Download AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage)
 - [Download Debian package](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb)
 
+Linux packages are built on Ubuntu 22.04. Use Ubuntu 22.04, Debian 12, or a
+newer distribution with a compatible glibc baseline. The Debian package declares
+its WebKitGTK 4.1, GTK 3, and system-tray runtime dependencies; the AppImage
+bundles application dependencies but still needs a compatible host glibc.
+
 Make the AppImage executable before launching it:
 
 ```sh
 chmod +x Tidebreak-linux-x86_64.AppImage
 ./Tidebreak-linux-x86_64.AppImage
+```
+
+Each Linux download has a `.sha256` sidecar. Verify the file you chose before
+installing or launching it:
+
+```sh
+sha256sum -c Tidebreak-linux-x86_64.AppImage.sha256
+# or
+sha256sum -c Tidebreak-linux-x86_64.deb.sha256
 ```
 
 Windows and Linux packages run the desktop chat, files, connected-folder,
