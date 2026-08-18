@@ -190,8 +190,8 @@ fn probe_windows_process_env(host: &HostEnv, name: &str) -> Result<ProbeCapture,
 
 #[cfg(windows)]
 fn resolve_windows_command(env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
-    let path = env_value(env, "PATH")?;
-    let extensions = env_value(env, "PATHEXT")
+    let path = env_value(env, std::ffi::OsStr::new("PATH"))?;
+    let extensions = env_value(env, std::ffi::OsStr::new("PATHEXT"))
         .map(|value| {
             value
                 .to_string_lossy()
