@@ -72,7 +72,7 @@ export function HarnessModelMenu({
   harness: HarnessKind;
   options: readonly CodeModelOption[];
   value?: string;
-  onChange: (model: string) => void;
+  onChange?: (model: string) => void;
 }) {
   const current =
     options.find((option) => option.id === value) ??
@@ -105,8 +105,13 @@ export function HarnessModelMenu({
         <Button
           variant="ghost"
           className="h-8 max-w-56 gap-2"
+          disabled={!onChange}
           aria-label={`Model: ${current.label}`}
-          title={`Model: ${current.label}`}
+          title={
+            onChange
+              ? `Model: ${current.label}`
+              : `Model: ${current.label} (set when this session started)`
+          }
         >
           <Icon className="size-4 shrink-0" />
           <span className="truncate">{current.label}</span>
@@ -122,7 +127,7 @@ export function HarnessModelMenu({
             const option = matches[Number(event.key) - 1];
             if (option) {
               event.preventDefault();
-              onChange(option.id);
+              onChange?.(option.id);
               setOpen(false);
             }
             return;
@@ -156,7 +161,7 @@ export function HarnessModelMenu({
             return (
               <DropdownMenuItem
                 key={`${option.source}:${option.id}`}
-                onSelect={() => onChange(option.id)}
+                onSelect={() => onChange?.(option.id)}
                 className="flex items-center gap-2 py-2"
               >
                 <span className="flex min-w-0 flex-1 flex-col">

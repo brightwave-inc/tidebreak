@@ -46,7 +46,8 @@ import {
  * are named. Typing a title here is the way to opt out of that.
  *
  * Permission mode defaults to Ask when the doctor reports structured
- * approvals, otherwise Plan — create always has a mode the harness can honor.
+ * approvals, otherwise the most autonomous non-bypass mode the harness can
+ * honor. Allow is never the create default.
  * The harness picker lists every doctor entry. Ready rows are selectable;
  * unusable ones stay visible and dimmed.
  */
@@ -118,9 +119,14 @@ export function NewWorkspaceDialog({
         base_ref: baseRef.trim() || undefined,
       });
       upsertWorkspace(workspace);
+      const listed =
+        useCodeCatalogStore.getState().modelsByHarness[harness] ?? [];
+      const model =
+        listed.find((option) => option.default)?.id ?? listed[0]?.id;
       const session = await client.createCodeSession(workspace.id, {
         harness,
         permission_mode: postedMode,
+        model,
       });
       rememberSession(session);
       onOpenChange(false);

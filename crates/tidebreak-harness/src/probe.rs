@@ -105,12 +105,7 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
             if let Some(binary) = crate::managed_binary(data_dir, kind) {
-                let env = capture_shell_env(host).await.unwrap_or_default();
-                return Ok(ProbeCapture {
-                    binary,
-                    env,
-                    stderr: String::new(),
-                });
+                return Ok(pinned_probe_capture(host, binary).await);
             }
             // Do not npm-install or fall through to PATH here. Listing
             // workspaces must not wait on a download. Create-session and
@@ -163,6 +158,25 @@ fn kind_for_command(name: &str) -> Option<tidebreak_core::HarnessKind> {
         "grok" => Some(tidebreak_core::HarnessKind::Grok),
         _ => None,
     }
+}
+
+async fn pinned_probe_capture(host: &HostEnv, binary: PathBuf) -> ProbeCapture {
+    match capture_shell_env(host).await {
+        Ok(env) => ProbeCapture {
+            binary,
+            env,
+            stderr: String::new(),
+        },
+        Err(err) => ProbeCapture {
+            binary,
+            env: process_env_without_tidebreak(),
+            stderr: err.to_string(),
+        },
+    }
+}
+
+fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
+    filter_child_env(std::env::vars_os())
 }
 
 async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
@@ -835,5 +849,30 @@ eval "$cmd"
         write_exec(&bin, "#!/bin/sh\necho\necho '2.1.233 (Claude Code)'\n");
         let version = observe_version(&bin).await.unwrap();
         assert!(version.contains("2.1.233"));
+    }
+
+    #[tokio::test]
+    async fn pin_probe_falls_back_to_process_env_when_the_shell_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("claude");
+        write_exec(&binary, "#!/bin/sh\necho 2.1.234\n");
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+        };
+        let capture = pinned_probe_capture(&host, binary.clone()).await;
+        assert_eq!(capture.binary, binary);
+        assert!(!capture.stderr.is_empty());
+        assert!(capture
+            .env
+            .iter()
+            .any(|(key, _)| key == "PATH" || key == "HOME"));
+        assert!(capture.env.iter().all(|(key, _)| {
+            !key.to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("TIDEBREAK_")
+        }));
     }
 }

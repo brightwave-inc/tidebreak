@@ -22,7 +22,7 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
-import { toggleTerminalLayout } from "./code/codeChrome";
+import { closeCodeChromeTab, splitCodeChromeLayout, toggleTerminalLayout } from "./code/codeChrome";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import {
   codeRepoIdFromPath,
@@ -197,31 +197,15 @@ export function AppShell() {
     "close-tab": () => {
       const { pathname, search } = router.state.location;
       const workspaceId = codeWorkspaceIdFromPath(pathname);
-      if (!workspaceId) return;
+      if (!workspaceId) return false;
       const layout = layoutFromSearch(search as PanelSearch);
-      if (layout.tabs.length === 0) return;
-      const index = layout.activeIndex;
-      const tabs = layout.tabs.filter((_, at) => at !== index);
-      if (tabs.length === 0) {
-        void navigate({
-          to: "/code/w/$workspaceId",
-          params: { workspaceId },
-          search: searchFromLayout({ tabs: [], activeIndex: 0, fullscreen: false }),
-        });
-        return;
-      }
-      let activeIndex = layout.activeIndex;
-      if (index < activeIndex) activeIndex -= 1;
-      else if (index === activeIndex) activeIndex = Math.max(index - 1, 0);
+      const chrome = splitCodeChromeLayout(layout);
+      if (chrome.panels.tabs.length === 0) return false;
+      const next = closeCodeChromeTab(layout, chrome.panels.activeIndex);
       void navigate({
         to: "/code/w/$workspaceId",
         params: { workspaceId },
-        search: searchFromLayout({
-          ...layout,
-          tabs,
-          activeIndex: Math.min(activeIndex, tabs.length - 1),
-          fullscreen: layout.fullscreen && tabs.length > 0,
-        }),
+        search: searchFromLayout(next),
       });
     },
     "focus-composer": focusComposer,

@@ -52,10 +52,10 @@ describe("StartSessionPrompt", () => {
         onStart={onStart}
       />,
     );
-    expect(screen.getByRole("button", { name: "Permissions: Allow all" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onStart).toHaveBeenCalledWith("claude_code", "allow", "list the files");
+    expect(onStart).toHaveBeenCalledWith("claude_code", "ask", "list the files");
   });
 
   it("falls back to Plan when structured approvals are not supported", async () => {

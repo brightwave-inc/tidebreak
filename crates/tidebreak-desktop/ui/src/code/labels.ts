@@ -125,15 +125,20 @@ export function autoIsUnsupervised(caps: ModeCaps): boolean {
 }
 
 /**
- * Create default: Allow all when the engine can honor it. Otherwise the
- * most autonomous posture it actually has.
+ * Create default: Ask when the engine can honor it. Otherwise the most
+ * autonomous non-bypass posture it actually has. Allow is always opt-in
+ * (decision 0033).
  */
 export function defaultCreatePermissionMode(caps: ModeCaps): CodePermissionMode {
-  if (caps.allow_mode === "supported") return "allow";
-  if (caps.auto_mode === "supported") return "auto";
   if (caps.structured_approvals === "supported") return "ask";
+  if (caps.auto_mode === "supported") return "auto";
   if (caps.plan_mode === "supported") return "plan";
-  return "allow";
+  return "plan";
+}
+
+/** True when this engine honors `--model` (or equivalent) on each turn. */
+export function harnessHonorsTurnModel(kind: HarnessKind): boolean {
+  return kind === "claude_code" || kind === "grok";
 }
 
 /** The modes create may post for this engine, each on its own flag. */

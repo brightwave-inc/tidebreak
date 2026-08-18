@@ -65,6 +65,8 @@ pub(crate) struct CodeRuntime {
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
+    /// Last pin-install failure per kind. Cleared on a successful install.
+    pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
     pr_cache: PrDigestCache,
     pub(crate) clone_jobs: CloneJobs,
@@ -94,6 +96,7 @@ impl CodeRuntime {
             },
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -147,6 +150,7 @@ impl CodeRuntime {
             host: HostEnv::from_process(),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
+            pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -239,6 +243,26 @@ impl CodeRuntime {
 
     /// Drop every memoized probe so the next read is cold. The doctor's
     /// refresh is the on-demand re-probe decision 0034 describes.
+    pub(crate) fn record_pin_install(&self, kind: HarnessKind, result: Result<(), String>) {
+        let mut errors = self.pin_install_errors.lock().expect("pin install errors");
+        match result {
+            Ok(()) => {
+                errors.remove(&kind);
+            }
+            Err(err) => {
+                errors.insert(kind, err);
+            }
+        }
+    }
+
+    pub(crate) fn pin_install_error(&self, kind: HarnessKind) -> Option<String> {
+        self.pin_install_errors
+            .lock()
+            .expect("pin install errors")
+            .get(&kind)
+            .cloned()
+    }
+
     pub(crate) fn invalidate_probes(&self) {
         self.probes.lock().expect("harness probes").clear();
     }
@@ -669,11 +693,13 @@ impl CodeRuntime {
         #[cfg(not(test))]
         {
             if let Err(err) = tidebreak_harness::ensure_installed(&self.data_dir, harness).await {
+                self.record_pin_install(harness, Err(err.clone()));
                 return Err(ServerError::unprocessable_kind(
                     "harness_not_found",
                     format!("{harness} could not be installed: {err}"),
                 ));
             }
+            self.record_pin_install(harness, Ok(()));
             self.probes.lock().expect("harness probes").remove(&harness);
         }
         let probe = self.probe(adapter.as_ref()).await;

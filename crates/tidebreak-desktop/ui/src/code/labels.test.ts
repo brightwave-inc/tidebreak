@@ -19,10 +19,10 @@ function caps(
 }
 
 describe("create-time permission mode", () => {
-  it("defaults to Allow all when the engine can honor it", () => {
+  it("defaults to Ask when the engine can honor it, never Allow", () => {
     expect(
       defaultCreatePermissionMode(caps("supported", "supported", "supported", "supported")),
-    ).toBe("allow");
+    ).toBe("ask");
     expect(
       createPermissionModes(caps("supported", "supported", "supported", "supported")),
     ).toEqual(["plan", "ask", "auto", "allow"]);
@@ -49,7 +49,7 @@ describe("create-time permission mode", () => {
     expect(defaultCreatePermissionMode(grok)).toBe("auto");
     expect(
       defaultCreatePermissionMode(caps("unsupported", "unsupported", "supported", "supported")),
-    ).toBe("allow");
+    ).toBe("auto");
     expect(autoIsUnsupervised(grok)).toBe(true);
     // Supervised Auto rides the approval channel and needs no statement.
     expect(autoIsUnsupervised(caps("supported", "supported", "supported"))).toBe(

@@ -58,6 +58,7 @@ import {
   fenceReasonText,
   gatewayCodeModels,
   harnessCodeModels,
+  harnessHonorsTurnModel,
   HARNESS_LABELS,
   LIFECYCLE_LABELS,
 } from "./labels";
@@ -149,6 +150,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       const created = await client.createCodeSession(workspaceId, {
         harness,
         permission_mode: permissionMode,
+        model: inferredHarnessModel(harness),
       });
       catalog.rememberSession(created);
       setSession(created);
@@ -360,6 +362,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       </div>
     </>
   );
+}
+
+function inferredHarnessModel(kind: HarnessKind): string | undefined {
+  const listed = useCodeCatalogStore.getState().modelsByHarness[kind] ?? [];
+  return listed.find((option) => option.default)?.id ?? listed[0]?.id;
 }
 
 function useCodeShortcutHints(): { terminal: string } {
@@ -586,7 +593,9 @@ function CodeSessionPane({
           model={model ?? undefined}
           modelOptions={modelOptions}
           sessionId={session.id}
-          onModelChange={setModel}
+          onModelChange={
+            harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
+          }
           onSend={send}
           onInterrupt={interrupt}
         />

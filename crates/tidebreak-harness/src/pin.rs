@@ -101,22 +101,20 @@ pub fn managed_binary(data_dir: &Path, kind: HarnessKind) -> Option<PathBuf> {
     is_absolute_executable(&binary).then_some(binary)
 }
 
-/// Install the pin with npm if it is not already present.
+/// Install the pin with the managed Node runtime's npm if it is not present.
 pub async fn ensure_installed(data_dir: &Path, kind: HarnessKind) -> Result<PathBuf, String> {
     if let Some(existing) = managed_binary(data_dir, kind) {
         return Ok(existing);
     }
     let pin = pin_for(kind).ok_or_else(|| format!("{kind} has no pin"))?;
-    let npm = find_npm(data_dir).ok_or_else(|| {
-        "no npm available to install the pinned harness (need the managed Node runtime or npm on PATH)"
-            .to_owned()
-    })?;
+    let node_bin = managed_node_bin(data_dir)
+        .ok_or_else(|| "install the managed Node runtime before pinning harnesses".to_owned())?;
     let dir = install_dir(data_dir, pin);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|err| format!("could not create harness install dir: {err}"))?;
     let spec = format!("{}@{}", pin.package, pin.version);
-    let mut command = Command::new(&npm);
+    let mut command = Command::new(node_bin.join("npm"));
     command
         .args([
             "install",
@@ -127,6 +125,7 @@ pub async fn ensure_installed(data_dir: &Path, kind: HarnessKind) -> Result<Path
             &spec,
         ])
         .current_dir(&dir)
+        .env("PATH", prepend_path(&node_bin))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -160,28 +159,27 @@ pub async fn ensure_installed(data_dir: &Path, kind: HarnessKind) -> Result<Path
     })
 }
 
-fn find_npm(data_dir: &Path) -> Option<PathBuf> {
+/// `{data_dir}/tools/node/<version>/bin` when both `node` and `npm` exist.
+///
+/// Official Node's `bin/npm` is `#!/usr/bin/env node`, so the sibling `node`
+/// must be first on the child PATH. GUI PATH is never consulted.
+fn managed_node_bin(data_dir: &Path) -> Option<PathBuf> {
     let node_root = data_dir.join("tools").join("node");
-    if let Ok(entries) = std::fs::read_dir(&node_root) {
-        for entry in entries.flatten() {
-            let npm = entry.path().join("bin").join("npm");
-            if is_absolute_executable(&npm) {
-                return Some(npm);
-            }
+    let mut newest: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(&node_root).ok()?.flatten() {
+        let bin = entry.path().join("bin");
+        if is_absolute_executable(&bin.join("node")) && is_absolute_executable(&bin.join("npm")) {
+            newest = Some(bin);
         }
     }
-    which_on_path("npm")
+    newest
 }
 
-fn which_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if is_absolute_executable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+fn prepend_path(bin: &Path) -> std::ffi::OsString {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin.to_path_buf()];
+    paths.extend(std::env::split_paths(&current));
+    std::env::join_paths(paths).unwrap_or_else(|_| bin.as_os_str().to_os_string())
 }
 
 #[cfg(test)]
@@ -232,5 +230,17 @@ mod tests {
             managed_binary(tmp.path(), HarnessKind::ClaudeCode),
             Some(binary)
         );
+    }
+
+    #[test]
+    fn missing_managed_node_is_an_install_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(ensure_installed(tmp.path(), HarnessKind::ClaudeCode))
+            .unwrap_err();
+        assert!(err.contains("managed Node"), "{err}");
     }
 }

@@ -177,7 +177,8 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyW"],
     mod: true,
     description: "Close the current tab",
-    group: "View",
+    group: "Code",
+    scope: "code",
     allowInEditable: true,
   },
   {
@@ -402,7 +403,10 @@ function hasOpenModalDialog(doc: Document): boolean {
   );
 }
 
-export type ShellShortcutHandlers = Record<ShellShortcutAction, () => void>;
+export type ShellShortcutHandlers = Record<
+  ShellShortcutAction,
+  () => boolean | void
+>;
 
 /**
  * Bind the shell shortcuts to a single window listener for the app's lifetime.
@@ -436,8 +440,9 @@ export function useShellShortcuts(
         mode: modeRef.current(),
       });
       if (!def) return;
+      const handled = handlersRef.current[def.id]();
+      if (handled === false) return;
       event.preventDefault();
-      handlersRef.current[def.id]();
     }
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);

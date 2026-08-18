@@ -27,10 +27,17 @@ pub async fn refresh_harnesses(
         let installs = HarnessKind::ALL.iter().map(|kind| {
             let data_dir = runtime.data_dir.clone();
             async move {
-                let _ = tidebreak_harness::ensure_installed(&data_dir, *kind).await;
+                (
+                    *kind,
+                    tidebreak_harness::ensure_installed(&data_dir, *kind)
+                        .await
+                        .map(|_| ()),
+                )
             }
         });
-        futures::future::join_all(installs).await;
+        for (kind, result) in futures::future::join_all(installs).await {
+            runtime.record_pin_install(kind, result);
+        }
     }
     runtime.invalidate_probes();
     Ok(Json(doctor(&state).await?))
@@ -79,7 +86,10 @@ async fn doctor(state: &AppState) -> Result<HarnessDoctorReport, ServerError> {
                 .filter(|session| session.harness_kind == *kind)
                 .map(|session| session.unrecognized_event_count)
                 .sum();
-            let remediation = if !probe.found {
+            let install_error = runtime.pin_install_error(*kind);
+            let remediation = if let Some(err) = install_error {
+                format!("could not install the pinned {kind} binary: {err}")
+            } else if !probe.found {
                 format!("refresh to install the pinned {kind} binary")
             } else if probe.authenticated == Some(false) {
                 format!("sign in to {kind} in your own terminal, then refresh")
