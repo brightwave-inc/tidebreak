@@ -46,8 +46,8 @@ impl HarnessAdapter for CodexAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "codex").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary).await.ok();
-                let authenticated = observe_login(&capture.binary).await;
+                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let authenticated = observe_login(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -96,7 +96,10 @@ impl HarnessAdapter for CodexAdapter {
 }
 
 /// `codex login status` — "Logged in…" vs "Not logged in". Never reads tokens.
-async fn observe_login(binary: &Path) -> Option<bool> {
+async fn observe_login(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<bool> {
     let mut command = Command::new(binary);
     command
         .args(["login", "status"])
@@ -104,6 +107,10 @@ async fn observe_login(binary: &Path) -> Option<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
     let output = timeout(AUTH_TIMEOUT, command.output()).await.ok()?.ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout

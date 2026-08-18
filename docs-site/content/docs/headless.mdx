@@ -84,6 +84,13 @@ A bare `tidebreak` with no arguments runs `serve`.
 Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
 for `run` and `watch`).
 
+Code mode always drives Tidebreak's pinned harness packages through its exact
+managed Node runtime. The desktop app provisions that runtime; a headless
+server can reuse it when it starts with the same `TIDEBREAK_DATA_DIR`, but does
+not download Node itself or fall back to a system installation. On a fresh
+headless data directory, `tidebreak code doctor` reports the missing managed
+runtime until that directory has been provisioned by the desktop.
+
 ### `serve`
 
 Starts the local API on an ephemeral loopback port and prints the address and a

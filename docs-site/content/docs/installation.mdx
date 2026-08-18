@@ -64,12 +64,14 @@ sha256sum -c Tidebreak-linux-x86_64.deb.sha256
 ```
 
 Windows and Linux packages run the desktop chat, files, connected-folder,
-provider, and remote-sandbox surfaces. Native local execution, managed Node and
-LibreOffice installation, computer use, and code mode remain unavailable where
-the app reports those platform capabilities as unsupported. Release builds
-check the signed updater feed in the background and ask before restarting into
-a newer package. Linux updates preserve the installed format: AppImage installs
-receive AppImage updates and Debian installs receive `.deb` updates.
+provider, and remote-sandbox surfaces. Linux also supports code mode with the
+same digest-verified managed Node runtime and pinned coding harnesses as macOS.
+Windows code mode remains unavailable. Native local execution, managed
+LibreOffice installation, and computer use remain unavailable on both Windows
+and Linux. Release builds check the signed updater feed in the background and
+ask before restarting into a newer package. Linux updates preserve the
+installed format: AppImage installs receive AppImage updates and Debian
+installs receive `.deb` updates.
 
 ## Build from source
 
@@ -114,7 +116,8 @@ Inside it:
 | `tidebreak.lock` | Proof that one process owns this directory |
 
 Provider API keys are **not** in that directory. They go to your OS credential
-store (the login keychain on macOS) under the service name `tidebreak`.
+store — Login Keychain on macOS, Credential Manager on Windows, or Secret
+Service on Linux — under the service name `tidebreak`.
 
 <Callout type="warn">
 While Tidebreak is pre-1.0, opening a database written by an older build can

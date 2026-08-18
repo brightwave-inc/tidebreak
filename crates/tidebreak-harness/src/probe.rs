@@ -32,6 +32,9 @@ pub struct HostEnv {
     pub clear_env: bool,
     /// App data directory. When set, probe prefers a pinned install under it.
     pub data_dir: Option<PathBuf>,
+    /// Host-verified managed Node root. Pinned npm harnesses need its `bin`
+    /// directory first on `PATH`; their entrypoints use `#!/usr/bin/env node`.
+    pub managed_node_root: Option<PathBuf>,
 }
 
 impl Default for HostEnv {
@@ -52,6 +55,7 @@ impl HostEnv {
             env: Vec::new(),
             clear_env: false,
             data_dir: None,
+            managed_node_root: None,
         }
     }
 }
@@ -105,6 +109,13 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
             if let Some(binary) = crate::managed_binary(data_dir, kind) {
+                let node = host
+                    .managed_node_root
+                    .as_deref()
+                    .map(|root| root.join("bin/node"));
+                if !node.as_deref().is_some_and(crate::is_absolute_executable) {
+                    return Err(ProbeError::NotFound(name.to_owned()));
+                }
                 return Ok(pinned_probe_capture(host, binary).await);
             }
             // Do not npm-install or fall through to PATH here. Listing
@@ -164,15 +175,39 @@ async fn pinned_probe_capture(host: &HostEnv, binary: PathBuf) -> ProbeCapture {
     match capture_shell_env(host).await {
         Ok(env) => ProbeCapture {
             binary,
-            env,
+            env: prepend_managed_node_path(env, host.managed_node_root.as_deref()),
             stderr: String::new(),
         },
         Err(err) => ProbeCapture {
             binary,
-            env: process_env_without_tidebreak(),
+            env: prepend_managed_node_path(
+                process_env_without_tidebreak(),
+                host.managed_node_root.as_deref(),
+            ),
             stderr: err.to_string(),
         },
     }
+}
+
+fn prepend_managed_node_path(
+    mut env: Vec<(OsString, OsString)>,
+    managed_node_root: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let Some(root) = managed_node_root else {
+        return env;
+    };
+    let bin = root.join("bin");
+    let prior = env
+        .iter()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    env.retain(|(key, _)| !key.to_string_lossy().eq_ignore_ascii_case("PATH"));
+    let mut paths = vec![bin.clone()];
+    paths.extend(std::env::split_paths(&prior));
+    let path = std::env::join_paths(paths).unwrap_or_else(|_| bin.into_os_string());
+    env.push((OsString::from("PATH"), path));
+    env
 }
 
 fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
@@ -212,8 +247,19 @@ where
         .collect()
 }
 
-/// Run `<binary> --version` and return the first line, trimmed.
-pub async fn observe_version(binary: &Path) -> Result<String, ProbeError> {
+fn apply_captured_env(command: &mut Command, env: &[(std::ffi::OsString, std::ffi::OsString)]) {
+    command.env_clear();
+    for (key, value) in filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+}
+
+/// Run `<binary> --version` under the captured environment and return the
+/// first line, trimmed.
+pub async fn observe_version(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<String, ProbeError> {
     let mut command = Command::new(binary);
     command
         .arg("--version")
@@ -221,6 +267,7 @@ pub async fn observe_version(binary: &Path) -> Result<String, ProbeError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_captured_env(&mut command, env);
     let output = timeout(PROBE_TIMEOUT, command.output())
         .await
         .map_err(|_| ProbeError::Shell("version probe timed out".into()))?
@@ -262,6 +309,7 @@ pub async fn list_cli_models(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_captured_env(&mut command, env);
     let Ok(Ok(output)) = timeout(PROBE_TIMEOUT, command.output()).await else {
         return Vec::new();
     };
@@ -650,6 +698,7 @@ eval "$cmd"
             env: vec![("PATH".into(), dir.as_os_str().to_owned())],
             clear_env: true,
             data_dir: None,
+            managed_node_root: None,
         }
     }
 
@@ -732,6 +781,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             ],
             clear_env: true,
             data_dir: None,
+            managed_node_root: None,
         };
         match resolve_binary(&host, "claude").await {
             Err(ProbeError::RelativePath { name, path })
@@ -755,6 +805,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             env: vec![("PATH".into(), dir.path().as_os_str().to_owned())],
             clear_env: true,
             data_dir: None,
+            managed_node_root: None,
         };
         let resolved = resolve_binary(&host, "claude").await.unwrap();
         assert_eq!(resolved, bin);
@@ -806,6 +857,7 @@ eval "$cmd"
             env: Vec::new(),
             clear_env: true,
             data_dir: None,
+            managed_node_root: None,
         };
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, bin);
@@ -847,7 +899,7 @@ eval "$cmd"
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("claude");
         write_exec(&bin, "#!/bin/sh\necho\necho '2.1.233 (Claude Code)'\n");
-        let version = observe_version(&bin).await.unwrap();
+        let version = observe_version(&bin, &[]).await.unwrap();
         assert!(version.contains("2.1.233"));
     }
 
@@ -861,6 +913,7 @@ eval "$cmd"
             env: Vec::new(),
             clear_env: true,
             data_dir: None,
+            managed_node_root: None,
         };
         let capture = pinned_probe_capture(&host, binary.clone()).await;
         assert_eq!(capture.binary, binary);
@@ -874,5 +927,70 @@ eval "$cmd"
                 .to_ascii_uppercase()
                 .starts_with("TIDEBREAK_")
         }));
+    }
+
+    #[tokio::test]
+    async fn pinned_entrypoint_runs_with_only_managed_node_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_root = dir.path().join("verified-node");
+        let node_bin = node_root.join("bin");
+        std::fs::create_dir_all(&node_bin).unwrap();
+        write_exec(
+            &node_bin.join("node"),
+            "#!/bin/sh\nprintf '%s\\n' managed-node-version\n",
+        );
+        let binary = dir.path().join("claude");
+        write_exec(&binary, "#!/usr/bin/env node\n");
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: Some(node_root),
+        };
+
+        let capture = pinned_probe_capture(&host, binary.clone()).await;
+        let path_values = capture
+            .env
+            .iter()
+            .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(path_values.len(), 1);
+        assert_eq!(
+            std::env::split_paths(path_values[0]).next().as_deref(),
+            Some(node_bin.as_path())
+        );
+        assert_eq!(
+            observe_version(&binary, &capture.env).await.unwrap(),
+            "managed-node-version"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_harness_is_not_found_without_a_verified_node_root() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let pin = crate::pin_for(tidebreak_core::HarnessKind::ClaudeCode).unwrap();
+        let install_dir = crate::pin::install_dir(data_dir.path(), pin);
+        let binary = install_dir.join("node_modules/.bin/claude");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        write_exec(&binary, "#!/usr/bin/env node\n");
+        std::fs::write(
+            install_dir.join("installed.json"),
+            serde_json::json!({"package": pin.package, "version": pin.version}).to_string(),
+        )
+        .unwrap();
+        let host = HostEnv {
+            shell: PathBuf::from("/bin/sh"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: Some(data_dir.path().to_path_buf()),
+            managed_node_root: None,
+        };
+
+        assert!(matches!(
+            probe_shell(&host, "claude").await,
+            Err(ProbeError::NotFound(name)) if name == "claude"
+        ));
     }
 }

@@ -402,7 +402,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
             )}
 
             {availableFolders.length > 0 && (
-              <FolderSection label="Available on this Mac">
+              <FolderSection label="Available on this device">
                 {availableFolders.map((folder) => (
                   <FolderCard
                     key={folder.rootId}

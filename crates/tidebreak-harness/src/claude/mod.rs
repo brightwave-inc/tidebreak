@@ -82,7 +82,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary).await.ok();
+                let version = observe_version(&capture.binary, &capture.env).await.ok();
                 // Auth observation is not captured for 2.1.233. Do not guess.
                 HarnessProbe {
                     found: true,

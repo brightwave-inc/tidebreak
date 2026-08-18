@@ -268,9 +268,11 @@ the packages is distribution-signed in this shipping slice.
 
 Release builds check the authenticated feed and ask before restarting. Tauri's
 installed-bundle detection selects AppImage or Debian metadata before download.
-Native local execution, managed Node and LibreOffice installation, computer use,
-and code mode remain governed by their existing platform capability checks;
-packaging the desktop does not claim those features on Linux.
+Linux code mode uses the desktop's digest-verified managed Node runtime and
+pinned harness packages. Native local execution, managed LibreOffice
+installation, and computer use remain governed by their existing platform
+capability checks; packaging the desktop does not claim those features on
+Linux.
 
 The Linux packaging job uses compiler and Cargo download caches in read-only
 mode and does not enable pnpm caching. It builds both formats from the validated

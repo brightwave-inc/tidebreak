@@ -47,8 +47,8 @@ impl HarnessAdapter for OpencodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "opencode").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary).await.ok();
-                let authenticated = observe_auth(&capture.binary).await;
+                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let authenticated = observe_auth(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -99,7 +99,10 @@ impl HarnessAdapter for OpencodeAdapter {
 }
 
 /// `opencode auth list` — "N credentials" vs "0 credentials". Never reads tokens.
-async fn observe_auth(binary: &Path) -> Option<bool> {
+async fn observe_auth(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<bool> {
     let mut command = Command::new(binary);
     command
         .args(["auth", "list"])
@@ -107,6 +110,10 @@ async fn observe_auth(binary: &Path) -> Option<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
     let output = timeout(AUTH_TIMEOUT, command.output()).await.ok()?.ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut last: Option<u64> = None;

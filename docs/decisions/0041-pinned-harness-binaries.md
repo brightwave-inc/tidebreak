@@ -1,6 +1,6 @@
 # 41. Code Mode Drives Pinned Harness Binaries
 
-- Status: Proposed
+- Status: Superseded by [decision 44](0044-install-pinned-harnesses-on-linux.md)
 - Date: 2026-08-17
 - Owners: code mode
 - Related: [`0034-harness-discovery-credentials.md`](0034-harness-discovery-credentials.md),
