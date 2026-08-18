@@ -1,8 +1,44 @@
 import { create } from "zustand";
 
+import type { HarnessKind } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 
 const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
+const LAST_CREATE_KEY = "tidebreak.code-last-create";
+
+/** What the reader picked the last time they created a workspace. */
+export type CodeCreateDefaults = {
+  repoId?: string;
+  harness?: HarnessKind;
+  model?: string;
+};
+
+function readStoredCreateDefaults(): CodeCreateDefaults | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_CREATE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const record = parsed as Record<string, unknown>;
+    const text = (value: unknown) =>
+      typeof value === "string" && value.length > 0 ? value : undefined;
+    return {
+      repoId: text(record.repoId),
+      harness: text(record.harness) as HarnessKind | undefined,
+      model: text(record.model),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function storeCreateDefaults(defaults: CodeCreateDefaults): void {
+  try {
+    window.localStorage.setItem(LAST_CREATE_KEY, JSON.stringify(defaults));
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
 
 function readStoredReviewSidebarOpen(): boolean {
   try {
@@ -35,6 +71,11 @@ function storeReviewSidebarOpen(open: boolean): void {
  *
  * The review rail is the same kind of chrome as the left sidebar: it is not
  * a URL, and a reload should not forget whether it was showing.
+ *
+ * `lastCreate` is the tie-breaker for the new-workspace dialog's defaults.
+ * The catalog answers "what did you work on last" for anyone with a
+ * workspace already; this covers the first run of a window and the reader
+ * whose newest workspace is not the one they want to repeat.
  */
 export type CodeUiStore = {
   newWorkspaceOpen: boolean;
@@ -42,6 +83,7 @@ export type CodeUiStore = {
   newWorkspaceRepoId: string | undefined;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
+  lastCreate: CodeCreateDefaults | null;
   /**
    * Ask for a workspace, from a repo page or from anywhere in code mode.
    *
@@ -54,6 +96,8 @@ export type CodeUiStore = {
   setAddRepoOpen: (open: boolean) => void;
   toggleReviewSidebar: () => void;
   setReviewSidebarOpen: (open: boolean) => void;
+  /** Record a successful create so the next dialog opens on the same choices. */
+  rememberCreate: (defaults: CodeCreateDefaults) => void;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set) => ({
@@ -61,6 +105,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   newWorkspaceRepoId: undefined,
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
+  lastCreate: readStoredCreateDefaults(),
   startNewWorkspace: (repoId) => {
     const { repos } = useCodeCatalogStore.getState();
     if (repos.length === 0) {
@@ -84,5 +129,9 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   setReviewSidebarOpen: (open) => {
     storeReviewSidebarOpen(open);
     set({ reviewSidebarOpen: open });
+  },
+  rememberCreate: (defaults) => {
+    storeCreateDefaults(defaults);
+    set({ lastCreate: defaults });
   },
 }));

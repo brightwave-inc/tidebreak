@@ -1,10 +1,13 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
 import type {
   CodePermissionMode,
   CodeRepoSnapshot,
+  CodeSessionSnapshot,
+  CodeWorkspaceSnapshot,
+  HarnessDoctorEntry,
   HarnessKind,
 } from "../api/types";
 import { useApp } from "@/AppContext";
@@ -26,7 +29,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
@@ -43,16 +48,47 @@ import {
 /**
  * Create a workspace and its first session, then open it.
  *
- * The title is optional: left blank, the server generates a two-word name and
- * later replaces it with one derived from the first turn, the same way chats
- * are named. Typing a title here is the way to opt out of that.
+ * Every field arrives answered, so the dialog is one keystroke deep: Cmd+Enter
+ * from anywhere in it creates with what is on screen. Repo, harness, and model
+ * open on what this reader used last — the catalog knows, and `lastCreate`
+ * covers a fresh window. The title is optional: left blank, the server
+ * generates a two-word name and later replaces it with one derived from the
+ * first turn, the same way chats are named.
  *
- * Permission mode defaults to Ask when the doctor reports structured
- * approvals, otherwise the most autonomous non-bypass mode the harness can
- * honor. Allow is never the create default.
+ * Permission mode defaults to the most autonomous posture the harness honors
+ * (decision 0039, amended). Whichever posture that is, the row states it.
  * The harness picker lists every doctor entry. Ready rows are selectable;
  * unusable ones stay visible and dimmed.
  */
+
+/** The repo this reader worked on last: newest workspace, then storage. */
+function recentRepoId(
+  repos: readonly CodeRepoSnapshot[],
+  workspaces: readonly CodeWorkspaceSnapshot[],
+  remembered: string | undefined,
+): string {
+  const known = (id: string | undefined) =>
+    id && repos.some((repo) => repo.id === id) ? id : undefined;
+  const newest = [...workspaces]
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .find((workspace) => known(workspace.repo_id));
+  return known(newest?.repo_id) ?? known(remembered) ?? repos[0]?.id ?? "";
+}
+
+/** The engine this reader started last, if it can still be started. */
+function recentHarness(
+  ready: readonly HarnessDoctorEntry[],
+  sessions: Record<string, CodeSessionSnapshot>,
+  remembered: HarnessKind | undefined,
+): HarnessKind | undefined {
+  const newest = Object.values(sessions).sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
+  )[0];
+  for (const kind of [newest?.harness_kind, remembered]) {
+    if (kind && ready.some((entry) => entry.kind === kind)) return kind;
+  }
+  return ready[0]?.kind;
+}
 
 export function NewWorkspaceDialog({
   open,
@@ -68,37 +104,56 @@ export function NewWorkspaceDialog({
   const navigate = useNavigate();
   const { client, models, defaultModelKey } = useApp();
   const doctor = useCodeCatalogStore((state) => state.doctor);
+  const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
   const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
-  const [repoId, setRepoId] = useState(defaultRepoId ?? repos[0]?.id ?? "");
+  const lastCreate = useCodeUiStore((state) => state.lastCreate);
+  const rememberCreate = useCodeUiStore((state) => state.rememberCreate);
+  const [repoId, setRepoId] = useState("");
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
-  const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [pickedHarness, setPickedHarness] = useState<HarnessKind | null>(null);
   const [permissionMode, setPermissionMode] = useState<CodePermissionMode | null>(
     null,
   );
   const [creating, setCreating] = useState(false);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
+  const repoTrigger = useRef<HTMLButtonElement>(null);
+  const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
 
   const allHarnesses = doctor?.harnesses ?? [];
   const readyHarnesses = allHarnesses.filter(
     (entry) => !harnessUnusableReason(entry),
   );
+  // The doctor can land after the dialog opens, so the engine is derived
+  // rather than seeded: a pick wins, and until there is one the recent
+  // engine follows whatever the report says is ready.
+  const harness: HarnessKind =
+    (pickedHarness && readyHarnesses.some((e) => e.kind === pickedHarness)
+      ? pickedHarness
+      : undefined) ??
+    recentHarness(readyHarnesses, sessions, lastCreate?.harness) ??
+    "claude_code";
 
   useEffect(() => {
     if (!open) return;
-    setRepoId(defaultRepoId ?? repos[0]?.id ?? "");
+    const { workspaces: known } = useCodeCatalogStore.getState();
+    const nextRepo =
+      defaultRepoId ?? recentRepoId(repos, known, lastCreate?.repoId);
+    setRepoId(nextRepo);
     setTitle("");
-    const selected = repos.find((repo) => repo.id === (defaultRepoId ?? repos[0]?.id));
-    setBaseRef(selected?.default_base_ref ?? "");
-    setHarness(readyHarnesses[0]?.kind ?? "claude_code");
+    setBaseRef(
+      repos.find((repo) => repo.id === nextRepo)?.default_base_ref ?? "",
+    );
+    setPickedHarness(null);
     setPermissionMode(null);
     setModel(undefined);
-    // Reset against the dialog opening, not against doctor refreshes mid-open.
+    // Reset against the dialog opening, not against catalog refreshes
+    // mid-open — a workspace created elsewhere must not move this form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, defaultRepoId, repos]);
 
@@ -118,33 +173,37 @@ export function NewWorkspaceDialog({
 
   useEffect(() => {
     if (!open || !harness) return;
+    // The reader's last model wins where it is still on offer; otherwise the
+    // catalog's default, then the first row.
+    const pick = (listed: CodeModelOption[]) => (current?: string) => {
+      for (const candidate of [current, lastCreate?.model]) {
+        if (candidate && listed.some((option) => option.id === candidate)) {
+          return candidate;
+        }
+      }
+      return listed.find((option) => option.default)?.id ?? listed[0]?.id;
+    };
     const gateway = gatewayCodeModels(models, harness, defaultModelKey);
     if (gateway.length > 0) {
       setModelOptions(gateway);
-      setModel((current) =>
-        current && gateway.some((option) => option.id === current)
-          ? current
-          : (gateway.find((option) => option.default)?.id ?? gateway[0]?.id),
-      );
+      setModel(pick(gateway));
       return;
     }
     let cancelled = false;
     void ensureHarnessModels(client, harness).then((listed) => {
       if (cancelled) return;
       setModelOptions(listed);
-      setModel((current) =>
-        current && listed.some((option) => option.id === current)
-          ? current
-          : (listed.find((option) => option.default)?.id ?? listed[0]?.id),
-      );
+      setModel(pick(listed));
     });
     return () => {
       cancelled = true;
     };
+    // `lastCreate` is a seed, not a subscription: re-running on it would
+    // undo a deliberate pick the moment another create records one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, defaultModelKey, ensureHarnessModels, harness, models, open]);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  async function create() {
     if (!canCreate) return;
     setCreating(true);
     try {
@@ -167,6 +226,7 @@ export function NewWorkspaceDialog({
         model: posted,
       });
       rememberSession(session);
+      rememberCreate({ repoId, harness, model: posted });
       onOpenChange(false);
       await navigate({
         to: "/code/w/$workspaceId",
@@ -179,9 +239,30 @@ export function NewWorkspaceDialog({
     }
   }
 
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    void create();
+  }
+
   return (
     <Dialog open={open} onOpenChange={creating ? undefined : onOpenChange}>
-      <DialogContent className="max-w-md gap-5 p-5" aria-busy={creating}>
+      <DialogContent
+        className="max-w-md gap-5 p-5"
+        aria-busy={creating}
+        onOpenAutoFocus={(event) => {
+          const trigger = repoTrigger.current;
+          if (!trigger || trigger.hasAttribute("disabled")) return;
+          event.preventDefault();
+          trigger.focus();
+        }}
+        onKeyDownCapture={(event) => {
+          // Cmd+Enter (Ctrl+Enter off macOS) creates with what is on screen,
+          // whichever field has focus. Plain Enter stays field-local.
+          if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+          event.preventDefault();
+          void create();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>New workspace</DialogTitle>
           <DialogDescription>
@@ -200,7 +281,7 @@ export function NewWorkspaceDialog({
               }}
               disabled={creating || Boolean(defaultRepoId) || repos.length === 0}
             >
-              <SelectTrigger aria-label="Repo">
+              <SelectTrigger aria-label="Repo" ref={repoTrigger}>
                 <SelectValue placeholder="No repos" />
               </SelectTrigger>
               <SelectContent scrollButtons={false}>
@@ -219,7 +300,6 @@ export function NewWorkspaceDialog({
               onChange={(event) => setTitle(event.target.value)}
               disabled={creating}
               placeholder="Named automatically"
-              autoFocus
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
@@ -236,7 +316,7 @@ export function NewWorkspaceDialog({
             <HarnessPicker
               harnesses={allHarnesses}
               value={harness}
-              onChange={setHarness}
+              onChange={setPickedHarness}
               disabled={creating}
             />
           </div>
@@ -244,7 +324,13 @@ export function NewWorkspaceDialog({
             <span className="font-medium">Model</span>
             <Select
               value={model}
-              onValueChange={setModel}
+              // A model list that arrives after the first render lands its
+              // rows and its value in the same commit, and the select's
+              // hidden native input answers that with an empty change event.
+              // An empty id is never a model, so it is not a choice.
+              onValueChange={(next) => {
+                if (next) setModel(next);
+              }}
               disabled={creating || modelOptions.length === 0}
             >
               <SelectTrigger aria-label="Model">
@@ -307,6 +393,15 @@ export function NewWorkspaceDialog({
             </Button>
             <Button type="submit" disabled={!canCreate}>
               {creating ? "Creating…" : "Create"}
+              {!creating && (
+                <span
+                  className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
+                  aria-hidden="true"
+                >
+                  <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
+                  <kbd className="font-sans">↩</kbd>
+                </span>
+              )}
             </Button>
           </DialogFooter>
         </form>

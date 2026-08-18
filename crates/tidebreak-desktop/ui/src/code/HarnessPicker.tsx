@@ -17,7 +17,6 @@ import {
 } from "@/components/ui/select";
 import {
   HARNESS_LABELS,
-  HARNESS_SUBTITLES,
   harnessUnusableReason,
 } from "./labels";
 
@@ -32,12 +31,13 @@ const HARNESS_ICONS: Record<
 };
 
 /**
- * Branded harness dropdown: logo, product name, one-line subtitle per row.
+ * Branded harness dropdown: logo and product name per row.
  *
- * Ready rows are selectable. Unusable rows stay listed, disabled, with a
- * short reason in place of the subtitle; a quiet link to the doctor appears
- * under the control while any row is unusable. Versions and capability
- * flags stay off this surface.
+ * Ready rows are selectable and carry nothing but the name — a vendor gloss
+ * tells a reader picking an engine nothing they do not already know.
+ * Unusable rows stay listed, disabled, with the one reason they cannot be
+ * chosen; a quiet link to the doctor appears under the control while any row
+ * is unusable. Versions and capability flags stay off this surface.
  */
 export function HarnessPicker({
   harnesses,
@@ -89,9 +89,11 @@ export function HarnessPicker({
                     <span className="truncate font-medium">
                       {HARNESS_LABELS[entry.kind]}
                     </span>
-                    <span className="text-muted-foreground truncate text-xs">
-                      {reason ?? HARNESS_SUBTITLES[entry.kind]}
-                    </span>
+                    {reason && (
+                      <span className="text-muted-foreground truncate text-xs">
+                        {reason}
+                      </span>
+                    )}
                   </span>
                 </span>
               </SelectItem>

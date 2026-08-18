@@ -42,7 +42,7 @@ function entry(
 }
 
 describe("StartSessionPrompt", () => {
-  it("defaults to Ask and posts Ask when the doctor supports structured approvals", async () => {
+  it("defaults to the widest mode the engine honors, says so, and starts on Cmd+Enter", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
@@ -54,12 +54,16 @@ describe("StartSessionPrompt", () => {
         onStart={onStart}
       />,
     );
-    expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
+    const field = screen.getByRole("textbox", { name: "Message" });
+    await user.type(field, "list the files");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
-      "ask",
+      "allow",
       "list the files",
       undefined,
     );
@@ -152,13 +156,13 @@ describe("StartSessionPrompt", () => {
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
-      "ask",
+      "allow",
       "list the files",
       "claude-opus-5",
     );
   });
 
-  it("states Allow all when that mode is chosen", async () => {
+  it("narrows to a picked mode", async () => {
     const user = userEvent.setup();
     const onSelectMode = vi.fn();
     await renderWithRouter(
@@ -170,8 +174,6 @@ describe("StartSessionPrompt", () => {
         onStart={vi.fn()}
       />,
     );
-    expect(screen.getByRole("button", { name: "Permissions: Allow all" })).toBeInTheDocument();
-    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Permissions: Allow all" }));
     await user.click(screen.getByRole("menuitem", { name: /Ask/ }));
     expect(onSelectMode).toHaveBeenCalledWith("ask");

@@ -1,6 +1,6 @@
 # 39. Allow Is a First-Class Code Permission Mode
 
-- Status: Proposed
+- Status: Proposed (amended 2026-08-18, see [Amendment](#amendment-2026-08-18))
 - Date: 2026-08-17
 - Owners: code mode, approvals
 - Related: [`0033-code-mode-approvals.md`](0033-code-mode-approvals.md),
@@ -104,3 +104,27 @@ if usage shows Allow being chosen without the statement landing.
   statement renders exactly when Allow is the selected create mode.
 - The denylist test still fails a Plan / Ask / Auto plan that includes a
   bypass flag, including via extra argv.
+
+## Amendment (2026-08-18)
+
+**The create default is now the most autonomous mode the engine honors**,
+walking `Allow → Auto → Ask → Plan` and stopping at the first flag that
+says `supported`. The rest of this record stands: the scale, the per-mode
+capability flags, the exhaustive adapter mapping, and the closed bypass
+denylist for every mode but Allow are unchanged.
+
+Why: supervision cost dominated the create flow. Every new session opened
+in Ask and then spent its first minutes on approvals for reads and edits
+inside a throwaway worktree — the confinement code mode already provides
+([`0032`](0032-code-workspaces-worktrees-checkpoints.md)). Choosing the
+posture per session stays available; it is no longer the price of starting.
+
+What does not change: the statement. Allow and unsupervised Auto still say
+what they are next to the control that selects them, and now that they can
+arrive by default, that statement renders on open rather than only after a
+deliberate pick.
+
+Revisit if an unsupervised default causes an incident — a session that
+damages something outside its worktree, or acts on a prompt the reader
+would have stopped at the approval — or if readers report not seeing the
+posture they were started in.
