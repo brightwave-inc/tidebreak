@@ -88,7 +88,9 @@ export function acquireCodeSession(
         if (effect.type === "turn_began") fillPrompt(effect.turnId);
       }
     },
-    onConnectionState: () => {},
+    onConnectionState: (connectionState) => {
+      store.getState().setConnectionState(connectionState);
+    },
     hydrateTurns,
     onHydrate: (turns) => {
       store.getState().update((session) => hydrateCodeTurns(session, turns));

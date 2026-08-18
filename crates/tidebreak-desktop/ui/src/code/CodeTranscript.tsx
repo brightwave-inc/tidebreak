@@ -1,7 +1,7 @@
 import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
-import type { RefCallback } from "react";
+import { useState, type RefCallback } from "react";
 
-import type { CodeApprovalSnapshot, ToolDetail } from "../api/types";
+import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
 import { Badge } from "@/components/ui/badge";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
@@ -162,6 +162,10 @@ function itemSignature(
     case "assistant":
     case "reasoning":
       return String(item.streaming);
+    case "file_activity":
+      return fileActivitySignature(item.files);
+    case "steer":
+      return item.text;
     default:
       return item.kind;
   }
@@ -197,6 +201,20 @@ function TranscriptItem({
           anchorId={item.id}
         />
       );
+    case "steer":
+      return (
+        <UserMessage
+          text={item.text}
+          anchorId={item.id}
+          trailing={
+            <p className="text-muted-foreground mt-1 text-[11px]">
+              Steered mid-turn
+            </p>
+          }
+        />
+      );
+    case "file_activity":
+      return <FileActivityRow files={item.files} />;
     case "assistant":
       return (
         <article className="message message-assistant" aria-label="Assistant">
@@ -371,6 +389,111 @@ function toolDetailLine(detail: ToolDetail): string {
     case "other":
       return detail.summary;
   }
+}
+
+const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
+  added: "A",
+  modified: "M",
+  deleted: "D",
+  renamed: "R",
+};
+
+function fileActivitySignature(
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>,
+): string {
+  return Object.entries(files)
+    .map(
+      ([path, file]) =>
+        `${path}:${file.kind}:${file.diffstat.insertions}:${file.diffstat.deletions}`,
+    )
+    .join("|");
+}
+
+function fileActivityTotals(
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>,
+): { count: number; insertions: number; deletions: number } {
+  let insertions = 0;
+  let deletions = 0;
+  const paths = Object.keys(files);
+  for (const file of Object.values(files)) {
+    insertions += file.diffstat.insertions;
+    deletions += file.diffstat.deletions;
+  }
+  return { count: paths.length, insertions, deletions };
+}
+
+function FileActivityRow({
+  files,
+}: {
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const { count, insertions, deletions } = fileActivityTotals(files);
+  const noun = count === 1 ? "file" : "files";
+  return (
+    <div className="text-muted-foreground max-w-prose text-[11px]">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="text-left"
+        onClick={() => setOpen((current) => !current)}
+      >
+        {count} {noun} changed ·{" "}
+        <span className="text-success-foreground-muted tabular-nums">
+          +{insertions}
+        </span>{" "}
+        <span className="text-critical-foreground-muted tabular-nums">
+          −{deletions}
+        </span>
+      </button>
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows] duration-[140ms] ease-out motion-reduce:transition-none",
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+        )}
+      >
+        <ul className="min-h-0 overflow-hidden">
+          {Object.entries(files).map(([path, file]) => (
+            <li key={path} className="flex items-baseline gap-2 pt-0.5">
+              <span
+                className={cn(
+                  "w-3 shrink-0 font-mono",
+                  file.kind === "added" && "text-success-foreground-muted",
+                  file.kind === "modified" && "text-info-foreground-muted",
+                  file.kind === "deleted" && "text-critical-foreground-muted",
+                  file.kind === "renamed" && "text-warning-foreground-muted",
+                )}
+                aria-label={file.kind}
+              >
+                {FILE_KIND_LETTER[file.kind]}
+              </span>
+              <PathLabel path={path} />
+              <span className="shrink-0 tabular-nums">
+                +{file.diffstat.insertions} −{file.diffstat.deletions}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function PathLabel({ path }: { path: string }) {
+  const slash = path.lastIndexOf("/");
+  if (slash < 0) {
+    return (
+      <span className="min-w-0 truncate font-mono" title={path}>
+        {path}
+      </span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 font-mono" title={path}>
+      <span className="min-w-0 truncate">{path.slice(0, slash + 1)}</span>
+      <span className="shrink-0">{path.slice(slash + 1)}</span>
+    </span>
+  );
 }
 
 

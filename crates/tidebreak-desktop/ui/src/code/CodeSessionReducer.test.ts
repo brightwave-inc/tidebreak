@@ -76,12 +76,7 @@ describe("seq cursor", () => {
   it("advances the cursor for unknown event kinds", () => {
     const { state, effects } = reduceCodeSessionEvent(
       initialCodeSessionState(),
-      framed(4, { type: "file_changed", path: "a.ts", kind: "modified", diffstat: {
-        files: 1,
-        insertions: 1,
-        deletions: 0,
-        truncated: false,
-      } }),
+      framed(4, { type: "future_kind" } as unknown as CodeEvent),
       deps(),
     );
     expect(state.lastSeq).toBe(4);
@@ -323,6 +318,81 @@ describe("hydration flag", () => {
     expect(settled.hydrated).toBe(true);
     expect(settled.items).toBe(withTurns.items);
     expect(markCodeSessionHydrated(settled)).toBe(settled);
+  });
+});
+
+describe("user_steered", () => {
+  it("appends a steer item on the active turn", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "user_steered", text: "use fixtures" },
+    ]);
+    expect(state.items.at(-1)).toMatchObject({
+      kind: "steer",
+      turnId: "t1",
+      text: "use fixtures",
+    });
+  });
+});
+
+describe("file_changed", () => {
+  it("aggregates per-turn file activity and bumps contentRevision", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "file_changed",
+        path: "a.ts",
+        kind: "modified",
+        diffstat: { files: 1, insertions: 10, deletions: 2, truncated: false },
+      },
+      {
+        type: "file_changed",
+        path: "b.ts",
+        kind: "added",
+        diffstat: { files: 1, insertions: 32, deletions: 5, truncated: false },
+      },
+      {
+        type: "file_changed",
+        path: "a.ts",
+        kind: "modified",
+        diffstat: { files: 1, insertions: 12, deletions: 3, truncated: false },
+      },
+    ]);
+    expect(state.items.filter((item) => item.kind === "file_activity")).toHaveLength(
+      1,
+    );
+    expect(state.items.find((item) => item.kind === "file_activity")).toMatchObject({
+      kind: "file_activity",
+      turnId: "t1",
+      files: {
+        "a.ts": {
+          kind: "modified",
+          diffstat: { files: 1, insertions: 12, deletions: 3, truncated: false },
+        },
+        "b.ts": {
+          kind: "added",
+          diffstat: { files: 1, insertions: 32, deletions: 5, truncated: false },
+        },
+      },
+    });
+    expect(state.contentRevision).toBe(3);
+  });
+});
+
+describe("attention_changed", () => {
+  it("reduces into state.attention and does not add a transcript item", () => {
+    const { state } = play([
+      {
+        type: "attention_changed",
+        state: { type: "stalled", idle_secs: 90 },
+        source: "heuristic",
+      },
+    ]);
+    expect(state.attention).toEqual({
+      state: { type: "stalled", idle_secs: 90 },
+      source: "heuristic",
+    });
+    expect(state.items).toEqual([]);
   });
 });
 

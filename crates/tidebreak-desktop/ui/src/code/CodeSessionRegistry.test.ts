@@ -10,6 +10,9 @@ import { userItemId } from "./CodeSessionReducer";
 
 class FakeSocket {
   closed = false;
+  onopen: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
   constructor(
     public readonly after: number,
     public readonly emit: (frame: SequencedCodeEventFrame) => void,
@@ -127,6 +130,29 @@ describe("CodeSessionRegistry", () => {
     expect(store.getState().items.find((item) => item.kind === "assistant")).toMatchObject({
       text: "README.md",
     });
+  });
+
+  it("records reconnecting from the controller", async () => {
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+
+    const store = acquireCodeSession("s1", openSocket);
+    expect(store.getState().connectionState).toBe("live");
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(store.getState().connectionState).toBe("live");
+    expect(sockets).toHaveLength(1);
+
+    sockets[0]?.onclose?.();
+    expect(store.getState().connectionState).toBe("reconnecting");
   });
 
   it("fills in the prompt of a turn the socket announces", async () => {

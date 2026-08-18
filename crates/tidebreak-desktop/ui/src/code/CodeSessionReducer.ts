@@ -1,9 +1,11 @@
 import type {
+  Attention,
   CodeSessionLifecycle,
   CodeTurnSnapshot,
   CodeTurnStatus,
   CodeUsage,
   Diffstat,
+  FileChangeKind,
   HarnessKind,
   HarnessNoticeLevel,
   SequencedCodeEventFrame,
@@ -76,6 +78,18 @@ export type CodeTranscriptItem =
       id: string;
       approvalId: string;
       state: "pending" | "approved" | "denied";
+    }
+  | {
+      kind: "steer";
+      id: string;
+      turnId: string | null;
+      text: string;
+    }
+  | {
+      kind: "file_activity";
+      id: string;
+      turnId: string | null;
+      files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
     };
 
 export type CodeSessionState = {
@@ -110,6 +124,11 @@ export type CodeSessionState = {
    * as "your copy is stale", so they do not need their own polling.
    */
   contentRevision: number;
+  /**
+   * Latest `attention_changed` from the journal. Not a transcript item — the
+   * header badge reads this so a stall or a need-you does not grow the log.
+   */
+  attention: Attention | null;
 };
 
 export type CodeSessionEffect =
@@ -142,6 +161,7 @@ export function initialCodeSessionState(): CodeSessionState {
     lastUsage: null,
     lifecycle: null,
     contentRevision: 0,
+    attention: null,
   };
 }
 
@@ -151,6 +171,10 @@ export function userItemId(turnId: string): string {
 
 export function boundaryItemId(turnId: string): string {
   return `boundary:${turnId}`;
+}
+
+export function fileActivityItemId(turnId: string | null): string {
+  return turnId ? `files:${turnId}` : "files:open";
 }
 
 /**
@@ -443,6 +467,51 @@ export function reduceCodeSessionEvent(
       };
     }
 
+    case "user_steered": {
+      return {
+        state: {
+          ...state,
+          items: [
+            ...state.items,
+            {
+              kind: "steer",
+              id: deps.nextId(),
+              turnId: state.activeTurnId,
+              text: event.text,
+            },
+          ],
+        },
+        effects,
+      };
+    }
+
+    case "attention_changed": {
+      return {
+        state: {
+          ...state,
+          attention: { state: event.state, source: event.source },
+        },
+        effects,
+      };
+    }
+
+    case "file_changed": {
+      return {
+        state: {
+          ...state,
+          items: upsertFileActivity(
+            state.items,
+            state.activeTurnId,
+            event.path,
+            event.kind,
+            event.diffstat,
+          ),
+          contentRevision: state.contentRevision + 1,
+        },
+        effects,
+      };
+    }
+
     case "turn_completed":
     case "turn_failed":
     case "turn_interrupted": {
@@ -588,6 +657,40 @@ function applyDiffstat(
       ? { ...item, diffstat }
       : item,
   );
+}
+
+function upsertFileActivity(
+  items: CodeTranscriptItem[],
+  turnId: string | null,
+  path: string,
+  kind: FileChangeKind,
+  diffstat: Diffstat,
+): CodeTranscriptItem[] {
+  const id = fileActivityItemId(turnId);
+  const index = items.findIndex(
+    (item) => item.kind === "file_activity" && item.turnId === turnId,
+  );
+  if (index === -1) {
+    return [
+      ...items,
+      {
+        kind: "file_activity",
+        id,
+        turnId,
+        files: { [path]: { kind, diffstat } },
+      },
+    ];
+  }
+  const existing = items[index];
+  if (!existing || existing.kind !== "file_activity") return items;
+  return [
+    ...items.slice(0, index),
+    {
+      ...existing,
+      files: { ...existing.files, [path]: { kind, diffstat } },
+    },
+    ...items.slice(index + 1),
+  ];
 }
 
 function durationMs(

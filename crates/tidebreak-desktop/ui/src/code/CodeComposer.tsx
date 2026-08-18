@@ -297,9 +297,13 @@ export function CodeComposer({
   model,
   modelOptions,
   sessionId,
+  history,
+  queued = false,
+  lastTurnBeganId,
   onModelChange,
   onModeChange,
   onSend,
+  onSteer,
   onInterrupt,
 }: {
   disabled?: boolean;
@@ -311,26 +315,42 @@ export function CodeComposer({
   model?: string;
   modelOptions?: readonly CodeModelOption[];
   sessionId?: string;
+  /** Prior user prompts, newest first, for Up/Down recall. */
+  history?: readonly string[];
+  /** A follow-up the pane is holding until the next turn begins. */
+  queued?: boolean;
+  /**
+   * The turn the journal last announced. A change drops the queued pill once
+   * the parked follow-up starts.
+   */
+  lastTurnBeganId?: string | null;
   onModelChange?: (model: string) => void;
   onModeChange?: (mode: CodePermissionMode) => void;
   onSend: (message: string) => Promise<CodeTurnSubmission | void> | void;
+  /**
+   * Redirect the in-flight turn. Absent when the harness cannot steer, so a
+   * mid-turn send stays on the queue path.
+   */
+  onSteer?: (message: string) => Promise<void>;
   onInterrupt: () => Promise<void> | void;
 }) {
   const [draft, setDraft] = useState("");
   const [selectedModel, setSelectedModel] = useState(model ?? "");
-  const [notice, setNotice] = useState<
-    { tone: "queued" | "error"; text: string } | null
-  >(null);
+  const [notice, setNotice] = useState<{ text: string } | null>(null);
+  const [followUpQueued, setFollowUpQueued] = useState(false);
+  const [steerPending, setSteerPending] = useState(false);
+  const [steerError, setSteerError] = useState<string | null>(null);
+  const [steerStatus, setSteerStatus] = useState<string | null>(null);
+  const canSteer = onSteer !== undefined;
+  const showQueued = queued || followUpQueued;
 
   useEffect(() => {
     if (model) setSelectedModel(model);
   }, [model]);
 
   useEffect(() => {
-    if (!running) {
-      setNotice((current) => (current?.tone === "queued" ? null : current));
-    }
-  }, [running]);
+    setFollowUpQueued(false);
+  }, [lastTurnBeganId]);
 
   async function submit() {
     const message = draft.trim();
@@ -340,14 +360,10 @@ export function CodeComposer({
     try {
       const outcome = await onSend(message);
       if (outcome && outcome.kind === "queued") {
-        setNotice({
-          tone: "queued",
-          text: "Queued — runs after the current turn.",
-        });
+        setFollowUpQueued(true);
       }
     } catch (err) {
       setNotice({
-        tone: "error",
         text:
           err instanceof HttpError && err.kind === "queue_full"
             ? "A follow-up is already queued. Wait for it to run, or interrupt this turn."
@@ -359,8 +375,35 @@ export function CodeComposer({
     }
   }
 
+  async function steer() {
+    const message = draft.trim();
+    if (!message || disabled || !onSteer) return;
+    setSteerPending(true);
+    setSteerError(null);
+    setSteerStatus("Sending guidance…");
+    setNotice(null);
+    try {
+      await onSteer(message);
+      setDraft("");
+      setSteerStatus("Guidance sent");
+    } catch (err) {
+      setSteerStatus(null);
+      setSteerError(err instanceof Error ? err.message : "Could not steer");
+    } finally {
+      setSteerPending(false);
+    }
+  }
+
   return (
-    <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
+    <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
+      {showQueued && (
+        <p
+          role="status"
+          className="text-muted-foreground pointer-events-none absolute inset-x-0 bottom-full mx-auto mb-1 max-w-3xl text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
+        >
+          1 follow-up queued
+        </p>
+      )}
       <Composer
         activeTurnId={running ? "running" : null}
         busy={running}
@@ -368,6 +411,7 @@ export function CodeComposer({
         cancelPending={false}
         disabled={Boolean(disabled)}
         draft={draft}
+        history={history}
         modelMenu={
           harness && modelOptions && modelOptions.length > 0 ? (
             <HarnessModelMenu
@@ -389,26 +433,26 @@ export function CodeComposer({
             scopeKey={sessionId ?? "code-create"}
           />
         }
-        onDraftChange={setDraft}
+        onDraftChange={(value) => {
+          setSteerError(null);
+          setSteerStatus(null);
+          setDraft(value);
+        }}
         onSend={submit}
-        onSteer={submit}
+        onSteer={canSteer ? steer : submit}
         onQueue={submit}
         onStop={async () => {
           await onInterrupt();
         }}
         resetKey={sessionId ?? "code"}
-        steerError={null}
-        steerPending={false}
-        steerStatus={null}
+        steerError={canSteer ? steerError : null}
+        steerPending={canSteer ? steerPending : false}
+        steerStatus={canSteer ? steerStatus : null}
       />
       {notice && (
         <p
-          role="status"
-          className={
-            notice.tone === "error"
-              ? "text-destructive mx-auto max-w-3xl pt-1 text-xs"
-              : "text-muted-foreground mx-auto max-w-3xl pt-1 text-xs"
-          }
+          role="alert"
+          className="text-critical-foreground mx-auto max-w-3xl pt-1 text-[11px]"
         >
           {notice.text}
         </p>
