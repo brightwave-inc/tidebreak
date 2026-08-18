@@ -285,15 +285,18 @@ export function CodeToolCard({
   return (
     <ToolCardShell
       icon={toolIcon(detail)}
-      title={toolTitle(detail, name)}
-      titleClassName={detail.kind === "command" ? "font-mono" : undefined}
+      title={
+        <MiddleTruncate
+          text={toolTitle(detail, name)}
+          className={detail.kind === "command" ? "font-mono" : undefined}
+        />
+      }
       badge={badge}
       defaultExpanded={status === "running"}
-      className={status === "failed" ? "border-critical-border" : undefined}
       label={`${name} ${status}`}
     >
-      <div className="text-muted-foreground space-y-1 px-2.5 pb-2 text-xs">
-        <p>{toolDetailLine(detail)}</p>
+      <div className="text-muted-foreground space-y-1 px-2.5 pb-2 [overflow-anchor:none]">
+        <p className="text-[11px]">{toolDetailLine(detail)}</p>
         {preview && <ToolOutputPreview text={preview} />}
       </div>
     </ToolCardShell>
@@ -356,6 +359,30 @@ function toolTitle(detail: ToolDetail, name: string): string {
     case "other":
       return detail.summary || name;
   }
+}
+
+/** Keep the tail of a command or path when the header runs out of room. */
+function MiddleTruncate({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
+  const tail = Math.min(28, Math.max(12, Math.ceil(text.length / 3)));
+  if (text.length <= 40) {
+    return (
+      <span className={cn("block truncate", className)} title={text}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <span className={cn("flex min-w-0", className)} title={text}>
+      <span className="truncate">{text.slice(0, -tail)}</span>
+      <span className="shrink-0">{text.slice(-tail)}</span>
+    </span>
+  );
 }
 
 function toolDetailLine(detail: ToolDetail): string {

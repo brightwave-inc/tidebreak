@@ -47,7 +47,7 @@ export function ToolOutputPreview({
         <pre
           id={bodyId}
           aria-label={label}
-          className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
+          className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
         >
           {body}
         </pre>
@@ -56,7 +56,7 @@ export function ToolOutputPreview({
           label={`Copy ${label.toLowerCase()}`}
           copiedAnnouncement={`${label} copied to clipboard.`}
           failedAnnouncement={`${label} could not be copied.`}
-          className="border-border bg-background text-muted-foreground hover:text-foreground absolute top-1 right-1 inline-flex items-center rounded-md border p-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+          className="border-border bg-background text-muted-foreground hover:text-foreground absolute top-1 right-1 inline-flex items-center rounded-md border p-1 opacity-0 transition-opacity duration-[140ms] ease-out group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
         />
       </div>
       {hiddenCount > 0 && (
