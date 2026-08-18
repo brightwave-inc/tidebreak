@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo, useRef } from "react";
+import { memo, useMemo, useRef } from "react";
 import { Wand2 } from "lucide-react";
 import type { ReactNode, Ref, RefCallback, UIEvent } from "react";
 import type {
@@ -26,6 +26,9 @@ import type {
 import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
+import { AssistantMessageBody } from "./AssistantMessageBody";
+import { TranscriptSkeleton } from "./TranscriptSkeleton";
+import { UserMessage } from "./UserMessage";
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
 import { ThinkingAccordion } from "./ThinkingAccordion";
 import { stripCitationDirectives } from "./citationDirectives";
@@ -61,8 +64,6 @@ import {
   turnFailureOffersRetry,
 } from "./TurnFailureNotice";
 import type { TurnFailureCategory } from "./generated/wire";
-import { useStreamingTypewriter } from "./useStreamingTypewriter";
-import { Skeleton } from "./components/ui/skeleton";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
 
 export type ChatMessage =
@@ -473,26 +474,6 @@ export function MessageList({
           </>
         )}
       </div>
-    </div>
-  );
-}
-
-/** Placeholder rows that echo the transcript's shape while history hydrates. */
-function TranscriptSkeleton() {
-  return (
-    <div className="flex w-full flex-col gap-4" aria-hidden="true">
-      {[0, 1, 2, 3].map((row) => (
-        <Fragment key={row}>
-          <Skeleton className="h-9 w-1/2 self-start rounded-xl" />
-          <div className="flex flex-col gap-2.5 py-2">
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="h-3 w-5/6" />
-            <Skeleton className="h-3 w-1/3" />
-          </div>
-        </Fragment>
-      ))}
     </div>
   );
 }
@@ -1043,27 +1024,6 @@ function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
 }
 
 /**
- * Assistant prose driven by the typewriter: while the bubble is the live
- * streaming turn its text is typed in, and a settled or rehydrated message
- * renders at once. Block-level memoization inside {@link MessageMarkdown} keeps
- * each tick's re-parse confined to the trailing block.
- */
-function AssistantMessageBody({
-  text,
-  streaming,
-  containerRef,
-}: {
-  text: string;
-  streaming: boolean;
-  containerRef?: React.Ref<HTMLDivElement>;
-}) {
-  const displayed = useStreamingTypewriter(text, streaming);
-  return (
-    <MessageMarkdown containerRef={containerRef}>{displayed}</MessageMarkdown>
-  );
-}
-
-/**
  * The skills a durable user message named, read back from the transcript.
  *
  * Read-only by construction: the message has already been sent, so there is
@@ -1205,43 +1165,40 @@ function MessageBubbleImpl({
 
   if (message.role === "user") {
     return (
-      <div className="message-user-frame">
-        <article
-          className="message message-user"
-          aria-label="You"
-          data-transcript-anchor={message.id}
-        >
-          {message.images &&
-            message.images.length > 0 &&
-            imageClient &&
-            chatId &&
-            isolatedCard(
-              `${message.id}-images`,
-              message.images.map((image) => image.attachmentId).join(" "),
-              <TranscriptImageAttachments
-                client={imageClient}
-                chatId={chatId}
-                images={message.images}
-              />,
-            )}
-          {message.files &&
-            message.files.length > 0 &&
-            isolatedCard(
-              `${message.id}-files`,
-              message.files.map((file) => file.documentId).join(" "),
-              <TranscriptFileAttachments files={message.files} />,
-            )}
-          <MessageMarkdown>{message.text}</MessageMarkdown>
-          {message.invokedSkills && message.invokedSkills.length > 0 && (
+      <UserMessage
+        text={message.text}
+        createdAt={message.createdAt}
+        anchorId={message.id}
+        leading={
+          <>
+            {message.images &&
+              message.images.length > 0 &&
+              imageClient &&
+              chatId &&
+              isolatedCard(
+                `${message.id}-images`,
+                message.images.map((image) => image.attachmentId).join(" "),
+                <TranscriptImageAttachments
+                  client={imageClient}
+                  chatId={chatId}
+                  images={message.images}
+                />,
+              )}
+            {message.files &&
+              message.files.length > 0 &&
+              isolatedCard(
+                `${message.id}-files`,
+                message.files.map((file) => file.documentId).join(" "),
+                <TranscriptFileAttachments files={message.files} />,
+              )}
+          </>
+        }
+        trailing={
+          message.invokedSkills && message.invokedSkills.length > 0 ? (
             <TranscriptInvokedSkills skills={message.invokedSkills} />
-          )}
-        </article>
-        <MessageFooter
-          role="user"
-          text={message.text}
-          createdAt={message.createdAt}
-        />
-      </div>
+          ) : null
+        }
+      />
     );
   }
 
