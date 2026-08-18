@@ -81,7 +81,10 @@ export function DiffPanel({
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
         <div className="min-w-0">
           <h2 className="text-sm font-medium">Diff</h2>
-          <p className="text-muted-foreground truncate font-mono text-[11px]">
+          <p
+            className="text-muted-foreground truncate font-mono text-[11px]"
+            title={scopeCaption}
+          >
             {scopeCaption}
           </p>
         </div>
@@ -146,7 +149,10 @@ function FileDiffSection({
             )}
             aria-hidden="true"
           />
-          <h3 className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
+          <h3
+            className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs"
+            title={group.path}
+          >
             {group.path}
           </h3>
           {onOpenFile && (
@@ -175,7 +181,7 @@ function FileDiffSection({
         </button>
       </header>
       {expanded ? (
-        <pre className="overflow-x-auto py-1 font-mono text-[11px] leading-5">
+        <pre className="overflow-x-auto py-1 font-mono text-xs leading-5">
           {group.lines.map((line, index) => (
             <DiffLineRow
               key={`${group.path}:${index}`}

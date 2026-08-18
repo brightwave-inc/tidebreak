@@ -60,7 +60,7 @@ export function TurnReviewCard({
         <p className="flex items-center gap-1.5 font-medium">
           <TriangleAlert size={14} aria-hidden="true" />
           Turn failed
-          {duration && <span className="font-normal">· {duration}</span>}
+          {duration && <span className="font-normal tabular-nums">· {duration}</span>}
         </p>
         <p>{turn.error ?? "The engine stopped without saying why."}</p>
         {narrative}
@@ -74,7 +74,7 @@ export function TurnReviewCard({
       <SeamRow label="Turn interrupted" tone="warning">
         <CircleSlash size={13} aria-hidden="true" />
         <span>Turn interrupted</span>
-        {duration && <span>· {duration}</span>}
+        {duration && <span className="tabular-nums">· {duration}</span>}
         {narrative}
         {diffstat}
       </SeamRow>
@@ -85,7 +85,7 @@ export function TurnReviewCard({
     <SeamRow label="Turn finished" tone="quiet">
       <Check size={13} aria-hidden="true" />
       <span>Turn finished</span>
-      {duration && <span>· {duration}</span>}
+      {duration && <span className="tabular-nums">· {duration}</span>}
       {narrative}
       {diffstat}
       <TurnUsage usage={turn.usage} />
@@ -167,7 +167,7 @@ function TurnDiffstat({
 
 export function DiffstatBadge({ stat }: { stat: Diffstat }) {
   return (
-    <Badge variant="outline" size="sm">
+    <Badge variant="outline" size="sm" className="tabular-nums">
       {stat.files} file{stat.files === 1 ? "" : "s"} +{stat.insertions} −
       {stat.deletions}
       {stat.truncated ? " · truncated" : ""}

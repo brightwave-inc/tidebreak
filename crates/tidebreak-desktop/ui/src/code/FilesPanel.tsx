@@ -161,7 +161,7 @@ export function FilesPanel({
           {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
         </span>
       </div>
-      <div className="flex flex-col gap-1.5 px-3 pt-2">
+      <div className="flex flex-col gap-2 px-3 pt-2">
         <SearchInput
           size="sm"
           value={query}
