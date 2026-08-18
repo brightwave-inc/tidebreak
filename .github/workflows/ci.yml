@@ -6,6 +6,10 @@ on:
   pull_request:
     types:
       [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
+  # Speculative merge groups from the main merge queue. Required checks must
+  # report here or the queue never drains. Scope detection diffs the group
+  # against its base the same way a pull request diffs against main.
+  merge_group:
   # Backstop the deliberately scoped post-merge capability lanes even during a
   # week with no relevant merge. The non-PR full-validation path below makes a
   # scheduled run exercise every lane.
@@ -36,20 +40,28 @@ concurrency:
 jobs:
   pr-title:
     name: semantic PR title
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     steps:
+      # A merge group has no pull-request title payload. The same check name
+      # is required on the queue, and the title was already judged when the
+      # pull request entered it.
+      - name: Accept titles already checked on the pull request
+        if: ${{ github.event_name == 'merge_group' }}
+        run: echo "Merge groups reuse the pull request title check."
       # The title and labels come from the event payload, so this job never
       # needs the pull request's own code — only the trusted base-branch copy
       # of the policy it is judged by.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
       - name: Validate Conventional Commit title
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           CANONICAL_REPOSITORY: brightwave-inc/tidebreak
           GH_TOKEN: ${{ github.token }}
@@ -124,6 +136,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           PUSH_BASE_SHA: ${{ github.event.before }}
           PUSH_HEAD_SHA: ${{ github.event.after }}
         run: |
@@ -142,6 +156,11 @@ jobs:
             pull_request)
               base_sha="$PR_BASE_SHA"
               head_sha="$PR_HEAD_SHA"
+              diff_range="$base_sha...$head_sha"
+              ;;
+            merge_group)
+              base_sha="$MERGE_GROUP_BASE_SHA"
+              head_sha="$MERGE_GROUP_HEAD_SHA"
               diff_range="$base_sha...$head_sha"
               ;;
             push)

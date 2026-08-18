@@ -454,6 +454,27 @@ test("PR lanes are scope-gated, never label-gated", () => {
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
+test("merge queue groups re-run required CI", () => {
+  const ci = workflows["ci.yml"];
+  const changes = workflowJob(ci, "changes");
+  const prTitle = workflowJob(ci, "pr-title");
+
+  // Required checks never run unless the workflow listens for merge_group.
+  // Keep the trigger after pull_request so the trusted base-branch trigger
+  // regex still matches this file.
+  assert.match(ci, /pull_request:\n\s+types:\n[\s\S]*?\n  merge_group:\n/);
+  assert.match(changes, /merge_group\)\n\s+base_sha="\$MERGE_GROUP_BASE_SHA"/);
+  assert.match(changes, /MERGE_GROUP_BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
+  assert.match(changes, /MERGE_GROUP_HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
+  // The title job is a required check. Merge groups have no PR payload, so
+  // the same name must still report success or the queue stalls.
+  assert.match(
+    prTitle,
+    /if: \$\{\{ github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group' \}\}/,
+  );
+  assert.match(prTitle, /github\.event_name == 'merge_group'/);
+});
+
 test("native Windows CI is an explicit PR opt-in with a main backstop", () => {
   const windows = workflowJob(workflows["ci.yml"], "windows-check");
   const windowsCiGate =
