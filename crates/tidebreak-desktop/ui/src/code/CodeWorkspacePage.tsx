@@ -449,7 +449,7 @@ function PendingApprovalBadge({
         document
           .querySelector('[data-code-approval-state="pending"]')
           ?.scrollIntoView({
-            block: "center",
+            block: "nearest",
             behavior: followScrollBehavior(false),
           });
       }}
