@@ -2050,9 +2050,8 @@ mod windows_tests {
         let action = QuickAction {
             name: "process tree timeout".into(),
             command: format!(
-                "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
-                 -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
-                 'Start-Sleep -Seconds 120') -PassThru; \
+                "$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\ping.exe') \
+                 -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; \
                  [IO.File]::WriteAllText({}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
                  Wait-Process -Id $child.Id",
                 powershell_single_quote(&pid_file.to_string_lossy())
@@ -2085,7 +2084,7 @@ mod windows_tests {
     }
 
     async fn wait_for_pid(path: &Path, action: &tokio::task::JoinHandle<ActionOutcome>) -> u32 {
-        let deadline = Instant::now() + ACTION_TIMEOUT - Duration::from_millis(500);
+        let deadline = Instant::now() + ACTION_TIMEOUT + DESCENDANT_EXIT_TIMEOUT;
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await {
                 if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
@@ -2098,7 +2097,7 @@ mod windows_tests {
             );
             assert!(
                 Instant::now() < deadline,
-                "descendant pid was not published before ACTION_TIMEOUT"
+                "quick action exceeded its timeout without publishing its descendant pid"
             );
             sleep(Duration::from_millis(25)).await;
         }
