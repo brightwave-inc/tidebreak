@@ -1407,6 +1407,8 @@ jobs:
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
+    # The x86_64 baseline remains `runs-on: ubuntu-22.04`; the matrix adds the
+    # matching native Ubuntu 22.04 ARM runner without changing that baseline.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     environment:
@@ -2187,19 +2189,23 @@ jobs:
                 exit 1
               }
             done
-            for arch in x86_64 aarch64; do
-              for file in \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}-setup.exe" \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}-setup.exe.sig" \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}.AppImage" \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}.AppImage.sig" \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}.deb" \
-                "Tidebreak_${TIDEBREAK_VERSION}_${arch}.deb.sig"; do
-                [[ -f "downloads/$file" ]] || {
-                  echo "Immutable release cannot recover hosted publication without $file." >&2
-                  exit 1
-                }
-              done
+            for file in \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64-setup.exe" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64-setup.exe.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.AppImage" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.AppImage.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.deb" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.deb.sig"; do
+              [[ -f "downloads/$file" ]] || {
+                echo "Immutable release cannot recover hosted publication without $file." >&2
+                exit 1
+              }
             done
           fi
 

@@ -1730,8 +1730,14 @@ test("GitHub release assets are attached before immutable publication", () => {
       /Tidebreak_\$\{TIDEBREAK_VERSION\}_(?:aarch64|\$\{arch\})\.deb\.sig/,
     );
   }
-  assert.match(attachJob, /for arch in x86_64 aarch64/);
-  assert.match(attachJob, /Tidebreak_\$\{TIDEBREAK_VERSION\}_\$\{arch\}\.deb\.sig/);
+  assert.match(
+    attachJob,
+    /Tidebreak_\$\{TIDEBREAK_VERSION\}_x86_64\.deb\.sig/,
+  );
+  assert.match(
+    attachJob,
+    /Tidebreak_\$\{TIDEBREAK_VERSION\}_aarch64\.deb\.sig/,
+  );
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
   assert.match(attachJob, /if \[\[ "\$RELEASE_DRAFT" = true \]\]/);
   assert.match(attachJob, /releases\/\$RELEASE_ID\/assets/);
@@ -2157,7 +2163,11 @@ test("the packaged desktop activates the signed updater feed", () => {
   );
   assert.match(
     desktopUpdater,
-    /cfg!\(all\([\s\S]*not\(debug_assertions\),[\s\S]*target_os = "macos"[\s\S]*target_os = "windows"[\s\S]*target_os = "linux"[\s\S]*\)\)/,
+    /cfg!\(all\(not\(debug_assertions\), target_os = "macos"\)\)/,
+  );
+  assert.match(
+    desktopUpdater,
+    /cfg!\(all\([\s\S]*not\(debug_assertions\),[\s\S]*target_os = "windows"[\s\S]*target_os = "linux"[\s\S]*\)\)/,
   );
   if (
     /target_os = "windows"/.test(desktopUpdater) ||
