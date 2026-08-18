@@ -619,7 +619,7 @@ satisfy them.
 Every lane a change's scope can reach runs on the pull request itself; a lane
 outside the scope reports a successful skip, which is what lets a required
 check pass without running. Green PR checks are full platform-neutral
-validation — see [`CLAUDE.md`](../CLAUDE.md) — re-backed by the same lanes on
+validation, re-backed by the same lanes on
 every Rust-scoped push to `main` and on the weekly scheduled run. Keep the
 whole set required so the skip-reporting stays wired up, and add any new
 always-running lane to the list.

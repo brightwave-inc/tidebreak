@@ -1,225 +1,34 @@
 # Working in Tidebreak
 
-Guidance for Claude (and other coding agents) working in this repository. Humans
-should read [`CONTRIBUTING.md`](CONTRIBUTING.md) first — this file layers the
-day-to-day standards an agent needs on top of it, and does not repeat what's
-already there.
+Guidance for coding agents. Humans start at [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-Tidebreak is a Cargo workspace of Rust crates plus a Tauri desktop app whose UI is
-React/TypeScript under `crates/tidebreak-desktop/ui`.
+Tidebreak is a Cargo workspace of Rust crates plus a Tauri desktop app whose UI
+is React/TypeScript under `crates/tidebreak-desktop/ui`.
 
-## Workflow
+## Hard rules
 
-- **Do not use the `bw` CLI in Tidebreak.** It is not part of this repository;
-  use this repository's documented Cargo, pnpm, and GitHub commands instead.
-- **Branch off `main`; PR back into `main`.** Never commit straight to `main`.
-- **Issues are for active or cross-agent work, not for narrating the current
-  task or keeping a someday backlog.** Use an issue when work needs a concrete
-  owner, dependency, or reviewable delivery. Record design decisions in
-  [`docs/decisions/`](docs/decisions) rather than in an issue thread — see
-  below. Keep deliberately parked product scope in
-  [`docs/deferred.md`](docs/deferred.md), which is the canonical
-  account of what Tidebreak does not yet implement and why. Work the user is
-  directing interactively in this session doesn't need an issue; filing one
-  adds tracking overhead without coordinating anyone. If you do pick up
-  substantial parallel-track work, claim its issue **before you start editing**
-  — see below.
-- **Only commit or push when asked.** Don't merge your own PRs unless the request
-  was explicitly to merge; default to opening the PR for review.
+- Do not use the `bw` CLI. Use this repository's Cargo, pnpm, and GitHub commands.
+- Branch off `main`; PR back into `main`. Never commit straight to `main`.
+- Commit or push only when asked. Do not merge unless the request was to merge.
+- For parallel-track work, claim the GitHub issue (assignee + `in-progress`)
+  before the first edit. Interactive work the user is directing here does not
+  need an issue.
+- Use GitHub REST (`gh` / `gh api`), not GraphQL. Shared agent sessions exhaust
+  the GraphQL quota.
+- Pin every direct dependency to an exact version that already matches the
+  lockfile. Dependabot is the upgrade path.
+- Add a test only if a failure would change what we do. Prefer contracts,
+  easy-to-reverse decisions, bug reproductions, and end-to-end behavior.
+- Run a cheap relevant subset locally; let CI do the rest. A conflicting PR
+  ran nothing — rebase before trusting green.
+- Enable auto-merge (`gh pr merge <n> --squash --auto --delete-branch`) so a
+  ready PR lands when its lanes go green.
+- This is a public repository. No secrets, no private design docs.
 
-## Decision records
+## Pointers
 
-Design decisions live in [`docs/decisions/`](docs/decisions) as numbered
-records. An issue tracks *work*; a decision record states what was chosen and
-why, and stays readable long after the work is done and the issue is closed.
-Reasoning that survives only in a PR description is reasoning nobody will find.
-
-Write one **before building** when a change fixes something later work has to
-live with: a data-model or ownership boundary, a wire or persisted contract, a
-vocabulary that will spread through the codebase, or a rule two subsystems will
-both be held to.
-
-- Copy [`0000-template.md`](docs/decisions/0000-template.md), take the next
-  number, and open it as a PR like any other change. Merging is the acceptance;
-  a record still under discussion says `Proposed`.
-- **Record the alternatives you rejected, and why.** A record that states only
-  the chosen design cannot stop the same argument being reopened.
-- **Say what would make you revisit it.** A decision that cannot be revisited
-  is not a decision, it is an assumption.
-- **Supersede rather than rewrite.** When a decision changes, the old record
-  gets `Status: Superseded` and a pointer to its replacement, and otherwise
-  stays as written — the value is the reasoning at the time.
-
-The directory listing is the index. Don't enumerate records anywhere else; a
-hand-maintained list of them goes stale the first time someone forgets it.
-
-Not everything needs one. Ordinary implementation, bug fixes, and work whose
-shape an existing record already settles go straight to an issue or a PR.
-
-## Issue tracking
-
-Work is tracked with plain GitHub **issues** — no project board. Issues carry
-work; decision records carry decisions. Issue state (open/closed), assignee,
-and a small set of workflow labels carry everything the team and separate agent
-sessions need to see where things stand without reading commit logs. This
-matters where sessions can collide or work outlives a session; it is not a
-ledger of everything an agent happens to be doing right now.
-
-The workflow labels:
-
-- `in-progress` — claimed; a session is actively working the issue.
-- `blocked` — cannot proceed until a dependency or decision lands.
-
-The conventions:
-
-- **Claim before you build, not after.** Assign yourself and add the
-  `in-progress` label **before the first edit**. Sessions run in parallel and
-  cannot see each other's working trees, so the issue is the only place a claim
-  is visible. Claiming at the end of the work is worth nothing: the failure it
-  prevents is a second session starting the same issue an hour ago.
-- **Check for existing work before you start.** Read the issue's labels/assignee
-  and `gh pr list` together. Either can be stale on its own — an unclaimed issue
-  with an open PR against it is taken. `gh issue list --label in-progress` shows
-  every active claim.
-- **A closed issue is not proof the work is done.** Check whether the merged PR
-  covered the whole scope, and open a follow-up issue for whatever it left.
-- **If you find your work already merged by someone else, don't force yours
-  through.** The version that landed first has the floor; rebasing a competing
-  design over it reverts reviewed work. Salvage the difference — extra coverage,
-  bugs you found — into follow-up issues, and say so when you close yours.
-- **Reference the issue from the PR** with `Closes #N` so the merge auto-closes
-  it.
-- **Keep labels current.** Stale state misleads the team — drop `in-progress`
-  when you park work. If the work is blocked by a concrete dependency, add
-  `blocked` with a comment saying what is needed. If it is deliberately future
-  product scope rather than an active, actionable task, close the issue and
-  update [`docs/deferred.md`](docs/deferred.md) instead; do not add a
-  `deferred` label.
-- **Avoid the GitHub GraphQL API — REST covers this workflow entirely.** All
-  agent sessions share one `gh` account, and the GraphQL quota (5000 points/hr)
-  is routinely exhausted when sessions run in parallel — REST keeps working
-  when GraphQL is rate-limited. Everything above is plain `gh` issue/PR
-  commands or `gh api <rest-path>`; don't reach for `gh api graphql`, and note
-  a few `gh` subcommands (e.g. `gh project *`, which nothing here needs) use
-  GraphQL under the hood.
-
-## Dependencies
-
-- **Pin every direct dependency to an exact version.** Cargo deps use `=x.y.z`
-  (in the root `[workspace.dependencies]` or the crate's `Cargo.toml`); the
-  desktop UI uses exact versions in `package.json`, enforced by
-  `ui/.npmrc` (`save-exact=true`).
-- **A pin must match what the lockfile already resolves** — adding pins should
-  leave `Cargo.lock` / `pnpm-lock.yaml` versions unchanged. Verify with
-  `cargo check --workspace --locked` (no lock diff) before committing.
-- **Bump versions deliberately.** Dependabot edits the pin in its own PR; that's
-  the intended upgrade path, not `cargo update` / `pnpm update` drift.
-
-## Tests earn their place or come out
-
-Build time is a first-class cost here — the workspace is large and the Rust lanes
-dominate CI. A test that would never change what we do is not free; it is paid
-for on every build, by everyone, forever. Write fewer, better tests.
-
-The bar for adding one: **would this failing tell us something we'd act on?**
-
-Worth writing, and worth defending in review:
-
-- **Contracts that cross a boundary** — wire types, persisted shapes, migration
-  compatibility. Breaking these silently is expensive to discover.
-- **Decisions that are easy to reverse by accident** — the model registry's
-  honesty invariants, the guard that no model advertises image input before the
-  path carries it, the check that the default model is curated and current.
-- **Cross-provider replay stays flatten-on-switch** — see
-  [`docs/model-providers.md`](docs/model-providers.md). Native artifacts are
-  origin-gated; foreign routes get cleartext (or nothing), never a new
-  pairwise translator. New provider-coupled features need a degradation story
-  in the same change.
-- **Reproductions of bugs we actually hit.** These are the highest-value tests
-  in the repo.
-- **Behavior, driven end to end.** One test that runs a real turn and reads the
-  journal beats ten that assert on intermediate structs.
-
-Not worth writing, and fair game to delete on sight:
-
-- Tests that assert the code *exists* — constructing a struct and reading its
-  fields back, or checking a constant equals itself.
-- Duplicate coverage: several tests walking one path with cosmetically different
-  inputs. Keep the one that best localizes a regression.
-- Assertions pinned to internals that break on every refactor without ever
-  catching a defect. These tax exactly the changes we want to be cheap.
-- Over-specified assertions — matching a whole serialized payload when the test
-  is about one field. They fail for unrelated reasons and train people to update
-  expectations without reading them.
-- Setup-heavy tests whose assertion is trivial next to the scaffolding.
-
-When you delete tests, justify each one in the PR body in a line. "Removed 14
-tests" is not reviewable; "removed 14 that re-asserted serde round-tripping
-already covered by the wire-type fixtures" is.
-
-Coverage percentage is not a goal and is not tracked. Confidence is.
-
-## Let CI do the heavy verification
-
-Every platform-neutral lane a change can reach runs on its pull request: a
-green PR means the same commits stay green on `main`. There is no opt-in
-label for heavier validation — the former `full-ci` label is gone and does
-nothing. Re-running the full workspace suite locally before every push buys
-little and costs minutes on each iteration. Run a cheap relevant subset
-locally, push early, and let the lanes work while you keep going.
-
-The change-scope gate in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-is the whole rule, and it is coarse on purpose:
-
-- Any changed file outside `*.md`, `docs/`, `assets/`, `.githooks/`, `LICENSE`,
-  `NOTICE`, and `crates/tidebreak-desktop/ui/` marks the change **Rust** —
-  including `Cargo.toml` and `Cargo.lock`. That runs rustfmt, clippy
-  (`--all-targets -D warnings`), and the desktop tests. Every Cargo invocation
-  passes `--locked`, so a lockfile drift fails there too.
-- A Rust change also marks the **workspace** scope, which adds the headless
-  workspace tests plus the PostgreSQL turn-state lane, unless every changed file
-  is one of `tidebreak-desktop`'s own sources. Nothing in the workspace depends on
-  the desktop crate and the headless lane already excludes it, so those lanes
-  cannot see such a change. `ui/src/generated/` is not covered by the carve-out
-  because its staleness check lives in `tidebreak-server`.
-- Any file under `crates/tidebreak-desktop/ui/` marks it **UI**, which runs
-  `pnpm test` and `pnpm build`.
-- Branch protection requires the pull-request jobs directly. A lane outside a
-  change's scope reports a successful skip. The always-running change detector
-  rejects impossible narrower-scope combinations before conditional jobs
-  consume them. There is no serial aggregate wrapper after the slowest job.
-- The native Windows lane runs automatically for Rust-scoped pushes to `main`,
-  schedules, and manual dispatches. Pull requests opt in with the `windows-ci`
-  label when they touch a Windows-native boundary. It stays non-required because
-  it is the slowest lane; the post-merge and scheduled runs are the backstop.
-- Production releases require universal macOS packages plus x86_64 and ARM64
-  Windows and Linux packages. Windows ships NSIS; Linux ships AppImage and
-  `.deb`; release builds on all three operating systems use the signed Tauri
-  updater feed. Windows Authenticode remains parked in
-  [`docs/deferred.md`](docs/deferred.md).
-
-**The remaining trap is a PR that ran nothing.** A conflicting PR runs nothing
-but trivial policy checks; rebase it before believing its status. Judge a PR by
-whether every applicable lane is present and passed, not by the absence of red.
-`gh pr checks <n>` shows the truth.
-
-Enable auto-merge (`gh pr merge <n> --squash --auto --delete-branch`) so a PR
-lands the moment its lanes go green instead of waiting for you to come back.
-
-Driving the running app to confirm behavior is not expected — say what you
-could not verify and hand it over.
-
-## Commits and PRs
-
-- Follow the semantic PR-title policy in [`CONTRIBUTING.md`](CONTRIBUTING.md).
-  The title becomes the squash commit and controls the next version; use `!`
-  only for an intentional breaking change. Published `vX.Y.Z` tags, not
-  committed Cargo/Tauri placeholders, are the desktop product's version source.
-- Commit and PR text should read as ordinary engineering writing: describe what
-  changed and why, not the tooling that produced it.
-- This is a public repository. Do not reference internal or private design
-  documents in code, comments, commits, or PRs.
-- Never commit secrets — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-Release maintainers should follow [`docs/releases.md`](docs/releases.md),
-especially the compatibility and desktop-schema checklist before `1.0.0`.
+- Humans and commit/PR titles: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Decisions: [`docs/decisions/`](docs/decisions)
+- Parked scope: [`docs/deferred.md`](docs/deferred.md)
+- Releases: [`docs/releases.md`](docs/releases.md)
+- Cross-provider replay: [`docs/model-providers.md`](docs/model-providers.md)
