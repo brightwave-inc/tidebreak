@@ -20,7 +20,7 @@ import {
   harnessUnusableReason,
 } from "./labels";
 
-const HARNESS_ICONS: Record<
+export const HARNESS_ICONS: Record<
   HarnessKind,
   ComponentType<{ className?: string }>
 > = {

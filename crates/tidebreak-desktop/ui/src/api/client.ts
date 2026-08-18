@@ -1820,6 +1820,22 @@ export class ApiClient {
     );
   }
 
+  async patchCodeWorkspace(
+    workspaceId: string,
+    body: { title: string },
+  ): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json(`/code/workspaces/${encodeURIComponent(workspaceId)}`, {
+          method: "PATCH",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code workspace",
+    );
+  }
+
   async archiveCodeWorkspace(
     workspaceId: string,
     force = false,

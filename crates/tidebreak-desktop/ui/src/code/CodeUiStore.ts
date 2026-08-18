@@ -2,9 +2,14 @@ import { create } from "zustand";
 
 import type { HarnessKind } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import {
+  isWorkspaceSortMode,
+  type WorkspaceSortMode,
+} from "./workspaceCards";
 
 const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
+const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
 
 /** What the reader picked the last time they created a workspace. */
 export type CodeCreateDefaults = {
@@ -60,6 +65,24 @@ function storeReviewSidebarOpen(open: boolean): void {
   }
 }
 
+function readStoredWorkspaceSort(): WorkspaceSortMode {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_SORT_KEY);
+    if (raw && isWorkspaceSortMode(raw)) return raw;
+  } catch {
+    // Preference persistence is best-effort.
+  }
+  return "by-repo";
+}
+
+function storeWorkspaceSort(mode: WorkspaceSortMode): void {
+  try {
+    window.localStorage.setItem(WORKSPACE_SORT_KEY, mode);
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
+
 /**
  * Code mode's dialog and chrome state, held outside the components that draw it.
  *
@@ -83,6 +106,7 @@ export type CodeUiStore = {
   newWorkspaceRepoId: string | undefined;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
+  workspaceSortMode: WorkspaceSortMode;
   lastCreate: CodeCreateDefaults | null;
   /**
    * Ask for a workspace, from a repo page or from anywhere in code mode.
@@ -96,6 +120,7 @@ export type CodeUiStore = {
   setAddRepoOpen: (open: boolean) => void;
   toggleReviewSidebar: () => void;
   setReviewSidebarOpen: (open: boolean) => void;
+  setWorkspaceSortMode: (mode: WorkspaceSortMode) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
 };
@@ -105,6 +130,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   newWorkspaceRepoId: undefined,
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
+  workspaceSortMode: readStoredWorkspaceSort(),
   lastCreate: readStoredCreateDefaults(),
   startNewWorkspace: (repoId) => {
     const { repos } = useCodeCatalogStore.getState();
@@ -129,6 +155,10 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   setReviewSidebarOpen: (open) => {
     storeReviewSidebarOpen(open);
     set({ reviewSidebarOpen: open });
+  },
+  setWorkspaceSortMode: (mode) => {
+    storeWorkspaceSort(mode);
+    set({ workspaceSortMode: mode });
   },
   rememberCreate: (defaults) => {
     storeCreateDefaults(defaults);
