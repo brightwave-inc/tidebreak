@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { LayoutGrid, Puzzle, SquarePen } from "lucide-react";
+import { LayoutGrid, Puzzle } from "lucide-react";
 
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
@@ -10,7 +10,7 @@ import { useExperimentalFlags } from "@/experimental";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
 import { ProjectsSection } from "./ProjectsSection";
-import { SidebarButton, useSidebarWidth } from "./primitives";
+import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
 
 /**
@@ -27,29 +27,13 @@ import { SidebarFrame } from "./SidebarFrame";
  */
 export function AppSidebar({ chat }: { chat?: Chat }) {
   const navigate = useNavigate();
-  const { newChat, refreshChats } = useApp();
+  const { refreshChats } = useApp();
   const chatsError = useChatListStore((state) => state.chatsError);
-  const creatingChat = useChatListStore((state) => state.creatingChat);
-  const deletingChatId = useChatListStore((state) => state.deletingChatId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const isCompact = useSidebarWidth() === "compact";
   const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
 
   return (
     <SidebarFrame>
-      {/* Expanded, starting a chat is the + on the Chats section header. The
-          compact rail hides that section, so it keeps a row of its own. */}
-      {isCompact && (
-        <SidebarButton
-          aria-label={creatingChat ? "Starting…" : "New chat"}
-          onClick={newChat}
-          disabled={creatingChat || deletingChatId !== null}
-        >
-          <SquarePen />
-          <span>New chat</span>
-        </SidebarButton>
-      )}
-
       {codeModeEnabled && <CodeModeSwitch />}
 
       <div className="flex shrink-0 flex-col gap-0.5">

@@ -2,7 +2,6 @@ import { FolderGit2, MessageSquare } from "lucide-react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 
 import { SegmentedControl } from "@/components/ui/segmented";
-import { useSidebarWidth } from "@/sidebar/primitives";
 import { isCodeRoute } from "./routes";
 
 type Mode = "chat" | "code";
@@ -18,7 +17,6 @@ export function CodeModeSwitch() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const isCompact = useSidebarWidth() === "compact";
   const value: Mode = isCodeRoute(pathname) ? "code" : "chat";
 
   return (
@@ -26,7 +24,6 @@ export function CodeModeSwitch() {
       <SegmentedControl
         aria-label="App mode"
         value={value}
-        compact={isCompact}
         onValueChange={(next) => {
           if (next === value) return;
           void navigate({ to: next === "code" ? "/code" : "/" });

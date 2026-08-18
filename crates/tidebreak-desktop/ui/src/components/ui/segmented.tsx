@@ -23,14 +23,12 @@ export function SegmentedControl<T extends string>({
   onValueChange,
   options,
   "aria-label": ariaLabel,
-  compact = false,
   className,
 }: {
   value: T;
   onValueChange: (value: T) => void;
   options: readonly SegmentedOption<T>[];
   "aria-label": string;
-  compact?: boolean;
   className?: string;
 }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -96,7 +94,6 @@ export function SegmentedControl<T extends string>({
               checked
                 ? "bg-background text-foreground"
                 : "text-muted-foreground hover:text-foreground",
-              compact && "px-1.5 [&_span]:hidden",
             )}
             onClick={() => onValueChange(option.value)}
             onKeyDown={(event) => onKeyDown(event, index)}

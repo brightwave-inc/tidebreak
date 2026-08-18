@@ -9,12 +9,7 @@ import {
 } from "react";
 import { Slot } from "@radix-ui/react-slot";
 
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   SIDEBAR_DEFAULT_WIDTH,
@@ -24,33 +19,31 @@ import {
 } from "@/UiStore";
 
 /**
- * The navigation rail, in two widths.
+ * The navigation rail, shown or gone.
  *
- * Compact keeps the rail rather than hiding it: a sidebar that disappears takes
- * the way back with it, and the reader is left hunting for a control to bring
- * it back. Collapsed here means icons only, still reachable, with each item's
- * name in a tooltip. Expanded width is reader-chosen and remembered.
+ * When collapsed the rail leaves the layout entirely; the shell keeps a single
+ * expand button pinned beside the window's traffic lights so the way back
+ * never disappears with the rail. Expanded width is reader-chosen and
+ * remembered.
  */
-export type SidebarWidth = "compact" | "expanded";
-
-export function useSidebarWidth(): SidebarWidth {
-  return useUiStore((state) => (state.sidebarCollapsed ? "compact" : "expanded"));
-}
 
 /**
- * Publish the expanded rail width onto the shell so chrome that sits over the
- * rail (the titlebar) can track it without reading the store itself.
+ * Publish the expanded rail width onto the shell so the overlay titlebar can
+ * size itself to it. Runs at the app-shell level rather than inside the rail
+ * so the value stays current after a collapse unmounts it.
  */
-function useSyncSidebarWidthCssVar(widthPx: number, isCompact: boolean) {
+export function useSyncSidebarWidthCssVar() {
+  const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);
+  const collapsed = useUiStore((state) => state.sidebarCollapsed);
   useEffect(() => {
     const shell = document.querySelector<HTMLElement>(".app-shell");
     if (!shell) return;
-    if (isCompact) {
+    if (collapsed) {
       shell.style.removeProperty("--sidebar-expanded-width");
       return;
     }
-    shell.style.setProperty("--sidebar-expanded-width", `${widthPx}px`);
-  }, [widthPx, isCompact]);
+    shell.style.setProperty("--sidebar-expanded-width", `${sidebarWidthPx}px`);
+  }, [sidebarWidthPx, collapsed]);
 }
 
 /**
@@ -155,11 +148,10 @@ function SidebarResizeHandle({
 }
 
 export function Sidebar({ className, children, ...props }: ComponentProps<"div">) {
-  const width = useSidebarWidth();
-  const isCompact = width === "compact";
+  const collapsed = useUiStore((state) => state.sidebarCollapsed);
   const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);
   const [resizing, setResizing] = useState(false);
-  useSyncSidebarWidthCssVar(sidebarWidthPx, isCompact);
+  if (collapsed) return null;
 
   return (
     <TooltipProvider>
@@ -167,21 +159,19 @@ export function Sidebar({ className, children, ...props }: ComponentProps<"div">
         {...props}
         className={cn(
           "relative flex shrink-0 flex-col overflow-hidden",
-          // Animate collapse/expand, but not live drags — easing lags the pointer.
-          !isCompact && !resizing && "transition-[flex-basis,min-width,width] duration-200",
+          // Animate width changes, but not live drags — easing lags the pointer.
+          !resizing && "transition-[flex-basis,min-width,width] duration-200",
           className,
         )}
         style={{
-          flex: isCompact
-            ? "0 0 var(--sidebar-compact-width)"
-            : `0 0 ${sidebarWidthPx}px`,
-          minWidth: isCompact ? "var(--sidebar-compact-width)" : `${sidebarWidthPx}px`,
-          width: isCompact ? undefined : sidebarWidthPx,
+          flex: `0 0 ${sidebarWidthPx}px`,
+          minWidth: `${sidebarWidthPx}px`,
+          width: sidebarWidthPx,
         }}
-        data-sidebar={width}
+        data-sidebar="expanded"
       >
         {children}
-        {!isCompact && <SidebarResizeHandle onDraggingChange={setResizing} />}
+        <SidebarResizeHandle onDraggingChange={setResizing} />
       </div>
     </TooltipProvider>
   );
@@ -216,12 +206,10 @@ export function SidebarFooter({
 }
 
 export function SidebarSectionTitle({ className, ...props }: ComponentProps<"div">) {
-  const isCompact = useSidebarWidth() === "compact";
   return (
     <div
       className={cn(
-        "line-clamp-1 shrink-0 truncate px-2 py-1 text-sm font-medium text-muted-foreground opacity-100 transition-opacity",
-        isCompact && "opacity-0",
+        "line-clamp-1 shrink-0 truncate px-2 py-1 text-sm font-medium text-muted-foreground",
         className,
       )}
       {...props}
@@ -229,48 +217,19 @@ export function SidebarSectionTitle({ className, ...props }: ComponentProps<"div
   );
 }
 
-/**
- * A row in the rail. Compact hides everything but the leading icon and moves
- * the label — taken from the first `span` — into a tooltip, so one definition
- * serves both widths.
- */
 export function SidebarButton({
   asChild = false,
-  children,
   className,
   ...props
 }: ComponentProps<"button"> & { asChild?: boolean }) {
   const Comp = asChild ? Slot : "button";
-  const [label, setLabel] = useState("");
-  const isCompact = useSidebarWidth() === "compact";
-
-  const measureLabel = (element: HTMLButtonElement | null) => {
-    if (!element) return;
-    setLabel(element.querySelector("span")?.textContent ?? "");
-  };
-
-  const button = (
+  return (
     <Comp
-      ref={measureLabel}
       className={cn(
         "inline-flex w-full cursor-pointer items-center gap-2 rounded-md p-2 text-left text-sm font-[450] whitespace-nowrap ring-offset-background transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
-        isCompact && "justify-center [&>*:not(:first-child)]:hidden",
         className,
       )}
       {...props}
-    >
-      {children}
-    </Comp>
-  );
-
-  if (!isCompact) return button;
-
-  return (
-    <Tooltip delayDuration={150}>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent side="right" align="center">
-        {label}
-      </TooltipContent>
-    </Tooltip>
+    />
   );
 }

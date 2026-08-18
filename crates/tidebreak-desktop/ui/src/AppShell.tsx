@@ -43,6 +43,8 @@ import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
+import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
+import { useSyncSidebarWidthCssVar } from "./sidebar/primitives";
 import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
@@ -130,6 +132,10 @@ export function AppShell() {
   const desktopUpdates = useDesktopUpdates();
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
+  // The expanded rail width is published by the shell, not the rail itself, so
+  // the value survives a collapse — the expand strip and the titlebar both
+  // depend on it.
+  useSyncSidebarWidthCssVar();
   // Read at keydown rather than subscribed to: which mode a shortcut fires in
   // is the route's answer, and the shell has no other reason to re-render on
   // every navigation.
@@ -696,6 +702,7 @@ export function AppShell() {
               navigation={desktopNavigation}
             />
           )}
+          <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
