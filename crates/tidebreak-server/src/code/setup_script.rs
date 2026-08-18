@@ -6,8 +6,13 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+
+#[cfg(windows)]
+use std::os::windows::ffi::OsStringExt;
 
 use tidebreak_harness::ProcessTreeChild;
 use tokio::process::Command;
@@ -32,7 +37,7 @@ pub(crate) fn spawn_workspace_script(
     worktree: &Path,
     script: &str,
 ) -> io::Result<ProcessTreeChild> {
-    let mut command = workspace_script_command(worktree, script);
+    let mut command = workspace_script_command(worktree, script)?;
     tidebreak_harness::spawn_process_tree(&mut command)
 }
 
@@ -67,8 +72,8 @@ pub(crate) async fn run_workspace_script(
     })
 }
 
-fn workspace_script_command(worktree: &Path, script: &str) -> Command {
-    let (program, args) = workspace_script_launcher(script, std::env::var_os("SHELL"));
+fn workspace_script_command(worktree: &Path, script: &str) -> io::Result<Command> {
+    let (program, args) = workspace_script_launcher(script, std::env::var_os("SHELL"))?;
     let mut command = Command::new(program);
     command
         .args(args)
@@ -77,21 +82,21 @@ fn workspace_script_command(worktree: &Path, script: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
-    command
+    Ok(command)
 }
 
 fn workspace_script_launcher(
     script: &str,
     unix_shell: Option<OsString>,
-) -> (OsString, Vec<OsString>) {
+) -> io::Result<(OsString, Vec<OsString>)> {
     #[cfg(windows)]
     {
         let _ = unix_shell;
         let script = format!(
             "$global:LASTEXITCODE = 0\n{script}\nif (-not $?) {{ if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; exit 1 }}\nexit 0"
         );
-        (
-            OsString::from("powershell.exe"),
+        Ok((
+            system_windows_powershell()?.into_os_string(),
             [
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
@@ -101,14 +106,38 @@ fn workspace_script_launcher(
             ]
             .into_iter()
             .collect(),
-        )
+        ))
     }
     #[cfg(not(windows))]
     {
-        (
+        Ok((
             unix_shell.unwrap_or_else(|| OsString::from("/bin/sh")),
             [OsString::from("-lc"), OsString::from(script)].into(),
-        )
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn system_windows_powershell() -> io::Result<PathBuf> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        // SAFETY: `buffer` is writable for the advertised number of UTF-16
+        // code units and remains alive for the duration of the call.
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer))
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"));
+        }
+        buffer.resize(length.saturating_add(1), 0);
     }
 }
 
@@ -129,7 +158,8 @@ mod tests {
     #[test]
     fn unix_scripts_preserve_the_configured_login_shell_contract() {
         let (program, args) =
-            workspace_script_launcher("printf ready", Some(OsString::from("/custom/shell")));
+            workspace_script_launcher("printf ready", Some(OsString::from("/custom/shell")))
+                .unwrap();
         assert_eq!(program, OsString::from("/custom/shell"));
         assert_eq!(
             args,
@@ -143,8 +173,13 @@ mod tests {
         let (program, args) = workspace_script_launcher(
             "Write-Output ready",
             Some(OsString::from("ignored-shell.exe")),
+        )
+        .unwrap();
+        assert_eq!(
+            program,
+            system_windows_powershell().unwrap().into_os_string()
         );
-        assert_eq!(program, OsString::from("powershell.exe"));
+        assert!(Path::new(&program).is_absolute());
         assert_eq!(
             &args[..4],
             ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
@@ -152,6 +187,23 @@ mod tests {
         let command = args[4].to_string_lossy();
         assert!(command.contains("Write-Output ready"));
         assert!(command.contains("$LASTEXITCODE"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_scripts_ignore_a_worktree_powershell_decoy() {
+        let directory = tempfile::tempdir().expect("worktree");
+        std::fs::write(
+            directory.path().join("powershell.exe"),
+            b"repository-controlled decoy",
+        )
+        .expect("write decoy executable");
+
+        let run = run_workspace_script(directory.path(), "Write-Output trusted")
+            .await
+            .expect("run trusted PowerShell");
+        assert!(run.success, "{}", run.stderr);
+        assert_eq!(run.stdout.trim(), "trusted");
     }
 
     #[cfg(windows)]

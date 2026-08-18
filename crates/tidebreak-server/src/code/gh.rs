@@ -1866,3 +1866,91 @@ exit 3
         assert_eq!(url, "https://github.com/acme/demo.git");
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use tokio::time::{sleep, Instant};
+    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    const DESCENDANT_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn quick_action_timeout_terminates_its_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let action = QuickAction {
+            name: "process tree timeout".into(),
+            command: "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
+                      -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
+                      'Start-Sleep -Seconds 120') -PassThru; \
+                      $pidPath = Join-Path -Path (Get-Location) -ChildPath 'descendant.pid'; \
+                      [IO.File]::WriteAllText($pidPath, $child.Id.ToString()); \
+                      Wait-Process -Id $child.Id"
+                .into(),
+            auto_run_on_create: false,
+        };
+        let worktree = dir.path().to_path_buf();
+        let action_task = tokio::spawn(async move { run_action(&worktree, &action).await });
+
+        let pid = wait_for_pid(&pid_file, &action_task).await;
+        let descendant = open_process(pid);
+        assert_eq!(
+            wait_status(&descendant, Duration::ZERO),
+            WAIT_TIMEOUT,
+            "descendant {pid} exited before the quick-action timeout"
+        );
+        assert!(
+            !action_task.is_finished(),
+            "quick action ended before its descendant was opened"
+        );
+
+        let outcome = action_task.await.unwrap();
+        assert!(outcome.timed_out, "{outcome:?}");
+        assert!(!outcome.success, "{outcome:?}");
+        assert_eq!(
+            wait_status(&descendant, DESCENDANT_EXIT_TIMEOUT),
+            WAIT_OBJECT_0,
+            "descendant {pid} remained alive after quick-action job teardown"
+        );
+    }
+
+    async fn wait_for_pid(path: &Path, action: &tokio::task::JoinHandle<ActionOutcome>) -> u32 {
+        let deadline = Instant::now() + ACTION_TIMEOUT - Duration::from_millis(500);
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(path).await {
+                if let Ok(pid) = value.trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(
+                !action.is_finished(),
+                "quick action ended before publishing its descendant pid"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "descendant pid was not published before ACTION_TIMEOUT"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn open_process(pid: u32) -> OwnedHandle {
+        // SAFETY: synchronization access is requested for the descendant pid
+        // that the quick action just created and published.
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        assert!(!raw.is_null(), "could not open descendant process {pid}");
+        // SAFETY: successful OpenProcess transfers one owned handle.
+        unsafe { OwnedHandle::from_raw_handle(raw.cast()) }
+    }
+
+    fn wait_status(process: &OwnedHandle, limit: Duration) -> u32 {
+        // SAFETY: `process` is a live synchronization handle and remains owned
+        // for the duration of the bounded wait.
+        unsafe { WaitForSingleObject(process.as_raw_handle() as HANDLE, limit.as_millis() as u32) }
+    }
+}

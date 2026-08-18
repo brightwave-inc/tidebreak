@@ -1163,7 +1163,7 @@ mod windows_tests {
     use super::*;
 
     #[tokio::test]
-    async fn resolves_cmd_shims_from_case_varied_path_and_pathext() {
+    async fn resolves_and_executes_cmd_shims_from_case_varied_path_and_pathext() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("claude.cmd");
         std::fs::write(&shim, "@echo 2.1.234\r\n").unwrap();
@@ -1180,6 +1180,12 @@ mod windows_tests {
 
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, shim);
+        assert_eq!(
+            observe_version(&capture.binary, &capture.env)
+                .await
+                .unwrap(),
+            "2.1.234"
+        );
         assert_eq!(
             capture
                 .env
