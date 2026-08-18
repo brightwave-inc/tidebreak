@@ -4,6 +4,7 @@ import {
   applyAcceptedTurn,
   hydrateCodeTurns,
   initialCodeSessionState,
+  markCodeSessionHydrated,
   reduceCodeSessionEvent,
   userItemId,
   type CodeSessionDeps,
@@ -218,6 +219,7 @@ describe("hydrate then replay", () => {
       id: userItemId("t1"),
       turnId: "t1",
       text: "list the files",
+      createdAt: NOW,
     });
     expect(hydrated.items[1]).toMatchObject({
       kind: "turn_boundary",
@@ -241,6 +243,7 @@ describe("hydrate then replay", () => {
       kind: "user",
       turnId: "t1",
       text: "list the files",
+      createdAt: NOW,
     });
     expect(
       replayed.state.items.filter((item) => item.kind === "turn_boundary"),
@@ -287,6 +290,7 @@ describe("hydrate then replay", () => {
       kind: "user",
       turnId: "t1",
       text: "list the files",
+      createdAt: NOW,
     });
   });
 
@@ -301,5 +305,39 @@ describe("hydrate then replay", () => {
     ]);
     expect(again.items.filter((item) => item.kind === "user")).toHaveLength(1);
     expect(again.items[0]?.id).toBe(userItemId("t1"));
+    expect(again.items[0]).toMatchObject({ createdAt: NOW });
+  });
+});
+
+describe("hydration flag", () => {
+  it("starts unset and flips only when the snapshot settles", () => {
+    const initial = initialCodeSessionState();
+    expect(initial.hydrated).toBe(false);
+
+    // Applying turns is not settlement: a snapshot that never arrives still
+    // has to flip, so the flag is not a side effect of hydrateCodeTurns.
+    const withTurns = hydrateCodeTurns(initial, [SNAPSHOT_TURN]);
+    expect(withTurns.hydrated).toBe(false);
+
+    const settled = markCodeSessionHydrated(withTurns);
+    expect(settled.hydrated).toBe(true);
+    expect(settled.items).toBe(withTurns.items);
+    expect(markCodeSessionHydrated(settled)).toBe(settled);
+  });
+});
+
+describe("user item createdAt", () => {
+  it("carries the turn's started_at on accept and hydrate", () => {
+    const accepted = applyAcceptedTurn(initialCodeSessionState(), SNAPSHOT_TURN);
+    expect(accepted.items[0]).toMatchObject({
+      kind: "user",
+      createdAt: NOW,
+    });
+
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    expect(hydrated.items[0]).toMatchObject({
+      kind: "user",
+      createdAt: NOW,
+    });
   });
 });
