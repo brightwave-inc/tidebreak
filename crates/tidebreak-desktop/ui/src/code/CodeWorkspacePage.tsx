@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
 import type {
+  Attention,
   CodeApprovalSnapshot,
   CodePermissionMode,
   CodeRepoSnapshot,
@@ -264,9 +265,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <div className="flex items-center gap-2">
           {session && (
             <>
-              <AttentionBadge
-                compact
-                attention={digest?.attention ?? session.attention}
+              <SessionAttentionBadge
+                sessionId={session.id}
+                client={client}
+                fallback={digest?.attention ?? session.attention}
               />
               <PendingApprovalBadge sessionId={session.id} client={client} />
               <span className="text-muted-foreground text-xs">
@@ -407,6 +409,20 @@ function renderCodePanel(
   );
 }
 
+function SessionAttentionBadge({
+  sessionId,
+  client,
+  fallback,
+}: {
+  sessionId: string;
+  client: ApiClient;
+  fallback: Attention | undefined;
+}) {
+  const store = useRegisteredCodeSession(sessionId, client);
+  const live = store((state) => state.attention);
+  return <AttentionBadge compact attention={live ?? fallback} />;
+}
+
 function PendingApprovalBadge({
   sessionId,
   client,
@@ -477,6 +493,8 @@ function CodeSessionPane({
   const busy = store((state) => state.busy);
   const hydrated = store((state) => state.hydrated);
   const animateStreaming = store((state) => state.animateStreaming);
+  const connectionState = store((state) => state.connectionState);
+  const lastTurnBeganId = store((state) => state.lastTurnBeganId);
   // The reducer's own applied-event cursor is the activity signal the stall
   // timer wants: every delta, tool result, and boundary advances it.
   const lastSeq = store((state) => state.lastSeq);
@@ -487,6 +505,7 @@ function CodeSessionPane({
   );
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
+  const [queued, setQueued] = useState(false);
   // No `?? []` fallback here: a fresh array is a new snapshot every render,
   // and zustand v5 loops on referentially unstable snapshots.
   const cachedModels = useCodeCatalogStore(
@@ -550,6 +569,20 @@ function CodeSessionPane({
   const availableModes: CodePermissionMode[] = doctorEntry
     ? createPermissionModes(doctorEntry.caps)
     : ["plan", "ask", "auto", "allow"];
+  const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
+  const composerHistory = useMemo(
+    () =>
+      items
+        .flatMap((item) =>
+          item.kind === "user" && item.text.trim() ? [item.text] : [],
+        )
+        .reverse(),
+    [items],
+  );
+
+  useEffect(() => {
+    setQueued(false);
+  }, [lastTurnBeganId]);
 
   // `items` is a fresh array on every streamed delta, so keying the fetch on it
   // would list approvals again for every token of a turn. Only an approval
@@ -590,7 +623,14 @@ function CodeSessionPane({
     // message ran or queued, and it holds the draft when the server refuses.
     return submitAcceptedTurn(store.getState().update, () =>
       client.submitCodeTurn(session.id, message, model ?? undefined),
-    );
+    ).then((outcome) => {
+      if (outcome.kind === "queued") setQueued(true);
+      return outcome;
+    });
+  }
+
+  async function steer(message: string) {
+    await client.steerCodeSession(session.id, message);
   }
 
   async function interrupt() {
@@ -603,6 +643,14 @@ function CodeSessionPane({
 
   return (
     <>
+      {connectionState === "reconnecting" && (
+        <div
+          role="status"
+          className="border-info-border bg-info-background text-info-foreground mx-4 mt-3 rounded-md border px-3 py-1.5 text-xs"
+        >
+          Reconnecting to the session…
+        </div>
+      )}
       <div className={cn("message-view", follow.fadeClass)}>
         <CodeTranscript
           items={items}
@@ -659,10 +707,14 @@ function CodeSessionPane({
           model={model ?? undefined}
           modelOptions={modelOptions}
           sessionId={session.id}
+          history={composerHistory}
+          queued={queued}
+          lastTurnBeganId={lastTurnBeganId}
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
           }
           onSend={send}
+          onSteer={steeringSupported ? steer : undefined}
           onInterrupt={interrupt}
         />
       )}

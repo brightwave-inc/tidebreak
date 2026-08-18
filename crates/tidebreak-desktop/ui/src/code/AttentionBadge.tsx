@@ -2,7 +2,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 import type { Attention } from "../api/types";
-import { attentionLabel } from "./labels";
+import { attentionLabel, attentionTooltip } from "./labels";
 
 /**
  * Status affordance for a server-computed attention state.
@@ -22,6 +22,7 @@ export function AttentionBadge({
 }) {
   if (!attention || attention.state.type === "working") return null;
   const label = attentionLabel(attention);
+  const tooltip = attentionTooltip(attention);
   const tone = attentionTone(attention);
   if (compact) {
     return (
@@ -35,7 +36,7 @@ export function AttentionBadge({
           className,
         )}
         aria-label={label}
-        title={label}
+        title={tooltip}
         data-attention={attention.state.type}
       />
     );
@@ -54,7 +55,7 @@ export function AttentionBadge({
       size="sm"
       className={className}
       aria-label={label}
-      title={label}
+      title={tooltip}
       data-attention={attention.state.type}
     >
       {label}

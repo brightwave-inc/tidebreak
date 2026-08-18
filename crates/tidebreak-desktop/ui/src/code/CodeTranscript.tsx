@@ -1,7 +1,7 @@
 import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 import type { RefCallback } from "react";
 
-import type { CodeApprovalSnapshot, ToolDetail } from "../api/types";
+import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
 import { Badge } from "@/components/ui/badge";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
@@ -162,6 +162,10 @@ function itemSignature(
     case "assistant":
     case "reasoning":
       return String(item.streaming);
+    case "file_activity":
+      return fileActivitySignature(item.files);
+    case "steer":
+      return item.text;
     default:
       return item.kind;
   }
@@ -197,6 +201,20 @@ function TranscriptItem({
           anchorId={item.id}
         />
       );
+    case "steer":
+      return (
+        <UserMessage
+          text={item.text}
+          anchorId={item.id}
+          trailing={
+            <p className="text-muted-foreground mt-1 text-[11px]">
+              Steered mid-turn
+            </p>
+          }
+        />
+      );
+    case "file_activity":
+      return <FileActivityRow files={item.files} />;
     case "assistant":
       return (
         <article className="message message-assistant" aria-label="Assistant">
@@ -371,6 +389,80 @@ function toolDetailLine(detail: ToolDetail): string {
     case "other":
       return detail.summary;
   }
+}
+
+const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
+  added: "A",
+  modified: "M",
+  deleted: "D",
+  renamed: "R",
+};
+
+function fileActivitySignature(
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>,
+): string {
+  return Object.entries(files)
+    .map(
+      ([path, file]) =>
+        `${path}:${file.kind}:${file.diffstat.insertions}:${file.diffstat.deletions}`,
+    )
+    .join("|");
+}
+
+function fileActivityTotals(
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>,
+): { count: number; insertions: number; deletions: number } {
+  let insertions = 0;
+  let deletions = 0;
+  const paths = Object.keys(files);
+  for (const file of Object.values(files)) {
+    insertions += file.diffstat.insertions;
+    deletions += file.diffstat.deletions;
+  }
+  return { count: paths.length, insertions, deletions };
+}
+
+function FileActivityRow({
+  files,
+}: {
+  files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
+}) {
+  const { count, insertions, deletions } = fileActivityTotals(files);
+  const noun = count === 1 ? "file" : "files";
+  const summary = `${count} ${noun} changed · +${insertions} −${deletions}`;
+  return (
+    <details className="text-muted-foreground max-w-prose text-xs">
+      <summary className="cursor-pointer">{summary}</summary>
+      <ul className="mt-1 flex flex-col gap-0.5">
+        {Object.entries(files).map(([path, file]) => (
+          <li key={path} className="flex items-baseline gap-2">
+            <span
+              className={cn(
+                "inline-flex size-4 shrink-0 items-center justify-center rounded-[3px] font-mono text-[10px] font-medium",
+                file.kind === "added" &&
+                  "bg-success-background text-success-foreground",
+                file.kind === "modified" &&
+                  "bg-info-background text-info-foreground",
+                file.kind === "deleted" &&
+                  "bg-critical-background text-critical-foreground",
+                file.kind === "renamed" &&
+                  "bg-warning-background text-warning-foreground",
+              )}
+              aria-label={file.kind}
+            >
+              {FILE_KIND_LETTER[file.kind]}
+            </span>
+            <code className="min-w-0 truncate" title={path}>
+              {path}
+            </code>
+            <span className="shrink-0 tabular-nums">
+              +{file.diffstat.insertions} −{file.diffstat.deletions}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 

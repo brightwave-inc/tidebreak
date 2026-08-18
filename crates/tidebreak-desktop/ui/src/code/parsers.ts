@@ -1304,6 +1304,28 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       if (!state) return null;
       return { type: "attention_changed", state, source: value.source };
     }
+    case "file_changed": {
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "file_changed" }>>(value, [
+          "type",
+          "path",
+          "kind",
+          "diffstat",
+        ]) ||
+        typeof value.path !== "string" ||
+        !isMember(value.kind, FILE_CHANGE_KINDS)
+      ) {
+        return null;
+      }
+      const diffstat = parseDiffstat(value.diffstat);
+      if (!diffstat) return null;
+      return {
+        type: "file_changed",
+        path: value.path,
+        kind: value.kind,
+        diffstat,
+      };
+    }
     default:
       // Unknown kinds stay well-formed so a newer journal does not stall the
       // cursor. The reducer advances seq and paints nothing.

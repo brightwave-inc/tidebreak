@@ -5,8 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeComposer } from "./CodeComposer";
 import { HttpError } from "../api/client";
+import { useUiStore } from "../UiStore";
+
 afterEach(() => {
   cleanup();
+  useUiStore.setState({ activeTurnSendMode: "queue" });
 });
 
 const QUEUED = {
@@ -48,9 +51,81 @@ describe("CodeComposer", () => {
 
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("and run the tests"));
     expect(box).toHaveValue("");
-    expect(
-      await screen.findByText("Queued — runs after the current turn."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
+  });
+
+  it("clears the queued pill when the next turn begins", async () => {
+    const onSend = vi.fn().mockResolvedValue(QUEUED);
+    const { rerender } = render(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        lastTurnBeganId="t1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "and run the tests" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
+
+    rerender(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        lastTurnBeganId="t2"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("1 follow-up queued")).toBeNull();
+  });
+
+  it("steers mid-turn when the harness supports it", async () => {
+    useUiStore.setState({ activeTurnSendMode: "steer" });
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onSend = vi.fn();
+    render(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={onSend}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "try the other file" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("try the other file"),
+    );
+    expect(onSend).not.toHaveBeenCalled();
+    expect(await screen.findByText("Guidance sent")).toBeInTheDocument();
+  });
+
+  it("queues mid-turn when steering is unsupported", async () => {
+    useUiStore.setState({ activeTurnSendMode: "steer" });
+    const onSend = vi.fn().mockResolvedValue(QUEUED);
+    render(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "and run the tests" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("and run the tests"));
+    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
   });
 
   it("says the queue is full and keeps the draft", async () => {
@@ -74,9 +149,9 @@ describe("CodeComposer", () => {
       screen.getByRole("button", { name: "Queue message for after this response" }),
     );
 
-    expect(
-      await screen.findByText("A follow-up is already queued. Wait for it to run, or interrupt this turn."),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A follow-up is already queued. Wait for it to run, or interrupt this turn.",
+    );
     expect(box).toHaveValue("and push it");
   });
 

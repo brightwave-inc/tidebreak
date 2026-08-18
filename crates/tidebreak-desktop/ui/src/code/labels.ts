@@ -329,3 +329,22 @@ export function attentionLabel(attention: Attention): string {
       return attention.state.note || "Pinned";
   }
 }
+
+/**
+ * Richer badge tooltip: idle seconds, how a need was detected, the pin note.
+ * The visible label stays short.
+ */
+export function attentionTooltip(attention: Attention): string {
+  switch (attention.state.type) {
+    case "stalled":
+      return `Stalled · idle ${attention.state.idle_secs}s`;
+    case "needs_you":
+      return `${attentionLabel(attention)} · ${attention.state.source}`;
+    case "manual":
+      return attention.state.note
+        ? `Pinned · ${attention.state.note}`
+        : "Pinned";
+    default:
+      return attentionLabel(attention);
+  }
+}
