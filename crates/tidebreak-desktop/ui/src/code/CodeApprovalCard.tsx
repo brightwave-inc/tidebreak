@@ -42,7 +42,7 @@ export function CodeApprovalCard({
       data-testid="code-approval-card"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-[13px] font-medium break-words">
+        <h3 className="text-[13.5px] font-medium break-words">
           {approvalTitle(approval)}
         </h3>
         <ApprovalState approval={approval} />
@@ -53,7 +53,7 @@ export function CodeApprovalCard({
         decidedAt={approval.decided_at}
       />
       {approval.state === "denied" && approval.feedback && (
-        <p className="text-[13px] break-words">{approval.feedback}</p>
+        <p className="text-[13.5px] break-words">{approval.feedback}</p>
       )}
       <div>
         <button
@@ -151,7 +151,7 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
     case "command":
       return (
         <div className="flex flex-col gap-1">
-          <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-[13px] break-words whitespace-pre-wrap">
+          <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-[13.5px] break-words whitespace-pre-wrap">
             {approval.kind.cmd || "Command"}
           </pre>
           {approval.kind.cwd && (
@@ -166,17 +166,17 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
         <ul className="space-y-0.5">
           {approval.kind.paths.map((path) => (
             <li key={path}>
-              <MiddleTruncate text={path} className="font-mono text-[11px]" />
+              <MiddleTruncate text={path} className="font-mono text-[13.5px]" />
             </li>
           ))}
         </ul>
       ) : (
-        <p className="text-muted-foreground text-[13px]">File write</p>
+        <p className="text-muted-foreground text-[13.5px]">File write</p>
       );
     case "network":
     case "other":
       return (
-        <p className="text-muted-foreground text-[13px] break-words">
+        <p className="text-muted-foreground text-[13.5px] break-words">
           {approval.kind.summary}
         </p>
       );
