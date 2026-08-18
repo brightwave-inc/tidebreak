@@ -381,8 +381,12 @@ fn chat_and_code_entities_do_not_cross_reference() {
             );
         }
         // `TurnId` is a suffix of `CodeTurnId`; require a word-ish boundary.
+        // `code_turn_attachment.turn_id` is a code-mode FK, not chat `TurnId`.
         for line in text.lines() {
-            if line.contains("TurnId") && !line.contains("CodeTurnId") {
+            if line.contains("TurnId")
+                && !line.contains("CodeTurnId")
+                && !line.contains("code_turn_attachment")
+            {
                 panic!("{} references chat TurnId: {line}", path.display());
             }
         }

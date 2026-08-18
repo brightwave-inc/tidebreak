@@ -112,12 +112,12 @@ where
     Ok(())
 }
 
-async fn load_attachments_on<C>(conn: &C, turn_id: uuid::Uuid) -> Result<Vec<CodeTurnAttachment>>
+async fn load_attachments_on<C>(conn: &C, turn_id: CodeTurnId) -> Result<Vec<CodeTurnAttachment>>
 where
     C: ConnectionTrait,
 {
     let rows = entities::code_turn_attachment::Entity::find()
-        .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id))
+        .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
         .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
         .all(conn)
         .await
@@ -126,14 +126,13 @@ where
         .map(|row| {
             let media_type = ImageMediaType::parse(&row.media_type).ok_or_else(|| {
                 AgentError::Store(format!(
-                    "code_turn_attachment {} has unknown media type {}",
-                    row.turn_id, row.media_type
+                    "code_turn_attachment {turn_id} has unknown media type {}",
+                    row.media_type
                 ))
             })?;
             let byte_len = u64::try_from(row.byte_len).map_err(|_| {
                 AgentError::Store(format!(
-                    "code_turn_attachment {} has a negative byte length",
-                    row.turn_id
+                    "code_turn_attachment {turn_id} has a negative byte length"
                 ))
             })?;
             Ok(CodeTurnAttachment {
@@ -270,7 +269,7 @@ pub async fn save_turn(store: &DbStore, turn: &CodeTurn) -> Result<bool> {
 
 async fn turn_from_stored(store: &DbStore, row: entities::code_turn::Model) -> Result<CodeTurn> {
     let mut turn = turn_from_row(row)?;
-    turn.attachments = load_attachments_on(&store.conn, turn.id.0).await?;
+    turn.attachments = load_attachments_on(&store.conn, turn.id).await?;
     Ok(turn)
 }
 
