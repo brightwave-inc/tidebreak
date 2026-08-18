@@ -1104,10 +1104,14 @@ fn category_name(category: PluginCategory) -> &'static str {
 }
 
 fn manifest_body(manifest: &str) -> &str {
-    manifest
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n"))
-        .map_or("", |(_, body)| body)
+    let rest = manifest
+        .strip_prefix("---\r\n")
+        .or_else(|| manifest.strip_prefix("---\n"));
+    rest.and_then(|rest| {
+        rest.split_once("\r\n---\r\n")
+            .or_else(|| rest.split_once("\n---\n"))
+    })
+    .map_or("", |(_, body)| body)
 }
 
 fn display_name(name: &str) -> String {

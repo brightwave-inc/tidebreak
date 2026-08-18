@@ -259,12 +259,7 @@ pub fn parse_skill_manifest(
     if source.len() > crate::MAX_WORKSPACE_FILE_BYTES {
         return Err(invalid("manifest exceeds the workspace file limit"));
     }
-    let rest = source
-        .strip_prefix("---\n")
-        .ok_or_else(|| invalid("missing opening frontmatter fence"))?;
-    let (frontmatter, body) = rest
-        .split_once("\n---\n")
-        .ok_or_else(|| invalid("missing closing frontmatter fence"))?;
+    let (frontmatter, body) = split_frontmatter(source).map_err(invalid)?;
 
     let mut name = None;
     let mut description = None;
@@ -338,6 +333,18 @@ pub fn parse_skill_manifest(
         host_deps,
         origin,
     })
+}
+
+/// Split `---`-fenced YAML frontmatter. Windows checkouts and user files may
+/// use CRLF, so both fence encodings are accepted.
+pub(crate) fn split_frontmatter(source: &str) -> Result<(&str, &str), &'static str> {
+    let rest = source
+        .strip_prefix("---\r\n")
+        .or_else(|| source.strip_prefix("---\n"))
+        .ok_or("missing opening frontmatter fence")?;
+    rest.split_once("\r\n---\r\n")
+        .or_else(|| rest.split_once("\n---\n"))
+        .ok_or("missing closing frontmatter fence")
 }
 
 /// The three dependency lists one `deps` entry may declare.
@@ -670,6 +677,10 @@ Instructions live here.\n";
                 .python_deps,
             [""; 0]
         );
+
+        let crlf = VALID.replace('\n', "\r\n");
+        let package = parse_skill_manifest(&crlf, SkillOrigin::Builtin).unwrap();
+        assert_eq!(package.name, "pdf-documents");
     }
 
     /// The `host:` list is a closed vocabulary: `libreoffice` parses into its

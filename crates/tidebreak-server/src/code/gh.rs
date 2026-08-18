@@ -1142,8 +1142,8 @@ fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) ->
                 .collect::<Vec<_>>()
         })
         .filter(|extensions| !extensions.is_empty())
-        .unwrap_or_else(|| [".COM", ".EXE"].map(str::to_owned).to_vec());
-    let mut extensions = vec![".EXE".to_owned()];
+        .unwrap_or_else(|| [".COM", ".exe"].map(str::to_owned).to_vec());
+    let mut extensions = vec![".exe".to_owned()];
     for extension in configured {
         if !extensions
             .iter()
@@ -1964,6 +1964,16 @@ mod windows_tests {
 
     const DESCENDANT_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+    fn assert_windows_path_eq(actual: Option<PathBuf>, expected: &Path) {
+        let actual = actual.expect("expected an executable path");
+        assert!(
+            actual
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy()),
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
     #[test]
     fn github_cli_discovery_applies_windows_executable_extensions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1971,7 +1981,7 @@ mod windows_tests {
         std::fs::write(&gh, b"synthetic executable").unwrap();
         let search_path = std::env::join_paths([dir.path()]).unwrap();
 
-        assert_eq!(find_gh(search_path.to_str()), Some(gh));
+        assert_windows_path_eq(find_gh(search_path.to_str()), &gh);
     }
 
     #[test]
@@ -1983,9 +1993,9 @@ mod windows_tests {
         std::fs::write(&gh, b"synthetic executable").unwrap();
         let search_path = std::env::join_paths([unlaunchable.path(), installed.path()]).unwrap();
 
-        assert_eq!(
+        assert_windows_path_eq(
             find_windows_gh(&search_path, Some(OsStr::new(".PS1;.EXE"))),
-            Some(gh)
+            &gh,
         );
     }
 
@@ -1998,9 +2008,9 @@ mod windows_tests {
         std::fs::write(&gh, b"synthetic executable").unwrap();
         let search_path = std::env::join_paths([batch_shim.path(), installed.path()]).unwrap();
 
-        assert_eq!(
+        assert_windows_path_eq(
             find_windows_gh(&search_path, Some(OsStr::new(".CMD;.EXE"))),
-            Some(gh)
+            &gh,
         );
     }
 
@@ -2039,13 +2049,14 @@ mod windows_tests {
         let pid_file = dir.path().join("descendant.pid");
         let action = QuickAction {
             name: "process tree timeout".into(),
-            command: "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
-                      -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
-                      'Start-Sleep -Seconds 120') -PassThru; \
-                      $pidPath = Join-Path -Path (Get-Location) -ChildPath 'descendant.pid'; \
-                      [IO.File]::WriteAllText($pidPath, $child.Id.ToString()); \
-                      Wait-Process -Id $child.Id"
-                .into(),
+            command: format!(
+                "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
+                 -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
+                 'Start-Sleep -Seconds 120') -PassThru; \
+                 [IO.File]::WriteAllText({}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
+                 Wait-Process -Id $child.Id",
+                powershell_single_quote(&pid_file.to_string_lossy())
+            ),
             auto_run_on_create: false,
         };
         let worktree = dir.path().to_path_buf();
@@ -2077,7 +2088,7 @@ mod windows_tests {
         let deadline = Instant::now() + ACTION_TIMEOUT - Duration::from_millis(500);
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await {
-                if let Ok(pid) = value.trim().parse() {
+                if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
                     return pid;
                 }
             }

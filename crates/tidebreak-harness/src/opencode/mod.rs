@@ -172,7 +172,8 @@ mod tests {
             });
             let actual = format!("{}\n", serde_json::to_string_pretty(&out.events).unwrap());
             assert_eq!(
-                expected, actual,
+                expected.replace("\r\n", "\n"),
+                actual,
                 "normalized sequence for {name} drifted from the fixture"
             );
         }

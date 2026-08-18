@@ -464,11 +464,14 @@ mod windows_tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("descendant.pid");
         let powershell = powershell_path();
-        let script = "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
-                      -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
-                      'Start-Sleep -Seconds 120') -PassThru; \
-                      [IO.File]::WriteAllText($args[0], $child.Id.ToString()); \
-                      Wait-Process -Id $child.Id";
+        let pid_literal = format!("'{}'", pid_file.to_string_lossy().replace('\'', "''"));
+        let script = format!(
+            "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
+             -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
+             'Start-Sleep -Seconds 120') -PassThru; \
+             [IO.File]::WriteAllText({pid_literal}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
+             Wait-Process -Id $child.Id"
+        );
         let mut command = Command::new(powershell);
         command
             .args([
@@ -478,7 +481,6 @@ mod windows_tests {
                 "-Command",
                 script,
             ])
-            .arg(&pid_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -495,7 +497,7 @@ mod windows_tests {
         let deadline = Instant::now() + DESCENDANT_TIMEOUT;
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await {
-                if let Ok(pid) = value.trim().parse() {
+                if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
                     return pid;
                 }
             }
