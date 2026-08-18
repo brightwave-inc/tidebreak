@@ -263,7 +263,7 @@ pub enum CodeUpdateNotice {
         title: String,
         turn_count: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pr_state: Option<PullRequestDigest>,
+        pr_state: Option<Box<PullRequestDigest>>,
     },
     TerminalActivity {
         workspace_id: WorkspaceId,
