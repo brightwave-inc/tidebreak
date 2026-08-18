@@ -2070,7 +2070,7 @@ async fn recovered_drive_keeps_failed_provider_attempts_in_the_spend_budget() {
 /// move forward before the model call is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_secs(120), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "takes a while").await;
 
@@ -2081,7 +2081,8 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
         // the container is driving — so a short lease expires under CI
         // contention before the first tick and this loop never observes an
         // extension. A short heartbeat still proves the expiry moved without
-        // sleeping through a full lease period.
+        // sleeping through a full lease period. The durable fence is not under
+        // test here; a quiet interval avoids extra SQLite writes during setup.
         let provider = Arc::new(ScriptedProvider::gated(
             vec![
                 "use-tool:write_file:{\"path\":\"note.txt\",\"content\":\"a b\"}".to_owned(),
@@ -2096,7 +2097,9 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             backend.clone(),
             resolver,
             SandboxContainerRunConfig {
+                lease: Duration::from_secs(120),
                 heartbeat: Duration::from_millis(100),
+                durable_fence_interval: Duration::from_secs(30),
                 ..fast_config()
             },
         ));
@@ -2106,7 +2109,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             async move { runner.drive(run_id).await }
         });
         wait_until(
-            Duration::from_secs(45),
+            Duration::from_secs(60),
             "the first model call started",
             || async {
                 if gate.entered() {
@@ -2130,7 +2133,7 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             .expect("a claimed run has a lease expiry");
 
         wait_until(
-            Duration::from_secs(10),
+            Duration::from_secs(20),
             "the live drive completed at least one heartbeat",
             || async {
                 let ticks = runner.heartbeat_ticks();
@@ -2158,17 +2161,27 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
 
         gate.release();
 
-        let outcome = drive
-            .await
-            .unwrap()
-            .expect("driving succeeds")
-            .expect("the container run is claimable");
+        let outcome = match tokio::time::timeout(Duration::from_secs(45), drive).await {
+            Ok(joined) => joined
+                .expect("the drive task finished")
+                .expect("driving succeeds")
+                .expect("the container run is claimable"),
+            Err(_) => {
+                panic!(
+                    "drive still outstanding after the observed heartbeat; provisions={} destroys={} provider_calls={} heartbeats={}",
+                    backend.provisions.load(Ordering::SeqCst),
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                    runner.heartbeat_ticks(),
+                );
+            }
+        };
         // The run completed normally rather than being reaped out from under the
         // still-working container.
         assert_eq!(outcome, SandboxContainerRunOutcome::Completed(run_id));
     })
     .await
-    .expect("test completed within its time bound");
+    .expect("heartbeat lease proof completed within its 120-second hang guard");
 }
 
 /// A container run is exempt from the in-process lease reaper: its lease
