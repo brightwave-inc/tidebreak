@@ -8,9 +8,10 @@ use crate::state::AppState;
 
 use super::require_code;
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspaceSnapshot, CodeWorkspaceTree, CreateWorkspaceBody, ListWorkspacesQuery,
-    PatchWorkspaceBody, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceTreeQuery,
+    PatchWorkspaceBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
+    WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -88,6 +89,22 @@ pub async fn list_workspace_tree(
         .workspace_tree(id, query.query.as_deref().unwrap_or(""), query.limit)
         .await?;
     Ok(Json(CodeWorkspaceTree { paths, truncated }))
+}
+
+pub async fn get_workspace_blob(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+    Query(query): Query<WorkspaceBlobQuery>,
+) -> Result<Json<CodeWorkspaceBlob>, ServerError> {
+    let blob = require_code(&state)?
+        .workspace_blob(id, &query.path)
+        .await?;
+    Ok(Json(CodeWorkspaceBlob {
+        path: blob.path,
+        content: blob.content,
+        truncated: blob.truncated,
+        binary: blob.binary,
+    }))
 }
 
 pub async fn list_workspace_files(

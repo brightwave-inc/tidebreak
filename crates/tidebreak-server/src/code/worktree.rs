@@ -16,8 +16,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default number of paths the tree route returns.
 pub(crate) const DEFAULT_TREE_LIMIT: u32 = 50;
-/// Hard cap on the tree route. The composer is a shortlist, not a browser.
-pub(crate) const MAX_TREE_LIMIT: u32 = 200;
+/// Hard cap on the tree route. The explorer may request this many paths.
+pub(crate) const MAX_TREE_LIMIT: u32 = 5_000;
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brave", "calm", "crisp", "dusk", "ember", "faint", "gentle", "hidden", "ivory",
@@ -447,6 +447,83 @@ pub(crate) fn two_word_name(seed: u128) -> String {
     format!("{adjective}-{noun}")
 }
 
+const MAX_BLOB_BYTES: usize = 512 * 1_024;
+
+/// One worktree file's text, bounded so a huge blob cannot fill the viewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeBlob {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+/// Read one relative worktree file as UTF-8 text.
+pub(crate) async fn read_worktree_file(
+    worktree_path: &Path,
+    relative: &str,
+) -> Result<WorktreeBlob, WorktreeError> {
+    let rel = validate_relative_file(relative)?;
+    let abs = worktree_path.join(&rel);
+    let canonical_root = tokio::fs::canonicalize(worktree_path)
+        .await
+        .map_err(|err| WorktreeError::internal(format!("could not resolve the worktree: {err}")))?;
+    let canonical = tokio::fs::canonicalize(&abs)
+        .await
+        .map_err(|_| WorktreeError::user(format!("file not found: {}", rel.display())))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(WorktreeError::user("path must stay inside the worktree"));
+    }
+    let metadata = tokio::fs::metadata(&canonical).await.map_err(|err| {
+        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(WorktreeError::user(format!(
+            "{} is not a file",
+            rel.display()
+        )));
+    }
+    let bytes = tokio::fs::read(&canonical).await.map_err(|err| {
+        WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+    })?;
+    let path = rel.to_string_lossy().replace('\\', "/");
+    if bytes.contains(&0) {
+        return Ok(WorktreeBlob {
+            path,
+            content: String::new(),
+            truncated: false,
+            binary: true,
+        });
+    }
+    let truncated = bytes.len() > MAX_BLOB_BYTES;
+    let end = bytes.len().min(MAX_BLOB_BYTES);
+    Ok(WorktreeBlob {
+        path,
+        content: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+        truncated,
+        binary: false,
+    })
+}
+
+fn validate_relative_file(value: &str) -> Result<PathBuf, WorktreeError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(WorktreeError::user("path is required"));
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(WorktreeError::user("path must be a relative worktree file"));
+    }
+    Ok(path.to_path_buf())
+}
+
 async fn verify_inside_worktree(path: &Path) -> Result<(), WorktreeError> {
     let inside = git_stdout(
         Some(path),
@@ -795,9 +872,9 @@ mod tests {
         let (capped, truncated) = list_tree_paths(&repo, "bulk-", 50).await.unwrap();
         assert_eq!(capped.len(), 50);
         assert!(truncated);
-        let (hard_capped, hard_truncated) = list_tree_paths(&repo, "bulk-", 500).await.unwrap();
-        assert_eq!(hard_capped.len(), 200);
-        assert!(hard_truncated);
+        let (page, page_truncated) = list_tree_paths(&repo, "bulk-", 500).await.unwrap();
+        assert_eq!(page.len(), 250);
+        assert!(!page_truncated);
     }
 
     #[test]
@@ -820,6 +897,26 @@ mod tests {
         let slug = name.strip_prefix("tidebreak/").unwrap();
         assert!(slug.contains('-'), "{slug}");
         assert_eq!(slugify("Hello, World!"), "hello-world");
+    }
+
+    #[tokio::test]
+    async fn blob_reads_text_and_refuses_parent_paths() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "blob");
+        create_worktree(&repo, &path, "tidebreak/blob", "main")
+            .await
+            .unwrap();
+        std::fs::write(path.join("notes.md"), "hello from blob\n").unwrap();
+
+        let blob = read_worktree_file(&path, "notes.md").await.unwrap();
+        assert_eq!(blob.path, "notes.md");
+        assert_eq!(blob.content, "hello from blob\n");
+        assert!(!blob.binary);
+        assert!(!blob.truncated);
+
+        let err = read_worktree_file(&path, "../README.md").await.unwrap_err();
+        assert!(err.to_string().contains("relative"), "{err}");
     }
 
     #[cfg(windows)]

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -164,13 +165,14 @@ describe("NewWorkspaceDialog", () => {
     const repoField = screen.getByRole("combobox", { name: "Repo" });
     expect(repoField).toHaveTextContent("tidebreak");
     expect(repoField).toHaveFocus();
+    expect(repoField).toBeEnabled();
     expect(screen.getByRole("combobox", { name: "Harness" })).toHaveTextContent(
       "Codex CLI",
     );
     await waitFor(() =>
-      expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent(
-        "GPT 5.6 Sol",
-      ),
+      expect(
+        screen.getByRole("button", { name: "Model: GPT 5.6 Sol" }),
+      ).toBeEnabled(),
     );
     // Allow is the default where the engine honors it, and it says so.
     expect(
@@ -203,5 +205,120 @@ describe("NewWorkspaceDialog", () => {
         model: "gpt-5.6-sol",
       }),
     );
+  });
+
+  it("lists the workspace block before harness, then model", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "claude_code" as const,
+            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const labels = [
+      ...screen
+        .getByRole("dialog")
+        .querySelectorAll(
+          "form > div > span.font-medium, form > label > span.font-medium",
+        ),
+    ].map((el) => el.textContent);
+    expect(labels).toEqual([
+      "Repo",
+      "Title",
+      "Base ref",
+      "Harness",
+      "Model",
+      "Permission mode",
+    ]);
+  });
+
+  it("keeps the repo picker enabled when opened from a repo", async () => {
+    const repos = [repo("repo-old", "legacy"), repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "claude_code" as const,
+            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog
+          open
+          onOpenChange={vi.fn()}
+          repos={repos}
+          defaultRepoId="repo-old"
+        />
+      </AppContextProvider>,
+      { initialUrl: "/code/r/repo-old" },
+    );
+
+    const repoField = screen.getByRole("combobox", { name: "Repo" });
+    expect(repoField).toHaveTextContent("legacy");
+    expect(repoField).toBeEnabled();
+  });
+
+  it("lets the reader search the model list", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("opencode")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "opencode" as const,
+            models: [
+              { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
+              { id: "claude-opus-5", label: "Claude Opus 5" },
+              { id: "grok-4.5", label: "Grok 4.5" },
+            ],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole("button", {
+      name: "Model: GPT 5.6 Sol",
+    });
+    await user.click(trigger);
+    const search = await screen.findByRole("searchbox", {
+      name: "Search models",
+    });
+    await user.type(search, "opus");
+    expect(screen.getByRole("menuitem", { name: /Claude Opus 5/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: /GPT 5.6 Sol/ }),
+    ).not.toBeInTheDocument();
   });
 });

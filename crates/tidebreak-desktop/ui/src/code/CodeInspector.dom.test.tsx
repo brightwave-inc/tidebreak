@@ -47,6 +47,7 @@ function makeClient(): Pick<
   | "mergeCodePr"
   | "getCodeWorkspaceDiff"
   | "listCodeWorkspaceFiles"
+  | "listCodeWorkspaceTree"
   | "getCodeWorkspacePr"
 > {
   return {
@@ -74,6 +75,10 @@ function makeClient(): Pick<
       files: [],
       truncated: false,
       stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    }),
+    listCodeWorkspaceTree: vi.fn().mockResolvedValue({
+      paths: [],
+      truncated: false,
     }),
     getCodeWorkspacePr: vi.fn().mockResolvedValue(null),
   };
@@ -146,8 +151,39 @@ it("exposes a tablist and passes the scoped turn into files and source", async (
 
   await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
   await waitFor(() =>
-    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith("ws-1", "turn-1"),
+    expect(client.listCodeWorkspaceTree).toHaveBeenCalledWith("ws-1", {
+      limit: 5000,
+    }),
   );
+});
+
+it("gives the active inspector tab a selected fill idle tabs do not share", async () => {
+  render(
+    <CodeInspector
+      client={makeClient() as never}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+    />,
+  );
+
+  const files = screen.getByRole("tab", { name: "Files" });
+  const source = screen.getByRole("tab", { name: "Source control" });
+  const pr = screen.getByRole("tab", { name: "Pull request" });
+
+  expect(files).toHaveAttribute("data-state", "active");
+  expect(files).toHaveClass("bg-foreground/10");
+  expect(source).toHaveAttribute("data-state", "inactive");
+  expect(pr).toHaveAttribute("data-state", "inactive");
+  expect(source).not.toHaveClass("bg-foreground/10");
+  expect(pr).not.toHaveClass("bg-foreground/10");
+
+  await userEvent.setup().click(source);
+
+  expect(source).toHaveAttribute("data-state", "active");
+  expect(source).toHaveClass("bg-foreground/10");
+  expect(files).not.toHaveClass("bg-foreground/10");
+  expect(pr).not.toHaveClass("bg-foreground/10");
 });
 
 it("labels a turn by its ordinal among user items", () => {

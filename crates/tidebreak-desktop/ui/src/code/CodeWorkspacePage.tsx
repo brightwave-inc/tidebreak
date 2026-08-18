@@ -41,12 +41,18 @@ import {
 import { AttentionBadge } from "./AttentionBadge";
 import {
   closeCodeChromeTab,
+  closeEditorTab,
   focusCodeChromeTab,
+  focusConversation,
+  focusEditorTab,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
+import { CodeCenterTabs } from "./CodeCenterTabs";
+import { DiffPanel } from "./DiffPanel";
+import { FileViewer } from "./FileViewer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector, inspectorTurnLabel } from "./CodeInspector";
+import { CodeInspector } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
@@ -101,7 +107,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const catalog = useCodeCatalogStore();
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
-  const { setLayout } = usePanelNav();
+  const { setLayout, openPanel } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
@@ -231,33 +237,45 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     : [];
 
   function openTurnDiff(turnId: string) {
-    const items = session
-      ? acquireCodeSessionFromClient(session.id, client).getState().items
-      : [];
-    if (session) releaseCodeSession(session.id);
-    setInspectorScope({
-      turnId,
-      label: inspectorTurnLabel(items, turnId),
-    });
-    setReviewSidebarOpen(true);
+    openPanel({ type: "diff", turnId });
   }
 
+  function openFile(path: string) {
+    openPanel({ type: "file", path });
+  }
+
+  function openFileDiff(path: string) {
+    openPanel({ type: "diff", path });
+  }
+
+  const editorTabs = chrome.editors.tabs;
+  const showingChat =
+    editorTabs.length === 0 || Boolean(chrome.editors.conversationFocused);
+  const activeEditor = showingChat
+    ? null
+    : (editorTabs[chrome.editors.activeIndex] ?? null);
+
   const workspaceMain = (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <CodeCenterTabs
+        editorTabs={editorTabs}
+        editorActiveIndex={chrome.editors.activeIndex}
+        conversationFocused={showingChat}
+        onSelectChat={() => setLayout(focusConversation(layout))}
+        onSelectEditor={(index) => setLayout(focusEditorTab(layout, index))}
+        onCloseEditor={(index) => setLayout(closeEditorTab(layout, index))}
+      />
+      <div className={cn("min-h-0 flex-1", !showingChat && "hidden")}>
       <PanelLayout
         layout={chrome.panels}
         framed={false}
         onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
         onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
         renderChat={(visible) => (
-          // The panel slot this sits in is a plain block, so nothing stretches
-          // the pane to the slot's height — `flex-1` resolves to nothing and
-          // the transcript never becomes a scroller. It claims the height
-          // itself, the same way `.chat-pane` does.
-          <div
-            className="flex h-full min-h-0 flex-col overflow-hidden"
-            hidden={!visible}
-          >
+          // The panel slot is a plain block. `.chat-pane` claims that height
+          // so `.message-view` can grow and the composer stays at the bottom,
+          // including on an empty transcript.
+          <div className="chat-pane" hidden={!visible || !showingChat}>
             {fenced && session?.fence_reason && (
               <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
                 <p>{fenceReasonText(session.fence_reason)}</p>
@@ -298,6 +316,28 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           renderCodePanel(panel, client, workspaceId)
         }
       />
+      </div>
+      {!showingChat && activeEditor && (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {activeEditor.type === "file" ? (
+            <FileViewer
+              client={client}
+              workspaceId={workspaceId}
+              path={activeEditor.path}
+              contentRevision={contentRevision}
+            />
+          ) : (
+            <DiffPanel
+              client={client}
+              workspaceId={workspaceId}
+              turnId={activeEditor.turnId}
+              file={activeEditor.path}
+              contentRevision={contentRevision}
+              onOpenFile={openFile}
+            />
+          )}
+        </div>
+      )}
       {chrome.terminal && (
         <TerminalDrawer
           client={client}
@@ -423,7 +463,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           direction="horizontal"
           className="min-h-0 flex-1"
         >
-          <ResizablePanel defaultSize={72} minSize={36} className="min-w-0">
+          <ResizablePanel defaultSize={72} minSize={36} className="h-full min-h-0 min-w-0">
             {workspaceMain}
           </ResizablePanel>
           <ResizableHandle />
@@ -434,11 +474,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               workspaceId={workspaceId}
               workspace={workspace}
               contentRevision={contentRevision}
+              onOpenFile={openFile}
+              onOpenDiff={openFileDiff}
             />
           </ResizablePanel>
         </ResizablePanelGroup>
       ) : (
-        <div className="flex min-h-0 flex-1 overflow-hidden">{workspaceMain}</div>
+        <div className="flex h-full min-h-0 flex-1 overflow-hidden">{workspaceMain}</div>
       )}
     </>
   );
@@ -789,7 +831,7 @@ function CodeSessionPane({
   }
 
   return (
-    <>
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className={cn("message-view", follow.fadeClass)}>
         {connectionState === "reconnecting" && (
           <p
@@ -871,7 +913,7 @@ function CodeSessionPane({
           onInterrupt={interrupt}
         />
       )}
-    </>
+    </div>
   );
 }
 

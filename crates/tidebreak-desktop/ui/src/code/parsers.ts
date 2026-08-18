@@ -18,6 +18,7 @@ import type {
   CodeTerminalSnapshot,
   CodeWorkspaceDiff,
   CodeWorkspaceFiles,
+  CodeWorkspaceBlob,
   CodeWorkspaceTree,
   CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
@@ -57,6 +58,7 @@ import type {
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   CodeWorkspaceTree as WireCodeWorkspaceTree,
   CodeTurnAttachment as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
@@ -828,6 +830,32 @@ export function parseCodeWorkspaceFiles(
     truncated: value.truncated,
     stat,
     ...(value.turn_id !== undefined ? { turn_id: value.turn_id } : {}),
+  };
+}
+
+export function parseCodeWorkspaceBlob(
+  value: unknown,
+): CodeWorkspaceBlob | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceBlob>(value, [
+      "path",
+      "content",
+      "truncated",
+      "binary",
+    ]) ||
+    typeof value.path !== "string" ||
+    typeof value.content !== "string" ||
+    typeof value.truncated !== "boolean" ||
+    typeof value.binary !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    path: value.path,
+    content: value.content,
+    truncated: value.truncated,
+    binary: value.binary,
   };
 }
 

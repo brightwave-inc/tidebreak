@@ -1,75 +1,209 @@
-import { useCallback } from "react";
-
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
 import type { ApiClient } from "../api/client";
-import type { CodeFileChange, FileChangeKind } from "../api/types";
+import { SearchInput } from "@/components/SearchInput";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import {
+  ancestorPaths,
+  buildFileTree,
+  filterPaths,
+  type FileTreeNode,
+} from "./fileTree";
 import { useLiveResource } from "./useLiveContent";
 
-const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
-  added: "A",
-  modified: "M",
-  deleted: "D",
-  renamed: "R",
-};
+const TREE_PAGE = 5000;
 
 /**
- * Changed files vs the workspace base, optionally filtered to one turn.
- * Clicking a row opens the Diff panel at that file.
- *
- * The list reloads on every content revision so a panel left open while the
- * engine works does not keep describing the worktree as it was.
+ * Nested worktree explorer. Search is Cmd+F (Ctrl+F): file names and
+ * include/exclude globs. Diffs stay on the Source tab.
  */
 export function FilesPanel({
   client,
   workspaceId,
-  turnId,
   selected,
   onOpenFile,
   contentRevision = 0,
 }: {
-  client: Pick<ApiClient, "listCodeWorkspaceFiles">;
+  client: Pick<ApiClient, "listCodeWorkspaceTree">;
   workspaceId: string;
-  turnId?: string;
   selected?: string;
   onOpenFile: (file: string) => void;
   /** Bumped by the session journal when the worktree may have moved. */
   contentRevision?: number;
 }) {
-  const load = useCallback(
-    () => client.listCodeWorkspaceFiles(workspaceId, turnId),
-    [client, workspaceId, turnId],
+  const [query, setQuery] = useState("");
+  const [include, setInclude] = useState("");
+  const [exclude, setExclude] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [openDirs, setOpenDirs] = useState<Set<string>>(() => new Set());
+  const [closedTop, setClosedTop] = useState<Set<string>>(() => new Set());
+  const [searchHits, setSearchHits] = useState<string[] | null>(null);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+
+  const loadTree = useCallback(
+    () => client.listCodeWorkspaceTree(workspaceId, { limit: TREE_PAGE }),
+    [client, workspaceId],
   );
   const {
-    data: listing,
+    data: tree,
     error,
     refreshing,
   } = useLiveResource({
-    key: `${workspaceId} ${turnId ?? ""}`,
+    key: workspaceId,
     revision: contentRevision,
-    load,
-    errorMessage: "Could not load changed files",
+    load: loadTree,
+    errorMessage: "Could not load files",
   });
 
-  const files = listing?.files ?? [];
-  const empty = listing !== null && files.length === 0 && !error;
+  useEffect(() => {
+    const needle = query.trim();
+    setSearchHits(null);
+    setSearchTruncated(false);
+    if (!needle) {
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      void client
+        .listCodeWorkspaceTree(workspaceId, { query: needle, limit: TREE_PAGE })
+        .then((hits) => {
+          if (cancelled) return;
+          setSearchHits(hits.paths);
+          setSearchTruncated(hits.truncated);
+          setSearching(false);
+        })
+        .catch(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [client, workspaceId, query, contentRevision]);
+
+  const visiblePaths = useMemo(() => {
+    return filterPaths(searchHits ?? tree?.paths ?? [], include, exclude);
+  }, [searchHits, tree, include, exclude]);
+
+  const nodes = useMemo(() => buildFileTree(visiblePaths), [visiblePaths]);
+
+  const forcedOpen = useMemo(() => {
+    if (!query.trim() && !include.trim() && !exclude.trim()) return new Set<string>();
+    const dirs = new Set<string>();
+    for (const path of visiblePaths) {
+      for (const parent of ancestorPaths(path)) dirs.add(parent);
+    }
+    return dirs;
+  }, [query, include, exclude, visiblePaths]);
+
+  function isOpen(path: string): boolean {
+    if (forcedOpen.has(path)) return true;
+    if (!path.includes("/")) return !closedTop.has(path);
+    return openDirs.has(path);
+  }
+
+  function toggleDir(path: string) {
+    if (!path.includes("/")) {
+      setClosedTop((current) => {
+        const next = new Set(current);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+      return;
+    }
+    setOpenDirs((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    function onFind(event: KeyboardEvent) {
+      if (event.key !== "f" && event.key !== "F") return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const pane = root.current;
+      if (!pane || pane.closest("[data-state='inactive']")) return;
+      event.preventDefault();
+      setFiltersOpen(true);
+      searchInput.current?.focus();
+      searchInput.current?.select();
+    }
+    window.addEventListener("keydown", onFind);
+    return () => window.removeEventListener("keydown", onFind);
+  }, []);
+
+  const ready = tree !== null;
+  const truncated = Boolean(tree?.truncated || searchTruncated);
+  const empty = ready && nodes.length === 0 && !error;
+  const busy = refreshing || searching;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div
+      ref={root}
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      data-testid="files-explorer"
+    >
       <div className="flex items-center justify-between gap-2 px-3 pt-3">
-        <h2 className="text-sm font-medium">Changed files</h2>
+        <h2 className="text-sm font-medium">Files</h2>
         <span className="grid size-3.5 shrink-0 place-items-center">
-          {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
+          {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
         </span>
       </div>
+      <div className="flex flex-col gap-1.5 px-3 pt-2">
+        <SearchInput
+          size="sm"
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search files"
+          aria-label="Search files"
+          inputRef={searchInput}
+        />
+        {filtersOpen || include || exclude ? (
+          <>
+            <Input
+              value={include}
+              onChange={(event) => setInclude(event.target.value)}
+              placeholder="files to include"
+              aria-label="Files to include"
+              className="h-8 text-xs"
+            />
+            <Input
+              value={exclude}
+              onChange={(event) => setExclude(event.target.value)}
+              placeholder="files to exclude"
+              aria-label="Files to exclude"
+              className="h-8 text-xs"
+            />
+          </>
+        ) : (
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground self-start text-[11px]"
+            onClick={() => setFiltersOpen(true)}
+          >
+            Include / exclude
+          </button>
+        )}
+      </div>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
-      {listing?.truncated && (
+      {truncated && (
         <p className="text-muted-foreground px-3 py-2 text-xs">
-          File list was truncated. Open a single file for the rest.
+          File list was truncated. Narrow the search to see the rest.
         </p>
       )}
-      {!listing && !error && (
+      {!ready && !error && (
         <div className="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
           <Skeleton className="h-4 w-2/3" />
           <Skeleton className="h-4 w-1/2" />
@@ -77,74 +211,101 @@ export function FilesPanel({
         </div>
       )}
       {empty ? (
-        <p className="text-muted-foreground px-3 py-6 text-sm">No files changed.</p>
-      ) : listing ? (
-        <ul className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
-          {files.map((file) => {
-            const current = selected === file.path;
-            return (
-              <li key={`${file.kind}:${file.path}`}>
-                <button
-                  type="button"
-                  aria-current={current ? true : undefined}
-                  className={cn(
-                    "flex w-full items-baseline justify-between gap-3 border-b py-2 text-left text-xs",
-                    current && "bg-muted/40",
-                  )}
-                  onClick={() => onOpenFile(file.path)}
-                >
-                  <span className="flex min-w-0 items-baseline gap-2">
-                    <span
-                      className={cn(
-                        "w-3 shrink-0 font-mono",
-                        file.kind === "added" && "text-success-foreground-muted",
-                        file.kind === "modified" && "text-info-foreground-muted",
-                        file.kind === "deleted" && "text-critical-foreground-muted",
-                        file.kind === "renamed" && "text-warning-foreground-muted",
-                      )}
-                      aria-label={file.kind}
-                    >
-                      {FILE_KIND_LETTER[file.kind]}
-                    </span>
-                    <code className="min-w-0 truncate" title={file.path}>
-                      {fileLabel(file)}
-                    </code>
-                  </span>
-                  <FileStat file={file} />
-                </button>
-              </li>
-            );
-          })}
+        <p className="text-muted-foreground px-3 py-6 text-sm">
+          {query.trim() || include.trim() || exclude.trim()
+            ? "No matching files."
+            : "No files."}
+        </p>
+      ) : ready ? (
+        <ul
+          className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pt-2"
+          role="tree"
+          aria-label="Workspace files"
+        >
+          {nodes.map((node) => (
+            <TreeRow
+              key={node.path}
+              node={node}
+              depth={0}
+              selected={selected}
+              isOpen={isOpen}
+              onToggle={toggleDir}
+              onOpenFile={onOpenFile}
+            />
+          ))}
         </ul>
       ) : null}
     </div>
   );
 }
 
-function FileStat({ file }: { file: CodeFileChange }) {
-  if (file.insertions === 0 && file.deletions === 0) {
-    return (
-      <span className="shrink-0 tabular-nums">
-        <span className="text-success">+0</span>
-      </span>
-    );
-  }
-  return (
-    <span className="shrink-0 tabular-nums">
-      {file.insertions > 0 && (
-        <span className="text-success">+{file.insertions}</span>
-      )}
-      {file.insertions > 0 && file.deletions > 0 && " "}
-      {file.deletions > 0 && (
-        <span className="text-critical">−{file.deletions}</span>
-      )}
-    </span>
-  );
-}
+function TreeRow({
+  node,
+  depth,
+  selected,
+  isOpen,
+  onToggle,
+  onOpenFile,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  selected?: string;
+  isOpen: (path: string) => boolean;
+  onToggle: (path: string) => void;
+  onOpenFile: (file: string) => void;
+}) {
+  const open = node.kind === "dir" && isOpen(node.path);
+  const current = node.kind === "file" && selected === node.path;
+  const Icon =
+    node.kind === "dir" ? (open ? FolderOpen : Folder) : File;
 
-function fileLabel(file: CodeFileChange): string {
-  if (file.kind === "renamed" && file.previous_path) {
-    return `${file.previous_path} → ${file.path}`;
-  }
-  return file.path;
+  return (
+    <li role="treeitem" aria-expanded={node.kind === "dir" ? open : undefined}>
+      <button
+        type="button"
+        aria-current={current ? true : undefined}
+        style={{ paddingLeft: 8 + depth * 12 }}
+        className={cn(
+          "flex w-full items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
+          current && "bg-muted/60",
+          !current && "hover:bg-muted/40",
+        )}
+        onClick={() => {
+          if (node.kind === "dir") onToggle(node.path);
+          else onOpenFile(node.path);
+        }}
+      >
+        {node.kind === "dir" ? (
+          <ChevronRight
+            className={cn(
+              "text-muted-foreground size-3 shrink-0 transition-transform",
+              open && "rotate-90",
+            )}
+            aria-hidden
+          />
+        ) : (
+          <span className="size-3 shrink-0" aria-hidden />
+        )}
+        <Icon className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+        <span className="min-w-0 truncate" title={node.path}>
+          {node.name}
+        </span>
+      </button>
+      {open && node.children && (
+        <ul role="group">
+          {node.children.map((child) => (
+            <TreeRow
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              selected={selected}
+              isOpen={isOpen}
+              onToggle={onToggle}
+              onOpenFile={onOpenFile}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
 }

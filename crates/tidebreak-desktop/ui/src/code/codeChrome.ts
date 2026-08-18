@@ -14,35 +14,75 @@ import {
  */
 export function splitCodeChromeLayout(layout: LayoutState): {
   panels: LayoutState;
+  editors: LayoutState;
   terminal: Extract<PanelContent, { type: "terminal" }> | null;
 } {
   const terminal = layout.tabs.find((tab) => tab.type === "terminal") as
     | Extract<PanelContent, { type: "terminal" }>
     | undefined;
-  const tabs = layout.tabs.filter((tab) => !isDrawerTab(tab));
-  if (tabs.length === 0) {
-    return { panels: EMPTY_LAYOUT, terminal: terminal ?? null };
-  }
-
   const active = layout.tabs[layout.activeIndex];
-  let activeIndex = 0;
-  if (active && !isDrawerTab(active)) {
-    const found = tabs.findIndex((tab) => panelKey(tab) === panelKey(active));
-    if (found >= 0) activeIndex = found;
-  }
+  const side = layout.tabs.filter((tab) => !isDrawerTab(tab) && !isEditorTab(tab));
+  const editors = layout.tabs.filter(isEditorTab);
 
   return {
-    panels: {
-      tabs,
-      activeIndex,
-      fullscreen: layout.fullscreen,
+    panels: sliceLayout(side, active, layout.fullscreen),
+    editors: {
+      ...sliceLayout(editors, active, false),
+      conversationFocused: layout.conversationFocused,
     },
     terminal: terminal ?? null,
   };
 }
 
+function sliceLayout(
+  tabs: PanelContent[],
+  active: PanelContent | undefined,
+  fullscreen: boolean,
+): LayoutState {
+  if (tabs.length === 0) return EMPTY_LAYOUT;
+  let activeIndex = 0;
+  if (active) {
+    const found = tabs.findIndex((tab) => panelKey(tab) === panelKey(active));
+    if (found >= 0) activeIndex = found;
+  }
+  return { tabs, activeIndex, fullscreen };
+}
+
 function isDrawerTab(tab: PanelContent): boolean {
   return tab.type === "terminal";
+}
+
+export function isEditorTab(tab: PanelContent): boolean {
+  return tab.type === "file" || tab.type === "diff";
+}
+
+/** Show the conversation while keeping file and diff tabs open. */
+export function focusConversation(layout: LayoutState): LayoutState {
+  return { ...layout, conversationFocused: true };
+}
+
+/** Bring a file or diff tab forward. `editorIndex` counts only those tabs. */
+export function focusEditorTab(layout: LayoutState, editorIndex: number): LayoutState {
+  const editors = layout.tabs.filter(isEditorTab);
+  const target = editors[editorIndex];
+  if (!target) return layout;
+  const index = layout.tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  if (index < 0) return layout;
+  return { ...layout, activeIndex: index, conversationFocused: false };
+}
+
+/** Close a file or diff tab. `editorIndex` counts only those tabs. */
+export function closeEditorTab(layout: LayoutState, editorIndex: number): LayoutState {
+  const editors = layout.tabs.filter(isEditorTab);
+  const target = editors[editorIndex];
+  if (!target) return layout;
+  const index = layout.tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  if (index < 0) return layout;
+  const next = closeLayoutTab(layout, index);
+  if (next.tabs.filter(isEditorTab).length === 0) {
+    return { ...next, conversationFocused: undefined };
+  }
+  return next;
 }
 
 /**
@@ -56,7 +96,7 @@ function codeChromeUrlIndex(layout: LayoutState, stripIndex: number): number {
   let remaining = stripIndex;
   for (let index = 0; index < layout.tabs.length; index += 1) {
     const tab = layout.tabs[index];
-    if (!tab || isDrawerTab(tab)) continue;
+    if (!tab || isDrawerTab(tab) || isEditorTab(tab)) continue;
     if (remaining === 0) return index;
     remaining -= 1;
   }
@@ -72,9 +112,32 @@ export function focusCodeChromeTab(layout: LayoutState, stripIndex: number): Lay
 
 /** Close the side-region tab at `stripIndex` and keep the terminal in the URL. */
 export function closeCodeChromeTab(layout: LayoutState, stripIndex: number): LayoutState {
-  const { panels, terminal } = splitCodeChromeLayout(layout);
+  const { panels, editors, terminal } = splitCodeChromeLayout(layout);
   const nextPanels = closeLayoutTab(panels, stripIndex);
-  return mergeTerminalLayout(nextPanels, terminal);
+  return combineChrome(nextPanels, editors, terminal);
+}
+
+function combineChrome(
+  panels: LayoutState,
+  editors: LayoutState,
+  terminal: Extract<PanelContent, { type: "terminal" }> | null,
+): LayoutState {
+  const tabs = [...editors.tabs, ...panels.tabs];
+  if (terminal) tabs.push(terminal);
+  if (tabs.length === 0) return EMPTY_LAYOUT;
+  const focused =
+    !editors.conversationFocused && editors.tabs[editors.activeIndex]
+      ? editors.tabs[editors.activeIndex]
+      : panels.tabs[panels.activeIndex];
+  const activeIndex = focused
+    ? Math.max(0, tabs.findIndex((tab) => panelKey(tab) === panelKey(focused)))
+    : 0;
+  return {
+    tabs,
+    activeIndex,
+    fullscreen: panels.fullscreen && panels.tabs.length > 0,
+    conversationFocused: editors.conversationFocused,
+  };
 }
 
 function closeLayoutTab(layout: LayoutState, index: number): LayoutState {
@@ -97,7 +160,12 @@ function mergeTerminalLayout(
 ): LayoutState {
   if (!terminal) return panels;
   if (panels.tabs.length === 0) {
-    return { tabs: [terminal], activeIndex: 0, fullscreen: false };
+    return {
+      tabs: [terminal],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: panels.conversationFocused,
+    };
   }
   const tabs = [...panels.tabs, terminal];
   const active = panels.tabs[panels.activeIndex];

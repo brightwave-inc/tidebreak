@@ -75,13 +75,19 @@ export function usePanelNav() {
       if (existing !== -1) {
         const tabs = layout.tabs.slice();
         tabs[existing] = panel;
-        go({ ...layout, tabs, activeIndex: existing });
+        go({
+          ...layout,
+          tabs,
+          activeIndex: existing,
+          conversationFocused: false,
+        });
         return;
       }
       go({
         ...layout,
         tabs: [...layout.tabs, panel],
         activeIndex: layout.tabs.length,
+        conversationFocused: false,
       });
     },
 

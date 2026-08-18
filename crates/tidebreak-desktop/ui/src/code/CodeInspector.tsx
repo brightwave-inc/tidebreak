@@ -47,25 +47,32 @@ import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 type InspectorTab = "files" | "source" | "pr";
 
 const TAB_TRIGGER_CLASS =
-  "text-muted-foreground hover:text-foreground grid size-8 place-items-center rounded-lg px-0 py-0 data-[state=active]:bg-muted data-[state=active]:text-foreground";
+  "text-muted-foreground hover:bg-transparent hover:text-foreground grid size-8 place-items-center rounded-lg px-0 py-0";
+
+const TAB_TRIGGER_SELECTED_CLASS =
+  "bg-foreground/10 text-foreground hover:bg-foreground/10 hover:text-foreground data-[state=active]:bg-foreground/10 data-[state=active]:text-foreground shadow-[inset_0_-2px_0_0_currentColor]";
 
 /**
  * Right workspace rail: Files, Source control, and Pull request as icon tabs.
  *
- * Files is the changed-file list. Source control is the worktree patch plus
- * commit, push, and PR creation. Pull request carries the PR's own life:
- * status, checks, and review comments once one exists.
+ * Files is a nested worktree explorer. Source control is the worktree patch
+ * plus commit, push, and PR creation. Pull request carries the PR's own
+ * life: status, checks, and review comments once one exists.
  */
 export function CodeInspector({
   client,
   workspaceId,
   workspace,
   contentRevision,
+  onOpenFile,
+  onOpenDiff,
 }: {
   client: ApiClient;
   workspaceId: string;
   workspace: CodeWorkspaceSnapshot | null;
   contentRevision: number;
+  onOpenFile?: (path: string) => void;
+  onOpenDiff?: (path: string) => void;
 }) {
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const pr = digest?.pr_state ?? workspace?.pr;
@@ -83,6 +90,19 @@ export function CodeInspector({
   }, [scope]);
 
   function openFile(next: string) {
+    if (onOpenFile) {
+      onOpenFile(next);
+      return;
+    }
+    setFile(next);
+    setTab("source");
+  }
+
+  function openDiff(next: string) {
+    if (onOpenDiff) {
+      onOpenDiff(next);
+      return;
+    }
     setFile(next);
     setTab("source");
   }
@@ -100,13 +120,17 @@ export function CodeInspector({
       >
         <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
           <TabsList className="h-auto justify-start gap-0.5 bg-transparent p-0">
-            <InspectorTabTrigger value="files" label="Files">
+            <InspectorTabTrigger value="files" label="Files" selected={tab === "files"}>
               <Files className="size-3.5" />
             </InspectorTabTrigger>
-            <InspectorTabTrigger value="source" label="Source control">
+            <InspectorTabTrigger
+              value="source"
+              label="Source control"
+              selected={tab === "source"}
+            >
               <GitBranch className="size-3.5" />
             </InspectorTabTrigger>
-            <InspectorTabTrigger value="pr" label="Pull request">
+            <InspectorTabTrigger value="pr" label="Pull request" selected={tab === "pr"}>
               <GitPullRequest
                 className={cn(
                   "size-3.5",
@@ -133,7 +157,6 @@ export function CodeInspector({
           <FilesPanel
             client={client}
             workspaceId={workspaceId}
-            turnId={turnId}
             contentRevision={contentRevision}
             selected={file}
             onOpenFile={openFile}
@@ -161,6 +184,7 @@ export function CodeInspector({
               turnLabel={scope?.label}
               file={file}
               contentRevision={contentRevision}
+              onOpenFile={openDiff}
             />
           </div>
         </TabsContent>
@@ -183,21 +207,25 @@ export function CodeInspector({
 function InspectorTabTrigger({
   value,
   label,
+  selected,
   children,
 }: {
   value: InspectorTab;
   label: string;
+  selected: boolean;
   children: ReactNode;
 }) {
   return (
     <WithTooltip label={label}>
-      <TabsTrigger
-        value={value}
-        aria-label={label}
-        className={TAB_TRIGGER_CLASS}
-      >
-        {children}
-      </TabsTrigger>
+      <span className="inline-flex">
+        <TabsTrigger
+          value={value}
+          aria-label={label}
+          className={cn(TAB_TRIGGER_CLASS, selected && TAB_TRIGGER_SELECTED_CLASS)}
+        >
+          {children}
+        </TabsTrigger>
+      </span>
     </WithTooltip>
   );
 }

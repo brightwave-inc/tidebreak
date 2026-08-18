@@ -39,6 +39,7 @@ export function DiffPanel({
   turnLabel,
   file,
   contentRevision = 0,
+  onOpenFile,
 }: {
   client: Pick<ApiClient, "getCodeWorkspaceDiff">;
   workspaceId: string;
@@ -47,6 +48,7 @@ export function DiffPanel({
   turnLabel?: string;
   file?: string;
   contentRevision?: number;
+  onOpenFile?: (path: string) => void;
 }) {
   const load = useCallback(
     () => client.getCodeWorkspaceDiff(workspaceId, { turn: turnId, file }),
@@ -103,7 +105,11 @@ export function DiffPanel({
           </div>
         )}
         {groups.map((group) => (
-          <FileDiffSection key={group.path} group={group} />
+          <FileDiffSection
+            key={group.path}
+            group={group}
+            onOpenFile={onOpenFile}
+          />
         ))}
         {payload && groups.length === 0 && !error && (
           <p className="text-muted-foreground px-3 py-6 text-sm">No diff.</p>
@@ -113,7 +119,13 @@ export function DiffPanel({
   );
 }
 
-function FileDiffSection({ group }: { group: DiffFileGroup }) {
+function FileDiffSection({
+  group,
+  onOpenFile,
+}: {
+  group: DiffFileGroup;
+  onOpenFile?: (path: string) => void;
+}) {
   const large = group.lines.length > DIFF_COLLAPSE_LINE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
   const { insertions, deletions } = fileDiffstat(group.lines);
@@ -137,6 +149,25 @@ function FileDiffSection({ group }: { group: DiffFileGroup }) {
           <h3 className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
             {group.path}
           </h3>
+          {onOpenFile && (
+            <span
+              role="link"
+              tabIndex={0}
+              className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenFile(group.path);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenFile(group.path);
+              }}
+            >
+              Open
+            </span>
+          )}
           <span className="shrink-0 font-mono text-[11px] tabular-nums">
             <span className="text-success">+{insertions}</span>{" "}
             <span className="text-critical">−{deletions}</span>
