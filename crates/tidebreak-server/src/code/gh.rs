@@ -399,7 +399,15 @@ pub(crate) async fn merge_pull_request(
 pub(crate) fn classify_merge_error(err: String) -> GhError {
     let bounded = bound_text(&err);
     let lower = bounded.to_ascii_lowercase();
-    if lower.contains("not logged") || lower.contains("not signed") || lower.contains("auth") {
+    // Sign-out markers must be specific: a bare `auth` substring also matches
+    // host messages that name the pull request author, which would send a
+    // blocked merge to the sign-in remediation instead.
+    if lower.contains("not logged")
+        || lower.contains("not signed")
+        || lower.contains("authenticat")
+        || lower.contains("gh auth login")
+        || lower.contains("http 401")
+    {
         return GhError::GhSignedOut {
             instructions: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
         };
@@ -1694,6 +1702,8 @@ exit 3
             "GraphQL: Pull request is not mergeable (mergePullRequest)",
             "X this branch has merge conflicts with the base branch",
             "X 2 reviews are required by reviewers with write access",
+            // "author" contains "auth"; the sign-out markers must not eat it.
+            "X review is required from someone other than the pull request author",
         ] {
             assert!(
                 matches!(
@@ -1706,6 +1716,10 @@ exit 3
         assert!(matches!(
             classify_merge_error("HTTP 401: authentication required".into()),
             GhError::GhSignedOut { .. }
+        ));
+        assert!(matches!(
+            classify_merge_error("the author of this pull request cannot approve it".into(),),
+            GhError::User(_)
         ));
         assert!(matches!(
             classify_merge_error("something else entirely".into()),
