@@ -1511,7 +1511,17 @@ test("Linux packaging writes no shared cache before loading updater material", (
   assert.doesNotMatch(release, /^  prepare_linux:/m);
   const buildJob = workflowJob(release, "build_linux");
   assert.match(buildJob, /needs: \[validate, inspect_hosted\]/);
-  assert.match(buildJob, /runs-on: ubuntu-22\.04/);
+  // Current workflow pins the x86_64 job to ubuntu-22.04. The upcoming ARM64
+  // matrix keeps that runner and selects it through ${{ matrix.runner }}.
+  assert.match(buildJob, /ubuntu-22\.04/);
+  assert.match(
+    buildJob,
+    /runs-on: (?:ubuntu-22\.04|\$\{\{ matrix\.runner \}\})/,
+  );
+  if (/runner: ubuntu-22\.04-arm/.test(buildJob)) {
+    assert.match(buildJob, /target: x86_64-unknown-linux-gnu/);
+    assert.match(buildJob, /target: aarch64-unknown-linux-gnu/);
+  }
   assert.match(buildJob, /libwebkit2gtk-4\.1-dev/);
   assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(buildJob, /version: 10\.18\.3/);
@@ -1683,7 +1693,22 @@ test("GitHub release assets are attached before immutable publication", () => {
   assert.match(attachJob, /\.app\.zip/);
   assert.match(attachJob, /\.app\.tar\.gz/);
   assert.match(attachJob, /\.app\.tar\.gz\.sig/);
-  assert.match(attachJob, /Tidebreak_\$\{TIDEBREAK_VERSION\}_x86_64\.deb\.sig/);
+  // Current publication lists the x86_64 Debian signature literally. The
+  // upcoming ARM64 graph may keep that literal or expand it through ${arch}.
+  assert.match(
+    attachJob,
+    /Tidebreak_\$\{TIDEBREAK_VERSION\}_(?:x86_64|\$\{arch\})\.deb\.sig/,
+  );
+  if (/name: tidebreak-windows-aarch64-/.test(attachJob)) {
+    assert.match(attachJob, /name: tidebreak-linux-aarch64-/);
+    assert.match(attachJob, /Tidebreak-windows-aarch64-setup\.exe/);
+    assert.match(attachJob, /Tidebreak-linux-aarch64\.AppImage/);
+    assert.match(attachJob, /Tidebreak-linux-aarch64\.deb/);
+    assert.match(
+      attachJob,
+      /Tidebreak_\$\{TIDEBREAK_VERSION\}_(?:aarch64|\$\{arch\})\.deb\.sig/,
+    );
+  }
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
   assert.match(attachJob, /if \[\[ "\$RELEASE_DRAFT" = true \]\]/);
   assert.match(attachJob, /releases\/\$RELEASE_ID\/assets/);
@@ -2100,10 +2125,20 @@ test("the packaged desktop activates the signed updater feed", () => {
     "updates must install behind the reversible broker barrier",
   );
   assert.match(desktopUpdater, /app\.restart\(\)/);
+  // Production updates stay off debug builds. Current main enables macOS
+  // only; the upcoming packaging change may also enable Windows and Linux
+  // in the same cfg! or a sibling one.
   assert.match(
     desktopUpdater,
-    /cfg!\(all\(not\(debug_assertions\), target_os = "macos"\)\)/,
+    /cfg!\(all\([\s\S]*not\(debug_assertions\),[\s\S]*target_os = "macos"[\s\S]*\)\)/,
   );
+  if (
+    /target_os = "windows"/.test(desktopUpdater) ||
+    /target_os = "linux"/.test(desktopUpdater)
+  ) {
+    assert.match(desktopUpdater, /target_os = "windows"/);
+    assert.match(desktopUpdater, /target_os = "linux"/);
+  }
   assert.match(
     desktopUpdater,
     /const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs\(15\)/,
