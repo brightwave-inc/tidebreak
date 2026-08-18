@@ -226,7 +226,10 @@ export function CodeSidebar() {
           groups.map((group) => (
             <div key={group.key} className="flex flex-col gap-0.5">
               {group.label && (
-                <div className="mt-1 truncate px-2 pt-1 pb-0.5 text-[11px] font-medium text-muted-foreground/90">
+                <div
+                  className="truncate px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground/90"
+                  title={group.label}
+                >
                   {group.label}
                 </div>
               )}
@@ -340,7 +343,7 @@ function WorkspaceCard({
           aria-current={active ? "page" : undefined}
           data-active={active || undefined}
           title={attentionTitle}
-          className="flex w-full cursor-pointer flex-col gap-0.5 rounded-md px-2 py-1.5 text-left ring-offset-background motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none data-[active]:bg-muted"
+          className="flex w-full cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left ring-offset-background motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none data-[active]:bg-muted"
           onClick={onOpen}
         >
           <span className="flex min-w-0 items-center gap-1.5">
@@ -384,7 +387,7 @@ function WorkspaceCard({
             </span>
           </span>
           {showSession && digest && (
-            <span className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-0.5 text-[11px] text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-1.5 pl-0.5 text-[11px] text-muted-foreground">
               <ChevronRight
                 className="size-3 shrink-0 opacity-50"
                 aria-hidden
