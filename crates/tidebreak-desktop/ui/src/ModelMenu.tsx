@@ -21,6 +21,7 @@ import {
   providerLabel,
 } from "./ModelSelection";
 import { useManagedPolicy } from "./managedPolicy";
+import { familyForModelId, MODEL_ID_FAMILIES } from "./modelFamilies";
 import { Button } from "@/components/ui/button";
 import { ProviderIcon } from "./ProviderIcons";
 import {
@@ -80,62 +81,142 @@ export function ModelToolCapabilityChip({ model }: { model: ModelInfo }) {
   );
 }
 
-/** Catalog rows by provider, in {@link PROVIDER_ORDER}, then the rest as found. */
-function groupByProvider(
-  models: readonly ModelInfo[],
-): { provider: ProviderKind; models: ModelInfo[] }[] {
-  const byProvider = new Map<ProviderKind, ModelInfo[]>();
+/** How a rail tab or group header is drawn: a mark and a name. */
+type GroupBadge = {
+  label: string;
+  iconProvider: ProviderKind;
+  iconModelId?: string;
+};
+
+/**
+ * One section of the picker: a serving provider, or one vendor's slice of a
+ * gateway catalog. `id` is the rail identity; `provider` stays the route that
+ * serves the rows, which routing and policy still key on.
+ */
+export type CatalogGroup = GroupBadge & {
+  id: string;
+  provider: ProviderKind;
+  models: ModelInfo[];
+};
+
+/**
+ * Which group a row belongs to.
+ *
+ * Direct providers group as themselves. A gateway catalog is mixed, so its
+ * rows split by the vendor the row is branded with — the curated `vendor`
+ * when the server matched one, else the open-model family its id names —
+ * and only rows with neither stay under the generic gateway tab.
+ */
+function groupBadgeForModel(model: ModelInfo): GroupBadge & { id: string } {
+  if (model.provider !== "model_gateway") {
+    return {
+      id: model.provider,
+      label: providerLabel(model.provider),
+      iconProvider: model.provider,
+    };
+  }
+  const family = familyForModelId(model.id);
+  if (family) {
+    return {
+      id: `model_gateway/${family.match}`,
+      label: family.label,
+      iconProvider: "model_gateway",
+      iconModelId: family.match,
+    };
+  }
+  if (model.vendor) {
+    return {
+      id: `model_gateway/${model.vendor}`,
+      label: providerLabel(model.vendor),
+      iconProvider: model.vendor,
+    };
+  }
+  return {
+    id: "model_gateway",
+    label: providerLabel("model_gateway"),
+    iconProvider: "model_gateway",
+  };
+}
+
+/** Rank vendors inside a gateway catalog: known vendors first, then families. */
+const GATEWAY_GROUP_ORDER: readonly string[] = [
+  ...PROVIDER_ORDER.map((provider) => `model_gateway/${provider}`),
+  ...MODEL_ID_FAMILIES.map((family) => `model_gateway/${family.match}`),
+  "model_gateway",
+];
+
+/**
+ * Catalog rows grouped for the rail: providers in {@link PROVIDER_ORDER},
+ * then the rest as found — except a gateway catalog, whose groups sort by
+ * {@link GATEWAY_GROUP_ORDER} so the split does not reshuffle with the
+ * catalog.
+ */
+function groupCatalog(models: readonly ModelInfo[]): CatalogGroup[] {
+  const byId = new Map<string, CatalogGroup>();
   for (const model of models) {
-    const list = byProvider.get(model.provider);
-    if (list) list.push(model);
-    else byProvider.set(model.provider, [model]);
+    const badge = groupBadgeForModel(model);
+    const existing = byId.get(badge.id);
+    if (existing) existing.models.push(model);
+    else byId.set(badge.id, { ...badge, provider: model.provider, models: [model] });
   }
 
-  const groups: { provider: ProviderKind; models: ModelInfo[] }[] = [];
+  const groups: CatalogGroup[] = [];
   for (const provider of PROVIDER_ORDER) {
-    const found = byProvider.get(provider);
+    const found = byId.get(provider);
     if (found) {
-      groups.push({ provider, models: found });
-      byProvider.delete(provider);
+      groups.push(found);
+      byId.delete(provider);
     }
   }
-  for (const [provider, found] of byProvider) {
-    groups.push({ provider, models: found });
-  }
+  const rest = [...byId.values()];
+  const gatewayRank = (group: CatalogGroup) => {
+    const rank = GATEWAY_GROUP_ORDER.indexOf(group.id);
+    return rank === -1 ? GATEWAY_GROUP_ORDER.length : rank;
+  };
+  groups.push(...rest.filter((group) => group.provider !== "model_gateway"));
+  groups.push(
+    ...rest
+      .filter((group) => group.provider === "model_gateway")
+      .sort((a, b) => gatewayRank(a) - gatewayRank(b)),
+  );
   return groups;
 }
 
 /**
- * Which provider rail the picker should open on.
+ * Which rail tab the picker should open on.
  *
- * Prefers the provider of the model that will run, then the first group the
+ * Prefers the group of the model that will run, then the first group the
  * menu actually shows. `null` only when there is no group at all.
  */
-export function pickerProviderForSelection(
-  groups: readonly { provider: ProviderKind }[],
-  selected: Pick<ModelInfo, "provider"> | null,
-): ProviderKind | null {
+export function pickerGroupForSelection(
+  groups: readonly { id: string }[],
+  selected: ModelInfo | null,
+): string | null {
   if (selected) {
-    const match = groups.find((group) => group.provider === selected.provider);
-    if (match) return match.provider;
+    const id = groupBadgeForModel(selected).id;
+    const match = groups.find((group) => group.id === id);
+    if (match) return match.id;
   }
-  return groups[0]?.provider ?? null;
+  return groups[0]?.id ?? null;
 }
 
-/** One icon on the picker rail: connected providers and ones still to set up. */
-export type PickerRailEntry = {
+/** One icon on the picker rail: connected groups and providers still to set up. */
+export type PickerRailEntry = GroupBadge & {
+  id: string;
   provider: ProviderKind;
   connected: boolean;
   modelCount: number;
 };
 
 /**
- * Every provider the catalog knows, in {@link PROVIDER_ORDER}.
+ * Every group the catalog knows, in {@link PROVIDER_ORDER}.
  *
  * Connected groups (something can run) sit with the unconfigured ones so the
  * rail is a map of the catalog rather than only what this install already
  * unlocked. The gateway stays off the unconfigured side: it has no key to
- * paste. A managed profile only lists what can already run.
+ * paste. A managed profile only lists what can already run. A provider whose
+ * vendor a gateway group already serves is not offered for setup — its models
+ * can run through the gateway.
  */
 export function pickerRailEntries(
   models: readonly ModelInfo[],
@@ -143,43 +224,63 @@ export function pickerRailEntries(
   selectedKey: string | null,
   managed: boolean = false,
 ): PickerRailEntry[] {
-  const connected = visibleModelGroups(models, selectedKey).map(
-    (group) => ({
-      provider: group.provider,
-      connected: true,
-      modelCount: group.models.length,
-    }),
+  const connected: PickerRailEntry[] = visibleModelGroups(
+    models,
+    selectedKey,
+  ).map((group) => ({
+    id: group.id,
+    provider: group.provider,
+    label: group.label,
+    iconProvider: group.iconProvider,
+    iconModelId: group.iconModelId,
+    connected: true,
+    modelCount: group.models.length,
+  }));
+  const seen = new Set(
+    connected.flatMap((entry) => [
+      entry.id,
+      // A gateway vendor group covers the direct provider it mirrors.
+      ...(entry.id.startsWith("model_gateway/")
+        ? [entry.id.slice("model_gateway/".length)]
+        : []),
+    ]),
   );
-  const seen = new Set(connected.map((entry) => entry.provider));
-  const unconfigured = notConnectedProviders(models, providers, managed)
+  const unconfigured: PickerRailEntry[] = notConnectedProviders(
+    models,
+    providers,
+    managed,
+  )
     .filter((entry) => !seen.has(entry.provider))
     .map((entry) => ({
+      id: entry.provider,
       provider: entry.provider,
+      label: providerLabel(entry.provider),
+      iconProvider: entry.provider,
       connected: false,
       modelCount: entry.modelCount,
     }));
 
-  const byProvider = new Map<ProviderKind, PickerRailEntry>();
+  const byId = new Map<string, PickerRailEntry>();
   for (const entry of [...connected, ...unconfigured]) {
-    byProvider.set(entry.provider, entry);
+    byId.set(entry.id, entry);
   }
 
   const ordered: PickerRailEntry[] = [];
   for (const provider of PROVIDER_ORDER) {
-    const found = byProvider.get(provider);
+    const found = byId.get(provider);
     if (found) {
       ordered.push(found);
-      byProvider.delete(provider);
+      byId.delete(provider);
     }
   }
-  for (const found of byProvider.values()) {
+  for (const found of byId.values()) {
     ordered.push(found);
   }
   return ordered;
 }
 
 /**
- * The groups the composer picker shows: every catalog row for a provider
+ * The groups the composer picker shows: every catalog row for a group
  * that can run something, plus the group holding the current selection even
  * when that row cannot run. A provider with nothing usable is a rail icon
  * that offers setup, not an empty model list.
@@ -187,8 +288,8 @@ export function pickerRailEntries(
 export function visibleModelGroups(
   models: readonly ModelInfo[],
   selectedKey: string | null,
-): { provider: ProviderKind; models: ModelInfo[] }[] {
-  return groupByProvider(models).flatMap((group) => {
+): CatalogGroup[] {
+  return groupCatalog(models).flatMap((group) => {
     if (group.models.some((model) => model.available)) return [group];
     if (selectedKey === null) return [];
 
@@ -240,7 +341,7 @@ export function notConnectedProviders(
 ): { provider: ProviderKind; modelCount: number }[] {
   if (managed) return [];
   const status = new Map(providers.map((info) => [info.kind, info]));
-  return groupByProvider(models)
+  return groupCatalog(models)
     .filter((group) => {
       if (group.provider === "model_gateway") return false;
       // Anything that can already run is connected however it got there.
@@ -351,13 +452,13 @@ export function ModelMenu({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
-  const [activeProvider, setActiveProvider] = useState<ProviderKind | null>(
-    () => pickerProviderForSelection(rail, known ?? usableDefault),
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(
+    () => pickerGroupForSelection(rail, known ?? usableDefault),
   );
   const activeRail =
-    rail.find((entry) => entry.provider === activeProvider) ?? rail[0] ?? null;
+    rail.find((entry) => entry.id === activeGroupId) ?? rail[0] ?? null;
   const activeGroup =
-    groups.find((group) => group.provider === activeRail?.provider) ?? null;
+    groups.find((group) => group.id === activeRail?.id) ?? null;
   const showProviderRail = rail.length > 0;
   const searchResults = matchingModels(groups, query);
   const searching = query.length > 0;
@@ -365,8 +466,8 @@ export function ModelMenu({
   function openMenu(next: boolean) {
     if (next) {
       setQuery("");
-      setActiveProvider(
-        pickerProviderForSelection(rail, known ?? usableDefault),
+      setActiveGroupId(
+        pickerGroupForSelection(rail, known ?? usableDefault),
       );
     }
     setOpen(next);
@@ -457,39 +558,31 @@ export function ModelMenu({
             aria-label="Providers"
           >
             {rail.map((entry) => {
-              const selected = activeRail?.provider === entry.provider;
+              const selected = activeRail?.id === entry.id;
+              const railLabel = entry.connected
+                ? entry.label
+                : `Connect ${entry.label}`;
               return (
-                <WithTooltip
-                  key={entry.provider}
-                  label={
-                    entry.connected
-                      ? providerLabel(entry.provider)
-                      : `Connect ${providerLabel(entry.provider)}`
-                  }
-                  side="right"
-                >
+                <WithTooltip key={entry.id} label={railLabel} side="right">
                   <button
                     type="button"
                     role="tab"
                     aria-selected={selected}
-                    aria-label={
-                      entry.connected
-                        ? providerLabel(entry.provider)
-                        : `Connect ${providerLabel(entry.provider)}`
-                    }
+                    aria-label={railLabel}
                     className={cn(
                       "relative flex size-9 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       selected ? "bg-accent" : "hover:bg-accent/60",
                       !entry.connected && "opacity-45 hover:opacity-80",
                     )}
-                    onClick={() => setActiveProvider(entry.provider)}
+                    onClick={() => setActiveGroupId(entry.id)}
                   >
                     <ProviderIcon
-                      // A rail tab represents the route serving the group,
-                      // not whichever upstream vendor happened to be first.
-                      // Gateway catalogs are mixed, so their tab must stay the
-                      // generic gateway mark while rows retain vendor marks.
-                      provider={entry.provider}
+                      // A rail tab wears the mark of its group: a vendor's
+                      // slice of a gateway catalog gets the vendor mark, and
+                      // only gateway rows with no recognizable vendor keep
+                      // the generic gateway mark.
+                      provider={entry.iconProvider}
+                      modelId={entry.iconModelId}
                       className="size-4"
                     />
                     {selected && (
@@ -534,12 +627,13 @@ export function ModelMenu({
             <div>
               <div className="flex flex-col items-start gap-3 px-2 py-3">
                 <ProviderIcon
-                  provider={activeRail.provider}
+                  provider={activeRail.iconProvider}
+                  modelId={activeRail.iconModelId}
                   className="size-5"
                 />
                 <div className="space-y-1">
                   <p className="text-sm font-medium">
-                    Connect {providerLabel(activeRail.provider)}
+                    Connect {activeRail.label}
                   </p>
                   <p className="text-muted-foreground text-xs leading-relaxed">
                     {activeRail.modelCount}{" "}

@@ -6,6 +6,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   gatewayCodeModels,
+  groupCodeModelOptions,
   harnessUnusableReason,
 } from "./labels";
 
@@ -140,8 +141,58 @@ describe("gatewayCodeModels", () => {
         id: "claude-opus-5",
         label: "Claude Opus 5",
         source: "Claude Code · model-gateway",
+        vendor: "anthropic",
         default: true,
       },
+    ]);
+  });
+
+  it("confines a mixed gateway catalog to the harness's vendor", () => {
+    const gatewayModel = (id: string, vendor: string | null) =>
+      ({
+        key: `model_gateway::${id}`,
+        id,
+        display_name: id,
+        provider: "model_gateway",
+        vendor,
+        available: true,
+      }) as never;
+    const catalog = [
+      gatewayModel("claude-opus-5", "anthropic"),
+      gatewayModel("gpt-5.6-sol", "openai"),
+      gatewayModel("deepseek-v4-pro", null),
+      gatewayModel("grok-4.5", "xai"),
+    ];
+    expect(
+      gatewayCodeModels(catalog, "claude_code").map((option) => option.id),
+    ).toEqual(["claude-opus-5"]);
+    expect(
+      gatewayCodeModels(catalog, "codex").map((option) => option.id),
+    ).toEqual(["gpt-5.6-sol"]);
+    // opencode is vendor-neutral: the whole catalog stays.
+    expect(gatewayCodeModels(catalog, "opencode")).toHaveLength(4);
+  });
+});
+
+describe("groupCodeModelOptions", () => {
+  it("groups rows by vendor and family, in the rail's fixed order", () => {
+    const option = (id: string, vendor: string | null = null) => ({
+      id,
+      label: id,
+      source: "opencode",
+      vendor: vendor as never,
+    });
+    const groups = groupCodeModelOptions([
+      option("deepseek-v4-pro"),
+      option("claude-opus-5", "anthropic"),
+      option("gpt-5.6-sol"),
+      option("mystery-model"),
+    ]);
+    expect(groups.map((group) => [group.id, group.label])).toEqual([
+      ["openai", "OpenAI"],
+      ["anthropic", "Anthropic"],
+      ["deepseek", "DeepSeek"],
+      ["other", "Other"],
     ]);
   });
 });
