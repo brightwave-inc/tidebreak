@@ -256,7 +256,11 @@ installer.
 Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
 `prepare_windows` job compiles the tag from scratch (or from an earlier
 release's prepared cache) and is the single writer of the Windows Cargo
-registry and prepared-build caches.
+registry and prepared-build caches. The Windows ARM job keeps the
+`aarch64-pc-windows-msvc` Rust target and compiles whisper.cpp with Ninja plus
+`clang-cl`, because ggml refuses MSVC on ARM. The prepared-build cache key
+includes a version prefix so a failed MSVC CMake tree cannot be reused after
+that compiler switch.
 
 ### Linux: x86_64 and ARM64 AppImage and Debian packages
 

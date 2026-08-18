@@ -1433,7 +1433,26 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
     assert.match(job, /runner: windows-latest/);
     assert.match(job, /target: aarch64-pc-windows-msvc/);
     assert.match(job, /runner: windows-11-arm/);
+    // whisper.cpp refuses MSVC on ARM. Force Ninja + clang-cl only on the
+    // ARM matrix entry so x86_64 keeps the Visual Studio generator.
+    assert.match(job, /if: \$\{\{ matrix\.arch == 'aarch64' \}\}/);
+    assert.match(job, /CMAKE_GENERATOR=Ninja/);
+    assert.match(job, /CMAKE_C_COMPILER=/);
+    assert.match(job, /CMAKE_CXX_COMPILER=/);
+    assert.match(job, /CMAKE_ASM_COMPILER=/);
+    assert.match(job, /clang-cl/);
+    assert.match(job, /command -v ninja/);
   }
+  assert.ok(
+    prepareJob.indexOf("Use clang-cl for Windows ARM native code") <
+      prepareJob.indexOf("Compile without production credentials or bundles"),
+    "Windows ARM clang-cl must be configured before the unsigned compile",
+  );
+  assert.ok(
+    buildJob.indexOf("Use clang-cl for Windows ARM native code") <
+      buildJob.indexOf("Build the Tauri app without Windows code signing"),
+    "Windows ARM clang-cl must be configured before the packaged build",
+  );
 
   // The prerequisite compiles without any production credential and never
   // uploads what it built; only the cache carries its outputs forward.
@@ -1477,7 +1496,7 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   assert.equal(cachedPaths(buildCacheRestore), cachedPaths(prepareCacheSave));
   assert.match(
     buildCacheRestore,
-    /key: windows-release-prepared-v1-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
+    /key: windows-release-prepared-v2-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
   );
   assert.doesNotMatch(buildCacheRestore, /restore-keys:/);
 

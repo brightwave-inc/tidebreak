@@ -1110,10 +1110,10 @@ jobs:
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
-          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          key: windows-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
-            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            windows-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            windows-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -1146,6 +1146,40 @@ jobs:
 
       - name: Verify the third-party notices match the released graph
         run: node scripts/generate-third-party-notices.mjs --check
+
+      # whisper.cpp refuses MSVC on ARM. The cmake crate honors CMAKE_GENERATOR
+      # from the environment but not CMAKE_GENERATOR_TOOLSET, so Ninja plus
+      # clang-cl is the reliable way to keep aarch64-pc-windows-msvc while
+      # compiling the native C/C++ with Clang.
+      - name: Use clang-cl for Windows ARM native code
+        if: ${{ matrix.arch == 'aarch64' }}
+        run: |
+          clang_cl=""
+          for candidate in \
+            "$(command -v clang-cl || true)" \
+            "/c/Program Files/LLVM/bin/clang-cl.exe" \
+            "/c/Program Files/LLVM/bin/clang-cl"; do
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+              clang_cl="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$clang_cl" ]]; then
+            echo "clang-cl is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          if ! command -v ninja >/dev/null; then
+            echo "ninja is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          clang_cl="$(cygpath -m "$clang_cl")"
+          {
+            echo "CMAKE_GENERATOR=Ninja"
+            echo "CMAKE_C_COMPILER=$clang_cl"
+            echo "CMAKE_CXX_COMPILER=$clang_cl"
+            echo "CMAKE_ASM_COMPILER=$clang_cl"
+          } >> "$GITHUB_ENV"
+          echo "Using $clang_cl with Ninja for Windows ARM native code"
 
       - name: Compile without production credentials or bundles
         id: compile
@@ -1246,7 +1280,7 @@ jobs:
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
-          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          key: windows-release-prepared-v2-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
 
       # A restore extracts the whole archive, including the linked products a
       # prerequisite run left in it. Delete them and let this build relink them
@@ -1319,6 +1353,40 @@ jobs:
         run: |
           rustup show
           rustup target add "${{ matrix.target }}"
+
+      # whisper.cpp refuses MSVC on ARM. The cmake crate honors CMAKE_GENERATOR
+      # from the environment but not CMAKE_GENERATOR_TOOLSET, so Ninja plus
+      # clang-cl is the reliable way to keep aarch64-pc-windows-msvc while
+      # compiling the native C/C++ with Clang.
+      - name: Use clang-cl for Windows ARM native code
+        if: ${{ matrix.arch == 'aarch64' }}
+        run: |
+          clang_cl=""
+          for candidate in \
+            "$(command -v clang-cl || true)" \
+            "/c/Program Files/LLVM/bin/clang-cl.exe" \
+            "/c/Program Files/LLVM/bin/clang-cl"; do
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+              clang_cl="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$clang_cl" ]]; then
+            echo "clang-cl is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          if ! command -v ninja >/dev/null; then
+            echo "ninja is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          clang_cl="$(cygpath -m "$clang_cl")"
+          {
+            echo "CMAKE_GENERATOR=Ninja"
+            echo "CMAKE_C_COMPILER=$clang_cl"
+            echo "CMAKE_CXX_COMPILER=$clang_cl"
+            echo "CMAKE_ASM_COMPILER=$clang_cl"
+          } >> "$GITHUB_ENV"
+          echo "Using $clang_cl with Ninja for Windows ARM native code"
 
       - name: Write tag-derived Tauri configuration
         env:
