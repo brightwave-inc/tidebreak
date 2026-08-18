@@ -601,6 +601,54 @@ impl CodeRuntime {
         Ok(status)
     }
 
+    /// Force a fresh host read: drop the digest cache entry, then take the
+    /// normal status path.
+    pub(crate) async fn refresh_workspace_pr(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        self.pr_cache.invalidate(id);
+        self.workspace_pr(id).await
+    }
+
+    pub(crate) async fn workspace_pr_comments(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<gh::PrComments, ServerError> {
+        let workspace = self.get_workspace(id).await?;
+        let gh_path = self.gh_search_path_owned();
+        gh::load_pr_comments(
+            std::path::Path::new(&workspace.worktree_path),
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)
+    }
+
+    /// User-initiated merge (or auto-merge arming) of the workspace PR, then a
+    /// fresh status read so the caller and the updates channel both see the
+    /// result. This is the only route to `gh pr merge`.
+    pub(crate) async fn merge_workspace_pr(
+        &self,
+        id: WorkspaceId,
+        method: gh::MergeMethod,
+        auto: bool,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let workspace = self.require_live_workspace(id).await?;
+        let gh_path = self.gh_search_path_owned();
+        gh::merge_pull_request(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            method,
+            auto,
+            &self.pr_cache,
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)?;
+        self.workspace_pr(id).await
+    }
+
     pub(crate) async fn create_workspace_pr(
         &self,
         id: WorkspaceId,
@@ -1372,6 +1420,7 @@ fn map_gh(err: GhError) -> ServerError {
         GhError::GhSignedOut { instructions } => {
             ServerError::conflict_kind("gh_signed_out", instructions)
         }
+        GhError::MergeBlocked(message) => ServerError::conflict_kind("pr_not_mergeable", message),
         GhError::User(message) => {
             if message.contains("no quick action") {
                 ServerError::not_found(message)

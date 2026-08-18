@@ -71,6 +71,8 @@ pub(crate) enum GhError {
     #[error("{instructions}")]
     GhSignedOut { instructions: String },
     #[error("{0}")]
+    MergeBlocked(String),
+    #[error("{0}")]
     User(String),
     #[error("{0}")]
     Internal(String),
@@ -337,9 +339,252 @@ pub(crate) async fn create_pull_request(
         title: None,
         checks_summary: None,
         checks: None,
+        draft: None,
+        merged: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: None,
+        base_branch: None,
+        auto_merge_enabled: None,
     };
     cache.put(workspace_id, digest.clone());
     Ok(digest)
+}
+
+/// Merge strategy for the user-initiated merge operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeMethod {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Squash => "--squash",
+            Self::Merge => "--merge",
+            Self::Rebase => "--rebase",
+        }
+    }
+}
+
+/// Merge the workspace PR, or enable auto-merge on it. This is the only path
+/// allowed to run `gh pr merge`, and it exists solely for the user-initiated
+/// merge endpoint — agent and automation paths go through [`run_gh`], which
+/// refuses merge argv outright.
+pub(crate) async fn merge_pull_request(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    method: MergeMethod,
+    auto: bool,
+    cache: &PrDigestCache,
+    gh_search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let gh = observe_gh(gh_search_path).await;
+    let binary = require_gh_binary(&gh)?;
+    let mut args = vec!["pr", "merge", method.flag()];
+    if auto {
+        args.push("--auto");
+    }
+    run_gh_user_merge(worktree, &binary, &args, GH_TIMEOUT)
+        .await
+        .map_err(classify_merge_error)?;
+    cache.invalidate(workspace_id);
+    Ok(())
+}
+
+/// Turn a `gh pr merge` failure into something the PR card can show.
+pub(crate) fn classify_merge_error(err: String) -> GhError {
+    let bounded = bound_text(&err);
+    let lower = bounded.to_ascii_lowercase();
+    if lower.contains("not logged") || lower.contains("not signed") || lower.contains("auth") {
+        return GhError::GhSignedOut {
+            instructions: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
+        };
+    }
+    if lower.contains("not mergeable")
+        || lower.contains("merge conflict")
+        || lower.contains("branch protection")
+        || lower.contains("protected branch")
+        || lower.contains("base branch policy")
+        || lower.contains("required status check")
+        || lower.contains("review is required")
+        || lower.contains("reviews are required")
+        || lower.contains("draft")
+        || lower.contains("already been merged")
+        || lower.contains("clean status")
+    {
+        return GhError::MergeBlocked(format!("the pull request cannot be merged: {bounded}"));
+    }
+    GhError::User(format!("gh pr merge failed: {bounded}"))
+}
+
+/// PR comments read live from the host. Never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrComments {
+    pub number: u64,
+    pub comments: Vec<tidebreak_core::PullRequestComment>,
+}
+
+/// Load issue comments, review bodies, and inline review comments for the
+/// workspace PR. Inline comments come from the REST endpoint because
+/// `gh pr view --json` does not carry file/line positions.
+pub(crate) async fn load_pr_comments(
+    worktree: &Path,
+    gh_search_path: Option<&str>,
+) -> Result<PrComments, GhError> {
+    let gh = observe_gh(gh_search_path).await;
+    let binary = require_gh_binary(&gh)?;
+    let view = run_gh(
+        worktree,
+        &binary,
+        &["pr", "view", "--json", "number,comments,reviews"],
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(|err| GhError::user(format!("could not read PR comments: {err}")))?;
+    let (number, mut comments) = parse_pr_view_comments(&view);
+    let Some(number) = number else {
+        return Err(GhError::user(
+            "no pull request found for this branch".to_owned(),
+        ));
+    };
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments");
+    // Inline comments are additive: a failed REST read still returns the
+    // conversation-tab comments rather than failing the whole request.
+    if let Ok(json) = run_gh(worktree, &binary, &["api", &endpoint], GH_TIMEOUT).await {
+        comments.extend(parse_review_comments(&json));
+    }
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(PrComments { number, comments })
+}
+
+fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
+    if !gh.found {
+        return Err(GhError::GhAbsent {
+            instructions: gh.remediation.clone(),
+        });
+    }
+    if gh.authenticated != Some(true) {
+        return Err(GhError::GhSignedOut {
+            instructions: gh.remediation.clone(),
+        });
+    }
+    gh.binary.clone().ok_or_else(|| GhError::GhAbsent {
+        instructions: gh.remediation.clone(),
+    })
+}
+
+/// Parse `gh pr view --json number,comments,reviews`: issue comments plus
+/// review bodies. Missing or malformed entries are skipped, never fatal.
+pub(crate) fn parse_pr_view_comments(
+    json: &str,
+) -> (Option<u64>, Vec<tidebreak_core::PullRequestComment>) {
+    use tidebreak_core::{PullRequestComment, PullRequestCommentKind};
+
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let number = parsed.get("number").and_then(|value| value.as_u64());
+    let mut comments = Vec::new();
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(|inner| inner.as_str())
+            .filter(|inner| !inner.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let login = |value: &serde_json::Value| {
+        value
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(|inner| inner.as_str())
+            .filter(|inner| !inner.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    for item in parsed
+        .get("comments")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(body) = text(item, "body") else {
+            continue;
+        };
+        comments.push(PullRequestComment {
+            kind: PullRequestCommentKind::Issue,
+            author: login(item),
+            created_at: text(item, "createdAt"),
+            body,
+            review_state: None,
+            path: None,
+            line: None,
+        });
+    }
+    for item in parsed
+        .get("reviews")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        // A review submitted without a body (a bare approve) carries nothing
+        // to read; the decision already rides the digest.
+        let Some(body) = text(item, "body") else {
+            continue;
+        };
+        comments.push(PullRequestComment {
+            kind: PullRequestCommentKind::Review,
+            author: login(item),
+            created_at: text(item, "submittedAt").or_else(|| text(item, "createdAt")),
+            body,
+            review_state: text(item, "state").map(|state| state.to_ascii_lowercase()),
+            path: None,
+            line: None,
+        });
+    }
+    (number, comments)
+}
+
+/// Parse the REST `pulls/{n}/comments` array: inline review comments with
+/// file path and line. Missing fields are tolerated.
+pub(crate) fn parse_review_comments(json: &str) -> Vec<tidebreak_core::PullRequestComment> {
+    use tidebreak_core::{PullRequestComment, PullRequestCommentKind};
+
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let mut comments = Vec::new();
+    for item in parsed.as_array().into_iter().flatten() {
+        let Some(body) = item
+            .get("body")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        comments.push(PullRequestComment {
+            kind: PullRequestCommentKind::Inline,
+            author: item
+                .get("user")
+                .and_then(|user| user.get("login"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            created_at: text("created_at"),
+            body: body.to_owned(),
+            review_state: None,
+            path: text("path"),
+            line: item
+                .get("line")
+                .and_then(|value| value.as_u64())
+                .or_else(|| item.get("original_line").and_then(|value| value.as_u64())),
+        });
+    }
+    comments
 }
 
 /// Run one named quick action in the worktree. Output is not journaled.
@@ -642,6 +887,8 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+const PR_VIEW_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,baseRefName";
+
 async fn load_pr_digest(
     worktree: &Path,
     gh: &GhObservation,
@@ -653,18 +900,25 @@ async fn load_pr_digest(
     let view = run_gh(
         worktree,
         binary,
-        &["pr", "view", "--json", "number,url,state,title"],
+        &["pr", "view", "--json", PR_VIEW_FIELDS],
         GH_TIMEOUT,
     )
     .await;
     let Ok(json) = view else {
         return Ok(None);
     };
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-    let number = parsed.get("number").and_then(|value| value.as_u64());
-    let Some(number) = number else {
-        return Ok(None);
-    };
+    let checks_table = run_gh(worktree, binary, &["pr", "checks"], GH_TIMEOUT)
+        .await
+        .unwrap_or_default();
+    Ok(digest_from_view_json(&json, &checks_table))
+}
+
+/// Parse one `gh pr view --json` payload plus a `gh pr checks` table into the
+/// stored digest. Every field beyond the number is optional and tolerated
+/// missing.
+pub(crate) fn digest_from_view_json(json: &str, checks_table: &str) -> Option<PullRequestDigest> {
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let number = parsed.get("number").and_then(|value| value.as_u64())?;
     let url = parsed
         .get("url")
         .and_then(|value| value.as_str())
@@ -681,13 +935,27 @@ async fn load_pr_digest(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let checks_table = run_gh(worktree, binary, &["pr", "checks"], GH_TIMEOUT)
-        .await
-        .unwrap_or_default();
-    let checks = parse_pr_checks(&checks_table);
-    Ok(Some(PullRequestDigest {
+    let checks = parse_pr_checks(checks_table);
+    let lower_token = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+    };
+    let branch = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    Some(PullRequestDigest {
         number,
         url,
+        merged: Some(state == "merged"),
         state,
         title,
         checks_summary: summarize_checks(&checks),
@@ -696,7 +964,18 @@ async fn load_pr_digest(
         } else {
             Some(checks)
         },
-    }))
+        draft: parsed.get("isDraft").and_then(|value| value.as_bool()),
+        review_decision: lower_token("reviewDecision"),
+        mergeable: lower_token("mergeable"),
+        merge_state_status: lower_token("mergeStateStatus"),
+        head_branch: branch("headRefName"),
+        base_branch: branch("baseRefName"),
+        auto_merge_enabled: Some(
+            parsed
+                .get("autoMergeRequest")
+                .is_some_and(|value| !value.is_null()),
+        ),
+    })
 }
 
 pub(crate) fn parse_pr_checks(output: &str) -> Vec<tidebreak_core::PullRequestCheck> {
@@ -960,6 +1239,11 @@ async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Strin
     }
 }
 
+/// General `gh` runner for creation, status, and comment reads — every
+/// agent-driven or automated path. It hard-refuses merge and auto-merge
+/// arguments so no automation path can ever merge a PR; the one allowed merge
+/// entry point is [`run_gh_user_merge`], reachable only from the dedicated
+/// user-initiated merge operation. GraphQL is refused on every runner.
 async fn run_gh(
     cwd: &Path,
     binary: &Path,
@@ -973,6 +1257,33 @@ async fn run_gh(
     {
         return Err("refusing to run a merge or GraphQL gh command".into());
     }
+    spawn_gh(cwd, binary, args, limit).await
+}
+
+/// Runner reserved for the user-initiated merge endpoint. It runs only
+/// `gh pr merge …` argv — anything else, including GraphQL, is refused — so
+/// the ability to merge stays scoped to the one operation the user asks for.
+async fn run_gh_user_merge(
+    cwd: &Path,
+    binary: &Path,
+    args: &[&str],
+    limit: Duration,
+) -> Result<String, String> {
+    if args.len() < 2 || args[0] != "pr" || args[1] != "merge" {
+        return Err("the merge runner only runs gh pr merge".into());
+    }
+    if args.contains(&"graphql") {
+        return Err("refusing to run a GraphQL gh command".into());
+    }
+    spawn_gh(cwd, binary, args, limit).await
+}
+
+async fn spawn_gh(
+    cwd: &Path,
+    binary: &Path,
+    args: &[&str],
+    limit: Duration,
+) -> Result<String, String> {
     let mut command = Command::new(binary);
     command
         .args(args)
@@ -1288,9 +1599,212 @@ exit 3
         assert!(!logged.contains("--base origin/main"), "{logged}");
         assert!(logged.contains("pr view"), "{logged}");
         assert!(logged.contains("pr checks"), "{logged}");
-        assert!(!logged.contains("merge"), "{logged}");
+        // The view field list legitimately names mergeable/autoMergeRequest;
+        // what may never appear is a merge invocation or flag.
+        assert!(!logged.contains("pr merge"), "{logged}");
+        assert!(!logged.contains("--merge"), "{logged}");
         assert!(!logged.contains("--auto"), "{logged}");
         assert!(!logged.contains("graphql"), "{logged}");
+
+        // The general runner refuses merge argv before spawning anything —
+        // creation and status paths cannot merge even if handed the argv.
+        for argv in [
+            &["pr", "merge", "--squash"][..],
+            &["pr", "merge", "--auto", "--squash"][..],
+            &["api", "graphql"][..],
+        ] {
+            let refused = run_gh(&work, &shim_dir.path().join("gh"), argv, GH_TIMEOUT)
+                .await
+                .unwrap_err();
+            assert!(refused.contains("refusing"), "{argv:?}: {refused}");
+        }
+        let after = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(logged, after, "a refused command must never reach gh");
+    }
+
+    #[tokio::test]
+    async fn only_the_user_merge_runner_may_merge_and_it_runs_nothing_else() {
+        let shim_dir = TempDir::new().unwrap();
+        let log = shim_dir.path().join("log");
+        write_executable(
+            &shim_dir.path().join("gh"),
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = pr ] && [ "$2" = merge ]; then exit 0; fi
+echo unexpected "$@" >&2
+exit 3
+"#,
+                log = log.display()
+            ),
+        );
+        let binary = shim_dir.path().join("gh");
+        let dir = TempDir::new().unwrap();
+
+        // The merge runner refuses everything that is not `gh pr merge`,
+        // GraphQL included.
+        for argv in [
+            &["pr", "view"][..],
+            &["pr", "create"][..],
+            &["api", "graphql"][..],
+            &["pr", "merge", "graphql"][..],
+        ] {
+            let refused = run_gh_user_merge(dir.path(), &binary, argv, GH_TIMEOUT)
+                .await
+                .unwrap_err();
+            assert!(
+                refused.contains("only runs gh pr merge") || refused.contains("refusing"),
+                "{argv:?}: {refused}"
+            );
+        }
+        assert!(!log.exists(), "a refused argv must never spawn gh");
+
+        // The dedicated merge operation is the one path that runs it.
+        let cache = PrDigestCache::default();
+        merge_pull_request(
+            dir.path(),
+            WorkspaceId::new(),
+            MergeMethod::Squash,
+            false,
+            &cache,
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        merge_pull_request(
+            dir.path(),
+            WorkspaceId::new(),
+            MergeMethod::Merge,
+            true,
+            &cache,
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(logged.contains("pr merge --squash"), "{logged}");
+        assert!(logged.contains("pr merge --merge --auto"), "{logged}");
+    }
+
+    #[test]
+    fn merge_failures_map_to_blocked_signed_out_or_user() {
+        for blocked in [
+            "X Pull request #12 is not mergeable: the base branch policy prohibits the merge.",
+            "GraphQL: Pull request is not mergeable (mergePullRequest)",
+            "X this branch has merge conflicts with the base branch",
+            "X 2 reviews are required by reviewers with write access",
+        ] {
+            assert!(
+                matches!(
+                    classify_merge_error(blocked.into()),
+                    GhError::MergeBlocked(_)
+                ),
+                "expected MergeBlocked for {blocked}"
+            );
+        }
+        assert!(matches!(
+            classify_merge_error("HTTP 401: authentication required".into()),
+            GhError::GhSignedOut { .. }
+        ));
+        assert!(matches!(
+            classify_merge_error("something else entirely".into()),
+            GhError::User(_)
+        ));
+    }
+
+    #[test]
+    fn rich_pr_view_json_maps_to_digest() {
+        let json = r#"{
+            "number": 12,
+            "url": "https://github.com/example/demo/pull/12",
+            "state": "OPEN",
+            "title": "feat: first change",
+            "isDraft": true,
+            "reviewDecision": "CHANGES_REQUESTED",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "autoMergeRequest": {"enabledAt": "2026-08-17T00:00:00Z"},
+            "headRefName": "tidebreak/first-change",
+            "baseRefName": "main"
+        }"#;
+        let digest = digest_from_view_json(json, "lint\tpass\t1s\n").unwrap();
+        assert_eq!(digest.number, 12);
+        assert_eq!(digest.state, "open");
+        assert_eq!(digest.draft, Some(true));
+        assert_eq!(digest.merged, Some(false));
+        assert_eq!(digest.review_decision.as_deref(), Some("changes_requested"));
+        assert_eq!(digest.mergeable.as_deref(), Some("mergeable"));
+        assert_eq!(digest.merge_state_status.as_deref(), Some("blocked"));
+        assert_eq!(
+            digest.head_branch.as_deref(),
+            Some("tidebreak/first-change")
+        );
+        assert_eq!(digest.base_branch.as_deref(), Some("main"));
+        assert_eq!(digest.auto_merge_enabled, Some(true));
+        assert_eq!(
+            digest.checks_summary.as_deref(),
+            Some("1 passing, 0 pending, 0 failing")
+        );
+
+        // Older gh output without the extra fields still yields a digest, and
+        // a merged state is reflected in both `state` and `merged`.
+        let sparse = digest_from_view_json(
+            r#"{"number": 7, "state": "MERGED", "autoMergeRequest": null}"#,
+            "",
+        )
+        .unwrap();
+        assert_eq!(sparse.state, "merged");
+        assert_eq!(sparse.merged, Some(true));
+        assert_eq!(sparse.draft, None);
+        assert_eq!(sparse.review_decision, None);
+        assert_eq!(sparse.auto_merge_enabled, Some(false));
+        assert!(digest_from_view_json("not json", "").is_none());
+    }
+
+    #[test]
+    fn pr_comments_parse_issue_review_and_inline_shapes() {
+        use tidebreak_core::PullRequestCommentKind;
+
+        let view = r#"{
+            "number": 12,
+            "comments": [
+                {"author": {"login": "alice"}, "createdAt": "2026-08-16T10:00:00Z", "body": "looks close"},
+                {"body": ""}
+            ],
+            "reviews": [
+                {"author": {"login": "bob"}, "state": "CHANGES_REQUESTED", "submittedAt": "2026-08-16T11:00:00Z", "body": "please split this"},
+                {"author": {"login": "carol"}, "state": "APPROVED", "body": ""}
+            ]
+        }"#;
+        let (number, comments) = parse_pr_view_comments(view);
+        assert_eq!(number, Some(12));
+        assert_eq!(comments.len(), 2, "empty bodies are dropped: {comments:?}");
+        assert_eq!(comments[0].kind, PullRequestCommentKind::Issue);
+        assert_eq!(comments[0].author.as_deref(), Some("alice"));
+        assert_eq!(comments[0].body, "looks close");
+        assert_eq!(comments[1].kind, PullRequestCommentKind::Review);
+        assert_eq!(
+            comments[1].review_state.as_deref(),
+            Some("changes_requested")
+        );
+        assert_eq!(
+            comments[1].created_at.as_deref(),
+            Some("2026-08-16T11:00:00Z")
+        );
+
+        let rest = r#"[
+            {"user": {"login": "bob"}, "created_at": "2026-08-16T12:00:00Z", "body": "rename this", "path": "src/lib.rs", "line": 42},
+            {"user": {"login": "bob"}, "body": "outdated hunk", "path": "src/old.rs", "line": null, "original_line": 7},
+            {"body": ""}
+        ]"#;
+        let inline = parse_review_comments(rest);
+        assert_eq!(inline.len(), 2);
+        assert_eq!(inline[0].kind, PullRequestCommentKind::Inline);
+        assert_eq!(inline[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(inline[0].line, Some(42));
+        assert_eq!(inline[1].line, Some(7), "falls back to original_line");
+        assert_eq!(parse_review_comments("surprise!").len(), 0);
     }
 
     #[tokio::test]

@@ -371,6 +371,36 @@ pub struct CodeWorkspacePrSnapshot {
     pub remediation: String,
 }
 
+/// Body of `POST /code/workspaces/{id}/pr/merge`.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct MergeCodePrBody {
+    pub method: CodePrMergeMethod,
+    /// True arms host auto-merge instead of merging immediately.
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// Merge strategy for a user-initiated PR merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodePrMergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+/// `GET /code/workspaces/{id}/pr/comments`: the PR conversation, read live
+/// from the host and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodePrCommentsSnapshot {
+    /// PR number the comments belong to.
+    pub number: u64,
+    /// Issue comments, review bodies, and inline review comments, ordered by
+    /// creation time.
+    pub comments: Vec<tidebreak_core::PullRequestComment>,
+}
+
 /// Bounded output of one named quick action. Never journaled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeActionSnapshot {
@@ -634,9 +664,11 @@ pub enum CodeUpdateNotice {
         attention: Attention,
         title: String,
         turn_count: i64,
+        /// Boxed to keep the notice enum's variants near one size; the wire
+        /// shape is unchanged.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        pr_state: Option<PullRequestDigest>,
+        pr_state: Option<Box<PullRequestDigest>>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -681,7 +713,7 @@ impl CodeUpdateNotice {
             attention: wire.attention,
             title: wire.title,
             turn_count: wire.turn_count,
-            pr_state: wire.pr_state,
+            pr_state: wire.pr_state.map(Box::new),
         }
     }
 }

@@ -90,6 +90,8 @@ import {
   type CodeWorkspaceDiff,
   type CodeWorkspaceFiles,
   type CodeWorkspacePrSnapshot,
+  type CodePrCommentsSnapshot,
+  type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
   type CodeCloneJobSnapshot,
@@ -132,6 +134,7 @@ import {
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspacePr,
+  parseCodePrComments,
   parseHarnessModelList,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
@@ -1992,6 +1995,58 @@ export class ApiClient {
         await this.json(`/code/workspaces/${encodeURIComponent(workspaceId)}/pr`, {
           headers: this.headers(),
         }),
+      ),
+      "code pull request",
+    );
+  }
+
+  /** Force a fresh host read, bypassing the server's short PR cache. */
+  async refreshCodeWorkspacePr(
+    workspaceId: string,
+  ): Promise<CodeWorkspacePrSnapshot> {
+    return requireParsed(
+      parseCodeWorkspacePr(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/refresh`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "code pull request",
+    );
+  }
+
+  async getCodePrComments(
+    workspaceId: string,
+  ): Promise<CodePrCommentsSnapshot> {
+    return requireParsed(
+      parseCodePrComments(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/comments`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code pull request comments",
+    );
+  }
+
+  /**
+   * User-initiated merge. auto=true arms host auto-merge instead of merging
+   * immediately. Returns the post-merge snapshot.
+   */
+  async mergeCodePr(
+    workspaceId: string,
+    body: { method: CodePrMergeMethod; auto?: boolean },
+  ): Promise<CodeWorkspacePrSnapshot> {
+    return requireParsed(
+      parseCodeWorkspacePr(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/merge`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ method: body.method, auto: body.auto ?? false }),
+          },
+        ),
       ),
       "code pull request",
     );

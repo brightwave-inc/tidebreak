@@ -746,6 +746,18 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_pr),
         )
         .route(
+            "/code/workspaces/{id}/pr/refresh",
+            post(routes::code::refresh_workspace_pr),
+        )
+        .route(
+            "/code/workspaces/{id}/pr/comments",
+            get(routes::code::get_workspace_pr_comments),
+        )
+        .route(
+            "/code/workspaces/{id}/pr/merge",
+            post(routes::code::merge_workspace_pr),
+        )
+        .route(
             "/code/workspaces/{id}/actions/{name}",
             post(routes::code::run_workspace_action),
         )

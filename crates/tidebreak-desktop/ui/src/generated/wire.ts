@@ -1124,6 +1124,26 @@ export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: n
 export type CodePermissionMode = "plan" | "ask" | "auto" | "allow";
 
 /**
+ * `GET /code/workspaces/{id}/pr/comments`: the PR conversation, read live
+ * from the host and never persisted.
+ */
+export type CodePrCommentsSnapshot = { 
+/**
+ * PR number the comments belong to.
+ */
+number: number, 
+/**
+ * Issue comments, review bodies, and inline review comments, ordered by
+ * creation time.
+ */
+comments: Array<PullRequestComment>, };
+
+/**
+ * Merge strategy for a user-initiated PR merge.
+ */
+export type CodePrMergeMethod = "squash" | "merge" | "rebase";
+
+/**
  * Result of pushing the workspace branch.
  */
 export type CodePushSnapshot = { branch: string, remote: string, };
@@ -1203,7 +1223,12 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+/**
+ * Boxed to keep the notice enum's variants near one size; the wire
+ * shape is unchanged.
+ */
+pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.
@@ -2124,6 +2149,15 @@ export type McpServersInfo = { servers: Array<McpServerInfo>, };
 export type McpViewSession = { frame_path: string, };
 
 /**
+ * Body of `POST /code/workspaces/{id}/pr/merge`.
+ */
+export type MergeCodePrBody = { method: CodePrMergeMethod, 
+/**
+ * True arms host auto-merge instead of merging immediately.
+ */
+auto: boolean, };
+
+/**
  * Identifies a persisted message within a chat.
  */
 export type MessageId = string;
@@ -2653,6 +2687,46 @@ url?: string, };
 export type PullRequestCheckBucket = "pass" | "pending" | "fail";
 
 /**
+ * One pull-request comment: an issue comment, a review body, or an inline
+ * review comment. Never persisted; fetched live from the host.
+ */
+export type PullRequestComment = { 
+/**
+ * Where on the PR the comment lives.
+ */
+kind: PullRequestCommentKind, 
+/**
+ * Author login, when the host reported one.
+ */
+author?: string, 
+/**
+ * Host creation timestamp, verbatim.
+ */
+created_at?: string, 
+/**
+ * Comment body, markdown as the host stores it.
+ */
+body: string, 
+/**
+ * Lowercased review verdict (approved, changes_requested, commented), on
+ * review bodies only.
+ */
+review_state?: string, 
+/**
+ * File path, on inline review comments.
+ */
+path?: string, 
+/**
+ * Line number, on inline review comments when the host reports one.
+ */
+line?: number, };
+
+/**
+ * Which surface of the PR a comment belongs to.
+ */
+export type PullRequestCommentKind = "issue" | "review" | "inline";
+
+/**
  * Bounded pull-request digest stored on a workspace.
  */
 export type PullRequestDigest = { 
@@ -2679,7 +2753,39 @@ checks_summary?: string | null,
 /**
  * Individual checks, when the host reported any.
  */
-checks?: Array<PullRequestCheck>, };
+checks?: Array<PullRequestCheck>, 
+/**
+ * True when the host reports the PR as a draft.
+ */
+draft?: boolean, 
+/**
+ * True when the host reports the PR merged.
+ */
+merged?: boolean, 
+/**
+ * Lowercased host review decision (approved, changes_requested, review_required).
+ */
+review_decision?: string, 
+/**
+ * Lowercased host mergeability (mergeable, conflicting, unknown).
+ */
+mergeable?: string, 
+/**
+ * Lowercased host merge-state status (clean, blocked, behind, dirty, …).
+ */
+merge_state_status?: string, 
+/**
+ * Head branch name on the host.
+ */
+head_branch?: string, 
+/**
+ * Base branch name on the host.
+ */
+base_branch?: string, 
+/**
+ * True when auto-merge is enabled on the host.
+ */
+auto_merge_enabled?: boolean, };
 
 /**
  * A follow-up parked while the session is already running a turn.

@@ -384,6 +384,81 @@ pub struct PullRequestDigest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub checks: Option<Vec<PullRequestCheck>>,
+    /// True when the host reports the PR as a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub draft: Option<bool>,
+    /// True when the host reports the PR merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged: Option<bool>,
+    /// Lowercased host review decision (approved, changes_requested, review_required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_decision: Option<String>,
+    /// Lowercased host mergeability (mergeable, conflicting, unknown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mergeable: Option<String>,
+    /// Lowercased host merge-state status (clean, blocked, behind, dirty, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merge_state_status: Option<String>,
+    /// Head branch name on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_branch: Option<String>,
+    /// Base branch name on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base_branch: Option<String>,
+    /// True when auto-merge is enabled on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auto_merge_enabled: Option<bool>,
+}
+
+/// One pull-request comment: an issue comment, a review body, or an inline
+/// review comment. Never persisted; fetched live from the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestComment {
+    /// Where on the PR the comment lives.
+    pub kind: PullRequestCommentKind,
+    /// Author login, when the host reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<String>,
+    /// Host creation timestamp, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub created_at: Option<String>,
+    /// Comment body, markdown as the host stores it.
+    pub body: String,
+    /// Lowercased review verdict (approved, changes_requested, commented), on
+    /// review bodies only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_state: Option<String>,
+    /// File path, on inline review comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// Line number, on inline review comments when the host reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub line: Option<u64>,
+}
+
+/// Which surface of the PR a comment belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestCommentKind {
+    /// Conversation-tab issue comment.
+    Issue,
+    /// Review submission body.
+    Review,
+    /// Inline review comment on a file.
+    Inline,
 }
 
 /// Best-effort classification of what an approval is asking.

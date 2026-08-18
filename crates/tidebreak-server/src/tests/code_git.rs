@@ -325,7 +325,11 @@ exit 3
     );
     assert!(logged.contains("pr view"), "{logged}");
     assert!(logged.contains("pr checks"), "{logged}");
-    assert!(!logged.contains("merge"), "{logged}");
+    // The view field list legitimately names mergeable/autoMergeRequest; a
+    // merge invocation or flag may never appear on the create/status path.
+    assert!(!logged.contains("pr merge"), "{logged}");
+    assert!(!logged.contains("--merge"), "{logged}");
+    assert!(!logged.contains("--auto"), "{logged}");
     assert!(!logged.contains("graphql"), "{logged}");
 }
 

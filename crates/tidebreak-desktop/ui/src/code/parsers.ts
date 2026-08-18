@@ -41,6 +41,9 @@ import type {
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
   PullRequestDigest,
+  PullRequestComment,
+  PullRequestCommentKind,
+  CodePrCommentsSnapshot,
   QueuedCodeTurn,
 } from "../api/types";
 import type {
@@ -61,6 +64,8 @@ import type {
   CodeFileChange as WireCodeFileChange,
   Diffstat as WireDiffstat,
   PullRequestDigest as WirePullRequestDigest,
+  PullRequestComment as WirePullRequestComment,
+  CodePrCommentsSnapshot as WireCodePrCommentsSnapshot,
   HarnessCaps as WireHarnessCaps,
   HarnessDoctorEntry as WireHarnessDoctorEntry,
   HarnessDoctorReport as WireHarnessDoctorReport,
@@ -314,6 +319,10 @@ export function parseCodeWorkspace(
 export function parsePullRequestDigest(
   value: unknown,
 ): NonNullable<CodeWorkspaceSnapshot["pr"]> | null {
+  const optionalStringField = (field: unknown) =>
+    field === undefined || field === null || typeof field === "string";
+  const optionalBooleanField = (field: unknown) =>
+    field === undefined || field === null || typeof field === "boolean";
   if (
     !isRecord(value) ||
     !onlyKeys<WirePullRequestDigest>(value, [
@@ -323,14 +332,28 @@ export function parsePullRequestDigest(
       "title",
       "checks_summary",
       "checks",
+      "draft",
+      "merged",
+      "review_decision",
+      "mergeable",
+      "merge_state_status",
+      "head_branch",
+      "base_branch",
+      "auto_merge_enabled",
     ]) ||
     !isFiniteNumber(value.number) ||
     !nonEmpty(value.state) ||
-    (value.url !== undefined && value.url !== null && typeof value.url !== "string") ||
-    (value.title !== undefined && value.title !== null && typeof value.title !== "string") ||
-    (value.checks_summary !== undefined &&
-      value.checks_summary !== null &&
-      typeof value.checks_summary !== "string")
+    !optionalStringField(value.url) ||
+    !optionalStringField(value.title) ||
+    !optionalStringField(value.checks_summary) ||
+    !optionalStringField(value.review_decision) ||
+    !optionalStringField(value.mergeable) ||
+    !optionalStringField(value.merge_state_status) ||
+    !optionalStringField(value.head_branch) ||
+    !optionalStringField(value.base_branch) ||
+    !optionalBooleanField(value.draft) ||
+    !optionalBooleanField(value.merged) ||
+    !optionalBooleanField(value.auto_merge_enabled)
   ) {
     return null;
   }
@@ -343,6 +366,18 @@ export function parsePullRequestDigest(
     ...(value.title ? { title: value.title } : {}),
     ...(value.checks_summary ? { checks_summary: value.checks_summary } : {}),
     ...(checks && checks.length > 0 ? { checks } : {}),
+    ...(typeof value.draft === "boolean" ? { draft: value.draft } : {}),
+    ...(typeof value.merged === "boolean" ? { merged: value.merged } : {}),
+    ...(value.review_decision ? { review_decision: value.review_decision } : {}),
+    ...(value.mergeable ? { mergeable: value.mergeable } : {}),
+    ...(value.merge_state_status
+      ? { merge_state_status: value.merge_state_status }
+      : {}),
+    ...(value.head_branch ? { head_branch: value.head_branch } : {}),
+    ...(value.base_branch ? { base_branch: value.base_branch } : {}),
+    ...(typeof value.auto_merge_enabled === "boolean"
+      ? { auto_merge_enabled: value.auto_merge_enabled }
+      : {}),
   };
 }
 
@@ -420,6 +455,69 @@ export function parseCodeWorkspacePr(
     parsed.pr = pr;
   }
   return parsed;
+}
+
+const PR_COMMENT_KINDS = new Set<PullRequestCommentKind>([
+  "issue",
+  "review",
+  "inline",
+]);
+
+export function parseCodePrComments(
+  value: unknown,
+): CodePrCommentsSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodePrCommentsSnapshot>(value, ["number", "comments"]) ||
+    !isFiniteNumber(value.number) ||
+    !Array.isArray(value.comments)
+  ) {
+    return null;
+  }
+  const comments: PullRequestComment[] = [];
+  for (const item of value.comments) {
+    const comment = parsePullRequestComment(item);
+    if (!comment) return null;
+    comments.push(comment);
+  }
+  return { number: value.number, comments };
+}
+
+function parsePullRequestComment(value: unknown): PullRequestComment | null {
+  const optionalStringField = (field: unknown) =>
+    field === undefined || field === null || typeof field === "string";
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WirePullRequestComment>(value, [
+      "kind",
+      "author",
+      "created_at",
+      "body",
+      "review_state",
+      "path",
+      "line",
+    ]) ||
+    !isMember(value.kind, PR_COMMENT_KINDS) ||
+    typeof value.body !== "string" ||
+    !optionalStringField(value.author) ||
+    !optionalStringField(value.created_at) ||
+    !optionalStringField(value.review_state) ||
+    !optionalStringField(value.path) ||
+    (value.line !== undefined &&
+      value.line !== null &&
+      !isFiniteNumber(value.line))
+  ) {
+    return null;
+  }
+  return {
+    kind: value.kind,
+    body: value.body,
+    ...(value.author ? { author: value.author } : {}),
+    ...(value.created_at ? { created_at: value.created_at } : {}),
+    ...(value.review_state ? { review_state: value.review_state } : {}),
+    ...(value.path ? { path: value.path } : {}),
+    ...(isFiniteNumber(value.line) ? { line: value.line } : {}),
+  };
 }
 
 export function parseCodeCommit(value: unknown): CodeCommitSnapshot | null {
