@@ -10,6 +10,7 @@ import { MessageFooter } from "@/MessageFooter";
 import { isolatedCard } from "@/PendingCard";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
 import { ToolCardShell } from "@/ToolCardShell";
+import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
 import { cn } from "@/lib/utils";
@@ -223,15 +224,12 @@ function TranscriptItem({
       );
     case "notice":
       return <HarnessNotice level={item.level} message={item.message} />;
-    case "approval":
-      if (!approval) {
-        return (
-          <p className="text-muted-foreground text-sm" role="status">
-            Loading approval…
-          </p>
-        );
-      }
-      return (
+    case "approval": {
+      const card = !approval ? (
+        <p className="text-muted-foreground text-sm" role="status">
+          Loading approval…
+        </p>
+      ) : (
         <CodeApprovalCard
           approval={approval}
           deciding={deciding}
@@ -241,6 +239,15 @@ function TranscriptItem({
           }
         />
       );
+      return (
+        <div
+          data-code-approval-id={item.approvalId}
+          data-code-approval-state={item.state}
+        >
+          {card}
+        </div>
+      );
+    }
     case "turn_boundary":
       return <TurnReviewCard turn={item} onOpenTurnDiff={onOpenTurnDiff} />;
   }
@@ -282,15 +289,12 @@ export function CodeToolCard({
       titleClassName={detail.kind === "command" ? "font-mono" : undefined}
       badge={badge}
       defaultExpanded={status === "running"}
+      className={status === "failed" ? "border-critical-border" : undefined}
       label={`${name} ${status}`}
     >
       <div className="text-muted-foreground space-y-1 px-2.5 pb-2 text-xs">
         <p>{toolDetailLine(detail)}</p>
-        {preview && (
-          <pre className="bg-muted max-h-40 overflow-auto rounded-md p-2 font-mono whitespace-pre-wrap">
-            {preview}
-          </pre>
-        )}
+        {preview && <ToolOutputPreview text={preview} />}
       </div>
     </ToolCardShell>
   );

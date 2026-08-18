@@ -425,9 +425,23 @@ function PendingApprovalBadge({
   );
   if (pending === 0) return null;
   return (
-    <Badge variant="warning" size="sm" data-testid="pending-approval-badge">
-      {pending} {pending === 1 ? "approval" : "approvals"}
-    </Badge>
+    <button
+      type="button"
+      data-testid="pending-approval-badge"
+      className="cursor-pointer rounded-full border-0 bg-transparent p-0"
+      onClick={() => {
+        document
+          .querySelector('[data-code-approval-state="pending"]')
+          ?.scrollIntoView({
+            block: "center",
+            behavior: followScrollBehavior(false),
+          });
+      }}
+    >
+      <Badge variant="warning" size="sm">
+        {pending} {pending === 1 ? "approval" : "approvals"}
+      </Badge>
+    </button>
   );
 }
 
