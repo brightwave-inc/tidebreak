@@ -370,7 +370,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <div className="min-w-0">
           <h1 className="flex min-w-0 items-center gap-2 text-sm font-medium">
             {title ? (
-              <span className="truncate">{title}</span>
+              <span className="truncate" title={title}>
+                {title}
+              </span>
             ) : error ? null : (
               <span
                 data-testid="workspace-header-skeleton"
@@ -381,7 +383,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               </span>
             )}
             {repoName && (
-              <span className="text-muted-foreground truncate text-xs font-normal">
+              <span
+                className="text-muted-foreground truncate text-xs font-normal"
+                title={repoName}
+              >
                 {repoName}
               </span>
             )}
@@ -620,7 +625,7 @@ function WorktreePathChip({ path }: { path: string }) {
           }
           onClick={() => void onCopy()}
         >
-          {middleTruncate(path, 28)}
+          {middleTruncate(path, 24)}
         </button>
       </WithTooltip>
       <span className="sr-only" role="status" aria-live="polite">
@@ -665,7 +670,7 @@ function PendingApprovalBadge({
           });
       }}
     >
-      <Badge variant="warning" size="sm">
+      <Badge variant="warning" size="sm" className="tabular-nums">
         {pending} {pending === 1 ? "approval" : "approvals"}
       </Badge>
     </button>
