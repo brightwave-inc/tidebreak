@@ -1,13 +1,32 @@
 import { loader } from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
-
-// monaco-editor 0.56 exports `*.js` as `esm/vs/*.js`, so these must not
-// include the `esm/vs/` prefix.
+// monaco-editor 0.56 remaps `*.js` → `esm/vs/*.js`, so these paths must not
+// include the `esm/vs/` prefix. `monaco-editor` itself is the full barrel.
+import * as monaco from "monaco-editor/editor/editor.api";
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
-import cssWorker from "monaco-editor/language/css/css.worker.js?worker";
-import htmlWorker from "monaco-editor/language/html/html.worker.js?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker.js?worker";
-import tsWorker from "monaco-editor/language/typescript/ts.worker.js?worker";
+
+// Highlighters only — the full barrel pulls every language plus the LSP client
+// into Vite's production transform and OOMs a 4 GB heap.
+import "monaco-editor/languages/definitions/css/register.js";
+import "monaco-editor/languages/definitions/go/register.js";
+import "monaco-editor/languages/definitions/html/register.js";
+import "monaco-editor/languages/definitions/ini/register.js";
+import "monaco-editor/languages/definitions/java/register.js";
+import "monaco-editor/languages/definitions/javascript/register.js";
+import "monaco-editor/languages/definitions/kotlin/register.js";
+import "monaco-editor/languages/definitions/less/register.js";
+import "monaco-editor/languages/definitions/markdown/register.js";
+import "monaco-editor/languages/definitions/python/register.js";
+import "monaco-editor/languages/definitions/ruby/register.js";
+import "monaco-editor/languages/definitions/rust/register.js";
+import "monaco-editor/languages/definitions/scss/register.js";
+import "monaco-editor/languages/definitions/shell/register.js";
+import "monaco-editor/languages/definitions/sql/register.js";
+import "monaco-editor/languages/definitions/swift/register.js";
+import "monaco-editor/languages/definitions/typescript/register.js";
+import "monaco-editor/languages/definitions/xml/register.js";
+import "monaco-editor/languages/definitions/yaml/register.js";
+import "monaco-editor/language/json/monaco.contribution.js";
 
 let configured = false;
 
@@ -17,16 +36,10 @@ export function configureMonaco(): void {
   configured = true;
   self.MonacoEnvironment = {
     getWorker(_id: string, label: string) {
+      // CSS/HTML/TS highlighters are Monarch grammars and use the editor
+      // worker. The TypeScript language-service worker ships the compiler
+      // and blows the production-build heap.
       if (label === "json") return new jsonWorker();
-      if (label === "css" || label === "scss" || label === "less") {
-        return new cssWorker();
-      }
-      if (label === "html" || label === "handlebars" || label === "razor") {
-        return new htmlWorker();
-      }
-      if (label === "typescript" || label === "javascript") {
-        return new tsWorker();
-      }
       return new editorWorker();
     },
   };

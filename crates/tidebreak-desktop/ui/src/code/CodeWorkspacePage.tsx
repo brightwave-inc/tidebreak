@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -50,7 +50,6 @@ import {
 } from "./codeChrome";
 import { CodeCenterTabs } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
-import { FileViewer } from "./FileViewer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -83,6 +82,12 @@ import {
   LIFECYCLE_LABELS,
   sessionLifecycleTooltip,
 } from "./labels";
+
+// AppShell imports this page statically. Lazy-load the viewer so that path
+// does not evaluate Monaco until a file tab opens.
+const FileViewer = lazy(() =>
+  import("./FileViewer").then((module) => ({ default: module.FileViewer })),
+);
 
 /**
  * One workspace: header, transcript, composer, and the fence/reap path.
@@ -316,12 +321,25 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       {!showingChat && activeEditor && (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {activeEditor.type === "file" ? (
-            <FileViewer
-              client={client}
-              workspaceId={workspaceId}
-              path={activeEditor.path}
-              contentRevision={contentRevision}
-            />
+            <Suspense
+              fallback={
+                <div
+                  className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-3"
+                  aria-hidden="true"
+                >
+                  <Skeleton className="h-4 w-1/3" />
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-2/3" />
+                </div>
+              }
+            >
+              <FileViewer
+                client={client}
+                workspaceId={workspaceId}
+                path={activeEditor.path}
+                contentRevision={contentRevision}
+              />
+            </Suspense>
           ) : activeEditor.type === "diff" ? (
             <DiffPanel
               client={client}

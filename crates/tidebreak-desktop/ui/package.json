@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && node --max-old-space-size=4096 node_modules/vite/bin/vite.js build",
+    "build": "tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
     "test": "vitest run",
     "before-tauri-dev": "node ../scripts/prepare-sidecar.mjs && vite",
-    "before-tauri-build": "node ../scripts/prepare-sidecar.mjs --release && tsc && node --max-old-space-size=4096 node_modules/vite/bin/vite.js build",
+    "before-tauri-build": "node ../scripts/prepare-sidecar.mjs --release && tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
     "tauri": "cargo tauri"
   },
