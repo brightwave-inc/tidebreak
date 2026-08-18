@@ -26,7 +26,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 827
-- Desktop UI production packages: 499
+- Desktop UI production packages: 500
 - Distinct license texts: 569
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -5428,6 +5428,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
 ### @radix-ui/react-context 1.2.2
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-context-menu 2.3.7
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git

@@ -1,11 +1,11 @@
 import { type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { FolderGit2, LayoutGrid, Puzzle, SquarePen } from "lucide-react";
+import { LayoutGrid, Puzzle, SquarePen } from "lucide-react";
 
 import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
-import { isCodeRoute } from "@/code/routes";
+import { CodeModeSwitch } from "@/code/CodeModeSwitch";
 import { useExperimentalFlags } from "@/experimental";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
@@ -50,6 +50,8 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
         </SidebarButton>
       )}
 
+      {codeModeEnabled && <CodeModeSwitch />}
+
       <div className="flex shrink-0 flex-col gap-0.5">
         <InboxButton />
 
@@ -67,16 +69,6 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
           active={pathname === "/plugins" || pathname.startsWith("/plugins/")}
           onClick={() => void navigate({ to: "/plugins" })}
         />
-        {/* Experimental and opt-in: the rail lists Code only after the reader
-            enables it under Settings → Experimental. */}
-        {codeModeEnabled && (
-          <RouteButton
-            label="Code"
-            icon={<FolderGit2 />}
-            active={isCodeRoute(pathname)}
-            onClick={() => void navigate({ to: "/code" })}
-          />
-        )}
       </div>
 
       <ProjectsSection activeChatId={chat?.id} />

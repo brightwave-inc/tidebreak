@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
+
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
+}));
 
 /**
  * ADR 0030: the code rail must render without initializing chat session
@@ -92,6 +97,7 @@ afterEach(() => {
   useCodeCatalogStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
+  useCodeUiStore.setState({ workspaceSortMode: "by-repo" });
 });
 
 describe("CodeSidebar", () => {
@@ -103,10 +109,26 @@ describe("CodeSidebar", () => {
       { initialUrl: "/code" },
     );
 
-    expect(screen.getByRole("button", { name: "Chat" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Code" })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New workspace" })).toBeInTheDocument();
+  });
+
+  it("opens the workspace context menu with a destructive Archive item", async () => {
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const card = await screen.findByRole("button", { name: "Fix login" });
+    fireEvent.contextMenu(card);
+    const archive = await screen.findByRole("menuitem", { name: "Archive" });
+    expect(archive).toBeInTheDocument();
+    expect(archive.className).toContain("text-destructive");
   });
 });

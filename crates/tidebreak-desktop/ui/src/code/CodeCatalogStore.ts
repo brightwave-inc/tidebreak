@@ -151,12 +151,15 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     });
   },
   upsertWorkspace: (workspace) => {
-    set({
-      workspaces: [
-        workspace,
-        ...get().workspaces.filter((item) => item.id !== workspace.id),
-      ],
-    });
+    const current = get().workspaces;
+    const index = current.findIndex((item) => item.id === workspace.id);
+    if (index === -1) {
+      set({ workspaces: [...current, workspace] });
+      return;
+    }
+    const workspaces = current.slice();
+    workspaces[index] = workspace;
+    set({ workspaces });
   },
   reset: () => {
     set({
