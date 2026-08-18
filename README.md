@@ -25,9 +25,12 @@
 
 <p align="center">
   <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe"><img src="https://img.shields.io/badge/Download%20for%20Windows-0078D4.svg?logo=windows&logoColor=white" alt="Download the latest Windows release"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage"><img src="https://img.shields.io/badge/Download%20for%20Linux-FCC624.svg?logo=linux&logoColor=black" alt="Download the latest Linux AppImage"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb"><img src="https://img.shields.io/badge/Linux%20.deb-A81D33.svg?logo=debian&logoColor=white" alt="Download the latest Linux Debian package"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe"><img src="https://img.shields.io/badge/Windows-x86__64-0078D4.svg?logo=windows&logoColor=white" alt="Download the latest x86_64 Windows release"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe"><img src="https://img.shields.io/badge/Windows-ARM64-0078D4.svg?logo=windows&logoColor=white" alt="Download the latest ARM64 Windows release"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage"><img src="https://img.shields.io/badge/Linux%20AppImage-x86__64-FCC624.svg?logo=linux&logoColor=black" alt="Download the latest x86_64 Linux AppImage"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage"><img src="https://img.shields.io/badge/Linux%20AppImage-ARM64-FCC624.svg?logo=linux&logoColor=black" alt="Download the latest ARM64 Linux AppImage"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb"><img src="https://img.shields.io/badge/Linux%20.deb-x86__64-A81D33.svg?logo=debian&logoColor=white" alt="Download the latest x86_64 Linux Debian package"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb"><img src="https://img.shields.io/badge/Linux%20.deb-ARM64-A81D33.svg?logo=debian&logoColor=white" alt="Download the latest ARM64 Linux Debian package"></a>
 </p>
 
 <p align="center">
@@ -61,9 +64,8 @@ the headless CLI.
 > [!WARNING]
 > Tidebreak is pre-1.0 and changing quickly. Interfaces and local data formats
 > may change between releases, and profiles may be rebuilt rather than
-> migrated. Windows and Linux packages ship for x86_64, with ARM64 builds on
-> the way; some native capabilities
-> remain macOS-only and are reported as unavailable in the app.
+> migrated. Windows and Linux packages ship for x86_64 and ARM64; some native
+> capabilities remain macOS-only and are reported as unavailable in the app.
 
 ## Features
 

@@ -99,6 +99,10 @@ pub(crate) struct UpdateManager {
 
 pub(crate) const fn updates_enabled() -> bool {
     cfg!(all(not(debug_assertions), target_os = "macos"))
+        || cfg!(all(
+            not(debug_assertions),
+            any(target_os = "windows", target_os = "linux")
+        ))
 }
 
 /// What a fresh look at the feed means for an already-staged artifact.

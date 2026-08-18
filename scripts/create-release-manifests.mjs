@@ -35,7 +35,7 @@ const MACOS_PLATFORM = {
 const WINDOWS_PLATFORM = {
   platform: "windows",
   updaterPlatform: "windows",
-  architectures: ["x86_64"],
+  architectures: ["x86_64", "aarch64"],
   // Tauri v2 installs Windows updates from the NSIS installer itself, so the
   // updater signature covers the exact bytes users download.
   formats: [{ extension: "-setup.exe", format: "nsis", updater: true }],
@@ -44,7 +44,7 @@ const WINDOWS_PLATFORM = {
 const LINUX_PLATFORM = {
   platform: "linux",
   updaterPlatform: "linux",
-  architectures: ["x86_64"],
+  architectures: ["x86_64", "aarch64"],
   formats: [
     // Tauri selects Linux updates by the bundle format the running app was
     // installed from. Publish distinct targets so a Debian install can never

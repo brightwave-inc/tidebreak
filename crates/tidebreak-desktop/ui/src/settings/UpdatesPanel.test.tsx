@@ -20,7 +20,7 @@ describe("UpdatesPanel", () => {
       />,
     );
 
-    expect(markup).toContain("available in packaged macOS builds");
+    expect(markup).toContain("available in packaged release builds");
     expect(markup).toContain("disabled");
   });
 

@@ -9,7 +9,7 @@ import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
 export function updateStateSummary(state: DesktopUpdateState): string {
   if (!state.enabled) {
-    return "Automatic updates are available in packaged macOS builds.";
+    return "Automatic updates are available in packaged release builds.";
   }
   switch (state.status) {
     case "checking":

@@ -57,8 +57,11 @@ test("creates a complete manifest and Tauri updater document", () => {
     "darwin-aarch64",
     "darwin-x86_64",
     "windows-x86_64",
+    "windows-aarch64",
     "linux-x86_64-appimage",
+    "linux-aarch64-appimage",
     "linux-x86_64-deb",
+    "linux-aarch64-deb",
   ]);
   assert.match(
     latest.platforms["darwin-aarch64"].url,
@@ -81,6 +84,14 @@ test("creates a complete manifest and Tauri updater document", () => {
     "signature-windows-x86_64-nsis",
   );
   assert.match(
+    latest.platforms["windows-aarch64"].url,
+    /releases\/v0\.4\.2\/windows\/aarch64\/Tidebreak_0\.4\.2_aarch64-setup\.exe$/,
+  );
+  assert.equal(
+    latest.platforms["windows-aarch64"].signature,
+    "signature-windows-aarch64-nsis",
+  );
+  assert.match(
     latest.platforms["linux-x86_64-appimage"].url,
     /releases\/v0\.4\.2\/linux\/x86_64\/Tidebreak_0\.4\.2_x86_64\.AppImage$/,
   );
@@ -95,6 +106,22 @@ test("creates a complete manifest and Tauri updater document", () => {
   assert.equal(
     latest.platforms["linux-x86_64-deb"].signature,
     "signature-linux-x86_64-deb",
+  );
+  assert.match(
+    latest.platforms["linux-aarch64-appimage"].url,
+    /releases\/v0\.4\.2\/linux\/aarch64\/Tidebreak_0\.4\.2_aarch64\.AppImage$/,
+  );
+  assert.equal(
+    latest.platforms["linux-aarch64-appimage"].signature,
+    "signature-linux-aarch64-appimage",
+  );
+  assert.match(
+    latest.platforms["linux-aarch64-deb"].url,
+    /releases\/v0\.4\.2\/linux\/aarch64\/Tidebreak_0\.4\.2_aarch64\.deb$/,
+  );
+  assert.equal(
+    latest.platforms["linux-aarch64-deb"].signature,
+    "signature-linux-aarch64-deb",
   );
 
   const diskManifest = JSON.parse(

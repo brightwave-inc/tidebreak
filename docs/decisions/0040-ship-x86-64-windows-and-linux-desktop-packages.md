@@ -1,6 +1,6 @@
 # 40. Ship x86_64 Windows and Linux desktop packages
 
-- Status: Proposed
+- Status: Superseded by [decision 43](0043-ship-arm64-packages-and-enable-cross-platform-updates.md)
 - Date: 2026-08-17
 - Owners: desktop and release engineering
 - Related: [`docs/releases.md`](../releases.md), [decision 16](0016-desktop-staging-channel.md)

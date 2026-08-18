@@ -192,9 +192,10 @@ is the whole rule, and it is coarse on purpose:
   schedules, and manual dispatches. Pull requests opt in with the `windows-ci`
   label when they touch a Windows-native boundary. It stays non-required because
   it is the slowest lane; the post-merge and scheduled runs are the backstop.
-- Production releases require macOS, Windows x86_64, and Linux x86_64 packages.
-  Windows ships NSIS; Linux ships AppImage and `.deb`. Windows Authenticode,
-  ARM64 packages, and automatic updates outside macOS remain parked in
+- Production releases require universal macOS packages plus x86_64 and ARM64
+  Windows and Linux packages. Windows ships NSIS; Linux ships AppImage and
+  `.deb`; release builds on all three operating systems use the signed Tauri
+  updater feed. Windows Authenticode remains parked in
   [`docs/deferred.md`](docs/deferred.md).
 
 **The remaining trap is a PR that ran nothing.** A conflicting PR runs nothing

@@ -1062,7 +1062,7 @@ jobs:
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     defaults:
       run:
@@ -1070,11 +1070,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x86_64 only for the first unsigned Windows releases; see
-        # docs/releases.md.
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -1188,7 +1190,7 @@ jobs:
         && needs.inspect_hosted.outputs.exists != 'true'
         && needs.prepare_windows.result == 'success'
       }}
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     environment:
       name: desktop-production
@@ -1199,11 +1201,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x86_64 only for the first unsigned Windows releases; see
-        # docs/releases.md.
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     env:
       # Reuse compiler outputs across trusted release runs without caching the
       # bundled installers or the updater signing material.
@@ -1403,7 +1407,9 @@ jobs:
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
-    runs-on: ubuntu-22.04
+    # The x86_64 baseline remains `runs-on: ubuntu-22.04`; the matrix adds the
+    # matching native Ubuntu 22.04 ARM runner without changing that baseline.
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     environment:
       name: desktop-production
@@ -1414,6 +1420,10 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -1480,7 +1490,7 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.TIDEBREAK_VERSION,
-              bundle: { targets: ["appimage", "deb"], category: "Office" },
+              bundle: { targets: ["appimage", "deb"], category: "Productivity" },
               plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
             }));
           '
@@ -1686,7 +1696,7 @@ jobs:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: dist/macos/universal
 
-      - name: Download Windows artifacts
+      - name: Download x86_64 Windows artifacts
         if: >-
           ${{
             needs.validate.outputs.draft == 'true'
@@ -1697,7 +1707,18 @@ jobs:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: dist/windows/x86_64
 
-      - name: Download Linux artifacts
+      - name: Download ARM64 Windows artifacts
+        if: >-
+          ${{
+            needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-windows-aarch64-${{ needs.validate.outputs.version }}
+          path: dist/windows/aarch64
+
+      - name: Download x86_64 Linux artifacts
         if: >-
           ${{
             needs.validate.outputs.draft == 'true'
@@ -1707,6 +1728,17 @@ jobs:
         with:
           name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
           path: dist/linux/x86_64
+
+      - name: Download ARM64 Linux artifacts
+        if: >-
+          ${{
+            needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-linux-aarch64-${{ needs.validate.outputs.version }}
+          path: dist/linux/aarch64
 
       - name: Recover build inputs from the immutable GitHub Release
         if: >-
@@ -1721,7 +1753,9 @@ jobs:
             recovery \
             dist/macos/universal \
             dist/windows/x86_64 \
-            dist/linux/x86_64
+            dist/windows/aarch64 \
+            dist/linux/x86_64 \
+            dist/linux/aarch64
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir recovery
@@ -1742,24 +1776,26 @@ jobs:
             cp "recovery/$file" "dist/macos/universal/$file"
           done
 
-          windows_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
-          for suffix in setup.exe setup.exe.sig; do
-            file="$windows_base-$suffix"
-            [[ -f "recovery/$file" ]] || {
-              echo "Immutable GitHub Release is missing recovery asset: $file" >&2
-              exit 1
-            }
-            cp "recovery/$file" "dist/windows/x86_64/$file"
-          done
+          for arch in x86_64 aarch64; do
+            windows_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+            for suffix in setup.exe setup.exe.sig; do
+              file="$windows_base-$suffix"
+              [[ -f "recovery/$file" ]] || {
+                echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+                exit 1
+              }
+              cp "recovery/$file" "dist/windows/$arch/$file"
+            done
 
-          linux_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
-          for suffix in AppImage AppImage.sig deb deb.sig; do
-            file="$linux_base.$suffix"
-            [[ -f "recovery/$file" ]] || {
-              echo "Immutable GitHub Release is missing recovery asset: $file" >&2
-              exit 1
-            }
-            cp "recovery/$file" "dist/linux/x86_64/$file"
+            linux_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+            for suffix in AppImage AppImage.sig deb deb.sig; do
+              file="$linux_base.$suffix"
+              [[ -f "recovery/$file" ]] || {
+                echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+                exit 1
+              }
+              cp "recovery/$file" "dist/linux/$arch/$file"
+            done
           done
 
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
@@ -1991,19 +2027,33 @@ jobs:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: release-artifacts/macos
 
-      - name: Download the verified Windows build
+      - name: Download the verified x86_64 Windows build
         if: ${{ needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
-          path: release-artifacts/windows
+          path: release-artifacts/windows/x86_64
 
-      - name: Download the verified Linux build
+      - name: Download the verified ARM64 Windows build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-windows-aarch64-${{ needs.validate.outputs.version }}
+          path: release-artifacts/windows/aarch64
+
+      - name: Download the verified x86_64 Linux build
         if: ${{ needs.validate.outputs.draft == 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
-          path: release-artifacts/linux
+          path: release-artifacts/linux/x86_64
+
+      - name: Download the verified ARM64 Linux build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-linux-aarch64-${{ needs.validate.outputs.version }}
+          path: release-artifacts/linux/aarch64
 
       - name: Download the checksummed source SBOM
         if: ${{ needs.validate.outputs.draft == 'true' }}
@@ -2036,39 +2086,41 @@ jobs:
             (cd downloads && sha256sum "$file" > "$file.sha256")
           done
 
-          windows_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
-          windows_installer="$windows_base-setup.exe"
-          for file in "$windows_installer" "$windows_installer.sig"; do
-            [[ -f "release-artifacts/windows/$file" ]] || {
-              echo "The verified Windows build did not contain $file." >&2
-              exit 1
-            }
-            cp "release-artifacts/windows/$file" "downloads/$file"
-            (cd downloads && sha256sum "$file" > "$file.sha256")
-          done
-          cp "release-artifacts/windows/$windows_installer" \
-            downloads/Tidebreak-windows-x86_64-setup.exe
-          (cd downloads && sha256sum Tidebreak-windows-x86_64-setup.exe \
-            > Tidebreak-windows-x86_64-setup.exe.sha256)
+          for arch in x86_64 aarch64; do
+            windows_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+            windows_installer="$windows_base-setup.exe"
+            for file in "$windows_installer" "$windows_installer.sig"; do
+              [[ -f "release-artifacts/windows/$arch/$file" ]] || {
+                echo "The verified Windows $arch build did not contain $file." >&2
+                exit 1
+              }
+              cp "release-artifacts/windows/$arch/$file" "downloads/$file"
+              (cd downloads && sha256sum "$file" > "$file.sha256")
+            done
+            cp "release-artifacts/windows/$arch/$windows_installer" \
+              "downloads/Tidebreak-windows-${arch}-setup.exe"
+            (cd downloads && sha256sum "Tidebreak-windows-${arch}-setup.exe" \
+              > "Tidebreak-windows-${arch}-setup.exe.sha256")
 
-          linux_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
-          for suffix in AppImage AppImage.sig deb deb.sig; do
-            file="$linux_base.$suffix"
-            [[ -f "release-artifacts/linux/$file" ]] || {
-              echo "The verified Linux build did not contain $file." >&2
-              exit 1
-            }
-            cp "release-artifacts/linux/$file" "downloads/$file"
-            (cd downloads && sha256sum "$file" > "$file.sha256")
+            linux_base="Tidebreak_${TIDEBREAK_VERSION}_${arch}"
+            for suffix in AppImage AppImage.sig deb deb.sig; do
+              file="$linux_base.$suffix"
+              [[ -f "release-artifacts/linux/$arch/$file" ]] || {
+                echo "The verified Linux $arch build did not contain $file." >&2
+                exit 1
+              }
+              cp "release-artifacts/linux/$arch/$file" "downloads/$file"
+              (cd downloads && sha256sum "$file" > "$file.sha256")
+            done
+            cp "release-artifacts/linux/$arch/$linux_base.AppImage" \
+              "downloads/Tidebreak-linux-${arch}.AppImage"
+            cp "release-artifacts/linux/$arch/$linux_base.deb" \
+              "downloads/Tidebreak-linux-${arch}.deb"
+            (cd downloads && sha256sum "Tidebreak-linux-${arch}.AppImage" \
+              > "Tidebreak-linux-${arch}.AppImage.sha256")
+            (cd downloads && sha256sum "Tidebreak-linux-${arch}.deb" \
+              > "Tidebreak-linux-${arch}.deb.sha256")
           done
-          cp "release-artifacts/linux/$linux_base.AppImage" \
-            downloads/Tidebreak-linux-x86_64.AppImage
-          cp "release-artifacts/linux/$linux_base.deb" \
-            downloads/Tidebreak-linux-x86_64.deb
-          (cd downloads && sha256sum Tidebreak-linux-x86_64.AppImage \
-            > Tidebreak-linux-x86_64.AppImage.sha256)
-          (cd downloads && sha256sum Tidebreak-linux-x86_64.deb \
-            > Tidebreak-linux-x86_64.deb.sha256)
 
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
           cp "release-artifacts/sbom/$sbom" "downloads/$sbom"
@@ -2100,8 +2152,11 @@ jobs:
           fi
           for required in \
             downloads/Tidebreak-windows-x86_64-setup.exe \
+            downloads/Tidebreak-windows-aarch64-setup.exe \
             downloads/Tidebreak-linux-x86_64.AppImage \
-            downloads/Tidebreak-linux-x86_64.deb; do
+            downloads/Tidebreak-linux-x86_64.deb \
+            downloads/Tidebreak-linux-aarch64.AppImage \
+            downloads/Tidebreak-linux-aarch64.deb; do
             [[ -f "$required" ]] || {
               echo "The cross-platform download was not prepared: ${required#downloads/}" >&2
               exit 1
@@ -2128,13 +2183,25 @@ jobs:
               "$base.app.zip" \
               "$base.app.tar.gz" \
               "$base.app.tar.gz.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"; do
+              [[ -f "downloads/$file" ]] || {
+                echo "Immutable release cannot recover hosted publication without $file." >&2
+                exit 1
+              }
+            done
+            for file in \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe.sig" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage.sig" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb" \
               "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb.sig" \
-              "Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"; do
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64-setup.exe" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64-setup.exe.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.AppImage" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.AppImage.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.deb" \
+              "Tidebreak_${TIDEBREAK_VERSION}_aarch64.deb.sig"; do
               [[ -f "downloads/$file" ]] || {
                 echo "Immutable release cannot recover hosted publication without $file." >&2
                 exit 1

@@ -21,23 +21,26 @@ to check it:
 shasum -a 256 -c Tidebreak-macos-universal.dmg.sha256
 ```
 
-An installed macOS build keeps itself current. It checks for a newer signed
-release in the background and asks before restarting.
+Installed release builds keep themselves current. They check for a newer signed
+release in the background and ask before restarting.
 
 ## Windows
 
-[Download for Windows](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe)
+- [Download for x86_64 Windows](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe)
+- [Download for ARM64 Windows](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe)
 
-The x86_64 NSIS installer is not yet Authenticode-signed, so Windows SmartScreen
-may warn on first run. The release includes a `.sha256` sidecar for independent
+The NSIS installers are not yet Authenticode-signed, so Windows SmartScreen may
+warn on first run. Each release includes a `.sha256` sidecar for independent
 download verification.
 
 ## Linux
 
-Choose the portable AppImage or the Debian package. Both are x86_64 builds.
+Choose the portable AppImage or the Debian package for your architecture.
 
-- [Download AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage)
-- [Download Debian package](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb)
+- [Download x86_64 AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage)
+- [Download x86_64 Debian package](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb)
+- [Download ARM64 AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage)
+- [Download ARM64 Debian package](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb)
 
 Linux packages are built on Ubuntu 22.04. Use Ubuntu 22.04, Debian 12, or a
 newer distribution with a compatible glibc baseline. The Debian package declares
@@ -63,8 +66,10 @@ sha256sum -c Tidebreak-linux-x86_64.deb.sha256
 Windows and Linux packages run the desktop chat, files, connected-folder,
 provider, and remote-sandbox surfaces. Native local execution, managed Node and
 LibreOffice installation, computer use, and code mode remain unavailable where
-the app reports those platform capabilities as unsupported. Automatic updates
-currently run only on macOS; install a newer Windows or Linux package manually.
+the app reports those platform capabilities as unsupported. Release builds
+check the signed updater feed in the background and ask before restarting into
+a newer package. Linux updates preserve the installed format: AppImage installs
+receive AppImage updates and Debian installs receive `.deb` updates.
 
 ## Build from source
 

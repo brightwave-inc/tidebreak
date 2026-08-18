@@ -1427,6 +1427,13 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   )?.[0];
   assert.ok(prepareCacheSave);
   assert.ok(buildCacheRestore);
+  for (const job of [prepareJob, buildJob]) {
+    assert.match(job, /runs-on: \$\{\{ matrix\.runner \}\}/);
+    assert.match(job, /target: x86_64-pc-windows-msvc/);
+    assert.match(job, /runner: windows-latest/);
+    assert.match(job, /target: aarch64-pc-windows-msvc/);
+    assert.match(job, /runner: windows-11-arm/);
+  }
 
   // The prerequisite compiles without any production credential and never
   // uploads what it built; only the cache carries its outputs forward.
@@ -1524,6 +1531,11 @@ test("Linux packaging writes no shared cache before loading updater material", (
     assert.match(buildJob, /target: x86_64-unknown-linux-gnu/);
     assert.match(buildJob, /target: aarch64-unknown-linux-gnu/);
   }
+  assert.match(buildJob, /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(buildJob, /target: x86_64-unknown-linux-gnu/);
+  assert.match(buildJob, /runner: ubuntu-22\.04/);
+  assert.match(buildJob, /target: aarch64-unknown-linux-gnu/);
+  assert.match(buildJob, /runner: ubuntu-22\.04-arm/);
   assert.match(buildJob, /libwebkit2gtk-4\.1-dev/);
   assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(buildJob, /version: 10\.18\.3/);
@@ -1540,6 +1552,8 @@ test("Linux packaging writes no shared cache before loading updater material", (
   assert.match(rustCache, /save-if: false/);
 
   assert.match(buildJob, /--bundles appimage,deb/);
+  assert.match(buildJob, /category: "Productivity"/);
+  assert.doesNotMatch(buildJob, /category: "Office"/);
   assert.match(buildJob, /\.AppImage/);
   assert.match(buildJob, /\.deb/);
   assert.match(buildJob, /tauri signer sign "\$appimage_path"/);
@@ -1683,15 +1697,20 @@ test("GitHub release assets are attached before immutable publication", () => {
   // an incomplete hosted publication without rebuilding signed packages.
   assert.match(attachJob, /name: tidebreak-macos-universal-/);
   assert.match(attachJob, /name: tidebreak-windows-x86_64-/);
+  assert.match(attachJob, /name: tidebreak-windows-aarch64-/);
   assert.match(attachJob, /name: tidebreak-linux-x86_64-/);
+  assert.match(attachJob, /name: tidebreak-linux-aarch64-/);
   assert.match(attachJob, /name: tidebreak-source-sbom-/);
   assert.match(attachJob, /gh release download "\$RELEASE_TAG"/);
   assert.match(attachJob, /sha256sum --check --strict/);
   assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
   assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
   assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
+  assert.match(attachJob, /Tidebreak-windows-aarch64-setup\.exe/);
   assert.match(attachJob, /Tidebreak-linux-x86_64\.AppImage/);
   assert.match(attachJob, /Tidebreak-linux-x86_64\.deb/);
+  assert.match(attachJob, /Tidebreak-linux-aarch64\.AppImage/);
+  assert.match(attachJob, /Tidebreak-linux-aarch64\.deb/);
   assert.match(attachJob, /\.app\.zip/);
   assert.match(attachJob, /\.app\.tar\.gz/);
   assert.match(attachJob, /\.app\.tar\.gz\.sig/);
@@ -1711,6 +1730,14 @@ test("GitHub release assets are attached before immutable publication", () => {
       /Tidebreak_\$\{TIDEBREAK_VERSION\}_(?:aarch64|\$\{arch\})\.deb\.sig/,
     );
   }
+  assert.match(
+    attachJob,
+    /Tidebreak_\$\{TIDEBREAK_VERSION\}_x86_64\.deb\.sig/,
+  );
+  assert.match(
+    attachJob,
+    /Tidebreak_\$\{TIDEBREAK_VERSION\}_aarch64\.deb\.sig/,
+  );
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
   assert.match(attachJob, /if \[\[ "\$RELEASE_DRAFT" = true \]\]/);
   assert.match(attachJob, /releases\/\$RELEASE_ID\/assets/);
@@ -2133,6 +2160,14 @@ test("the packaged desktop activates the signed updater feed", () => {
   assert.match(
     desktopUpdater,
     /cfg!\(all\([\s\S]*not\(debug_assertions\),[\s\S]*target_os = "macos"[\s\S]*\)\)/,
+  );
+  assert.match(
+    desktopUpdater,
+    /cfg!\(all\(not\(debug_assertions\), target_os = "macos"\)\)/,
+  );
+  assert.match(
+    desktopUpdater,
+    /cfg!\(all\([\s\S]*not\(debug_assertions\),[\s\S]*target_os = "windows"[\s\S]*target_os = "linux"[\s\S]*\)\)/,
   );
   if (
     /target_os = "windows"/.test(desktopUpdater) ||
