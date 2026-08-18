@@ -1537,6 +1537,11 @@ test("Linux packaging writes no shared cache before loading updater material", (
   assert.match(buildJob, /target: aarch64-unknown-linux-gnu/);
   assert.match(buildJob, /runner: ubuntu-22\.04-arm/);
   assert.match(buildJob, /libwebkit2gtk-4\.1-dev/);
+  assert.match(
+    buildJob,
+    /xdg-utils/,
+    "AppImage packaging must install the xdg-mime provider on every runner",
+  );
   assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(buildJob, /version: 10\.18\.3/);
   assert.match(buildJob, /pnpm install --frozen-lockfile --ignore-scripts/);
