@@ -307,9 +307,10 @@ impl tidebreak_code_execution::HostToolBroker for DesktopHostToolBroker {
     fn retry(&self, tool: tidebreak_code_execution::HostDep) {
         match tool {
             tidebreak_code_execution::HostDep::LibreOffice => {
+                // Same race as Node: status can be polled before the spawn runs.
+                state().lock().expect("install state lock").last_failure = None;
                 let app = self.app.clone();
                 tauri::async_runtime::spawn(async move {
-                    state().lock().expect("install state lock").last_failure = None;
                     let _ = ensure_installed(&app).await;
                 });
             }
