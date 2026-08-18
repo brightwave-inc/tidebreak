@@ -1131,11 +1131,12 @@ fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) ->
                 .split(';')
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(|value| {
+                .filter_map(|value| {
                     if value.starts_with('.') {
-                        value.to_owned()
+                        launchable_windows_extension(value).then(|| value.to_owned())
                     } else {
-                        format!(".{value}")
+                        let value = format!(".{value}");
+                        launchable_windows_extension(&value).then_some(value)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -1164,6 +1165,13 @@ fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) ->
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn launchable_windows_extension(extension: &str) -> bool {
+    [".COM", ".EXE", ".BAT", ".CMD"]
+        .iter()
+        .any(|supported| extension.eq_ignore_ascii_case(supported))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -1950,6 +1958,7 @@ exit 3
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use tokio::time::{sleep, Instant};
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -1967,6 +1976,21 @@ mod windows_tests {
         let search_path = std::env::join_paths([dir.path()]).unwrap();
 
         assert_eq!(find_gh(search_path.to_str()), Some(gh));
+    }
+
+    #[test]
+    fn github_cli_discovery_skips_unlaunchable_pathext_entries() {
+        let unlaunchable = tempfile::tempdir().unwrap();
+        std::fs::write(unlaunchable.path().join("gh.ps1"), b"Write-Output wrong").unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let gh = installed.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([unlaunchable.path(), installed.path()]).unwrap();
+
+        assert_eq!(
+            find_windows_gh(&search_path, Some(OsStr::new(".PS1;.EXE"))),
+            Some(gh)
+        );
     }
 
     #[test]
