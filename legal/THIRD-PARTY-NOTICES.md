@@ -3094,7 +3094,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-bae.git
 - License text: not distributed with this package
 
-### sea-orm 2.0.1
+### sea-orm 2.0.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
@@ -3106,19 +3106,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-cli 2.0.1
+### sea-orm-cli 2.0.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-macros 2.0.1
+### sea-orm-macros 2.0.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-orm-migration 2.0.1
+### sea-orm-migration 2.0.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
@@ -4215,7 +4215,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/hsivonen/utf8_iter
 - License text: `COPYRIGHT` ([L-76c0e37c107d](#l-76c0e37c107d)), `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-7dc2f6402447](#l-7dc2f6402447))
 
-### uuid 1.24.0
+### uuid 1.24.1
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/uuid-rs/uuid
@@ -5673,7 +5673,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.25
+### @tanstack/react-router 1.170.29
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5691,7 +5691,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/router-core 1.171.21
+### @tanstack/router-core 1.171.24
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -6835,7 +6835,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/benmccann/esm-env.git
 - License text: `LICENSE` ([L-c6cc76cbbf3a](#l-c6cc76cbbf3a))
 
-### esrap 2.3.3
+### esrap 2.3.4
 
 - License: `MIT`
 - Repository: git+https://github.com/sveltejs/esrap.git

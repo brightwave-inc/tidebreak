@@ -46,7 +46,7 @@ cap-fs-ext = "=4.0.2"
 futures = "=0.3.34"
 futures-timer = "=3.0.4"
 thiserror = "=2.0.20"
-uuid = { version = "=1.24.0", features = ["v4", "serde"] }
+uuid = { version = "=1.24.1", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # Generates the renderer's TypeScript wire types from these serde definitions.
@@ -61,8 +61,8 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # pinned by a test rather than left to coincidence.
 ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "no-serde-warnings"] }
 windows-sys = "=0.61.2"
-sea-orm = { version = "=2.0.1", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
-sea-orm-migration = { version = "=2.0.1", default-features = false, features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "=2.0.2", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "=2.0.2", default-features = false, features = ["runtime-tokio-rustls"] }
 tokio = { version = "=1.53.1", features = ["rt", "macros", "fs"] }
 tokio-util = { version = "=0.7.19", features = ["io-util"] }
 # rustls-tls-webpki-roots (never native-tls) matches the reqwest stack; the
