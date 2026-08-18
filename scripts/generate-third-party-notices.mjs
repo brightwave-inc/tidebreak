@@ -116,6 +116,14 @@ export function normalizeLicenseText(raw) {
     .replace(/\s+$/, "");
 }
 
+export function normalizeNoticesForComparison(raw) {
+  // Git may materialize text files with CRLF on Windows. The generated notices
+  // deliberately use LF for deterministic repository bytes, but a check of an
+  // otherwise identical checkout must not fail solely because of Git's local
+  // line-ending conversion.
+  return raw.replace(/\r\n?/g, "\n");
+}
+
 export function licenseTextId(normalizedText) {
   const digest = createHash("sha256").update(normalizedText, "utf8").digest("hex");
   return `L-${digest.slice(0, 12)}`;
@@ -581,7 +589,10 @@ function main(argv) {
     );
   }
   const current = readFileSync(target, "utf8");
-  if (current === generated) {
+  if (
+    normalizeNoticesForComparison(current) ===
+    normalizeNoticesForComparison(generated)
+  ) {
     console.log(`${NOTICES_RELATIVE_PATH} is up to date`);
     return;
   }

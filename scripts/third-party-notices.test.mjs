@@ -20,6 +20,7 @@ import {
   collectRustPackages,
   licenseTextId,
   normalizeLicenseText,
+  normalizeNoticesForComparison,
   parseSpdxIdentifiers,
   pnpmInvocation,
   renderNotices,
@@ -63,6 +64,14 @@ test("the notices generator resolves the Windows pnpm command shim", () => {
     executable: "pnpm",
     args: ["licenses", "list", "--json", "--prod"],
   });
+});
+
+test("the notices check ignores Git's Windows line-ending conversion", () => {
+  const notices = "# Third-party notices\n\nGenerated terms.\n";
+  assert.equal(
+    normalizeNoticesForComparison(notices.replaceAll("\n", "\r\n")),
+    normalizeNoticesForComparison(notices),
+  );
 });
 
 test("the Rust collector covers the whole non-workspace graph and preserves its terms", () => {
