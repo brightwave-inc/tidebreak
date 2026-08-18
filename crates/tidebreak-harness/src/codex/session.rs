@@ -654,17 +654,26 @@ done
 
     #[cfg(unix)]
     fn write_fake_app_server(path: &std::path::Path) {
+        // Write a sibling inode, fsync, then rename over `path` so execve
+        // never sees a file that still has a writer (Linux ETXTBSY).
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        let staging = path.with_extension("writing");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o755)
-            .open(path)
+            .open(&staging)
             .unwrap();
         file.write_all(FAKE_APP_SERVER.as_bytes()).unwrap();
         file.sync_all().unwrap();
+        drop(file);
+        std::fs::rename(&staging, path).unwrap();
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent).unwrap();
+            dir.sync_all().unwrap();
+        }
     }
 
     #[cfg(unix)]
