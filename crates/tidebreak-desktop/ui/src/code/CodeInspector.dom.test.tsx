@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspaceSnapshot, PullRequestDigest } from "../api/types";
-import { CodeInspector } from "./CodeInspector";
+import { CodeInspector, inspectorTurnLabel } from "./CodeInspector";
+import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 afterEach(() => {
   cleanup();
   useCodeUpdatesStore.getState().reset();
+  useCodeUiStore.setState({ inspectorScope: null });
   vi.clearAllMocks();
 });
 
@@ -62,8 +65,16 @@ function makeClient(): Pick<
     }),
     refreshCodeWorkspacePr: vi.fn(),
     mergeCodePr: vi.fn(),
-    getCodeWorkspaceDiff: vi.fn().mockResolvedValue({ diff: "" }),
-    listCodeWorkspaceFiles: vi.fn().mockResolvedValue({ files: [] }),
+    getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+      diff: "",
+      truncated: false,
+      stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    }),
+    listCodeWorkspaceFiles: vi.fn().mockResolvedValue({
+      files: [],
+      truncated: false,
+      stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    }),
     getCodeWorkspacePr: vi.fn().mockResolvedValue(null),
   };
 }
@@ -79,7 +90,7 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
     />,
   );
 
-  screen.getByRole("button", { name: "Pull request" }).click();
+  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
   await screen.findByText("Fix login flow");
 
   // Draft wins over the open state token, and holds the merge buttons.
@@ -101,4 +112,52 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   );
   expect(screen.getByText("src/login.rs:12")).toBeInTheDocument();
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
+});
+
+it("exposes a tablist and passes the scoped turn into files and source", async () => {
+  const client = makeClient();
+  useCodeUiStore.setState({
+    inspectorScope: { turnId: "turn-1", label: "Turn 4" },
+  });
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+    />,
+  );
+
+  expect(screen.getByRole("tablist")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(
+    screen.getByRole("button", { name: "Clear Turn 4 scope" }),
+  ).toBeInTheDocument();
+
+  await waitFor(() =>
+    expect(client.getCodeWorkspaceDiff).toHaveBeenCalledWith("ws-1", {
+      turn: "turn-1",
+      file: undefined,
+    }),
+  );
+
+  await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
+  await waitFor(() =>
+    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith("ws-1", "turn-1"),
+  );
+});
+
+it("labels a turn by its ordinal among user items", () => {
+  expect(
+    inspectorTurnLabel(
+      [
+        { kind: "user", id: "u1", turnId: "t-a", text: "one", createdAt: "" },
+        { kind: "user", id: "u2", turnId: "t-b", text: "two", createdAt: "" },
+      ],
+      "t-b",
+    ),
+  ).toBe("Turn 2");
 });

@@ -19,6 +19,12 @@ export type CodeCreateDefaults = {
   model?: string;
 };
 
+/** Inspector filter for one turn's files and diff. `label` is the ordinal, never the id. */
+export type InspectorScope = {
+  turnId: string;
+  label: string;
+};
+
 function readStoredCreateDefaults(): CodeCreateDefaults | null {
   try {
     const raw = window.localStorage.getItem(LAST_CREATE_KEY);
@@ -139,6 +145,8 @@ export type CodeUiStore = {
   newWorkspaceRepoId: string | undefined;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
+  /** Files and diff scoped to one turn, or the whole worktree when null. */
+  inspectorScope: InspectorScope | null;
   workspaceSortMode: WorkspaceSortMode;
   lastCreate: CodeCreateDefaults | null;
   /** Per-workspace terminal drawer height, remembered across reloads. */
@@ -155,6 +163,7 @@ export type CodeUiStore = {
   setAddRepoOpen: (open: boolean) => void;
   toggleReviewSidebar: () => void;
   setReviewSidebarOpen: (open: boolean) => void;
+  setInspectorScope: (scope: InspectorScope | null) => void;
   setWorkspaceSortMode: (mode: WorkspaceSortMode) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
@@ -166,6 +175,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   newWorkspaceRepoId: undefined,
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
+  inspectorScope: null,
   workspaceSortMode: readStoredWorkspaceSort(),
   lastCreate: readStoredCreateDefaults(),
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
@@ -193,6 +203,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
     storeReviewSidebarOpen(open);
     set({ reviewSidebarOpen: open });
   },
+  setInspectorScope: (inspectorScope) => set({ inspectorScope }),
   setWorkspaceSortMode: (mode) => {
     storeWorkspaceSort(mode);
     set({ workspaceSortMode: mode });
