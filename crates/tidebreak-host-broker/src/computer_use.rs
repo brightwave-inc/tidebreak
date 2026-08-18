@@ -883,24 +883,32 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// Write an executable `/bin/sh` script to a temp path and return it. The
-    /// body is the fake helper.
-    fn fake_helper(tag: &str, body: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("tidebreak-cu-fake-{tag}-{}", std::process::id()));
+    struct FakeHelper {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    /// Write an executable `/bin/sh` script in a uniquely owned temporary
+    /// directory. Keeping the directory alive prevents fixture paths from
+    /// colliding with concurrent or retried test processes.
+    fn fake_helper(tag: &str, body: &str) -> FakeHelper {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("tidebreak-cu-fake-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("helper");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        FakeHelper { _dir: dir, path }
     }
 
     #[test]
     fn parses_a_well_formed_ok_envelope() {
         let helper = fake_helper("ok", r#"cat >/dev/null; printf '{"ok":true,"result":[]}'"#);
-        let windows = HelperBackend::new(helper.clone())
+        let windows = HelperBackend::new(helper.path.clone())
             .list_windows(None)
             .unwrap();
         assert!(windows.is_empty());
-        let _ = std::fs::remove_file(&helper);
     }
 
     #[test]
@@ -909,11 +917,10 @@ mod tests {
             "perm",
             r#"cat >/dev/null; printf '{"ok":false,"code":"permission_denied","error":"nope"}'"#,
         );
-        let err = HelperBackend::new(helper.clone())
+        let err = HelperBackend::new(helper.path.clone())
             .list_windows(None)
             .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::PermissionDenied);
-        let _ = std::fs::remove_file(&helper);
     }
 
     #[test]
@@ -922,11 +929,10 @@ mod tests {
             "yield",
             r#"cat >/dev/null; printf '{"ok":false,"code":"yielded","error":"a system security dialog is in the foreground"}'"#,
         );
-        let err = HelperBackend::new(helper.clone())
+        let err = HelperBackend::new(helper.path.clone())
             .list_windows(None)
             .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::Yielded);
-        let _ = std::fs::remove_file(&helper);
     }
 
     #[test]
@@ -934,7 +940,7 @@ mod tests {
         // Sleeps far past the timeout; must be killed and reported promptly,
         // not block the broker.
         let helper = fake_helper("hang", "sleep 30");
-        let backend = HelperBackend::with_timeout(helper.clone(), Duration::from_millis(150));
+        let backend = HelperBackend::with_timeout(helper.path.clone(), Duration::from_millis(150));
         let start = Instant::now();
         let err = backend.list_windows(None).unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::OperationFailed);
@@ -944,18 +950,16 @@ mod tests {
             "should return promptly after killing, took {:?}",
             start.elapsed()
         );
-        let _ = std::fs::remove_file(&helper);
     }
 
     #[test]
     fn empty_output_is_a_clean_error() {
         let helper = fake_helper("empty", "cat >/dev/null; exit 0");
-        let err = HelperBackend::new(helper.clone())
+        let err = HelperBackend::new(helper.path.clone())
             .list_windows(None)
             .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::OperationFailed);
         assert!(err.message.contains("no output"), "got: {}", err.message);
-        let _ = std::fs::remove_file(&helper);
     }
 
     #[test]
@@ -966,11 +970,10 @@ mod tests {
             "big",
             r#"cat >/dev/null; printf '{"ok":true,"result":"'; head -c 200000 /dev/zero | tr '\0' a; printf '"}'"#,
         );
-        let result = HelperBackend::new(helper.clone())
+        let result = HelperBackend::new(helper.path.clone())
             .run(serde_json::json!({ "op": "noop" }))
             .unwrap();
         assert!(result.is_string());
         assert_eq!(result.as_str().unwrap().len(), 200_000);
-        let _ = std::fs::remove_file(&helper);
     }
 }
