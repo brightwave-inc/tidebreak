@@ -5673,7 +5673,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.25
+### @tanstack/react-router 1.170.29
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5691,7 +5691,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/router-core 1.171.21
+### @tanstack/router-core 1.171.24
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -6835,7 +6835,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/benmccann/esm-env.git
 - License text: `LICENSE` ([L-c6cc76cbbf3a](#l-c6cc76cbbf3a))
 
-### esrap 2.3.3
+### esrap 2.3.4
 
 - License: `MIT`
 - Repository: git+https://github.com/sveltejs/esrap.git
