@@ -22,9 +22,9 @@
 //!
 //! - <https://nodejs.org/dist/v20.20.2/SHASUMS256.txt>
 //!
-//! macOS is the supported platform, matching the only local sandbox backend
-//! that exists today. Other platforms report the tool unavailable with the
-//! install-it-yourself hint.
+//! macOS and Linux are supported on both shipped architectures. The local
+//! sandbox remains macOS-only, but code mode uses the same managed runtime to
+//! install and launch its pinned harness packages on Linux.
 //!
 //! Gatekeeper: a download performed by this process carries no
 //! `com.apple.quarantine` attribute — quarantine is applied by applications
@@ -42,7 +42,7 @@
 //! marker for a different digest (a tampered or half-written install, or a
 //! stale layout after the pin moves) makes the managed copy invisible and a
 //! fresh install replaces it. The tree is not re-hashed per turn; the marker
-//! plus the binary's presence is the check.
+//! plus the `node` and `npm` entrypoints' presence is the check.
 //!
 //! Failure discipline: one failed install is remembered for the rest of the app
 //! run and reported as the unavailable reason. Nothing re-downloads on its own;
@@ -52,7 +52,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -64,18 +64,27 @@ pub(crate) const NODE_VERSION: &str = "20.20.2";
 
 /// The unpacked runtime is about 154 MB and the tarball about 40 MB; refuse to
 /// start on a disk with less headroom than that plus slack.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const REQUIRED_FREE_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Official Node archives for the supported targets are below 55 MB. Bound
+/// the streamed response independently of Content-Length so a bad endpoint
+/// cannot fill the app-data volume before the digest check gets a vote.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const DOWNLOAD_TOO_LARGE: &str = "The Node download was larger than expected and was discarded";
+
 struct PinnedArtifact {
-    // Read only by the macOS install path; other platforms carry the pinned
-    // shape (`PINNED = None`) without an installer to consume the URL.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // Read only by the macOS/Linux install path; unsupported platforms carry
+    // the pinned shape (`PINNED = None`) without an installer to consume it.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     url: &'static str,
     sha256: &'static str,
     /// The single directory the official tarball unpacks into, which the
     /// install moves into place as the version directory.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     archive_root: &'static str,
 }
 
@@ -93,7 +102,30 @@ static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     archive_root: "node-v20.20.2-darwin-x64",
 });
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
+    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz",
+    sha256: "47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d",
+    archive_root: "node-v20.20.2-linux-arm64",
+});
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
+    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz",
+    sha256: "19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b",
+    archive_root: "node-v20.20.2-linux-x64",
+});
+
+#[cfg(not(any(
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )
+)))]
 static PINNED: Option<PinnedArtifact> = None;
 
 /// Whether this platform can install its own Node runtime.
@@ -116,7 +148,7 @@ fn managed_version_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("tools").join("node").join(NODE_VERSION)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn staging_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("tools").join("node").join("staging")
 }
@@ -127,6 +159,10 @@ fn marker_path(version_dir: &Path) -> PathBuf {
 
 fn managed_binary(version_dir: &Path) -> PathBuf {
     version_dir.join("bin").join("node")
+}
+
+fn managed_npm(version_dir: &Path) -> PathBuf {
+    version_dir.join("bin").join("npm")
 }
 
 /// What `installed.json` records: which artifact the directory was verified
@@ -140,7 +176,7 @@ struct InstallMarker {
 
 /// The managed Node runtime's root directory, if a verified install of the
 /// pinned artifact is present. This is the cheap at-rest check: marker matches
-/// the pin, `bin/node` exists.
+/// the pin, and both `bin/node` and `bin/npm` exist.
 pub(crate) fn managed_node_root(data_dir: &Path) -> Option<PathBuf> {
     let pinned = PINNED.as_ref()?;
     managed_node_root_expecting(data_dir, pinned.sha256)
@@ -155,8 +191,7 @@ fn managed_node_root_expecting(data_dir: &Path, expected_sha256: &str) -> Option
     if marker.version != NODE_VERSION || marker.tarball_sha256 != expected_sha256 {
         return None;
     }
-    managed_binary(&version_dir)
-        .is_file()
+    (managed_binary(&version_dir).is_file() && managed_npm(&version_dir).is_file())
         .then_some(version_dir)
 }
 
@@ -252,6 +287,15 @@ pub(crate) fn ensure(app: AppHandle) {
     warm_node_runtime(app);
 }
 
+/// Explicit retry for a surface whose user asked to try provisioning again.
+/// Unlike background `ensure`, this clears the run-scoped failure memory.
+pub(crate) fn retry(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        state().lock().expect("install state lock").last_failure = None;
+        let _ = ensure_installed(&app).await;
+    });
+}
+
 /// The current truth about the managed Node runtime on this machine.
 ///
 /// Only the managed install counts. A system `node` on the user's `PATH` is
@@ -283,7 +327,7 @@ pub(crate) async fn status(app: &AppHandle) -> tidebreak_code_execution::HostToo
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run_install(data_dir: &Path) -> Result<(), String> {
     let pinned = PINNED
         .as_ref()
@@ -304,12 +348,12 @@ async fn run_install(data_dir: &Path) -> Result<(), String> {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 async fn run_install(_data_dir: &Path) -> Result<(), String> {
     Err("Automatic install is not supported on this platform".to_owned())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn install_into(
     data_dir: &Path,
     staging: &Path,
@@ -352,18 +396,21 @@ async fn install_into(
         return Err("The downloaded Node archive did not contain a runtime".to_owned());
     }
 
-    // Deliberate quarantine strip; see the module docs for why this is a no-op
-    // today and kept anyway.
-    let _ = crate::office_install::run_tool(
-        "/usr/bin/xattr",
-        &[
-            "-dr".as_ref(),
-            "com.apple.quarantine".as_ref(),
-            extracted.as_os_str(),
-        ],
-        Duration::from_secs(120),
-    )
-    .await;
+    // Deliberate quarantine strip on macOS; see the module docs for why this
+    // is a no-op today and kept anyway. Linux has no corresponding attribute.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = crate::office_install::run_tool(
+            "/usr/bin/xattr",
+            &[
+                "-dr".as_ref(),
+                "com.apple.quarantine".as_ref(),
+                extracted.as_os_str(),
+            ],
+            Duration::from_secs(120),
+        )
+        .await;
+    }
 
     let version_dir = managed_version_dir(data_dir);
     tokio::fs::create_dir_all(
@@ -404,27 +451,33 @@ async fn install_into(
 
 /// Unpack the official tarball into `destination`.
 ///
-/// `tar` rather than an in-process decompressor because the archive's `bin/npm`
-/// and `bin/npx` are symlinks into `lib/node_modules/npm`, and npm only works
-/// if they survive the unpack.
-#[cfg(target_os = "macos")]
+/// The in-process tar reader preserves the archive's `bin/npm` and `bin/npx`
+/// symlinks into `lib/node_modules/npm`, so the installed runtime does not
+/// depend on a system `tar` binary being present on the reader's machine.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn unpack(tarball: &Path, destination: &Path) -> Result<(), String> {
-    crate::office_install::run_tool(
-        "/usr/bin/tar",
-        &[
-            "-xzf".as_ref(),
-            tarball.as_os_str(),
-            "-C".as_ref(),
-            destination.as_os_str(),
-        ],
+    let tarball = tarball.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::time::timeout(
         Duration::from_secs(300),
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(&tarball)
+                .map_err(|error| format!("Could not open the Node archive: {error}"))?;
+            let gzip = flate2::read::GzDecoder::new(file);
+            let mut archive = tar::Archive::new(gzip);
+            archive
+                .unpack(&destination)
+                .map_err(|error| format!("Could not unpack Node: {error}"))
+        }),
     )
     .await
+    .map_err(|_| "Unpacking Node timed out".to_owned())?
+    .map_err(|error| format!("Could not join the Node unpack task: {error}"))?
 }
 
 /// Stream the artifact to disk. Verification happens after, against the whole
 /// file.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn download(url: &str, destination: &Path) -> Result<(), String> {
     use futures::StreamExt as _;
     use tokio::io::AsyncWriteExt as _;
@@ -443,13 +496,21 @@ async fn download(url: &str, destination: &Path) -> Result<(), String> {
             response.status()
         ));
     }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_BYTES)
+    {
+        return Err(DOWNLOAD_TOO_LARGE.to_owned());
+    }
 
     let mut file = tokio::fs::File::create(destination)
         .await
         .map_err(|error| format!("Could not write the download: {error}"))?;
     let mut stream = response.bytes_stream();
+    let mut downloaded = 0_u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("The download was interrupted: {error}"))?;
+        downloaded = next_downloaded_size(downloaded, chunk.len())?;
         file.write_all(&chunk)
             .await
             .map_err(|error| format!("Could not write the download: {error}"))?;
@@ -460,9 +521,48 @@ async fn download(url: &str, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Account for one response chunk before it reaches disk. Content-Length is
+/// only a hint; this is the bound for chunked or dishonest responses.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn next_downloaded_size(downloaded: u64, chunk_bytes: usize) -> Result<u64, String> {
+    let chunk_bytes = u64::try_from(chunk_bytes).map_err(|_| DOWNLOAD_TOO_LARGE.to_owned())?;
+    let next = downloaded
+        .checked_add(chunk_bytes)
+        .ok_or_else(|| DOWNLOAD_TOO_LARGE.to_owned())?;
+    if next > MAX_ARCHIVE_BYTES {
+        return Err(DOWNLOAD_TOO_LARGE.to_owned());
+    }
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_pin_matches_the_supported_desktop_hosts() {
+        assert_eq!(
+            supported(),
+            cfg!(any(target_os = "macos", target_os = "linux"))
+                && cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
+        );
+    }
+
+    #[test]
+    fn managed_download_refuses_bytes_past_its_ceiling() {
+        assert_eq!(
+            next_downloaded_size(MAX_ARCHIVE_BYTES - 1, 1),
+            Ok(MAX_ARCHIVE_BYTES)
+        );
+        assert_eq!(
+            next_downloaded_size(MAX_ARCHIVE_BYTES, 1).unwrap_err(),
+            DOWNLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            next_downloaded_size(u64::MAX, 1).unwrap_err(),
+            DOWNLOAD_TOO_LARGE
+        );
+    }
 
     /// At-rest integrity: the managed runtime only resolves behind a marker
     /// naming the pinned version and digest — no marker, or a marker for a
@@ -476,6 +576,7 @@ mod tests {
         let binary = managed_binary(&version_dir);
         std::fs::create_dir_all(binary.parent().expect("parent")).expect("dirs");
         std::fs::write(&binary, b"#!/bin/sh\n").expect("binary");
+        std::fs::write(managed_npm(&version_dir), b"#!/bin/sh\n").expect("npm");
 
         // Tree present, no marker: an interrupted install, not trusted.
         assert_eq!(managed_node_root_expecting(data_dir.path(), expected), None);
@@ -505,16 +606,21 @@ mod tests {
     /// npm ships as a symlink into `lib/node_modules/npm`, so an unpack that
     /// materialized links as copies — or dropped them — would leave a runtime
     /// that cannot run a single npm command. This drives the real unpack path.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
-    async fn unpack_preserves_the_bundled_npm_symlink() {
+    async fn unpack_preserves_the_bundled_npm_symlink_and_node_mode() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("node-v0.0.0-test");
         std::fs::create_dir_all(source.join("bin")).expect("bin");
         std::fs::create_dir_all(source.join("lib/node_modules/npm/bin")).expect("npm");
         std::fs::write(source.join("lib/node_modules/npm/bin/npm-cli.js"), b"//\n")
             .expect("npm-cli");
-        std::fs::write(source.join("bin/node"), b"#!/bin/sh\n").expect("node");
+        let node = source.join("bin/node");
+        std::fs::write(&node, b"#!/bin/sh\n").expect("node");
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).expect("node mode");
         std::os::unix::fs::symlink(
             "../lib/node_modules/npm/bin/npm-cli.js",
             source.join("bin/npm"),
@@ -522,19 +628,16 @@ mod tests {
         .expect("symlink");
 
         let tarball = dir.path().join("node.tar.gz");
-        crate::office_install::run_tool(
-            "/usr/bin/tar",
-            &[
-                "-czf".as_ref(),
-                tarball.as_os_str(),
-                "-C".as_ref(),
-                dir.path().as_os_str(),
-                "node-v0.0.0-test".as_ref(),
-            ],
-            Duration::from_secs(60),
-        )
-        .await
-        .expect("tar create");
+        let file = std::fs::File::create(&tarball).expect("tarball");
+        let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(gzip);
+        archive.follow_symlinks(false);
+        archive
+            .append_dir_all("node-v0.0.0-test", &source)
+            .expect("append source");
+        let mut gzip = archive.into_inner().expect("finish tar");
+        gzip.flush().expect("flush gzip");
+        gzip.finish().expect("finish gzip");
 
         let destination = dir.path().join("unpacked");
         std::fs::create_dir(&destination).expect("destination");
@@ -546,5 +649,14 @@ mod tests {
             .file_type()
             .is_symlink());
         assert!(npm.exists(), "the npm symlink resolves to its target");
+        assert_ne!(
+            std::fs::metadata(destination.join("node-v0.0.0-test/bin/node"))
+                .expect("node metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0,
+            "the runtime remains executable"
+        );
     }
 }

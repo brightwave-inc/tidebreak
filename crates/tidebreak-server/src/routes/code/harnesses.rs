@@ -23,22 +23,7 @@ pub async fn refresh_harnesses(
 ) -> Result<Json<HarnessDoctorReport>, ServerError> {
     let runtime = require_code(&state)?;
     #[cfg(not(test))]
-    {
-        let installs = HarnessKind::ALL.iter().map(|kind| {
-            let data_dir = runtime.data_dir.clone();
-            async move {
-                (
-                    *kind,
-                    tidebreak_harness::ensure_installed(&data_dir, *kind)
-                        .await
-                        .map(|_| ()),
-                )
-            }
-        });
-        for (kind, result) in futures::future::join_all(installs).await {
-            runtime.record_pin_install(kind, result);
-        }
-    }
+    runtime.refresh_pinned_harnesses().await;
     runtime.invalidate_probes();
     Ok(Json(doctor(&state).await?))
 }

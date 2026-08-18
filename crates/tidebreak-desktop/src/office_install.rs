@@ -48,7 +48,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -300,6 +300,21 @@ impl tidebreak_code_execution::HostToolBroker for DesktopHostToolBroker {
             }
             tidebreak_code_execution::HostDep::Node => {
                 crate::node_install::ensure(self.app.clone());
+            }
+        }
+    }
+
+    fn retry(&self, tool: tidebreak_code_execution::HostDep) {
+        match tool {
+            tidebreak_code_execution::HostDep::LibreOffice => {
+                let app = self.app.clone();
+                tauri::async_runtime::spawn(async move {
+                    state().lock().expect("install state lock").last_failure = None;
+                    let _ = ensure_installed(&app).await;
+                });
+            }
+            tidebreak_code_execution::HostDep::Node => {
+                crate::node_install::retry(self.app.clone());
             }
         }
     }
@@ -634,8 +649,8 @@ fn next_downloaded_size(downloaded: u64, chunk_bytes: usize) -> Result<u64, Stri
 
 /// SHA-256 of a file's contents, streamed, as lowercase hex.
 // Compiled on every platform — its test is platform-neutral — but only the
-// macOS install paths call it from the lib target.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Unix managed-install paths call it from the lib target.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -658,7 +673,7 @@ pub(crate) fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
 
 /// Run one system tool to completion under a hard timeout, failing on a
 /// non-zero exit with its stderr in the reason.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub(crate) async fn run_tool(
     program: &str,
     args: &[&std::ffi::OsStr],
@@ -686,10 +701,10 @@ pub(crate) async fn run_tool(
 }
 
 /// Refuse to start a large install on a nearly full disk. `df` because the
-/// standard library has no free-space query and this path is macOS-only.
+/// standard library has no free-space query and the callers are Unix-only.
 /// `shortfall` is the message the caller wants when the check fails, so each
 /// managed install names itself and its own size.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub(crate) async fn ensure_free_disk(
     directory: &Path,
     required: u64,

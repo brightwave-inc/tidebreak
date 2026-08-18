@@ -44,6 +44,14 @@ pub trait HostToolBroker: Send + Sync {
     /// nothing re-downloads without an explicit user retry.
     fn ensure(&self, tool: HostDep);
 
+    /// Explicitly retry provisioning `tool`, clearing a remembered failure
+    /// when the embedding supports one. The default preserves older brokers'
+    /// idempotent ensure behavior; interactive surfaces such as the harness
+    /// doctor's Refresh button use this hook to make "try again" real.
+    fn retry(&self, tool: HostDep) {
+        self.ensure(tool);
+    }
+
     /// The current truth about `tool`.
     async fn status(&self, tool: HostDep) -> HostToolStatus;
 

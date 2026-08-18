@@ -101,14 +101,24 @@ pub fn managed_binary(data_dir: &Path, kind: HarnessKind) -> Option<PathBuf> {
     is_absolute_executable(&binary).then_some(binary)
 }
 
-/// Install the pin with the managed Node runtime's npm if it is not present.
-pub async fn ensure_installed(data_dir: &Path, kind: HarnessKind) -> Result<PathBuf, String> {
+/// Install the pin with the host-verified managed Node runtime's npm if it is
+/// not present.
+///
+/// The caller owns verification of `managed_node_root` (for the desktop this
+/// is the digest-gated host-tool broker). This crate deliberately does not
+/// scan `{data_dir}/tools/node`: a sibling directory that merely looks like a
+/// Node install must never become executable code by being newest on disk.
+pub async fn ensure_installed(
+    data_dir: &Path,
+    kind: HarnessKind,
+    managed_node_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let node_bin = managed_node_bin(managed_node_root)
+        .ok_or_else(|| "install the managed Node runtime before pinning harnesses".to_owned())?;
     if let Some(existing) = managed_binary(data_dir, kind) {
         return Ok(existing);
     }
     let pin = pin_for(kind).ok_or_else(|| format!("{kind} has no pin"))?;
-    let node_bin = managed_node_bin(data_dir)
-        .ok_or_else(|| "install the managed Node runtime before pinning harnesses".to_owned())?;
     let dir = install_dir(data_dir, pin);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -159,20 +169,14 @@ pub async fn ensure_installed(data_dir: &Path, kind: HarnessKind) -> Result<Path
     })
 }
 
-/// `{data_dir}/tools/node/<version>/bin` when both `node` and `npm` exist.
+/// `<verified-root>/bin` when both `node` and `npm` exist.
 ///
 /// Official Node's `bin/npm` is `#!/usr/bin/env node`, so the sibling `node`
 /// must be first on the child PATH. GUI PATH is never consulted.
-fn managed_node_bin(data_dir: &Path) -> Option<PathBuf> {
-    let node_root = data_dir.join("tools").join("node");
-    let mut newest: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(&node_root).ok()?.flatten() {
-        let bin = entry.path().join("bin");
-        if is_absolute_executable(&bin.join("node")) && is_absolute_executable(&bin.join("npm")) {
-            newest = Some(bin);
-        }
-    }
-    newest
+fn managed_node_bin(managed_node_root: Option<&Path>) -> Option<PathBuf> {
+    let bin = managed_node_root?.join("bin");
+    (is_absolute_executable(&bin.join("node")) && is_absolute_executable(&bin.join("npm")))
+        .then_some(bin)
 }
 
 fn prepend_path(bin: &Path) -> std::ffi::OsString {
@@ -235,11 +239,24 @@ mod tests {
     #[test]
     fn missing_managed_node_is_an_install_error() {
         let tmp = tempfile::tempdir().unwrap();
+        // A directory that resembles an install is not authority. Only the
+        // verified root supplied by the host may be used.
+        let decoy_bin = tmp.path().join("tools/node/decoy/bin");
+        std::fs::create_dir_all(&decoy_bin).unwrap();
+        for name in ["node", "npm"] {
+            let path = decoy_bin.join(name);
+            std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
         let err = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(ensure_installed(tmp.path(), HarnessKind::ClaudeCode))
+            .block_on(ensure_installed(tmp.path(), HarnessKind::ClaudeCode, None))
             .unwrap_err();
         assert!(err.contains("managed Node"), "{err}");
     }

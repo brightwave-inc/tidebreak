@@ -47,8 +47,8 @@ impl HarnessAdapter for GrokAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "grok").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary).await.ok();
-                let authenticated = observe_login(&capture.binary).await;
+                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let authenticated = observe_login(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
@@ -100,7 +100,7 @@ impl HarnessAdapter for GrokAdapter {
             return Err(HarnessError::NotFound);
         }
         crate::grok::session::refuse_unhonored_mode(spec.permission_mode)?;
-        let version = observe_version(&spec.binary)
+        let version = observe_version(&spec.binary, &spec.env)
             .await
             .unwrap_or_else(|_| "unknown".into());
         Ok(Box::new(GrokSession::new(spec, version)))
@@ -109,7 +109,10 @@ impl HarnessAdapter for GrokAdapter {
 
 /// `grok models` — "You are logged in…" vs "You are not authenticated."
 /// Never reads tokens.
-async fn observe_login(binary: &Path) -> Option<bool> {
+async fn observe_login(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<bool> {
     let mut command = Command::new(binary);
     command
         .args(["models"])
@@ -117,6 +120,10 @@ async fn observe_login(binary: &Path) -> Option<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
     let output = timeout(AUTH_TIMEOUT, command.output()).await.ok()?.ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     login_status_from_models(&stdout)

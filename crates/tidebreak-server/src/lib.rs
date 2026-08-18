@@ -1289,6 +1289,7 @@ async fn bind_inner(
     let exec_blob_writes = Arc::new(state::BlobWriteGuard::new(
         config.data_dir.join("blob-locks"),
     ));
+    let code_host_tool_broker = host_tool_broker.clone();
     let code_execution = Arc::new(
         code_execution::ConfiguredCodeExecutionProvider::new(
             store.clone(),
@@ -1397,7 +1398,11 @@ async fn bind_inner(
         state.mcp.set_host_folders(host.clone());
     }
     state.host_folders = host_folders;
-    let code = Arc::new(code::CodeRuntime::new(db, state.config.data_dir.clone()));
+    let code = Arc::new(code::CodeRuntime::new(
+        db,
+        state.config.data_dir.clone(),
+        code_host_tool_broker,
+    ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());

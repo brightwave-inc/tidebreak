@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::oneshot;
@@ -46,6 +47,96 @@ use super::worktree::{
 };
 use crate::error::ServerError;
 
+const MANAGED_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const MANAGED_NODE_STARTUP_GRACE: Duration = Duration::from_secs(2);
+const MANAGED_NODE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+async fn wait_for_managed_node(
+    broker: &dyn tidebreak_code_execution::HostToolBroker,
+    retry: bool,
+    wait_timeout: Duration,
+    startup_grace: Duration,
+) -> Result<PathBuf, String> {
+    use tidebreak_code_execution::{HostDep, HostToolStatus};
+
+    if retry {
+        broker.retry(HostDep::Node);
+    } else {
+        broker.ensure(HostDep::Node);
+    }
+    let started = Instant::now();
+    loop {
+        match broker.status(HostDep::Node).await {
+            HostToolStatus::Available => {
+                return broker.managed_root(HostDep::Node).await.ok_or_else(|| {
+                    "managed Node became available without a verified runtime root".to_owned()
+                });
+            }
+            HostToolStatus::Installing => {}
+            HostToolStatus::Unavailable(reason)
+                if started.elapsed() < startup_grace
+                    && reason.to_ascii_lowercase().contains("not installed yet") => {}
+            HostToolStatus::Unavailable(reason) => return Err(reason),
+        }
+        if started.elapsed() >= wait_timeout {
+            return Err("timed out waiting for the managed Node runtime".to_owned());
+        }
+        tokio::time::sleep(MANAGED_NODE_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod managed_node_wait_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tidebreak_code_execution::{HostDep, HostToolBroker, HostToolStatus};
+
+    struct RecordingBroker {
+        ensure_calls: AtomicUsize,
+        retry_calls: AtomicUsize,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl HostToolBroker for RecordingBroker {
+        fn ensure(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+            self.ensure_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn retry(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+            self.retry_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn status(&self, tool: HostDep) -> HostToolStatus {
+            assert_eq!(tool, HostDep::Node);
+            HostToolStatus::Available
+        }
+
+        async fn managed_root(&self, tool: HostDep) -> Option<PathBuf> {
+            assert_eq!(tool, HostDep::Node);
+            Some(self.root.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_harness_refresh_retries_node_provisioning() {
+        let broker = RecordingBroker {
+            ensure_calls: AtomicUsize::new(0),
+            retry_calls: AtomicUsize::new(0),
+            root: PathBuf::from("/verified/node"),
+        };
+        let root = wait_for_managed_node(&broker, true, Duration::from_secs(1), Duration::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(root, PathBuf::from("/verified/node"));
+        assert_eq!(broker.ensure_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(broker.retry_calls.load(Ordering::Relaxed), 1);
+    }
+}
+
 /// Result of `POST /code/sessions/{id}/turns`.
 pub(crate) enum SubmitTurnOutcome {
     /// The session was idle; the turn ran to a terminal event.
@@ -62,6 +153,7 @@ pub(crate) struct CodeRuntime {
     pub data_dir: PathBuf,
     pub approvals: Arc<ApprovalBridge>,
     host: HostEnv,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -83,7 +175,11 @@ pub(crate) struct CodeRuntime {
 }
 
 impl CodeRuntime {
-    pub(crate) fn new(db: Arc<DbStore>, data_dir: PathBuf) -> Self {
+    pub(crate) fn new(
+        db: Arc<DbStore>,
+        data_dir: PathBuf,
+        host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    ) -> Self {
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -94,6 +190,7 @@ impl CodeRuntime {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
             },
+            host_tool_broker,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -148,6 +245,7 @@ impl CodeRuntime {
             data_dir,
             approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
+            host_tool_broker: None,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -233,7 +331,16 @@ impl CodeRuntime {
         if let Some(probe) = cached {
             return probe;
         }
-        let probe = adapter.probe(&self.host).await;
+        let mut host = self.host.clone();
+        host.managed_node_root = match self.host_tool_broker.as_deref() {
+            Some(broker) => {
+                broker
+                    .managed_root(tidebreak_code_execution::HostDep::Node)
+                    .await
+            }
+            None => None,
+        };
+        let probe = adapter.probe(&host).await;
         self.probes
             .lock()
             .expect("harness probes")
@@ -266,6 +373,54 @@ impl CodeRuntime {
 
     pub(crate) fn invalidate_probes(&self) {
         self.probes.lock().expect("harness probes").clear();
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    async fn managed_node_root(&self, retry: bool) -> Result<PathBuf, String> {
+        let broker = self.host_tool_broker.as_deref().ok_or_else(|| {
+            "this host does not provide a verified managed Node runtime".to_owned()
+        })?;
+        wait_for_managed_node(
+            broker,
+            retry,
+            MANAGED_NODE_WAIT_TIMEOUT,
+            MANAGED_NODE_STARTUP_GRACE,
+        )
+        .await
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    async fn ensure_pinned_harness(
+        &self,
+        kind: HarnessKind,
+        retry_node: bool,
+    ) -> Result<PathBuf, String> {
+        let node_root = self.managed_node_root(retry_node).await?;
+        tidebreak_harness::ensure_installed(&self.data_dir, kind, Some(&node_root)).await
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) async fn refresh_pinned_harnesses(&self) {
+        let node_root = self.managed_node_root(true).await;
+        let installs = HarnessKind::ALL.iter().map(|kind| {
+            let node_root = node_root.as_ref();
+            async move {
+                let result = match node_root {
+                    Ok(root) => tidebreak_harness::ensure_installed(
+                        &self.data_dir,
+                        *kind,
+                        Some(root.as_path()),
+                    )
+                    .await
+                    .map(|_| ()),
+                    Err(err) => Err(err.clone()),
+                };
+                (*kind, result)
+            }
+        });
+        for (kind, result) in futures::future::join_all(installs).await {
+            self.record_pin_install(kind, result);
+        }
     }
 
     pub(crate) fn adapter(
@@ -741,7 +896,7 @@ impl CodeRuntime {
         let adapter = self.adapter(harness)?;
         #[cfg(not(test))]
         {
-            if let Err(err) = tidebreak_harness::ensure_installed(&self.data_dir, harness).await {
+            if let Err(err) = self.ensure_pinned_harness(harness, false).await {
                 self.record_pin_install(harness, Err(err.clone()));
                 return Err(ServerError::unprocessable_kind(
                     "harness_not_found",

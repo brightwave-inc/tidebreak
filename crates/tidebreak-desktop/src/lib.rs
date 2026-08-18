@@ -97,9 +97,7 @@ async fn put_native_mcp_servers(
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let mut dialog = app
             .dialog()
-            .message(format!(
-                "Allow these MCP servers to run local programs as your macOS user?\n\n{preview}"
-            ))
+            .message(native_mcp_command_confirmation(&preview))
             .title("Allow local MCP commands?")
             .kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom(
@@ -144,6 +142,12 @@ async fn put_native_mcp_servers(
         return Err(message);
     }
     serde_json::from_slice(&body).map_err(|error| format!("decode MCP server response: {error}"))
+}
+
+fn native_mcp_command_confirmation(preview: &str) -> String {
+    format!(
+        "Allow these MCP servers to run local programs with your operating-system account's permissions?\n\n{preview}"
+    )
 }
 
 const MAX_NATIVE_APPROVAL_FIELD_CHARS: usize = 240;
@@ -916,6 +920,14 @@ mod server_info_tests {
         assert!(!label.contains('\u{200b}'));
         assert_eq!(label.chars().count(), 160);
         assert!(label.starts_with("trusted\u{fffd}\u{fffd}"));
+    }
+
+    #[test]
+    fn native_command_confirmation_is_platform_neutral_and_names_the_boundary() {
+        let prompt = native_mcp_command_confirmation(r#"{"command":"example"}"#);
+        assert!(prompt.contains("operating-system account's permissions"));
+        assert!(prompt.contains(r#"{"command":"example"}"#));
+        assert!(!prompt.contains("macOS user"));
     }
 
     #[test]
