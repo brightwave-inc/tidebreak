@@ -288,10 +288,12 @@ pub(crate) fn ensure(app: AppHandle) {
 }
 
 /// Explicit retry for a surface whose user asked to try provisioning again.
-/// Unlike background `ensure`, this clears the run-scoped failure memory.
+/// Unlike background `ensure`, this clears the run-scoped failure memory on
+/// the calling thread before the install is spawned, so a status poll cannot
+/// still return the previous failure.
 pub(crate) fn retry(app: AppHandle) {
+    state().lock().expect("install state lock").last_failure = None;
     tauri::async_runtime::spawn(async move {
-        state().lock().expect("install state lock").last_failure = None;
         let _ = ensure_installed(&app).await;
     });
 }

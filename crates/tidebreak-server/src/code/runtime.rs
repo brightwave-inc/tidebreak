@@ -73,6 +73,7 @@ async fn wait_for_managed_node(
                 });
             }
             HostToolStatus::Installing => {}
+            HostToolStatus::Unavailable(_) if retry && started.elapsed() < startup_grace => {}
             HostToolStatus::Unavailable(reason)
                 if started.elapsed() < startup_grace
                     && reason.to_ascii_lowercase().contains("not installed yet") => {}
@@ -82,58 +83,6 @@ async fn wait_for_managed_node(
             return Err("timed out waiting for the managed Node runtime".to_owned());
         }
         tokio::time::sleep(MANAGED_NODE_POLL_INTERVAL).await;
-    }
-}
-
-#[cfg(test)]
-mod managed_node_wait_tests {
-    use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use tidebreak_code_execution::{HostDep, HostToolBroker, HostToolStatus};
-
-    struct RecordingBroker {
-        ensure_calls: AtomicUsize,
-        retry_calls: AtomicUsize,
-        root: PathBuf,
-    }
-
-    #[async_trait::async_trait]
-    impl HostToolBroker for RecordingBroker {
-        fn ensure(&self, tool: HostDep) {
-            assert_eq!(tool, HostDep::Node);
-            self.ensure_calls.fetch_add(1, Ordering::Relaxed);
-        }
-
-        fn retry(&self, tool: HostDep) {
-            assert_eq!(tool, HostDep::Node);
-            self.retry_calls.fetch_add(1, Ordering::Relaxed);
-        }
-
-        async fn status(&self, tool: HostDep) -> HostToolStatus {
-            assert_eq!(tool, HostDep::Node);
-            HostToolStatus::Available
-        }
-
-        async fn managed_root(&self, tool: HostDep) -> Option<PathBuf> {
-            assert_eq!(tool, HostDep::Node);
-            Some(self.root.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn explicit_harness_refresh_retries_node_provisioning() {
-        let broker = RecordingBroker {
-            ensure_calls: AtomicUsize::new(0),
-            retry_calls: AtomicUsize::new(0),
-            root: PathBuf::from("/verified/node"),
-        };
-        let root = wait_for_managed_node(&broker, true, Duration::from_secs(1), Duration::ZERO)
-            .await
-            .unwrap();
-
-        assert_eq!(root, PathBuf::from("/verified/node"));
-        assert_eq!(broker.ensure_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(broker.retry_calls.load(Ordering::Relaxed), 1);
     }
 }
 
@@ -1614,5 +1563,116 @@ fn map_worker(err: WorkerError) -> ServerError {
 impl From<WorktreeError> for ServerError {
     fn from(err: WorktreeError) -> Self {
         map_worktree(err)
+    }
+}
+
+#[cfg(test)]
+mod managed_node_wait_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tidebreak_code_execution::{HostDep, HostToolBroker, HostToolStatus};
+
+    struct RecordingBroker {
+        ensure_calls: AtomicUsize,
+        retry_calls: AtomicUsize,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl HostToolBroker for RecordingBroker {
+        fn ensure(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+            self.ensure_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn retry(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+            self.retry_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn status(&self, tool: HostDep) -> HostToolStatus {
+            assert_eq!(tool, HostDep::Node);
+            HostToolStatus::Available
+        }
+
+        async fn managed_root(&self, tool: HostDep) -> Option<PathBuf> {
+            assert_eq!(tool, HostDep::Node);
+            Some(self.root.clone())
+        }
+    }
+
+    /// Reproduces the Doctor Refresh race: `retry` has been called, but the
+    /// first `status` still reports the remembered failure from the previous
+    /// attempt. That Unavailable must not fail the wait while startup grace
+    /// is open.
+    struct StaleFailureThenReadyBroker {
+        retry_calls: AtomicUsize,
+        polls: AtomicUsize,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl HostToolBroker for StaleFailureThenReadyBroker {
+        fn ensure(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+        }
+
+        fn retry(&self, tool: HostDep) {
+            assert_eq!(tool, HostDep::Node);
+            self.retry_calls.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn status(&self, tool: HostDep) -> HostToolStatus {
+            assert_eq!(tool, HostDep::Node);
+            match self.polls.fetch_add(1, Ordering::Relaxed) {
+                0 => HostToolStatus::Unavailable(
+                    "the previous Node install failed: disk full".into(),
+                ),
+                1 => HostToolStatus::Installing,
+                _ => HostToolStatus::Available,
+            }
+        }
+
+        async fn managed_root(&self, tool: HostDep) -> Option<PathBuf> {
+            assert_eq!(tool, HostDep::Node);
+            Some(self.root.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_harness_refresh_retries_node_provisioning() {
+        let broker = RecordingBroker {
+            ensure_calls: AtomicUsize::new(0),
+            retry_calls: AtomicUsize::new(0),
+            root: PathBuf::from("/verified/node"),
+        };
+        let root = wait_for_managed_node(&broker, true, Duration::from_secs(1), Duration::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(root, PathBuf::from("/verified/node"));
+        assert_eq!(broker.ensure_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(broker.retry_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_fail_on_a_stale_unavailable_during_startup_grace() {
+        let broker = StaleFailureThenReadyBroker {
+            retry_calls: AtomicUsize::new(0),
+            polls: AtomicUsize::new(0),
+            root: PathBuf::from("/verified/node"),
+        };
+        let root = wait_for_managed_node(
+            &broker,
+            true,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("stale failure during grace is in-progress, not terminal");
+
+        assert_eq!(root, PathBuf::from("/verified/node"));
+        assert_eq!(broker.retry_calls.load(Ordering::Relaxed), 1);
+        assert!(broker.polls.load(Ordering::Relaxed) >= 3);
     }
 }

@@ -48,7 +48,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -673,7 +673,9 @@ pub(crate) fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {
 
 /// Run one system tool to completion under a hard timeout, failing on a
 /// non-zero exit with its stderr in the reason.
-#[cfg(unix)]
+///
+/// Only macOS managed-install paths call this (`hdiutil`, `ditto`, `xattr`).
+#[cfg(target_os = "macos")]
 pub(crate) async fn run_tool(
     program: &str,
     args: &[&std::ffi::OsStr],
