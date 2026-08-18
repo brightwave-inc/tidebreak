@@ -61,7 +61,8 @@ the headless CLI.
 > [!WARNING]
 > Tidebreak is pre-1.0 and changing quickly. Interfaces and local data formats
 > may change between releases, and profiles may be rebuilt rather than
-> migrated. Windows and Linux packages ship for x86_64; some native capabilities
+> migrated. Windows and Linux packages ship for x86_64, with ARM64 builds on
+> the way; some native capabilities
 > remain macOS-only and are reported as unavailable in the app.
 
 ## Features
