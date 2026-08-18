@@ -17,6 +17,11 @@ import { useApp } from "@/AppContext";
 import { copyPlainText, scheduleCopyStateReset } from "@/ClipboardCopyButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { PanelLayout } from "@/panel/PanelLayout";
@@ -41,7 +46,7 @@ import {
   toggleTerminalLayout,
 } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector } from "./CodeInspector";
+import { CodeInspector, inspectorTurnLabel } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
@@ -100,6 +105,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
+  const setReviewSidebarOpen = useCodeUiStore(
+    (state) => state.setReviewSidebarOpen,
+  );
+  const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
@@ -125,6 +134,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (rememberedSession) setSession(rememberedSession);
   }, [rememberedSession]);
+
+  useEffect(() => {
+    return () => {
+      useCodeUiStore.getState().setInspectorScope(null);
+    };
+  }, [workspaceId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -214,6 +229,84 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         quickActions: repo?.quick_actions ?? [],
       })
     : [];
+
+  function openTurnDiff(turnId: string) {
+    const items = session
+      ? acquireCodeSessionFromClient(session.id, client).getState().items
+      : [];
+    if (session) releaseCodeSession(session.id);
+    setInspectorScope({
+      turnId,
+      label: inspectorTurnLabel(items, turnId),
+    });
+    setReviewSidebarOpen(true);
+  }
+
+  const workspaceMain = (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <PanelLayout
+        layout={chrome.panels}
+        framed={false}
+        onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
+        onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
+        renderChat={(visible) => (
+          // The panel slot this sits in is a plain block, so nothing stretches
+          // the pane to the slot's height — `flex-1` resolves to nothing and
+          // the transcript never becomes a scroller. It claims the height
+          // itself, the same way `.chat-pane` does.
+          <div
+            className="flex h-full min-h-0 flex-col overflow-hidden"
+            hidden={!visible}
+          >
+            {fenced && session?.fence_reason && (
+              <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
+                <p>{fenceReasonText(session.fence_reason)}</p>
+                <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
+                  Reap
+                </Button>
+              </div>
+            )}
+            {!session && workspace?.status === "active" && (
+              <StartSessionPrompt
+                harnesses={doctorHarnesses}
+                starting={starting}
+                selectedMode={createMode}
+                onSelectMode={setCreateMode}
+                client={client}
+                catalogModels={models}
+                defaultModelKey={defaultModelKey}
+                onStart={(harness, mode, message, model) =>
+                  startSession(harness, mode, message, model)
+                }
+              />
+            )}
+            {session && (
+              <CodeSessionPane
+                key={session.id}
+                session={session}
+                client={client}
+                catalogModels={models}
+                defaultModelKey={defaultModelKey}
+                disabled={fenced || workspace?.status !== "active"}
+                onOpenTurnDiff={openTurnDiff}
+              />
+            )}
+          </div>
+        )}
+        renderPanel={(panel) =>
+          renderCodePanel(panel, client, workspaceId)
+        }
+      />
+      {chrome.terminal && (
+        <TerminalDrawer
+          client={client}
+          workspaceId={workspaceId}
+          shortcutHint={shortcutHints.terminal}
+          onClose={() => setLayout(toggleTerminalLayout(layout))}
+        />
+      )}
+    </div>
+  );
 
   return (
     <>
@@ -323,79 +416,28 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             Retry
           </Button>
         </div>
-      ) : (
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <PanelLayout
-            layout={chrome.panels}
-            framed={false}
-            onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
-            onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
-            renderChat={(visible) => (
-              // The panel slot this sits in is a plain block, so nothing stretches
-              // the pane to the slot's height — `flex-1` resolves to nothing and
-              // the transcript never becomes a scroller. It claims the height
-              // itself, the same way `.chat-pane` does.
-              <div
-                className="flex h-full min-h-0 flex-col overflow-hidden"
-                hidden={!visible}
-              >
-                {fenced && session?.fence_reason && (
-                  <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-                    <p>{fenceReasonText(session.fence_reason)}</p>
-                    <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
-                      Reap
-                    </Button>
-                  </div>
-                )}
-                {!session && workspace?.status === "active" && (
-                  <StartSessionPrompt
-                    harnesses={doctorHarnesses}
-                    starting={starting}
-                    selectedMode={createMode}
-                    onSelectMode={setCreateMode}
-                    client={client}
-                    catalogModels={models}
-                    defaultModelKey={defaultModelKey}
-                    onStart={(harness, mode, message, model) =>
-                      startSession(harness, mode, message, model)
-                    }
-                  />
-                )}
-                {session && (
-                  <CodeSessionPane
-                    key={session.id}
-                    session={session}
-                    client={client}
-                    catalogModels={models}
-                    defaultModelKey={defaultModelKey}
-                    disabled={fenced || workspace?.status !== "active"}
-                  />
-                )}
-              </div>
-            )}
-            renderPanel={(panel) =>
-              renderCodePanel(panel, client, workspaceId)
-            }
-          />
-          {chrome.terminal && (
-            <TerminalDrawer
+      ) : reviewSidebarOpen ? (
+        <ResizablePanelGroup
+          autoSaveId="code-inspector"
+          direction="horizontal"
+          className="min-h-0 flex-1"
+        >
+          <ResizablePanel defaultSize={72} minSize={36} className="min-w-0">
+            {workspaceMain}
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel defaultSize={28} minSize={18} className="min-w-0">
+            <CodeInspector
+              key={workspaceId}
               client={client}
               workspaceId={workspaceId}
-              shortcutHint={shortcutHints.terminal}
-              onClose={() => setLayout(toggleTerminalLayout(layout))}
+              workspace={workspace}
+              contentRevision={contentRevision}
             />
-          )}
-        </div>
-        {reviewSidebarOpen && (
-          <CodeInspector
-            client={client}
-            workspaceId={workspaceId}
-            workspace={workspace}
-            contentRevision={contentRevision}
-          />
-        )}
-      </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        <div className="flex min-h-0 flex-1 overflow-hidden">{workspaceMain}</div>
       )}
     </>
   );
@@ -586,11 +628,7 @@ function CodeSessionPane({
   catalogModels: ModelInfo[];
   defaultModelKey: string | null;
   disabled: boolean;
-  /**
-   * Scope the review sidebar to one turn's changes, from a turn's diffstat.
-   * Left unset until the inspector can hold a scope; the diffstat reads as a
-   * plain count meanwhile rather than a control that does nothing.
-   */
+  /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
   onOpenTurnDiff?: (turnId: string) => void;
 }) {
   const follow = useTranscriptFollow();

@@ -31,9 +31,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { WithTooltip } from "@/components/ui/tooltip";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
+import type { CodeTranscriptItem } from "./CodeSessionReducer";
+import { useCodeUiStore } from "./CodeUiStore";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
 import { PrCard } from "./PrCard";
@@ -41,6 +45,9 @@ import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
 type InspectorTab = "files" | "source" | "pr";
+
+const TAB_TRIGGER_CLASS =
+  "text-muted-foreground hover:text-foreground grid size-8 place-items-center rounded-lg px-0 py-0 data-[state=active]:bg-muted data-[state=active]:text-foreground";
 
 /**
  * Right workspace rail: Files, Source control, and Pull request as icon tabs.
@@ -62,9 +69,18 @@ export function CodeInspector({
 }) {
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const pr = digest?.pr_state ?? workspace?.pr;
-  const [tab, setTab] = useState<InspectorTab>("files");
+  const scope = useCodeUiStore((state) => state.inspectorScope);
+  const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
+  const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
   const [file, setFile] = useState<string | undefined>();
   const active = workspace?.status !== "archived";
+  const turnId = scope?.turnId;
+
+  useEffect(() => {
+    if (!scope) return;
+    setTab("source");
+    setFile(undefined);
+  }, [scope]);
 
   function openFile(next: string) {
     setFile(next);
@@ -73,49 +89,60 @@ export function CodeInspector({
 
   return (
     <aside
-      className="flex w-80 shrink-0 flex-col overflow-hidden border-l"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
       aria-label="Workspace surfaces"
       data-testid="code-inspector"
     >
-      <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
-        <TabButton
-          label="Files"
-          current={tab === "files"}
-          onClick={() => setTab("files")}
+      <Tabs
+        value={tab}
+        onValueChange={(next) => setTab(next as InspectorTab)}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      >
+        <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
+          <TabsList className="h-auto justify-start gap-0.5 bg-transparent p-0">
+            <InspectorTabTrigger value="files" label="Files">
+              <Files className="size-3.5" />
+            </InspectorTabTrigger>
+            <InspectorTabTrigger value="source" label="Source control">
+              <GitBranch className="size-3.5" />
+            </InspectorTabTrigger>
+            <InspectorTabTrigger value="pr" label="Pull request">
+              <GitPullRequest
+                className={cn(
+                  "size-3.5",
+                  pr ? PR_ICON_TONE_CLASSES[prTone(pr)] : undefined,
+                )}
+              />
+            </InspectorTabTrigger>
+          </TabsList>
+          {scope && (
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground ml-auto truncate rounded-full border px-2 py-0.5 font-mono text-[11px]"
+              aria-label={`Clear ${scope.label} scope`}
+              onClick={() => setInspectorScope(null)}
+            >
+              {scope.label} ×
+            </button>
+          )}
+        </header>
+        <TabsContent
+          value="files"
+          className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <Files className="size-3.5" />
-        </TabButton>
-        <TabButton
-          label="Source control"
-          current={tab === "source"}
-          onClick={() => setTab("source")}
-        >
-          <GitBranch className="size-3.5" />
-        </TabButton>
-        <TabButton
-          label="Pull request"
-          current={tab === "pr"}
-          onClick={() => setTab("pr")}
-        >
-          <GitPullRequest
-            className={cn(
-              "size-3.5",
-              pr ? PR_ICON_TONE_CLASSES[prTone(pr)] : undefined,
-            )}
-          />
-        </TabButton>
-      </header>
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {tab === "files" && (
           <FilesPanel
             client={client}
             workspaceId={workspaceId}
+            turnId={turnId}
             contentRevision={contentRevision}
             selected={file}
             onOpenFile={openFile}
           />
-        )}
-        {tab === "source" && (
+        </TabsContent>
+        <TabsContent
+          value="source"
+          className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {active && (
               <div className="border-b px-3 py-3">
@@ -130,50 +157,66 @@ export function CodeInspector({
             <DiffPanel
               client={client}
               workspaceId={workspaceId}
+              turnId={turnId}
+              turnLabel={scope?.label}
               file={file}
               contentRevision={contentRevision}
             />
           </div>
-        )}
-        {tab === "pr" && (
+        </TabsContent>
+        <TabsContent
+          value="pr"
+          className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
           <PrTab
             client={client}
             workspaceId={workspaceId}
             pr={pr}
             branch={workspace?.branch_name}
           />
-        )}
-      </div>
+        </TabsContent>
+      </Tabs>
     </aside>
   );
 }
 
-function TabButton({
+function InspectorTabTrigger({
+  value,
   label,
-  current,
-  onClick,
   children,
 }: {
+  value: InspectorTab;
   label: string;
-  current: boolean;
-  onClick: () => void;
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-current={current}
-      onClick={onClick}
-      className={cn(
-        "text-muted-foreground hover:text-foreground grid size-8 place-items-center rounded-lg",
-        current && "bg-muted text-foreground",
-      )}
-    >
-      {children}
-    </button>
+    <WithTooltip label={label}>
+      <TabsTrigger
+        value={value}
+        aria-label={label}
+        className={TAB_TRIGGER_CLASS}
+      >
+        {children}
+      </TabsTrigger>
+    </WithTooltip>
   );
+}
+
+/**
+ * Ordinal label for a turn id, from the transcript's user items in order.
+ * The inspector never shows a raw turn UUID.
+ */
+export function inspectorTurnLabel(
+  items: readonly CodeTranscriptItem[],
+  turnId: string,
+): string {
+  let ordinal = 0;
+  for (const item of items) {
+    if (item.kind !== "user") continue;
+    ordinal += 1;
+    if (item.turnId === turnId) return `Turn ${ordinal}`;
+  }
+  return "This turn";
 }
 
 /**

@@ -300,7 +300,7 @@ afterEach(() => {
   useCodeCatalogStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
-  useCodeUiStore.setState({ reviewSidebarOpen: true });
+  useCodeUiStore.setState({ reviewSidebarOpen: true, inspectorScope: null });
 });
 
 describe("CodeWorkspacePage", () => {
@@ -437,10 +437,10 @@ describe("CodeWorkspacePage", () => {
 
     const inspector = screen.getByTestId("code-inspector");
     expect(
-      within(inspector).getByRole("button", { name: "Files" }),
+      within(inspector).getByRole("tab", { name: "Files" }),
     ).toBeInTheDocument();
     expect(
-      within(inspector).getByRole("button", { name: "Pull request" }),
+      within(inspector).getByRole("tab", { name: "Pull request" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
@@ -449,7 +449,7 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
     expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
 
-    await user.click(screen.getByRole("button", { name: "Pull request" }));
+    await user.click(screen.getByRole("tab", { name: "Pull request" }));
     expect(within(inspector).getByText("No pull request yet")).toBeInTheDocument();
   });
 
@@ -463,7 +463,9 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "Files" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tablist", { name: "Open panels" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
@@ -473,7 +475,7 @@ describe("CodeWorkspacePage", () => {
 
     const inspector = screen.getByTestId("code-inspector");
     expect(
-      within(inspector).getByRole("button", { name: "Files" }),
+      within(inspector).getByRole("tab", { name: "Files" }),
     ).toBeInTheDocument();
   });
 
@@ -491,13 +493,40 @@ describe("CodeWorkspacePage", () => {
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({ tabs: "terminal" }),
     );
-    expect(screen.queryByRole("tab", { name: "Files" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tablist", { name: "Open panels" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
     expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
     expect(
-      within(screen.getByTestId("code-inspector")).getByRole("button", {
+      within(screen.getByTestId("code-inspector")).getByRole("tab", {
         name: "Files",
       }),
     ).toBeInTheDocument();
+  });
+
+  it("scopes the inspector to a turn from the review seam", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Review this turn's changes" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Clear Turn 1 scope" }),
+    ).toHaveTextContent("Turn 1 ×");
+    expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await waitFor(() =>
+      expect(client.getCodeWorkspaceDiff).toHaveBeenCalledWith("ws-1", {
+        turn: "turn-1",
+        file: undefined,
+      }),
+    );
   });
 });
