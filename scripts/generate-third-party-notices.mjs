@@ -551,7 +551,7 @@ export function generateNotices({ root = repositoryRoot } = {}) {
   });
 }
 
-function firstDifference(expected, actual) {
+export function firstDifference(expected, actual) {
   const expectedLines = expected.split("\n");
   const actualLines = actual.split("\n");
   const limit = Math.max(expectedLines.length, actualLines.length);
@@ -589,14 +589,13 @@ function main(argv) {
     );
   }
   const current = readFileSync(target, "utf8");
-  if (
-    normalizeNoticesForComparison(current) ===
-    normalizeNoticesForComparison(generated)
-  ) {
+  const comparableCurrent = normalizeNoticesForComparison(current);
+  const comparableGenerated = normalizeNoticesForComparison(generated);
+  if (comparableCurrent === comparableGenerated) {
     console.log(`${NOTICES_RELATIVE_PATH} is up to date`);
     return;
   }
-  const difference = firstDifference(current, generated);
+  const difference = firstDifference(comparableCurrent, comparableGenerated);
   throw new Error(
     `${NOTICES_RELATIVE_PATH} is stale; run \`${REGENERATE_COMMAND}\`\n` +
       `first difference at line ${difference.line}\n` +

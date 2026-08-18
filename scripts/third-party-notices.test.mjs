@@ -18,6 +18,7 @@ import {
   REGENERATE_COMMAND,
   collectNodePackages,
   collectRustPackages,
+  firstDifference,
   licenseTextId,
   normalizeLicenseText,
   normalizeNoticesForComparison,
@@ -71,6 +72,17 @@ test("the notices check ignores Git's Windows line-ending conversion", () => {
   assert.equal(
     normalizeNoticesForComparison(notices.replaceAll("\n", "\r\n")),
     normalizeNoticesForComparison(notices),
+  );
+
+  const staleWindowsNotices = notices
+    .replace("Generated terms.", "Stale terms.")
+    .replaceAll("\n", "\r\n");
+  assert.deepEqual(
+    firstDifference(
+      normalizeNoticesForComparison(staleWindowsNotices),
+      normalizeNoticesForComparison(notices),
+    ),
+    { line: 3, expected: "Stale terms.", actual: "Generated terms." },
   );
 });
 
