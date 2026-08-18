@@ -1,25 +1,34 @@
-import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
-import { useState, type RefCallback } from "react";
+import {
+  Check,
+  ChevronDown,
+  CircleSlash,
+  FileCode,
+  FileSearch,
+  Loader2,
+  Search,
+  SquareTerminal,
+  Wrench,
+  X,
+} from "lucide-react";
+import { useEffect, useId, useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
-import { Badge } from "@/components/ui/badge";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
 import { AssistantWorkingIndicator } from "@/AssistantWorkingIndicator";
 import { MessageFooter } from "@/MessageFooter";
 import { isolatedCard } from "@/PendingCard";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
-import { ToolCardShell } from "@/ToolCardShell";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
-import { TurnReviewCard } from "./TurnReviewCard";
+import { formatTurnDuration, TurnReviewCard } from "./TurnReviewCard";
 
 /**
  * The code-session transcript: the reader's prompts, markdown for assistant
- * text, tool-card chrome for engine work, the approvals a turn is parked on,
+ * text, inline tool lines for engine work, the approvals a turn is parked on,
  * and what each turn came to.
  *
  * The frame is chat's — `.messages` around a `.messages-column` — because the
@@ -122,7 +131,7 @@ export function CodeTranscript({
  * Whether the engine owes the reader a visible working state.
  *
  * Anything with its own live presentation speaks for itself: streaming prose, a
- * running tool card, an approval waiting on a decision. The indicator covers
+ * running tool line, an approval waiting on a decision. The indicator covers
  * the gaps between them — and comes back under a partial response whose stream
  * has gone quiet, so a slow engine reads differently from a hung one.
  */
@@ -238,6 +247,8 @@ function TranscriptItem({
           detail={item.detail}
           status={item.status}
           preview={item.preview}
+          startedAt={item.startedAt}
+          durationMs={item.durationMs}
         />
       );
     case "notice":
@@ -271,50 +282,93 @@ function TranscriptItem({
   }
 }
 
+/**
+ * One engine action as a boxless line. The verb is a constant; the muted mono
+ * subject is the command or path; the right slot is meta, one status glyph,
+ * and a quiet chevron. Failed and denied open. Success stays closed. A running
+ * call streams the last lines of output without growing the row.
+ */
 export function CodeToolCard({
   name,
   detail,
   status,
   preview,
+  startedAt = null,
+  durationMs = null,
 }: {
   name: string;
   detail: ToolDetail;
   status: "running" | "succeeded" | "failed" | "denied";
   preview: string;
+  startedAt?: string | null;
+  durationMs?: number | null;
 }) {
-  const badge =
-    status === "running" ? (
-      <Badge variant="info" size="sm">
-        Running
-      </Badge>
-    ) : status === "failed" ? (
-      <Badge variant="critical" size="sm">
-        Failed
-      </Badge>
-    ) : status === "denied" ? (
-      <Badge variant="warning" size="sm">
-        Denied
-      </Badge>
-    ) : (
-      <Badge variant="success" size="sm">
-        Done
-      </Badge>
-    );
+  const [expanded, setExpanded] = useState(
+    status === "failed" || status === "denied",
+  );
+  const bodyId = useId();
+  const verb = toolVerb(detail, status);
+  const subject = toolSubject(detail, name);
+  const hasOutput = preview.trim().length > 0;
+  const elapsed = useElapsedLabel(startedAt, status === "running");
+  const duration = formatTurnDuration(durationMs);
+  const exitCode = parseExitCode(preview);
+
+  useEffect(() => {
+    if (status === "succeeded") setExpanded(false);
+    if (status === "failed" || status === "denied") setExpanded(true);
+  }, [status]);
+
+  const showTail = status === "running" && hasOutput;
+  const showExpanded = expanded && status !== "running" && hasOutput;
+
   return (
-    <ToolCardShell
-      icon={toolIcon(detail)}
-      title={toolTitle(detail, name)}
-      titleClassName={detail.kind === "command" ? "font-mono" : undefined}
-      badge={badge}
-      defaultExpanded={status === "running"}
-      className={status === "failed" ? "border-critical-border" : undefined}
-      label={`${name} ${status}`}
+    <div
+      className="max-w-prose [overflow-anchor:none]"
+      role="status"
+      aria-label={`${verb} ${status}`}
     >
-      <div className="text-muted-foreground space-y-1 px-2.5 pb-2 text-xs">
-        <p>{toolDetailLine(detail)}</p>
-        {preview && <ToolOutputPreview text={preview} />}
-      </div>
-    </ToolCardShell>
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 py-0.5 text-left text-[13px]"
+        aria-expanded={expanded || showTail}
+        aria-controls={hasOutput ? bodyId : undefined}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="text-muted-foreground shrink-0 [&>svg]:size-3.5">
+          {toolIcon(detail)}
+        </span>
+        <span className="shrink-0 font-semibold">{verb}</span>
+        <MiddleTruncate
+          text={subject}
+          className="text-muted-foreground min-w-0 font-mono"
+        />
+        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+          {status === "running" ? elapsed : duration}
+          {status !== "running" && exitCode !== null && (
+            <span>exit {exitCode}</span>
+          )}
+          <StatusGlyph status={status} />
+          <ChevronDown
+            className={cn(
+              "text-muted-foreground/50 size-3.5 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
+              !(expanded || showTail) && "-rotate-90",
+            )}
+            aria-hidden="true"
+          />
+        </span>
+      </button>
+      {showTail && (
+        <div id={bodyId}>
+          <StreamingTail text={preview} />
+        </div>
+      )}
+      {showExpanded && (
+        <div id={bodyId}>
+          <ToolOutputPreview text={preview} collapsedLines={12} bare />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -362,7 +416,59 @@ function toolIcon(detail: ToolDetail) {
   }
 }
 
-function toolTitle(detail: ToolDetail, name: string): string {
+function toolVerb(
+  detail: ToolDetail,
+  status: "running" | "succeeded" | "failed" | "denied",
+): string {
+  if (detail.kind === "command" && status === "denied") return "Command denied";
+  switch (detail.kind) {
+    case "command":
+    case "other":
+      return "Command run";
+    case "file_read":
+      return "File read";
+    case "file_edit":
+      return "File edited";
+    case "search":
+      return "Search";
+  }
+}
+
+/** Last twelve lines, height-capped so a streaming tail does not grow the row. */
+function StreamingTail({ text }: { text: string }) {
+  const lines = text.replace(/\n+$/, "").split("\n");
+  const tail = lines.slice(-12).join("\n");
+  return (
+    <pre
+      aria-label="Output"
+      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+    >
+      {tail}
+    </pre>
+  );
+}
+
+function useElapsedLabel(startedAt: string | null, active: boolean): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [active, startedAt]);
+  if (!startedAt) return null;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return null;
+  return formatTurnDuration(Math.max(0, now - start));
+}
+
+function parseExitCode(preview: string): number | null {
+  const match = preview.match(/(?:^|\n)\s*exit(?:ed)?(?:\s+code)?[:\s]+(-?\d+)\s*$/im);
+  if (!match) return null;
+  const code = Number(match[1]);
+  return Number.isFinite(code) ? code : null;
+}
+
+function toolSubject(detail: ToolDetail, name: string): string {
   switch (detail.kind) {
     case "command":
       return detail.cmd;
@@ -376,20 +482,62 @@ function toolTitle(detail: ToolDetail, name: string): string {
   }
 }
 
-function toolDetailLine(detail: ToolDetail): string {
-  switch (detail.kind) {
-    case "command":
-      return detail.cwd ? `cwd ${detail.cwd}` : "Command";
-    case "file_read":
-      return "File read";
-    case "file_edit":
-      return "File edit";
-    case "search":
-      return "Search";
-    case "other":
-      return detail.summary;
+function StatusGlyph({
+  status,
+}: {
+  status: "running" | "succeeded" | "failed" | "denied";
+}) {
+  switch (status) {
+    case "running":
+      return (
+        <Loader2
+          className="text-info-foreground size-3.5 animate-spin motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+      );
+    case "succeeded":
+      return (
+        <Check className="text-success-foreground size-3.5" aria-hidden="true" />
+      );
+    case "failed":
+      return (
+        <X className="text-critical-foreground size-3.5" aria-hidden="true" />
+      );
+    case "denied":
+      return (
+        <CircleSlash
+          className="text-warning-foreground size-3.5"
+          aria-hidden="true"
+        />
+      );
   }
 }
+
+/** Keep the tail of a command or path when the header runs out of room. */
+function MiddleTruncate({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
+  const tail = Math.min(28, Math.max(12, Math.ceil(text.length / 3)));
+  if (text.length <= 40) {
+    return (
+      <span className={cn("block truncate", className)} title={text}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <span className={cn("flex min-w-0", className)} title={text}>
+      <span className="truncate">{text.slice(0, -tail)}</span>
+      <span className="shrink-0">{text.slice(-tail)}</span>
+    </span>
+  );
+}
+
+
 
 const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
   added: "A",

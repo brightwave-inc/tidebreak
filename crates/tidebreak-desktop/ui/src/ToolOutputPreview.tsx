@@ -12,6 +12,11 @@ type ToolOutputPreviewProps = {
   collapsedLines?: number;
   /** What this block is, for the copy control and assistive technology. */
   label?: string;
+  /**
+   * Plain indented output: no surface, no padding box. The expander reads
+   * "· · · N more lines" instead of "Show N more lines".
+   */
+  bare?: boolean;
 };
 
 /**
@@ -28,6 +33,7 @@ export function ToolOutputPreview({
   text,
   collapsedLines = DEFAULT_COLLAPSED_LINES,
   label = "Output",
+  bare = false,
 }: ToolOutputPreviewProps) {
   const [expanded, setExpanded] = useState(false);
   const bodyId = useId();
@@ -47,7 +53,11 @@ export function ToolOutputPreview({
         <pre
           id={bodyId}
           aria-label={label}
-          className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
+          className={
+            bare
+              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+              : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
+          }
         >
           {body}
         </pre>
@@ -56,20 +66,26 @@ export function ToolOutputPreview({
           label={`Copy ${label.toLowerCase()}`}
           copiedAnnouncement={`${label} copied to clipboard.`}
           failedAnnouncement={`${label} could not be copied.`}
-          className="border-border bg-background text-muted-foreground hover:text-foreground absolute top-1 right-1 inline-flex items-center rounded-md border p-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+          className={
+            bare
+              ? "text-muted-foreground hover:text-foreground absolute top-0 right-0 inline-flex items-center p-0.5 opacity-0 transition-opacity duration-[140ms] ease-out group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+              : "border-border bg-background text-muted-foreground hover:text-foreground absolute top-1 right-1 inline-flex items-center rounded-md border p-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none"
+          }
         />
       </div>
       {hiddenCount > 0 && (
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground text-xs underline-offset-2 hover:underline"
+          className="text-muted-foreground hover:text-foreground text-[11px]"
           aria-expanded={expanded}
           aria-controls={bodyId}
           onClick={() => setExpanded((current) => !current)}
         >
           {expanded
             ? "Show less"
-            : `Show ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`}
+            : bare
+              ? `· · · ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`
+              : `Show ${hiddenCount} more line${hiddenCount === 1 ? "" : "s"}`}
         </button>
       )}
     </div>

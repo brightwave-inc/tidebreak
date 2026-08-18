@@ -56,6 +56,10 @@ export type CodeTranscriptItem =
       detail: ToolDetail;
       status: CodeToolStatus;
       preview: string;
+      /** When this client saw the call start. Null on journal replay. */
+      startedAt: string | null;
+      /** Wall time from start to completion. Null when replayed or still running. */
+      durationMs: number | null;
     }
   | {
       kind: "notice";
@@ -376,6 +380,8 @@ export function reduceCodeSessionEvent(
               detail: event.detail,
               status: "running",
               preview: "",
+              startedAt: framed.replayed ? null : deps.now(),
+              durationMs: null,
             },
           ],
         },
@@ -389,7 +395,14 @@ export function reduceCodeSessionEvent(
           ...state,
           items: state.items.map((item) =>
             item.kind === "tool" && item.callId === event.call_id
-              ? { ...item, status: event.outcome, preview: event.preview }
+              ? {
+                  ...item,
+                  status: event.outcome,
+                  preview: event.preview,
+                  durationMs: framed.replayed
+                    ? null
+                    : durationMs(item.startedAt, deps.now()),
+                }
               : item,
           ),
         },

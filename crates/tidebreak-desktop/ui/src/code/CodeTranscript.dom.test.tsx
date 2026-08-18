@@ -41,6 +41,8 @@ const items: CodeTranscriptItem[] = [
     detail: { kind: "command", cmd: "ls", cwd: "/tmp" },
     status: "succeeded",
     preview: "README.md",
+    startedAt: "2026-08-15T12:00:00.000Z",
+    durationMs: 1_200,
   },
   {
     kind: "notice",
@@ -65,8 +67,12 @@ describe("CodeTranscript", () => {
     render(<CodeTranscript items={items} />);
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
     expect(
-      screen.getByRole("status", { name: "Bash succeeded" }),
+      screen.getByRole("status", { name: "Command run succeeded" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Command run")).toBeInTheDocument();
+    expect(screen.getByText("ls")).toBeInTheDocument();
+    expect(screen.getByText("1s")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Output")).toBeNull();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
 
@@ -124,9 +130,9 @@ describe("CodeTranscript", () => {
     ).toBeInTheDocument();
   });
 
-  it("clamps a running tool's output and offers a copy control", async () => {
+  it("expands a failed tool and clamps long output", async () => {
     const preview = Array.from(
-      { length: 12 },
+      { length: 13 },
       (_, index) => `line ${index + 1}`,
     ).join("\n");
     render(
@@ -138,23 +144,77 @@ describe("CodeTranscript", () => {
             turnId: "t1",
             callId: "c1",
             name: "Bash",
-            detail: { kind: "command", cmd: "seq 12", cwd: "/tmp" },
-            status: "running",
+            detail: { kind: "command", cmd: "seq 13", cwd: "/tmp" },
+            status: "failed",
             preview,
+            startedAt: null,
+            durationMs: 800,
           },
         ]}
       />,
     );
 
     const body = screen.getByLabelText("Output");
-    expect(body.textContent).toContain("line 8");
-    expect(body.textContent).not.toContain("line 9");
+    expect(body.textContent).toContain("line 12");
+    expect(body.textContent).not.toContain("line 13");
     expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Show 4 more lines" }),
+      screen.getByRole("button", { name: "· · · 1 more line" }),
     );
-    expect(screen.getByLabelText("Output").textContent).toContain("line 12");
+    expect(screen.getByLabelText("Output").textContent).toContain("line 13");
+  });
+
+  it("keeps a successful call closed and names a denial with the constant verb", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-denied",
+            turnId: "t1",
+            callId: "c2",
+            name: "Bash",
+            detail: { kind: "command", cmd: "rm -rf /", cwd: "/tmp" },
+            status: "denied",
+            preview: "denied by policy",
+            startedAt: null,
+            durationMs: null,
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Command denied")).toBeInTheDocument();
+    expect(screen.getByLabelText("Output")).toHaveTextContent("denied by policy");
+  });
+
+  it("streams the tail of a running command without showing the head", () => {
+    const preview = Array.from(
+      { length: 16 },
+      (_, index) => `line ${index + 1}`,
+    ).join("\n");
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-run",
+            turnId: "t1",
+            callId: "c3",
+            name: "Bash",
+            detail: { kind: "command", cmd: "seq 16", cwd: "/tmp" },
+            status: "running",
+            preview,
+            startedAt: "2026-08-15T12:00:00.000Z",
+            durationMs: null,
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Command run")).toBeInTheDocument();
+    const body = screen.getByLabelText("Output");
+    expect(body.textContent?.split("\n")[0]).toBe("line 5");
+    expect(body.textContent).toContain("line 16");
   });
 
   it("shows the engine working only where nothing else says so", () => {
