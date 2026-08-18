@@ -27,6 +27,7 @@ import {
   groupCodeModelOptions,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
+  SESSION_PERMISSION_MODE_LOCKED,
 } from "./labels";
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
@@ -43,11 +44,12 @@ export function PermissionModePicker({
   onChange?: (mode: CodePermissionMode) => void;
   scopeKey?: string;
 }) {
-  return (
+  const locked = !onChange;
+  const menu = (
     <PermissionModeMenu
       scopeKey={scopeKey}
       value={value}
-      disabled={!onChange}
+      disabled={locked}
       onChange={async (mode: PermissionMode) => {
         if (!availableModes.includes(mode)) {
           throw new Error(PERMISSION_MODE_UNAVAILABLE_REASON);
@@ -55,6 +57,16 @@ export function PermissionModePicker({
         onChange?.(mode);
       }}
     />
+  );
+  if (!locked) return menu;
+  // Disabled buttons drop pointer events, so the tooltip has to sit on a
+  // wrapper the reader can still hover and focus.
+  return (
+    <WithTooltip label={SESSION_PERMISSION_MODE_LOCKED}>
+      <span className="inline-flex">
+        {menu}
+      </span>
+    </WithTooltip>
   );
 }
 

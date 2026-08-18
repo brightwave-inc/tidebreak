@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
-import { ArrowDown, SquareTerminal } from "lucide-react";
+import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
-import { archiveForceKind, type ApiClient } from "../api/client";
+import type { ApiClient } from "../api/client";
 import type {
   Attention,
   CodeApprovalSnapshot,
@@ -15,9 +14,10 @@ import type {
   ModelInfo,
 } from "../api/types";
 import { useApp } from "@/AppContext";
+import { copyPlainText, scheduleCopyStateReset } from "@/ClipboardCopyButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useConfirm } from "@/components/ConfirmDialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { PanelLayout } from "@/panel/PanelLayout";
 import type { PanelContent } from "@/panel/panelTypes";
@@ -58,13 +58,19 @@ import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeContentRevision } from "./useLiveContent";
 import {
+  WorkspaceOverflowMenu,
+  useWorkspaceCardCommands,
+  workspaceHeaderCommands,
+} from "./workspaceActions";
+import { middleTruncate } from "./workspaceCards";
+import {
   createPermissionModes,
   fenceReasonText,
   gatewayCodeModels,
   harnessCodeModels,
   harnessHonorsTurnModel,
-  HARNESS_LABELS,
   LIFECYCLE_LABELS,
+  sessionLifecycleTooltip,
 } from "./labels";
 
 /**
@@ -87,13 +93,13 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
 
 function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client, models, defaultModelKey } = useApp();
-  const { confirm, dialog } = useConfirm();
-  const navigate = useNavigate();
   const catalog = useCodeCatalogStore();
+  const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const { setLayout } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
+  const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
@@ -101,11 +107,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     catalog.sessionsByWorkspace[workspaceId] ?? null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const setViewedWorkspace = useCodeUpdatesStore((state) => state.setViewedWorkspace);
   const contentRevision = useCodeContentRevision(session?.id ?? null, client);
+  const rememberedSession = useCodeCatalogStore(
+    (state) => state.sessionsByWorkspace[workspaceId] ?? null,
+  );
 
   useEffect(() => {
     setViewedWorkspace(workspaceId);
@@ -113,7 +123,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   }, [setViewedWorkspace, workspaceId]);
 
   useEffect(() => {
+    if (rememberedSession) setSession(rememberedSession);
+  }, [rememberedSession]);
+
+  useEffect(() => {
     let cancelled = false;
+    setError(null);
     void (async () => {
       try {
         const [next, sessions] = await Promise.all([
@@ -142,7 +157,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceId]);
+  }, [client, workspaceId, reloadToken]);
 
   async function startSession(
     harness: HarnessKind,
@@ -185,81 +200,46 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  async function archive() {
-    if (!workspace) return;
-    const ok = await confirm({
-      title: "Archive this workspace?",
-      description:
-        "The worktree is removed. Commit, push, or create a pull request from the review sidebar first if you want to keep the work.",
-      confirmLabel: "Archive",
-      destructive: true,
-    });
-    if (!ok) return;
-    try {
-      await archiveWorkspace(client, workspace.id, false);
-    } catch (err) {
-      if (archiveForceKind(err)) {
-        const forced = await confirm({
-          title: "Discard leftover work?",
-          description: `${err instanceof Error ? err.message : String(err)} Commit and push from the review sidebar, or discard.`,
-          confirmLabel: "Discard and archive",
-          destructive: true,
-        });
-        if (!forced) return;
-        try {
-          await archiveWorkspace(client, workspace.id, true);
-        } catch (forceErr) {
-          toast.error(friendlyErrorMessage(forceErr, "Could not archive"));
-        }
-        return;
-      }
-      toast.error(friendlyErrorMessage(err, "Could not archive"));
-    }
-  }
-
-  async function archiveWorkspace(
-    api: ApiClient,
-    id: string,
-    force: boolean,
-  ) {
-    const archived = await api.archiveCodeWorkspace(id, force);
-    // The archived row stays in the catalog — the rail filters archived
-    // workspaces out and the repo page lists them with their status — but the
-    // session it held is gone with the worktree.
-    catalog.upsertWorkspace(archived);
-    catalog.forgetWorkspaceSession(id);
-    setWorkspace(archived);
-    toast.success("Workspace archived");
-    // This page is addressed by the workspace that was just archived, so
-    // staying here leaves the reader on a dead worktree. The repo lists it
-    // again, archived and labelled.
-    if (archived.repo_id) {
-      await navigate({
-        to: "/code/r/$repoId",
-        params: { repoId: archived.repo_id },
-        replace: true,
-      });
-    } else {
-      await navigate({ to: "/code", replace: true });
-    }
-  }
-
   const fenced =
     session?.lifecycle === "fenced" || session?.fence_reason !== undefined;
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
+  const title = digest?.title ?? workspace?.title;
+  const repoName = repo?.display_name;
+  const headerCommands = workspace
+    ? workspaceHeaderCommands({
+        archived: workspace.status === "archived",
+        hasSession: Boolean(session),
+        attentionPinned:
+          (digest?.attention ?? session?.attention)?.state.type === "manual",
+        quickActions: repo?.quick_actions ?? [],
+      })
+    : [];
 
   return (
     <>
-      {dialog}
+      {dialogs}
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
         <div className="min-w-0">
-          <h1 className="flex min-w-0 items-baseline gap-2 text-sm font-medium">
-            <span className="truncate">
-              {digest?.title ?? workspace?.title ?? "Workspace"}
-            </span>
-            <span className="text-muted-foreground truncate text-xs font-normal">
-              {repo?.display_name ?? workspace?.repo_id}
-            </span>
+          <h1 className="flex min-w-0 items-center gap-2 text-sm font-medium">
+            {title ? (
+              <span className="truncate">{title}</span>
+            ) : error ? null : (
+              <span
+                data-testid="workspace-header-skeleton"
+                className="flex min-w-0 items-center gap-2"
+              >
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-3 w-16" />
+              </span>
+            )}
+            {repoName && (
+              <span className="text-muted-foreground truncate text-xs font-normal">
+                {repoName}
+              </span>
+            )}
+            {workspace && (
+              <WorktreePathChip path={workspace.worktree_path} />
+            )}
           </h1>
         </div>
         <div className="flex items-center gap-2">
@@ -271,11 +251,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 fallback={digest?.attention ?? session.attention}
               />
               <PendingApprovalBadge sessionId={session.id} client={client} />
-              <span className="text-muted-foreground text-xs">
-                {LIFECYCLE_LABELS[digest?.lifecycle ?? session.lifecycle]}
-                {" · "}
-                {HARNESS_LABELS[session.harness_kind]}
-              </span>
+              <SessionLifecycleMark
+                lifecycle={digest?.lifecycle ?? session.lifecycle}
+                harness={session.harness_kind}
+                version={session.harness_version}
+                unrecognizedEventCount={session.unrecognized_event_count}
+              />
             </>
           )}
           <WithTooltip
@@ -296,14 +277,53 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               <SquareTerminal />
             </Button>
           </WithTooltip>
-          {workspace && workspace.status !== "archived" && (
-            <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
-              Archive
+          <WithTooltip
+            label={
+              reviewSidebarOpen
+                ? `Hide review sidebar ${shortcutHints.review}`
+                : `Review sidebar ${shortcutHints.review}`
+            }
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-pressed={reviewSidebarOpen}
+              aria-label="Review sidebar"
+              onClick={() => toggleReviewSidebar()}
+            >
+              <PanelRight />
             </Button>
+          </WithTooltip>
+          {workspace && (
+            <WorkspaceOverflowMenu
+              commands={headerCommands}
+              onCommand={(command) =>
+                run(command.id, {
+                  workspace,
+                  title: title ?? workspace.title,
+                  session: session ?? undefined,
+                  actionName: command.actionName,
+                })
+              }
+            />
           )}
         </div>
       </header>
-      {error && <p className="text-critical px-4 py-2 text-sm">{error}</p>}
+      {error ? (
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4">
+          <p className="text-muted-foreground max-w-sm text-center text-sm">
+            {error}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setReloadToken((token) => token + 1)}
+          >
+            Retry
+          </Button>
+        </div>
+      ) : (
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <PanelLayout
@@ -376,15 +396,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           />
         )}
       </div>
+      )}
     </>
   );
 }
 
-function useCodeShortcutHints(): { terminal: string } {
+function useCodeShortcutHints(): { terminal: string; review: string } {
   return useMemo(() => {
     const command = usesCommandModifier(navigator.userAgent);
     return {
       terminal: shortcutHint("toggle-code-terminal", command),
+      review: shortcutHint("toggle-code-review", command),
     };
   }, []);
 }
@@ -421,6 +443,96 @@ function SessionAttentionBadge({
   const store = useRegisteredCodeSession(sessionId, client);
   const live = store((state) => state.attention);
   return <AttentionBadge compact attention={live ?? fallback} />;
+}
+
+/**
+ * The engine dropped part of its own stream. Saying so where the session is
+ * read is the point of counting it at all — a silently degraded transcript
+ * looks exactly like a complete one (decision 0031). The count comes from the
+ * session row, so it settles at the end of a turn rather than mid-stream.
+ */
+function SessionLifecycleMark({
+  lifecycle,
+  harness,
+  version,
+  unrecognizedEventCount,
+}: {
+  lifecycle: CodeSessionSnapshot["lifecycle"];
+  harness: CodeSessionSnapshot["harness_kind"];
+  version?: string;
+  unrecognizedEventCount: number;
+}) {
+  const tooltip = sessionLifecycleTooltip({
+    lifecycle,
+    harness,
+    version,
+    unrecognizedEventCount,
+  });
+  return (
+    <WithTooltip label={tooltip}>
+      <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
+        {unrecognizedEventCount > 0 && (
+          <span
+            data-testid="unrecognized-event-dot"
+            className="bg-warning-foreground-muted inline-block size-2 shrink-0 rounded-full"
+            aria-label={`${unrecognizedEventCount} unread engine ${unrecognizedEventCount === 1 ? "event" : "events"}`}
+          />
+        )}
+        <span>{LIFECYCLE_LABELS[lifecycle]}</span>
+      </span>
+    </WithTooltip>
+  );
+}
+
+function WorktreePathChip({ path }: { path: string }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
+
+  useEffect(() => {
+    if (copyState === "idle") return;
+    return scheduleCopyStateReset(() => setCopyState("idle"));
+  }, [copyState]);
+
+  async function onCopy() {
+    try {
+      await copyPlainText(path);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
+  const label =
+    copyState === "copied"
+      ? "Copied"
+      : copyState === "failed"
+        ? "Copy failed"
+        : path;
+
+  return (
+    <>
+      <WithTooltip label={label}>
+        <button
+          type="button"
+          className="text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink truncate rounded-md px-1.5 py-0.5 font-mono text-[11px] motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out"
+          aria-label={
+            copyState === "idle" ? `Copy worktree path ${path}` : label
+          }
+          onClick={() => void onCopy()}
+        >
+          {middleTruncate(path, 28)}
+        </button>
+      </WithTooltip>
+      <span className="sr-only" role="status" aria-live="polite">
+        {copyState === "copied"
+          ? "Worktree path copied to clipboard."
+          : copyState === "failed"
+            ? "Worktree path could not be copied."
+            : ""}
+      </span>
+    </>
+  );
 }
 
 function PendingApprovalBadge({
@@ -461,12 +573,6 @@ function PendingApprovalBadge({
   );
 }
 
-/**
- * The engine dropped part of its own stream. Saying so where the session is
- * read is the point of counting it at all — a silently degraded transcript
- * looks exactly like a complete one (decision 0031). The count comes from the
- * session row, so it settles at the end of a turn rather than mid-stream.
- */
 function CodeSessionPane({
   session,
   client,

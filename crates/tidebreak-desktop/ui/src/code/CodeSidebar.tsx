@@ -250,6 +250,10 @@ export function CodeSidebar() {
                     commands={workspaceCommands({
                       hasPr: Boolean(pr),
                       archived: workspace.status === "archived",
+                      hasSession: Boolean(sessions[workspace.id]),
+                      attentionPinned:
+                        (digest?.attention ?? sessions[workspace.id]?.attention)
+                          ?.state.type === "manual",
                     })}
                     onOpen={() =>
                       void navigate({
@@ -262,6 +266,7 @@ export function CodeSidebar() {
                         workspace,
                         title: digest?.title ?? workspace.title,
                         pr,
+                        session: sessions[workspace.id],
                       })
                     }
                   />

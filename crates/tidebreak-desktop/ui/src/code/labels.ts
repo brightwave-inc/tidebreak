@@ -41,6 +41,30 @@ export const LIFECYCLE_LABELS: Record<CodeSessionLifecycle, string> = {
   ended: "Ended",
 };
 
+/**
+ * Lifecycle cluster tooltip: posture, harness + version, and unread engine
+ * events when the journal dropped frames (decision 0031).
+ */
+export function sessionLifecycleTooltip(input: {
+  lifecycle: CodeSessionLifecycle;
+  harness: HarnessKind;
+  version?: string;
+  unrecognizedEventCount: number;
+}): string {
+  const harness = input.version
+    ? `${HARNESS_LABELS[input.harness]} ${input.version}`
+    : HARNESS_LABELS[input.harness];
+  const parts = [LIFECYCLE_LABELS[input.lifecycle], harness];
+  if (input.unrecognizedEventCount > 0) {
+    const count = input.unrecognizedEventCount;
+    const noun = count === 1 ? "event" : "events";
+    parts.push(
+      `${count} unread engine ${noun} — transcript may be incomplete`,
+    );
+  }
+  return parts.join(" · ");
+}
+
 export const WORKSPACE_STATUS_LABELS: Record<CodeWorkspaceStatus, string> = {
   creating: "Creating",
   setup_failed: "Setup failed",
@@ -58,6 +82,10 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
 /** Shown when the selected harness cannot honor Ask or Auto. */
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
   "this harness cannot honor that mode";
+
+/** Mid-session picker: there is no PATCH permission-mode route. */
+export const SESSION_PERMISSION_MODE_LOCKED =
+  "Set when the session started — start a new session to change it";
 
 /** Stated wherever unsupervised Auto is offered (decision 0038). */
 export const UNSUPERVISED_AUTO_NOTE =
