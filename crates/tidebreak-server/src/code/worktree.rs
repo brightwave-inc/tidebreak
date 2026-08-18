@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -483,9 +484,21 @@ pub(crate) async fn read_worktree_file(
             rel.display()
         )));
     }
-    let bytes = tokio::fs::read(&canonical).await.map_err(|err| {
+    let file = tokio::fs::File::open(&canonical).await.map_err(|err| {
         WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
     })?;
+    let mut bytes = Vec::new();
+    let read = file
+        .take((MAX_BLOB_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|err| {
+            WorktreeError::internal(format!("could not read {}: {err}", rel.display()))
+        })?;
+    let truncated = read > MAX_BLOB_BYTES;
+    if truncated {
+        bytes.truncate(MAX_BLOB_BYTES);
+    }
     let path = rel.to_string_lossy().replace('\\', "/");
     if bytes.contains(&0) {
         return Ok(WorktreeBlob {
@@ -495,11 +508,9 @@ pub(crate) async fn read_worktree_file(
             binary: true,
         });
     }
-    let truncated = bytes.len() > MAX_BLOB_BYTES;
-    let end = bytes.len().min(MAX_BLOB_BYTES);
     Ok(WorktreeBlob {
         path,
-        content: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+        content: String::from_utf8_lossy(&bytes).into_owned(),
         truncated,
         binary: false,
     })
@@ -917,6 +928,26 @@ mod tests {
 
         let err = read_worktree_file(&path, "../README.md").await.unwrap_err();
         assert!(err.to_string().contains("relative"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn blob_read_is_capped_and_does_not_load_the_whole_file() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "blob-cap");
+        create_worktree(&repo, &path, "tidebreak/blob-cap", "main")
+            .await
+            .unwrap();
+        let huge = format!("hello {}\n", "x".repeat(MAX_BLOB_BYTES + 64));
+        std::fs::write(path.join("huge.txt"), &huge).unwrap();
+
+        let blob = read_worktree_file(&path, "huge.txt").await.unwrap();
+        assert_eq!(blob.path, "huge.txt");
+        assert!(blob.truncated);
+        assert!(!blob.binary);
+        assert_eq!(blob.content.len(), MAX_BLOB_BYTES);
+        assert!(blob.content.starts_with("hello "));
+        assert_ne!(blob.content, huge);
     }
 
     #[cfg(windows)]
