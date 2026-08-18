@@ -1407,7 +1407,7 @@ async fn wait_until_lease_expired(store: &Arc<dyn Store>, run_id: AgentRunId) {
 /// sandbox agent over loopback to its committed result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn container_worker_service_drives_queued_work_over_loopback() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "driven by the service").await;
         let backend = MockBackend::spawning();
@@ -1419,8 +1419,16 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
             Arc::new(Notify::new()),
             Arc::new(SandboxSteerGuard::default()),
             true,
-            fast_config(),
-            fast_worker_config(),
+            // This test proves service discovery and drive completion, not the
+            // heartbeat/fence cadence. Avoid making the real-agent path fight
+            // the parallel suite for SQLite's single writer.
+            quiet_drive_config(),
+            SandboxContainerRunWorkerConfig {
+                // One lane is sufficient for the singular queued run and
+                // avoids a second poller contending on the same fixture store.
+                max_concurrency: 1,
+                ..fast_worker_config()
+            },
         )
         .expect("the explicitly enabled service is constructed");
         let task = tokio::spawn(worker.run());
@@ -1435,7 +1443,7 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
         // discharged; the runner-level tests pin the exactly-once destroy on
         // the drive path, where nothing else is sweeping.
         wait_until(
-            Duration::from_secs(25),
+            Duration::from_secs(45),
             "the service drive completed and discharged teardown",
             || async {
                 let run = store.get_agent_run(run_id).await.unwrap().unwrap();
@@ -1460,7 +1468,7 @@ async fn container_worker_service_drives_queued_work_over_loopback() {
         assert_eq!(backend.provisions.load(Ordering::SeqCst), 1);
     })
     .await
-    .expect("service drive completed within its time bound");
+    .expect("service drive completed within its 60-second hang guard");
 }
 
 /// A teardown created after the service's startup pass is completed by a later
