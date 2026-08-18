@@ -1488,7 +1488,7 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.TIDEBREAK_VERSION,
-              bundle: { targets: ["appimage", "deb"], category: "Office" },
+              bundle: { targets: ["appimage", "deb"], category: "Productivity" },
               plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
             }));
           '

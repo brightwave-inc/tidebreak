@@ -1552,6 +1552,8 @@ test("Linux packaging writes no shared cache before loading updater material", (
   assert.match(rustCache, /save-if: false/);
 
   assert.match(buildJob, /--bundles appimage,deb/);
+  assert.match(buildJob, /category: "Productivity"/);
+  assert.doesNotMatch(buildJob, /category: "Office"/);
   assert.match(buildJob, /\.AppImage/);
   assert.match(buildJob, /\.deb/);
   assert.match(buildJob, /tauri signer sign "\$appimage_path"/);
