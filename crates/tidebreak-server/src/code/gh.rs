@@ -885,16 +885,42 @@ fn manual_pr_instructions(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| generate_pr_body(&[], stat));
     format!(
-        "{header}\n\nCreate the pull request from a terminal:\n\n  cd {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        "{header}\n\nCreate the pull request from a terminal:\n\n{commands}",
         header = gh.remediation,
-        worktree = worktree.display(),
-        title = shell_single_quote(&pr_title),
-        body = shell_single_quote(&pr_body),
+        commands = manual_pr_commands(worktree, branch, &pr_title, &pr_body),
     )
 }
 
+#[cfg(not(windows))]
+fn manual_pr_commands(worktree: &Path, branch: &str, title: &str, body: &str) -> String {
+    format!(
+        "  cd {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        worktree = shell_single_quote(&worktree.to_string_lossy()),
+        branch = shell_single_quote(branch),
+        title = shell_single_quote(title),
+        body = shell_single_quote(body),
+    )
+}
+
+#[cfg(windows)]
+fn manual_pr_commands(worktree: &Path, branch: &str, title: &str, body: &str) -> String {
+    format!(
+        "  Set-Location -LiteralPath {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        worktree = powershell_single_quote(&worktree.to_string_lossy()),
+        branch = powershell_single_quote(branch),
+        title = powershell_single_quote(title),
+        body = powershell_single_quote(body),
+    )
+}
+
+#[cfg(not(windows))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 const PR_VIEW_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,baseRefName";
@@ -1072,15 +1098,69 @@ fn pr_number_from_url(url: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+#[cfg(windows)]
 fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
     let path = search_path
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("PATH").ok())
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    find_windows_gh(&path, std::env::var_os("PATHEXT").as_deref())
+}
+
+#[cfg(not(windows))]
+fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
+    let path = search_path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_default();
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("gh");
         if is_executable(&candidate) {
             return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let configured = pathext
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    if value.starts_with('.') {
+                        value.to_owned()
+                    } else {
+                        format!(".{value}")
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| [".COM", ".EXE", ".BAT", ".CMD"].map(str::to_owned).to_vec());
+    let mut extensions = vec![".EXE".to_owned()];
+    for extension in configured {
+        if !extensions
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&extension))
+        {
+            extensions.push(extension);
+        }
+    }
+    for dir in std::env::split_paths(path) {
+        for extension in &extensions {
+            let candidate = dir.join(format!("gh{extension}"));
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+        let extensionless = dir.join("gh");
+        if is_executable(&extensionless) {
+            return Some(extensionless);
         }
     }
     None
@@ -1878,6 +1958,45 @@ mod windows_tests {
     };
 
     const DESCENDANT_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn github_cli_discovery_applies_windows_executable_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([dir.path()]).unwrap();
+
+        assert_eq!(find_gh(search_path.to_str()), Some(gh));
+    }
+
+    #[test]
+    fn manual_pr_instructions_use_powershell_quoting() {
+        let gh = GhObservation {
+            found: false,
+            authenticated: None,
+            binary: None,
+            remediation: "install gh".into(),
+        };
+        let instructions = manual_pr_instructions(
+            Path::new(r"C:\Users\Jane Doe\repo"),
+            "tidebreak/jane's-fix",
+            "Jane's fix",
+            Some("It's ready"),
+            &Diffstat {
+                files: 1,
+                insertions: 2,
+                deletions: 0,
+                truncated: false,
+            },
+            &gh,
+        );
+
+        assert!(instructions.contains(r"Set-Location -LiteralPath 'C:\Users\Jane Doe\repo'"));
+        assert!(instructions.contains("git push -u origin 'tidebreak/jane''s-fix'"));
+        assert!(instructions.contains("--title 'Jane''s fix'"));
+        assert!(instructions.contains("--body 'It''s ready'"));
+        assert!(!instructions.contains("'\\''"));
+    }
 
     #[tokio::test]
     async fn quick_action_timeout_terminates_its_descendant() {
