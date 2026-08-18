@@ -283,8 +283,7 @@ async fn run_worker(
                         engine.as_ref(),
                         &sink,
                         &mut commands,
-                        message,
-                        model,
+                        QueuedFollowUp { message, model },
                     )
                     .await;
                     let _ = reply.send(result);
@@ -373,7 +372,16 @@ async fn drain_queued(
         let Some(QueuedFollowUp { message, model }) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, sink, commands, message, model).await;
+        let _ = drive_turn(
+            db,
+            bus,
+            session,
+            engine,
+            sink,
+            commands,
+            QueuedFollowUp { message, model },
+        )
+        .await;
     }
 }
 
@@ -384,8 +392,7 @@ async fn drive_turn(
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     commands: &mut mpsc::Receiver<WorkerCommand>,
-    message: String,
-    model: Option<String>,
+    QueuedFollowUp { message, model }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
     if session.lifecycle == CodeSessionLifecycle::Running {
         return Err(WorkerError::Conflict(
