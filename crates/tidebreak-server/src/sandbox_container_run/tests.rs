@@ -305,6 +305,8 @@ struct TerminalFaultStore {
     fail_accounting: AtomicBool,
     accounting_failure_observed: Notify,
     accounting_calls: AtomicUsize,
+    cancellation_finalization_renewed: Notify,
+    cancellation_finalization_renewals: AtomicUsize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -344,6 +346,8 @@ impl TerminalFaultStore {
             fail_accounting: AtomicBool::new(false),
             accounting_failure_observed: Notify::new(),
             accounting_calls: AtomicUsize::new(0),
+            cancellation_finalization_renewed: Notify::new(),
+            cancellation_finalization_renewals: AtomicUsize::new(0),
         })
     }
 
@@ -632,9 +636,16 @@ impl Store for TerminalFaultStore {
         lease_token: Uuid,
         lease_duration: chrono::Duration,
     ) -> Result<bool> {
-        self.inner
+        let renewed = self
+            .inner
             .renew_agent_run_cancellation_finalization(id, lease_token, lease_duration)
-            .await
+            .await?;
+        if renewed {
+            self.cancellation_finalization_renewals
+                .fetch_add(1, Ordering::SeqCst);
+            self.cancellation_finalization_renewed.notify_one();
+        }
+        Ok(renewed)
     }
 
     async fn heartbeat_agent_run(
@@ -2131,16 +2142,23 @@ async fn heartbeats_the_lease_so_a_long_run_is_not_reaped() {
             .unwrap()
             .lease_expires_at
             .expect("a claimed run has a lease expiry");
+        // A heartbeat can complete between the provider gate opening and this
+        // lease snapshot. Waiting for an absolute count of one can therefore
+        // observe that older renewal and compare the lease against itself.
+        // Require a heartbeat completed after this snapshot instead.
+        let heartbeat_ticks_before = runner.heartbeat_ticks();
 
         wait_until(
             Duration::from_secs(20),
-            "the live drive completed at least one heartbeat",
+            "the live drive completed a heartbeat after the lease snapshot",
             || async {
                 let ticks = runner.heartbeat_ticks();
-                if ticks >= 1 {
+                if ticks > heartbeat_ticks_before {
                     Ok(ticks)
                 } else {
-                    Err("no attached heartbeat yet".to_owned())
+                    Err(format!(
+                        "heartbeat count is still {ticks}; snapshot count was {heartbeat_ticks_before}"
+                    ))
                 }
             },
         )
@@ -3018,7 +3036,7 @@ async fn a_result_fenced_by_cancellation_still_finishes_cancellation() {
 /// step and snapshots it into the immutable cancelled receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancellation_finalization_survives_accounting_failure_past_execution_lease() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(90), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "retry cancellation accounting").await;
         let lease_token = Uuid::new_v4();
@@ -3082,6 +3100,8 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
 
         let first_failure = fault_store.accounting_failure_observed.notified();
         tokio::pin!(first_failure);
+        let first_renewal = fault_store.cancellation_finalization_renewed.notified();
+        tokio::pin!(first_renewal);
         let original_expiry = run
             .lease_expires_at
             .expect("the claimed execution lease has an expiry");
@@ -3095,31 +3115,28 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(2), first_failure)
+        tokio::time::timeout(Duration::from_secs(20), first_failure)
             .await
             .expect("final accounting reaches the injected outage");
-        let still_cancelling = wait_until(
-            Duration::from_secs(5),
-            "cancellation finalization renewed the lease past the original execution expiry",
-            || async {
-                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
-                match (run.status, run.lease_expires_at) {
-                    (AgentRunStatus::Cancelling, Some(expiry)) if expiry > original_expiry => {
-                        Ok(run)
-                    }
-                    (status, expiry) => Err(format!(
-                        "status={status:?} lease_expires_at={expiry:?} original={original_expiry}"
-                    )),
-                }
-            },
-        )
-        .await;
+        tokio::time::timeout(Duration::from_secs(20), first_renewal)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "cancellation finalization did not renew; renewals={} accounting_calls={}",
+                    fault_store
+                        .cancellation_finalization_renewals
+                        .load(Ordering::SeqCst),
+                    fault_store.accounting_calls.load(Ordering::SeqCst),
+                )
+            });
+        let still_cancelling = store.get_agent_run(run_id).await.unwrap().unwrap();
+        assert_eq!(still_cancelling.status, AgentRunStatus::Cancelling);
         assert!(still_cancelling
             .lease_expires_at
-            .is_some_and(|expiry| expiry > chrono::Utc::now()));
+            .is_some_and(|expiry| expiry > original_expiry));
 
         fault_store.release_accounting();
-        let outcome = tokio::time::timeout(Duration::from_secs(2), finalize)
+        let outcome = tokio::time::timeout(Duration::from_secs(20), finalize)
             .await
             .expect("finalization resumes after accounting storage recovers")
             .unwrap()
@@ -3148,7 +3165,9 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
 /// that follows is what actually stops the container.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // Above the explicit setup and completion waits, so contention reports the
+    // last durable state instead of a bare outer Elapsed.
+    tokio::time::timeout(Duration::from_secs(120), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "cancelled mid-flight").await;
 
@@ -3160,12 +3179,14 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
         let runner = Arc::new(SandboxContainerRunner::new(
             store.clone(),
             backend.clone(),
-            Arc::new(FixedResolver(provider)),
+            Arc::new(FixedResolver(provider.clone())),
+            // This test proves cancellation acknowledgement and teardown, not
+            // a short lease or a 50 ms durable-write cadence. Keep one prompt
+            // heartbeat for cross-process cancellation detection while
+            // removing the lease-expiry and SQLite-contention failure modes.
             SandboxContainerRunConfig {
-                lease: Duration::from_secs(2),
-                heartbeat: Duration::from_millis(50),
-                durable_fence_interval: Duration::from_millis(50),
-                ..fast_config()
+                heartbeat: Duration::from_millis(250),
+                ..quiet_drive_config()
             },
         ));
         let drive = tokio::spawn({
@@ -3179,11 +3200,24 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
             .unwrap()
             .expect("the cancellation request lands");
 
-        let outcome = drive
-            .await
-            .unwrap()
-            .expect("driving succeeds")
-            .expect("the container run is claimable");
+        let outcome = match tokio::time::timeout(Duration::from_secs(30), drive).await {
+            Ok(joined) => joined
+                .expect("the drive task finished")
+                .expect("driving succeeds")
+                .expect("the container run is claimable"),
+            Err(_) => {
+                let run = store.get_agent_run(run_id).await.unwrap().unwrap();
+                panic!(
+                    "attached cancellation still outstanding; status={:?} last_error={:?} provisions={} destroys={} provider_calls={} heartbeats={}",
+                    run.status,
+                    run.last_error_code,
+                    backend.provisions.load(Ordering::SeqCst),
+                    backend.destroys.load(Ordering::SeqCst),
+                    provider.calls.load(Ordering::SeqCst),
+                    runner.heartbeat_ticks(),
+                );
+            }
+        };
         assert_eq!(outcome, SandboxContainerRunOutcome::Cancelled(run_id));
         let cancelled = store.get_agent_run(run_id).await.unwrap().unwrap();
         assert_eq!(cancelled.status, AgentRunStatus::Cancelled);
@@ -4005,7 +4039,9 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
 /// keep the cancellation waiting forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    // The explicit state waits below each carry diagnostics and may take up to
+    // 30 seconds under suite load. Keep the outer guard above their sum.
+    tokio::time::timeout(Duration::from_secs(120), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "close admission on cancellation").await;
 
@@ -4036,11 +4072,9 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
                 store.clone(),
                 backend.clone(),
                 Arc::new(UsageThenPendingResolver(provider.clone())),
-                SandboxContainerRunConfig {
-                    lease: Duration::from_secs(2),
-                    heartbeat: Duration::from_millis(50),
-                    ..fast_config()
-                },
+                // The test explicitly fires the local cancellation signal, so
+                // periodic heartbeat/fence writes are unrelated contention.
+                signal_woken_config(),
             )
             .with_steering(steering.clone()),
         );
@@ -4151,7 +4185,9 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
 /// observed usage, and only then commit the result that snapshots the totals.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_result_waits_for_pending_reverse_accounting() {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    // The setup wait has its own 30-second diagnostic bound. Leave enough room
+    // for it and the terminal accounting path to report the useful failure.
+    tokio::time::timeout(Duration::from_secs(120), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "result races reverse inference").await;
 
@@ -4179,7 +4215,9 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
             store.clone(),
             backend.clone(),
             Arc::new(UsageThenPendingResolver(provider.clone())),
-            fast_config(),
+            // Socket terminalization wakes this drive directly; lease/fence
+            // cadence is not part of the contract and only adds SQLite writes.
+            quiet_drive_config(),
         ));
         let drive = tokio::spawn({
             let runner = runner.clone();
