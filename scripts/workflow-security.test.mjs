@@ -1064,6 +1064,10 @@ test("release builds freeze a draft tag from the trusted main workflow", () => {
   assert.match(validateJob, /repos\/\$GITHUB_REPOSITORY\/git\/refs/);
   assert.match(validateJob, /git merge-base --is-ancestor "\$RELEASE_SHA" origin\/main/);
   assert.match(validateJob, /release-snapshot\.json/);
+  assert.match(validateJob, /Mark the in-flight draft as a prerelease/);
+  assert.match(validateJob, /-f draft=true/);
+  assert.match(validateJob, /-f prerelease=true/);
+  assert.doesNotMatch(validateJob, /-f draft=false/);
   assert.match(release, /ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
 });
 

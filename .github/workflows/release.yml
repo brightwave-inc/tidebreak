@@ -123,20 +123,20 @@ jobs:
             echo "tag=$RELEASE_TAG"
             echo "version=${RELEASE_TAG#v}"
           } >> "$GITHUB_OUTPUT"
-      - name: Convert the draft to a prerelease while it builds
+      - name: Mark the in-flight draft as a prerelease
         if: ${{ steps.release.outputs.draft == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
         run: |
-          # A draft keeps collecting release notes from new merges while the
-          # build runs, making the live draft drift away from the frozen notes.
-          # Mark the in-flight release as a prerelease so Release Drafter treats
-          # it as already-published and starts the next draft for any PRs that
-          # merge during this build.
+          # Keep the frozen notes on this draft, but do not publish it yet.
+          # Publishing here makes GitHub treat the release as immutable, so
+          # later asset uploads fail. Release Drafter only updates
+          # non-prerelease drafts, so this shape freezes the notes and
+          # lets the next merge start a new draft.
           gh api --method PATCH \
             "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -f draft=false \
+            -f draft=true \
             -f prerelease=true \
             >/dev/null
       - name: Require a commit from main
