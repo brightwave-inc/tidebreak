@@ -274,10 +274,12 @@ managed Node and LibreOffice installation, computer use, and code mode remain
 governed by their existing platform capability checks; packaging the desktop
 does not claim those features on Linux.
 
-Like Windows, Linux uses a credential-free `prepare_linux` job to compile the
-tag and save only Cargo intermediates and unsigned products. The packaging job
-restores that source-pinned cache, discards linked binaries, relinks from the
-release tag, builds both formats, and signs each package only after packaging.
+The Linux packaging job uses compiler and Cargo download caches in read-only
+mode and does not enable pnpm caching. It builds both formats from the validated
+release tag before the updater private key enters the step environment, then
+signs and collects only the completed package bytes. This avoids exposing a
+default-branch cache writer to code executed during a manually dispatched
+release.
 
 The public download contract is rooted at:
 

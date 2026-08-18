@@ -1395,146 +1395,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  prepare_linux:
-    name: prepare unsigned Linux · ${{ matrix.arch }}
+  build_linux:
+    name: Linux · ${{ matrix.arch }}
     needs: [validate, inspect_hosted]
     if: >-
       ${{
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
-      }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-gnu
-    env:
-      CARGO_INCREMENTAL: 0
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_ONLY
-      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.validate.outputs.sha }}
-
-      - name: Install Linux packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf
-
-      - name: Install Rust target
-        run: |
-          rustup show
-          rustup target add "${{ matrix.target }}"
-
-      - name: Restore unsigned Rust build cache
-        id: rust-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: linux-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
-          restore-keys: |
-            linux-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            linux-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
-        with:
-          shared-key: linux-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          cache-targets: false
-          save-if: true
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10.18.3
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Verify the third-party notices match the released graph
-        run: node scripts/generate-third-party-notices.mjs --check
-
-      - name: Compile without production credentials or bundles
-        id: compile
-        continue-on-error: true
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
-        with:
-          projectPath: crates/tidebreak-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
-
-      - name: Save release-specific unsigned Rust build cache
-        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
-
-      - name: Require a successful unsigned compilation
-        if: ${{ steps.compile.outcome != 'success' }}
-        run: exit 1
-
-  build_linux:
-    name: Linux · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted, prepare_linux]
-    if: >-
-      ${{
-        always()
-        && needs.validate.result == 'success'
-        && needs.validate.outputs.draft == 'true'
-        && needs.inspect_hosted.result == 'success'
-        && needs.inspect_hosted.outputs.exists != 'true'
-        && needs.prepare_linux.result == 'success'
       }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -1572,34 +1439,6 @@ jobs:
             libxdo-dev \
             patchelf
 
-      - name: Restore unsigned Rust build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop
-            target/${{ matrix.target }}/release/tidebreak-host-broker
-            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
-          key: linux-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
-
-      - name: Discard restored product binaries
-        env:
-          RELEASE_TARGET: ${{ matrix.target }}
-        run: |
-          rm -rf \
-            "target/$RELEASE_TARGET/release/tidebreak-desktop" \
-            "target/$RELEASE_TARGET/release/tidebreak-host-broker" \
-            "target/$RELEASE_TARGET/release/"libtidebreak_desktop_lib.* \
-            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
-
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -1621,11 +1460,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify the third-party notices match the released graph
+        run: node scripts/generate-third-party-notices.mjs --check
 
       - name: Install Rust target
         run: |

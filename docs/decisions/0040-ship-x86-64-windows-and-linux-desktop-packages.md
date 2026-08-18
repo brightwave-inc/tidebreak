@@ -112,9 +112,9 @@ automatic updates.
 
 - Manifest tests require Windows and Linux artifacts, checksums, updater
   signatures, and `latest.json` platform keys.
-- Workflow-policy tests require credential-free preparation, source-pinned
-  build-cache restoration, complete artifact transfer, and all-platform release
-  gating.
+- Workflow-policy tests require source-pinned Windows cache restoration,
+  cache-write-free Linux packaging before updater signing, complete artifact
+  transfer, and all-platform release gating.
 - Native Windows CI checks the target graph, broker, SQLite profile lifecycle,
   and Credential Manager backend.
 - The release jobs must produce exactly one NSIS installer, one AppImage, and
