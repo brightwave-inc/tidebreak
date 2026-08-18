@@ -1,5 +1,5 @@
 import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
-import type { RefCallback } from "react";
+import { useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
@@ -427,41 +427,72 @@ function FileActivityRow({
 }: {
   files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
 }) {
+  const [open, setOpen] = useState(false);
   const { count, insertions, deletions } = fileActivityTotals(files);
   const noun = count === 1 ? "file" : "files";
-  const summary = `${count} ${noun} changed · +${insertions} −${deletions}`;
   return (
-    <details className="text-muted-foreground max-w-prose text-xs">
-      <summary className="cursor-pointer">{summary}</summary>
-      <ul className="mt-1 flex flex-col gap-0.5">
-        {Object.entries(files).map(([path, file]) => (
-          <li key={path} className="flex items-baseline gap-2">
-            <span
-              className={cn(
-                "inline-flex size-4 shrink-0 items-center justify-center rounded-[3px] font-mono text-[10px] font-medium",
-                file.kind === "added" &&
-                  "bg-success-background text-success-foreground",
-                file.kind === "modified" &&
-                  "bg-info-background text-info-foreground",
-                file.kind === "deleted" &&
-                  "bg-critical-background text-critical-foreground",
-                file.kind === "renamed" &&
-                  "bg-warning-background text-warning-foreground",
-              )}
-              aria-label={file.kind}
-            >
-              {FILE_KIND_LETTER[file.kind]}
-            </span>
-            <code className="min-w-0 truncate" title={path}>
-              {path}
-            </code>
-            <span className="shrink-0 tabular-nums">
-              +{file.diffstat.insertions} −{file.diffstat.deletions}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </details>
+    <div className="text-muted-foreground max-w-prose text-[11px]">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="text-left"
+        onClick={() => setOpen((current) => !current)}
+      >
+        {count} {noun} changed ·{" "}
+        <span className="text-success-foreground-muted tabular-nums">
+          +{insertions}
+        </span>{" "}
+        <span className="text-critical-foreground-muted tabular-nums">
+          −{deletions}
+        </span>
+      </button>
+      <div
+        className={cn(
+          "grid transition-[grid-template-rows] duration-[140ms] ease-out motion-reduce:transition-none",
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+        )}
+      >
+        <ul className="min-h-0 overflow-hidden">
+          {Object.entries(files).map(([path, file]) => (
+            <li key={path} className="flex items-baseline gap-2 pt-0.5">
+              <span
+                className={cn(
+                  "w-3 shrink-0 font-mono",
+                  file.kind === "added" && "text-success-foreground-muted",
+                  file.kind === "modified" && "text-info-foreground-muted",
+                  file.kind === "deleted" && "text-critical-foreground-muted",
+                  file.kind === "renamed" && "text-warning-foreground-muted",
+                )}
+                aria-label={file.kind}
+              >
+                {FILE_KIND_LETTER[file.kind]}
+              </span>
+              <PathLabel path={path} />
+              <span className="shrink-0 tabular-nums">
+                +{file.diffstat.insertions} −{file.diffstat.deletions}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function PathLabel({ path }: { path: string }) {
+  const slash = path.lastIndexOf("/");
+  if (slash < 0) {
+    return (
+      <span className="min-w-0 truncate font-mono" title={path}>
+        {path}
+      </span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 font-mono" title={path}>
+      <span className="min-w-0 truncate">{path.slice(0, slash + 1)}</span>
+      <span className="shrink-0">{path.slice(slash + 1)}</span>
+    </span>
   );
 }
 

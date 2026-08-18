@@ -643,15 +643,15 @@ function CodeSessionPane({
 
   return (
     <>
-      {connectionState === "reconnecting" && (
-        <div
-          role="status"
-          className="border-info-border bg-info-background text-info-foreground mx-4 mt-3 rounded-md border px-3 py-1.5 text-xs"
-        >
-          Reconnecting to the session…
-        </div>
-      )}
       <div className={cn("message-view", follow.fadeClass)}>
+        {connectionState === "reconnecting" && (
+          <p
+            role="status"
+            className="text-info-foreground-muted pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
+          >
+            Reconnecting to the session…
+          </p>
+        )}
         <CodeTranscript
           items={items}
           hydrated={hydrated}

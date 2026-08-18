@@ -395,11 +395,11 @@ export function CodeComposer({
   }
 
   return (
-    <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
+    <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
       {showQueued && (
         <p
           role="status"
-          className="text-muted-foreground mx-auto max-w-3xl pb-1 text-xs"
+          className="text-muted-foreground pointer-events-none absolute inset-x-0 bottom-full mx-auto mb-1 max-w-3xl text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
         >
           1 follow-up queued
         </p>
@@ -452,7 +452,7 @@ export function CodeComposer({
       {notice && (
         <p
           role="alert"
-          className="text-destructive mx-auto max-w-3xl pt-1 text-xs"
+          className="text-critical-foreground mx-auto max-w-3xl pt-1 text-[11px]"
         >
           {notice.text}
         </p>
