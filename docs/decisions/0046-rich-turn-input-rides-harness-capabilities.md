@@ -1,4 +1,4 @@
-# 45. Rich Turn Input Rides Harness Capabilities
+# 46. Rich Turn Input Rides Harness Capabilities
 
 - Status: Proposed
 - Date: 2026-08-18
