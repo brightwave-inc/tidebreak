@@ -496,6 +496,21 @@ pub struct WorkspaceFilesQuery {
     pub turn: Option<CodeTurnId>,
 }
 
+/// Query for `GET /code/workspaces/{id}/blob`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceBlobQuery {
+    pub path: String,
+}
+
+/// One worktree file's text for the center viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceBlob {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
 /// Query for `GET /code/workspaces/{id}/diff`.
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceDiffQuery {

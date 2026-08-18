@@ -32,6 +32,7 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { HarnessModelMenu } from "./CodeComposer";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
@@ -279,7 +280,7 @@ export function NewWorkspaceDialog({
                 const next = repos.find((repo) => repo.id === value);
                 if (next) setBaseRef(next.default_base_ref);
               }}
-              disabled={creating || Boolean(defaultRepoId) || repos.length === 0}
+              disabled={creating || repos.length === 0}
             >
               <SelectTrigger aria-label="Repo" ref={repoTrigger}>
                 <SelectValue placeholder="No repos" />
@@ -322,34 +323,14 @@ export function NewWorkspaceDialog({
           </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Model</span>
-            <Select
+            <HarnessModelMenu
+              harness={harness}
+              options={modelOptions}
               value={model}
-              // A model list that arrives after the first render lands its
-              // rows and its value in the same commit, and the select's
-              // hidden native input answers that with an empty change event.
-              // An empty id is never a model, so it is not a choice.
-              onValueChange={(next) => {
-                if (next) setModel(next);
-              }}
-              disabled={creating || modelOptions.length === 0}
-            >
-              <SelectTrigger aria-label="Model">
-                <SelectValue
-                  placeholder={
-                    modelOptions.length === 0
-                      ? "Loading models…"
-                      : "Harness default"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent scrollButtons={false}>
-                {modelOptions.map((option) => (
-                  <SelectItem key={option.id} value={option.id}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={setModel}
+              disabled={creating}
+              variant="field"
+            />
           </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>

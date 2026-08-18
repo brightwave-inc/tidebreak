@@ -20,8 +20,9 @@ use tidebreak_egress::EgressPolicy;
 use super::*;
 
 use super::provider::{
-    claim_package_cache_population, deterministic_package_cache_failure,
-    exec_folder_grant_for_turn, finish_package_cache_population, PackageCachePopulationState,
+    claim_package_cache_population, coalesced_population_pins, deterministic_package_cache_failure,
+    exec_folder_grant_for_turn, finish_package_cache_population, pending_package_cache_pin_sets,
+    PackageCachePopulationState,
 };
 use super::staging::{materialize_chat_attachments, prepare_execution_directories};
 
@@ -111,6 +112,41 @@ fn package_cache_failure_inputs_stay_latched_until_pins_change() {
         1
     );
     assert!(claim_package_cache_population(&population, &changed).is_empty());
+}
+
+#[test]
+fn already_populated_pin_sets_are_not_scheduled_again() {
+    let original = vec![
+        vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
+        vec!["pypdf==6.0.0".to_owned()],
+    ];
+    let populated = ["numpy==2.0.2", "pillow==11.3.0"];
+    let pending = pending_package_cache_pin_sets(&original, |pins| {
+        let mut key: Vec<&str> = pins.iter().map(String::as_str).collect();
+        key.sort_unstable();
+        key == populated
+    });
+    assert_eq!(pending, vec![vec!["pypdf==6.0.0".to_owned()]]);
+    assert_eq!(
+        coalesced_population_pins(&pending),
+        vec!["pypdf==6.0.0".to_owned()]
+    );
+    assert!(pending_package_cache_pin_sets(&original, |_| true).is_empty());
+}
+
+#[test]
+fn coalesced_population_pins_are_one_sorted_union() {
+    assert_eq!(
+        coalesced_population_pins(&[
+            vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
+            vec!["pypdf==6.0.0".to_owned(), "pillow==11.3.0".to_owned()],
+        ]),
+        vec![
+            "numpy==2.0.2".to_owned(),
+            "pillow==11.3.0".to_owned(),
+            "pypdf==6.0.0".to_owned(),
+        ]
+    );
 }
 
 #[test]

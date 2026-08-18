@@ -9,6 +9,7 @@ import type {
   HarnessTier,
   ModelInfo,
   ProviderKind,
+  ReasoningEffort,
 } from "../api/types";
 import { familyForModelId, vendorForModelId } from "../modelFamilies";
 
@@ -182,6 +183,8 @@ export type CodeModelOption = {
   /** The vendor the id is branded as, for icons and grouping. */
   vendor?: ProviderKind | null;
   default?: boolean;
+  /** Levels the catalog model accepts. Absent or empty hides the effort control. */
+  reasoning_efforts?: readonly ReasoningEffort[];
 };
 
 /**
@@ -232,6 +235,7 @@ export function gatewayCodeModels(
       source,
       vendor: model.vendor ?? vendorForModelId(model.id),
       default: defaultKey === model.key || defaultKey === model.id,
+      reasoning_efforts: model.reasoning_efforts,
     }));
 }
 

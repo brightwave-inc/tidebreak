@@ -141,7 +141,7 @@ function storeTerminalDrawerHeights(heights: Record<string, number>): void {
  */
 export type CodeUiStore = {
   newWorkspaceOpen: boolean;
-  /** The repo the dialog opens locked to, when it was opened from one. */
+  /** The repo the dialog opens on, when it was opened from one. */
   newWorkspaceRepoId: string | undefined;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
@@ -185,9 +185,8 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
       set({ addRepoOpen: true });
       return;
     }
-    // A repo the catalog does not know would lock the form to nothing and
-    // leave the reader a dialog they cannot submit; free choice is the safe
-    // fallback.
+    // A repo the catalog does not know is not a useful default; free
+    // choice is the safe fallback.
     const known = repos.some((repo) => repo.id === repoId) ? repoId : undefined;
     set({ newWorkspaceOpen: true, newWorkspaceRepoId: known });
   },

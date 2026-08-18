@@ -1,4 +1,14 @@
-import { Bot, FileText, FolderOpen, Package, Shield, SquareTerminal, X } from "lucide-react";
+import {
+  Bot,
+  FileCode,
+  FileDiff,
+  FileText,
+  FolderOpen,
+  Package,
+  Shield,
+  SquareTerminal,
+  X,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "./panelTypes";
@@ -27,6 +37,14 @@ function panelTabFallbackLabel(panel: PanelContent): string {
       return "Agent";
     case "terminal":
       return "Terminal";
+    case "file":
+      return panel.path.split("/").pop() || panel.path;
+    case "diff":
+      return panel.path
+        ? `${panel.path.split("/").pop() || panel.path} diff`
+        : panel.turnId
+          ? "Turn diff"
+          : "Diff";
   }
 }
 
@@ -46,6 +64,10 @@ function PanelTabIcon({ panel }: { panel: PanelContent }) {
       return <Bot className={className} />;
     case "terminal":
       return <SquareTerminal className={className} />;
+    case "file":
+      return <FileCode className={className} />;
+    case "diff":
+      return <FileDiff className={className} />;
   }
 }
 

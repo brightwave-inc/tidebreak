@@ -125,16 +125,68 @@ pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>)
             ]
         }),
     };
-    if let Some(model) = model {
-        body["model"] = match model.split_once('/') {
-            Some((provider, model_id)) => json!({
-                "providerID": provider,
-                "modelID": model_id,
-            }),
-            None => json!({ "modelID": model }),
-        };
+    if let Some(model) = model.and_then(session_model_field) {
+        body["model"] = model;
     }
     body
+}
+
+/// `POST /session` model object. The captured 1.18.18 schema wants
+/// `{ providerID, id }`; `{ modelID }` and `{ providerID, modelID }` are 400.
+fn session_model_field(model: &str) -> Option<Value> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((provider, id)) = split_provider_model(trimmed) {
+        return Some(json!({ "providerID": provider, "id": id }));
+    }
+    let id = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let provider = infer_opencode_provider(id)?;
+    Some(json!({ "providerID": provider, "id": id }))
+}
+
+fn split_provider_model(model: &str) -> Option<(&str, &str)> {
+    let (provider, id) = model.split_once('/')?;
+    if provider.is_empty() || id.is_empty() {
+        return None;
+    }
+    // A gateway routing handle is not an OpenCode provider.
+    if provider.eq_ignore_ascii_case("model-gateway")
+        || provider.eq_ignore_ascii_case("model_gateway")
+    {
+        return None;
+    }
+    Some((provider, id))
+}
+
+fn infer_opencode_provider(id: &str) -> Option<&'static str> {
+    let leaf = id.to_ascii_lowercase();
+    if leaf.contains("claude")
+        || leaf.contains("sonnet")
+        || leaf.contains("opus")
+        || leaf.contains("haiku")
+    {
+        return Some("anthropic");
+    }
+    if leaf.contains("gpt") || leaf.contains("codex") || openai_o_series(&leaf) {
+        return Some("openai");
+    }
+    if leaf.contains("grok") {
+        return Some("xai");
+    }
+    if leaf.contains("gemini") {
+        return Some("google");
+    }
+    if leaf.contains("pickle") {
+        return Some("opencode");
+    }
+    None
+}
+
+fn openai_o_series(id: &str) -> bool {
+    id.strip_prefix('o')
+        .is_some_and(|rest| rest.starts_with(|ch: char| ch.is_ascii_digit()))
 }
 
 fn pick_loopback_port() -> Result<u16, HarnessError> {
@@ -289,15 +341,13 @@ impl OpencodeSession {
         let (status, parsed) = self
             .http("POST", path, &url, Some(body), Some(query.as_slice()))
             .await?;
+        self.emit_http_in(path, status, parsed.clone()).await;
         if !(200..300).contains(&status) {
-            return Err(HarnessError::Other(format!(
-                "POST /session status {status}"
-            )));
+            return Err(http_status_error("POST", path, status, &parsed));
         }
         if let Some(id) = parsed.get("id").and_then(Value::as_str) {
             *self.resume_ref.lock().expect("opencode resume") = Some(id.to_owned());
         }
-        self.emit_http_in(path, status, parsed).await;
         Ok(())
     }
 
@@ -522,6 +572,35 @@ impl HarnessSession for OpencodeSession {
     }
 }
 
+fn http_status_error(method: &str, path: &str, status: u16, body: &Value) -> HarnessError {
+    let detail = http_error_detail(body);
+    if detail.is_empty() {
+        HarnessError::Other(format!("{method} {path} status {status}"))
+    } else {
+        HarnessError::Other(format!("{method} {path} status {status}: {detail}"))
+    }
+}
+
+fn http_error_detail(body: &Value) -> String {
+    if let Some(message) = body
+        .pointer("/message")
+        .or_else(|| body.pointer("/error"))
+        .and_then(Value::as_str)
+    {
+        return message.to_owned();
+    }
+    if body.is_null() {
+        return String::new();
+    }
+    let rendered = body.to_string();
+    const CAP: usize = 200;
+    if rendered.len() > CAP {
+        format!("{}…", &rendered[..CAP])
+    } else {
+        rendered
+    }
+}
+
 fn sse_data_line(line: &str) -> Option<String> {
     let line = line.trim_end();
     let payload = line.strip_prefix("data:")?;
@@ -641,5 +720,38 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "allow" }));
+    }
+
+    #[test]
+    fn session_model_uses_provider_and_id() {
+        let slash = session_create_body(CodePermissionMode::Plan, Some("anthropic/claude-opus-5"));
+        assert_eq!(slash["model"]["providerID"], "anthropic");
+        assert_eq!(slash["model"]["id"], "claude-opus-5");
+        assert!(slash["model"].get("modelID").is_none());
+
+        let bare = session_create_body(CodePermissionMode::Allow, Some("gpt-5.6-sol"));
+        assert_eq!(bare["model"]["providerID"], "openai");
+        assert_eq!(bare["model"]["id"], "gpt-5.6-sol");
+
+        let grok = session_create_body(CodePermissionMode::Ask, Some("grok-4.5"));
+        assert_eq!(grok["model"]["providerID"], "xai");
+        assert_eq!(grok["model"]["id"], "grok-4.5");
+
+        let gemini = session_create_body(CodePermissionMode::Plan, Some("gemini-3-pro"));
+        assert_eq!(gemini["model"]["providerID"], "google");
+
+        let pickle = session_create_body(CodePermissionMode::Plan, Some("big-pickle"));
+        assert_eq!(pickle["model"]["providerID"], "opencode");
+        assert_eq!(pickle["model"]["id"], "big-pickle");
+
+        let gateway = session_create_body(
+            CodePermissionMode::Plan,
+            Some("model-gateway/claude-opus-5"),
+        );
+        assert_eq!(gateway["model"]["providerID"], "anthropic");
+        assert_eq!(gateway["model"]["id"], "claude-opus-5");
+
+        let unknown = session_create_body(CodePermissionMode::Plan, Some("mystery-weights"));
+        assert!(unknown.get("model").is_none());
     }
 }

@@ -24,7 +24,11 @@ export type PanelContent =
   /** One background agent run, opened from the agents table or the transcript. */
   | { type: "agent"; runId: string }
   /** Auxiliary workspace shell; `terminalId` pins a live PTY when known. */
-  | { type: "terminal"; terminalId?: string };
+  | { type: "terminal"; terminalId?: string }
+  /** One worktree file in the workspace center. */
+  | { type: "file"; path: string }
+  /** A colored diff in the workspace center. */
+  | { type: "diff"; path?: string; turnId?: string };
 
 export type PanelType = PanelContent["type"];
 
@@ -36,6 +40,11 @@ export type LayoutState = {
   tabs: PanelContent[];
   activeIndex: number;
   fullscreen: boolean;
+  /**
+   * Code workspace: the conversation tab is selected while file/diff tabs
+   * stay open. Absent everywhere else.
+   */
+  conversationFocused?: boolean;
 };
 
 export const EMPTY_LAYOUT: LayoutState = { tabs: [], activeIndex: 0, fullscreen: false };
@@ -55,6 +64,10 @@ export function panelKey(panel: PanelContent): string {
       return `document:${panel.documentId}`;
     case "agent":
       return `agent:${panel.runId}`;
+    case "file":
+      return `file:${panel.path}`;
+    case "diff":
+      return `diff:${panel.turnId ?? ""}:${panel.path ?? ""}`;
     default:
       return panel.type;
   }

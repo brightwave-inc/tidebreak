@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -9,67 +9,63 @@ afterEach(() => {
   cleanup();
 });
 
-describe("FilesPanel", () => {
-  it("lists changed files and opens a file in the diff panel", async () => {
-    const onOpenFile = vi.fn();
-    const client = {
-      listCodeWorkspaceFiles: vi.fn().mockResolvedValue({
-        files: [
-          {
-            path: "src/lib.rs",
-            kind: "modified",
-            insertions: 3,
-            deletions: 1,
-          },
-          {
-            path: "new.txt",
-            kind: "added",
-            insertions: 1,
-            deletions: 0,
-          },
-        ],
-        truncated: false,
-        stat: { files: 2, insertions: 4, deletions: 1, truncated: false },
+const TREE = {
+  paths: ["README.md", "new.txt", "src/lib.rs", "src/code/mod.rs"],
+  truncated: false,
+};
+
+function makeClient(tree = TREE) {
+  return {
+    listCodeWorkspaceTree: vi
+      .fn()
+      .mockImplementation((_id: string, opts?: { query?: string }) => {
+        const needle = opts?.query?.trim().toLowerCase();
+        const paths = needle
+          ? tree.paths.filter((path) => path.toLowerCase().includes(needle))
+          : tree.paths;
+        return Promise.resolve({ paths, truncated: tree.truncated });
       }),
-    };
+  };
+}
+
+describe("FilesPanel", () => {
+  it("nests folders and opens a file from the tree", async () => {
+    const onOpenFile = vi.fn();
+    const client = makeClient();
     render(
       <FilesPanel
         client={client}
         workspaceId="ws-1"
-        turnId="turn-1"
         onOpenFile={onOpenFile}
       />,
     );
-    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
-    expect(screen.getByText("new.txt")).toBeInTheDocument();
-    expect(screen.getByLabelText("modified")).toHaveTextContent("M");
-    expect(screen.getByLabelText("added")).toHaveTextContent("A");
-    expect(screen.getByText("+3")).toHaveClass("text-success");
-    expect(screen.getByText("−1")).toHaveClass("text-critical");
-    expect(screen.getByText("+1")).toHaveClass("text-success");
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+    expect(screen.getByText("src")).toBeInTheDocument();
+    expect(screen.getByText("lib.rs")).toBeInTheDocument();
+    expect(screen.queryByText("Changes")).not.toBeInTheDocument();
+    expect(screen.queryByText("+3")).not.toBeInTheDocument();
 
-    const selected = screen.getByRole("button", { name: /src\/lib\.rs/ });
-    expect(selected).not.toHaveAttribute("aria-current");
-    await userEvent.setup().click(screen.getByText("src/lib.rs"));
+    await userEvent.setup().click(screen.getByText("lib.rs"));
     expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs");
-    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith("ws-1", "turn-1");
+    expect(client.listCodeWorkspaceTree).toHaveBeenCalledWith("ws-1", {
+      limit: 5000,
+    });
   });
 
-  it("marks the selected row with aria-current", async () => {
-    const client = {
-      listCodeWorkspaceFiles: vi.fn().mockResolvedValue({
-        files: [
-          {
-            path: "src/lib.rs",
-            kind: "modified",
-            insertions: 3,
-            deletions: 1,
-          },
-        ],
-        truncated: false,
-        stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
-      }),
-    };
+  it("collapses a top-level folder", async () => {
+    const client = makeClient();
+    render(
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
+    );
+    expect(await screen.findByText("lib.rs")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByText("src"));
+    expect(screen.queryByText("lib.rs")).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByText("src"));
+    expect(screen.getByText("lib.rs")).toBeInTheDocument();
+  });
+
+  it("marks the selected file with aria-current", async () => {
+    const client = makeClient();
     render(
       <FilesPanel
         client={client}
@@ -78,10 +74,32 @@ describe("FilesPanel", () => {
         onOpenFile={vi.fn()}
       />,
     );
-    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /src\/lib\.rs/ })).toHaveAttribute(
+    expect(await screen.findByText("lib.rs")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "lib.rs" })).toHaveAttribute(
       "aria-current",
       "true",
     );
+  });
+
+  it("focuses search on Cmd+F and filters by include and exclude", async () => {
+    const client = makeClient();
+    render(
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
+    );
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    const search = screen.getByRole("searchbox", { name: "Search files" });
+    expect(search).toHaveFocus();
+    const include = screen.getByRole("textbox", { name: "Files to include" });
+    await userEvent.setup().type(include, "*.rs");
+    expect(screen.getByText("lib.rs")).toBeInTheDocument();
+    expect(screen.queryByText("README.md")).not.toBeInTheDocument();
+    expect(screen.queryByText("new.txt")).not.toBeInTheDocument();
+
+    const exclude = screen.getByRole("textbox", { name: "Files to exclude" });
+    await userEvent.setup().clear(include);
+    await userEvent.setup().type(exclude, "*.md");
+    expect(screen.queryByText("README.md")).not.toBeInTheDocument();
+    expect(screen.getByText("new.txt")).toBeInTheDocument();
   });
 });

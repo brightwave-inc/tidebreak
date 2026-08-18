@@ -89,6 +89,7 @@ import {
   type CodeTerminalSnapshot,
   type CodeWorkspaceDiff,
   type CodeWorkspaceFiles,
+  type CodeWorkspaceBlob,
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
   type CodePrCommentsSnapshot,
@@ -134,6 +135,7 @@ import {
   parseCodeWorkspace,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspaceBlob,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
   parseCodePrComments,
@@ -1983,6 +1985,22 @@ export class ApiClient {
         ),
       ),
       "code workspace files",
+    );
+  }
+
+  async getCodeWorkspaceBlob(
+    workspaceId: string,
+    path: string,
+  ): Promise<CodeWorkspaceBlob> {
+    const params = new URLSearchParams({ path });
+    return requireParsed(
+      parseCodeWorkspaceBlob(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/blob?${params}`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code workspace blob",
     );
   }
 

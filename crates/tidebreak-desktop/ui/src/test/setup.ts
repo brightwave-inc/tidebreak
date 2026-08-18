@@ -3,6 +3,15 @@
 // node environment; meaningful in files that opt into jsdom.
 import "@testing-library/jest-dom/vitest";
 
+// Monaco's clipboard contrib reads this at import time. jsdom has no
+// execCommand surface, so answer false and keep the editor loadable.
+if (
+  typeof document !== "undefined" &&
+  typeof document.queryCommandSupported !== "function"
+) {
+  document.queryCommandSupported = () => false;
+}
+
 // jsdom implements neither scrolling API; components calling scrollTo would
 // otherwise throw inside effects. A no-op keeps scroll-follow logic testable.
 if (

@@ -50,13 +50,52 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return id ? { type: "agent", runId: id } : null;
     case "terminal":
       return id ? { type: "terminal", terminalId: id } : { type: "terminal" };
+    case "file":
+      return parseFileTarget(id);
+    case "diff":
+      return parseDiffTarget(id);
     default:
       // `apps` and `plugins` were panel segments before the libraries became
-      // routes of their own, and `files`/`diff` before those surfaces moved
-      // into the workspace inspector; those links fall back to the
-      // conversation alone.
+      // routes of their own. A bare `files` catalog is still retired.
       return null;
   }
+}
+
+function parseFileTarget(id: string): PanelContent | null {
+  if (!id) return null;
+  try {
+    const path = decodeURIComponent(id);
+    return path && !path.includes("\0") ? { type: "file", path } : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseDiffTarget(id: string): PanelContent | null {
+  if (!id) return { type: "diff" };
+  const parts = id.split(".");
+  if (parts[0] === "t" && parts[1]) {
+    const turnId = parts[1];
+    if (parts.length === 2) return { type: "diff", turnId };
+    if (parts[2] === "f" && parts[3]) {
+      try {
+        const path = decodeURIComponent(parts.slice(3).join("."));
+        return path ? { type: "diff", turnId, path } : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  if (parts[0] === "f" && parts[1]) {
+    try {
+      const path = decodeURIComponent(parts.slice(1).join("."));
+      return path ? { type: "diff", path } : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 function parseDocumentTarget(id: string): PanelContent | null {
@@ -90,6 +129,16 @@ export function encodePanelSegment(panel: PanelContent): string {
       return `agent.${panel.runId}`;
     case "terminal":
       return panel.terminalId ? `terminal.${panel.terminalId}` : "terminal";
+    case "file":
+      return `file.${encodeURIComponent(panel.path)}`;
+    case "diff": {
+      if (panel.turnId && panel.path) {
+        return `diff.t.${panel.turnId}.f.${encodeURIComponent(panel.path)}`;
+      }
+      if (panel.turnId) return `diff.t.${panel.turnId}`;
+      if (panel.path) return `diff.f.${encodeURIComponent(panel.path)}`;
+      return "diff";
+    }
   }
 }
 
@@ -141,6 +190,7 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
     tabs,
     activeIndex: activeIndexFromSearch(search, tabs),
     fullscreen: isFullscreenParam(search),
+    conversationFocused: search.active === "chat" || undefined,
   };
 }
 
@@ -182,7 +232,12 @@ export function searchFromLayout(layout: LayoutState): PanelSearch {
     ...cleared,
     tabs: layout.tabs.map(encodePanelSegment).join(TAB_SEPARATOR),
     // The first tab is the default, so naming it would only lengthen the URL.
-    active: layout.activeIndex > 0 && active ? encodePanelSegment(active) : undefined,
+    // `chat` keeps file/diff tabs open while the conversation is showing.
+    active: layout.conversationFocused
+      ? "chat"
+      : layout.activeIndex > 0 && active
+        ? encodePanelSegment(active)
+        : undefined,
     fullscreen: layout.fullscreen ? "1" : undefined,
   };
 }

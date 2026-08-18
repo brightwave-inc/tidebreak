@@ -730,6 +730,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::list_workspace_tree),
         )
         .route(
+            "/code/workspaces/{id}/blob",
+            get(routes::code::get_workspace_blob),
+        )
+        .route(
             "/code/workspaces/{id}/diff",
             get(routes::code::get_workspace_diff),
         )
@@ -1424,11 +1428,6 @@ async fn bind_inner(
     // A no-op when `initialize` already derived the slice; the safety net for
     // the paths that return early (a managed profile ignoring its boot file).
     state.mcp.reconcile_plugin_servers().await;
-    // Runs on every boot, fresh installs included: built-in plugins ship
-    // enabled by default, and that default is the consent signal to start
-    // making their dependencies real from the first open. Nothing waits on
-    // it, the pass only spawns.
-    code_execution.spawn_dependency_provisioning();
     let token = state.token.clone();
     let client_executor_token = state.client_executor_token.clone();
     let local_import_token = state.local_import_token.clone();
@@ -1575,6 +1574,10 @@ async fn bind_inner(
             tracing::warn!("code-mode recovery: {}", error.message());
         }
     });
+    // After the accept address exists so first paint is not competing with
+    // pip or host-tool downloads. Built-in plugins still start warming on
+    // the first open; nothing waits on this pass.
+    code_execution.spawn_dependency_provisioning();
     // Publish before workers start answering so an attach racing boot sees a
     // file that matches the bound address. It carries the primary bearer and
     // the narrow local-import capability, never the executor credential. See

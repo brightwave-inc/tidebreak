@@ -1157,6 +1157,17 @@ impl CodeRuntime {
         Ok((listed.files, listed.truncated, listed.stat, turn))
     }
 
+    pub(crate) async fn workspace_blob(
+        &self,
+        workspace_id: WorkspaceId,
+        path: &str,
+    ) -> Result<worktree::WorktreeBlob, ServerError> {
+        let workspace = self.require_live_workspace(workspace_id).await?;
+        worktree::read_worktree_file(std::path::Path::new(&workspace.worktree_path), path)
+            .await
+            .map_err(map_worktree)
+    }
+
     pub(crate) async fn workspace_diff(
         &self,
         workspace_id: WorkspaceId,

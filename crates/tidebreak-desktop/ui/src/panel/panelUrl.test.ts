@@ -35,13 +35,21 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("plugins.documents")).toBeNull();
   });
 
-  // Files and Diff moved into the workspace inspector; links that still name
-  // them as tabs fall back to the conversation alone.
-  it("no longer reads the retired files and diff panels", () => {
+  it("reads worktree file and diff tabs", () => {
+    expect(parsePanelSegment("file.src%2Flib.rs")).toEqual({
+      type: "file",
+      path: "src/lib.rs",
+    });
+    expect(parsePanelSegment("diff.t.turn-1.f.src%2Flib.rs")).toEqual({
+      type: "diff",
+      turnId: "turn-1",
+      path: "src/lib.rs",
+    });
+    expect(parsePanelSegment("diff.f.src%2Flogin.ts")).toEqual({
+      type: "diff",
+      path: "src/login.ts",
+    });
     expect(parsePanelSegment("files")).toBeNull();
-    expect(parsePanelSegment("files.turn-1")).toBeNull();
-    expect(parsePanelSegment("diff")).toBeNull();
-    expect(parsePanelSegment("diff.t.turn-1.f.src%2Flib.rs")).toBeNull();
   });
 
   // The conversation holds its own region now; a URL still naming it as a
@@ -78,6 +86,8 @@ describe("panel URLs", () => {
       { type: "agent", runId: "run-1" },
       { type: "terminal" },
       { type: "terminal", terminalId: "term-1" },
+      { type: "file", path: "src/lib.rs" },
+      { type: "diff", path: "src/lib.rs", turnId: "turn-1" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
     }

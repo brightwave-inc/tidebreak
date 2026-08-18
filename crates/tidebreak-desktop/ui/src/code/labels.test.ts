@@ -172,6 +172,7 @@ describe("gatewayCodeModels", () => {
         source: "Claude Code · model-gateway",
         vendor: "anthropic",
         default: true,
+        reasoning_efforts: [],
       },
     ]);
   });

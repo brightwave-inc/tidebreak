@@ -804,11 +804,11 @@ impl ConfiguredCodeExecutionProvider {
     /// deliberately excluded: their pins change outside this built-in set and
     /// their installs use the ordinary networked path like any other package.
     fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
-        let pin_sets = package_cache_pin_sets(self.skills.iter());
-        if pin_sets.is_empty() {
-            return;
-        }
-        let pin_sets = claim_package_cache_population(&self.package_cache_population, &pin_sets);
+        let pin_sets = take_pending_package_cache_sets(
+            &self.package_cache_population,
+            &cache,
+            package_cache_pin_sets(self.skills.iter()),
+        );
         if pin_sets.is_empty() {
             return;
         }
@@ -859,11 +859,11 @@ impl ConfiguredCodeExecutionProvider {
         let Some(cache) = self.shared_package_cache().await else {
             return;
         };
-        let pin_sets = package_cache_pin_sets(skills.iter());
-        if pin_sets.is_empty() {
-            return;
-        }
-        let pin_sets = claim_package_cache_population(&self.package_cache_population, &pin_sets);
+        let pin_sets = take_pending_package_cache_sets(
+            &self.package_cache_population,
+            &cache,
+            package_cache_pin_sets(skills.iter()),
+        );
         if pin_sets.is_empty() {
             return;
         }
@@ -1597,6 +1597,38 @@ fn package_cache_pin_sets<'a>(
     pin_sets
 }
 
+/// Pin sets that still need a population job: not recorded on disk and not
+/// already in flight or settled in this process.
+pub(super) fn take_pending_package_cache_sets(
+    population: &Mutex<PackageCachePopulationState>,
+    cache: &SharedPackageCache,
+    pin_sets: Vec<Vec<String>>,
+) -> Vec<Vec<String>> {
+    let pending = pending_package_cache_pin_sets(&pin_sets, |pins| cache.has_populated_pins(pins));
+    claim_package_cache_population(population, &pending)
+}
+
+/// Drop sets a previous successful pass already acquired. The remainder is
+/// what one job should download.
+pub(super) fn pending_package_cache_pin_sets(
+    pin_sets: &[Vec<String>],
+    already_populated: impl Fn(&[String]) -> bool,
+) -> Vec<Vec<String>> {
+    pin_sets
+        .iter()
+        .filter(|&pins| !pins.is_empty() && !already_populated(pins))
+        .cloned()
+        .collect()
+}
+
+/// One `pip download` input covering every claimed set.
+pub(super) fn coalesced_population_pins(pin_sets: &[Vec<String>]) -> Vec<String> {
+    let mut pins: Vec<String> = pin_sets.iter().flatten().cloned().collect();
+    pins.sort();
+    pins.dedup();
+    pins
+}
+
 #[derive(Default)]
 pub(super) struct PackageCachePopulationState {
     in_flight: HashSet<Vec<String>>,
@@ -1647,13 +1679,13 @@ pub(super) fn deterministic_package_cache_failure(error: &CodeExecutionError) ->
         || message.contains("package cache pins must be exact")
 }
 
-/// Acquire `pin_sets` into `cache`, one set at a time.
+/// Acquire `pin_sets` into `cache` as one pip job.
 ///
-/// The lock is what keeps two triggers — a boot or plugin-enable provisioning
-/// pass and the exec-time one — from running pip against the same cache
-/// concurrently. Failures are logged and not propagated: the exact attempted
-/// inputs stay latched, while changed pins receive a fresh pass. Conversations
-/// keep their networked install path meanwhile.
+/// The lock keeps a boot or plugin-enable pass from running pip against the
+/// same cache as an exec-time trigger. Sets stay independent in the claim
+/// table so one unresolvable skill cannot latch the baseline; the download
+/// itself is the union, and only a deterministic failure of that union falls
+/// back to one set at a time.
 async fn populate_package_cache(
     lock: &tokio::sync::Mutex<()>,
     population: &Mutex<PackageCachePopulationState>,
@@ -1661,29 +1693,88 @@ async fn populate_package_cache(
     pin_sets: Vec<Vec<String>>,
 ) {
     let _guard = lock.lock().await;
-    for pins in pin_sets {
-        let settled = match cache
-            .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
-            .await
-        {
-            Ok(report) => {
-                tracing::info!(
-                    promoted = report.promoted,
-                    refused = report.refused,
-                    invalidated = report.invalidated,
-                    evicted = report.evicted,
-                    "shared package cache population pass finished"
-                );
+    let pending: Vec<Vec<String>> = pin_sets
+        .into_iter()
+        .filter(|pins| {
+            if cache.has_populated_pins(pins) {
+                finish_package_cache_population(population, pins, true);
+                false
+            } else {
                 true
             }
-            Err(error) => {
-                let deterministic = deterministic_package_cache_failure(&error);
-                tracing::warn!(%error, deterministic, "shared package cache population failed");
-                deterministic
-            }
-        };
-        finish_package_cache_population(population, &pins, settled);
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
     }
+    let union = coalesced_population_pins(&pending);
+    match cache
+        .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &union)
+        .await
+    {
+        Ok(report) => {
+            tracing::info!(
+                sets = pending.len(),
+                pins = union.len(),
+                promoted = report.promoted,
+                refused = report.refused,
+                invalidated = report.invalidated,
+                evicted = report.evicted,
+                "shared package cache population pass finished"
+            );
+            for pins in pending {
+                cache.record_populated_pins(&pins);
+                finish_package_cache_population(population, &pins, true);
+            }
+        }
+        Err(error) if !deterministic_package_cache_failure(&error) => {
+            tracing::warn!(%error, deterministic = false, "shared package cache population failed");
+            for pins in pending {
+                finish_package_cache_population(population, &pins, false);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                deterministic = true,
+                "shared package cache population failed; isolating pin sets"
+            );
+            for pins in pending {
+                populate_one_pin_set(population, cache, pins).await;
+            }
+        }
+    }
+}
+
+async fn populate_one_pin_set(
+    population: &Mutex<PackageCachePopulationState>,
+    cache: &SharedPackageCache,
+    pins: Vec<String>,
+) {
+    let settled = match cache
+        .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
+        .await
+    {
+        Ok(report) => {
+            tracing::info!(
+                sets = 1,
+                pins = pins.len(),
+                promoted = report.promoted,
+                refused = report.refused,
+                invalidated = report.invalidated,
+                evicted = report.evicted,
+                "shared package cache population pass finished"
+            );
+            cache.record_populated_pins(&pins);
+            true
+        }
+        Err(error) => {
+            let deterministic = deterministic_package_cache_failure(&error);
+            tracing::warn!(%error, deterministic, "shared package cache population failed");
+            deterministic
+        }
+    };
+    finish_package_cache_population(population, &pins, settled);
 }
 
 pub(super) fn exec_folder_grant_for_turn(

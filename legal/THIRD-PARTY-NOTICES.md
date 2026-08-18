@@ -26,8 +26,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 827
-- Desktop UI production packages: 500
-- Distinct license texts: 569
+- Desktop UI production packages: 506
+- Distinct license texts: 573
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -5301,6 +5301,18 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/js-sdsl/js-sdsl.git
 - License text: `LICENSE` ([L-2a25454eee4f](#l-2a25454eee4f))
 
+### @monaco-editor/loader 1.7.0
+
+- License: `MIT`
+- Repository: git+https://github.com/suren-atoyan/monaco-loader.git
+- License text: `LICENSE` ([L-b641a8cec557](#l-b641a8cec557))
+
+### @monaco-editor/react 4.7.0
+
+- License: `MIT`
+- Repository: git+https://github.com/suren-atoyan/monaco-react.git
+- License text: `LICENSE` ([L-10d0bd153dbc](#l-10d0bd153dbc))
+
 ### @noble/ciphers 2.2.0
 
 - License: `MIT`
@@ -6781,6 +6793,12 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/react-bootstrap/dom-helpers.git
 - License text: `LICENSE` ([L-1b0a9ba95a67](#l-1b0a9ba95a67))
 
+### dompurify 3.4.8
+
+- License: `(MPL-2.0 OR Apache-2.0)`
+- Repository: git://github.com/cure53/DOMPurify.git
+- License text: `LICENSE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MPL` ([L-4b89d4518bd1](#l-4b89d4518bd1))
+
 ### emoji-regex 8.0.0
 
 - License: `MIT`
@@ -7147,6 +7165,12 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/markdown-table
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
+### marked 14.0.0
+
+- License: `MIT`
+- Repository: git://github.com/markedjs/marked.git
+- License text: `LICENSE.md` ([L-dd923de97698](#l-dd923de97698))
+
 ### marked 18.0.7
 
 - License: `MIT`
@@ -7422,6 +7446,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/micromark/micromark/tree/main/packages/micromark-util-types
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
+
+### monaco-editor 0.56.0
+
+- License: `MIT`
+- Repository: https://github.com/microsoft/monaco-editor
+- License text: `LICENSE` ([L-806766baa900](#l-806766baa900))
 
 ### ms 2.1.3
 
@@ -7740,6 +7770,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: wooorm/space-separated-tokens
 - License text: `license` ([L-d9c32f07344c](#l-d9c32f07344c))
+
+### state-local 1.0.7
+
+- License: `MIT`
+- Repository: git+https://github.com/suren-atoyan/state-local
+- License text: `LICENSE` ([L-4cd7ad2192d1](#l-4cd7ad2192d1))
 
 ### string-width 4.2.3
 
@@ -9488,6 +9524,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### L-10d0bd153dbc
+
+```
+MIT License
+
+Copyright (c) 2018 Suren Atoyan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-11c9f8b2a209
@@ -15037,6 +15099,32 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### L-4cd7ad2192d1
+
+```
+MIT License
+
+Copyright (c) 2020 Suren Atoyan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-4d83b119f786
@@ -23894,6 +23982,32 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### L-806766baa900
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2016 - present Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### L-80cdd90699e4
 
 ```
@@ -30204,6 +30318,32 @@ DEALINGS IN THE SOFTWARE.
 The MIT License (MIT)
 
 Copyright (c) 2016 Rogier Schouten <github@workingcode.ninja>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### L-b641a8cec557
+
+```
+MIT License
+
+Copyright (c) 2021 Suren Atoyan
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

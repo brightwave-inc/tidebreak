@@ -1272,6 +1272,11 @@ cache_read_input_tokens: number,
 cache_creation_input_tokens: number, };
 
 /**
+ * One worktree file's text for the center viewer.
+ */
+export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean, };
+
+/**
  * Bounded unified diff for `GET /code/workspaces/{id}/diff`.
  */
 export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, file?: string, };

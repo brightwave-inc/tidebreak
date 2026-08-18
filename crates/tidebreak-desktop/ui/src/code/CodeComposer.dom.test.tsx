@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -238,4 +245,137 @@ describe("CodeComposer", () => {
     await user.click(screen.getByRole("menuitem", { name: /Opus 4.6/ }));
     expect(onModelChange).toHaveBeenCalledWith("opus");
   });
+
+  it("shows reasoning effort next to a model that accepts levels", () => {
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="codex"
+        model="gpt-5.4"
+        modelOptions={[
+          {
+            id: "gpt-5.4",
+            label: "GPT-5.4",
+            source: "Codex CLI",
+            reasoning_efforts: ["low", "medium", "high"],
+          },
+        ]}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const model = screen.getByRole("button", { name: "Model: GPT-5.4" });
+    const effort = screen.getByRole("button", { name: "Reasoning: Default" });
+    expect(
+      model.compareDocumentPosition(effort) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("hides reasoning effort when the model accepts none", () => {
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="claude_code"
+        model="sonnet"
+        modelOptions={[
+          {
+            id: "sonnet",
+            label: "Sonnet 4.6",
+            source: "Claude Code",
+            reasoning_efforts: [],
+          },
+        ]}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Model: Sonnet 4.6" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reasoning:/ })).toBeNull();
+  });
+
+  it("claims an image paste and leaves a text paste alone", () => {
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const image = pasteOn(box, [
+      new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+        type: "image/png",
+      }),
+    ]);
+    expect(image.defaultPrevented).toBe(true);
+    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Code turns cannot carry images yet. Attached images stay in the composer.",
+      ),
+    ).toBeInTheDocument();
+
+    const text = pasteOn(box, []);
+    expect(text.defaultPrevented).toBe(false);
+  });
+
+  it("opens the image picker from the tools menu", async () => {
+    const user = userEvent.setup();
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type="file"][accept]',
+    );
+    expect(input).not.toBeNull();
+    const click = vi.spyOn(input!, "click");
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    await user.click(screen.getByRole("menuitem", { name: "Attach files" }));
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("sends the text only and keeps attached images in the composer", async () => {
+    const onSend = vi.fn();
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    pasteOn(box, [
+      new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+        type: "image/png",
+      }),
+    ]);
+    fireEvent.change(box, { target: { value: "what is in this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("what is in this"));
+    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+  });
 });
+
+function pasteOn(target: Element, files: File[]) {
+  const event = createEvent.paste(target, {
+    clipboardData: { files },
+  });
+  fireEvent(target, event);
+  return event;
+}
