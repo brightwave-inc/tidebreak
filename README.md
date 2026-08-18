@@ -42,7 +42,10 @@
 Tidebreak is a local-first desktop agent for work that ends in a file, not just
 a chat response. It can read attached documents, work in explicitly connected
 folders, run code in a sandbox, search the web, delegate parallel jobs, and
-publish anything it creates as a versioned output.
+publish anything it creates as a versioned output. An experimental code mode
+turns the same supervision onto software work: it drives coding agents such as
+Claude Code in isolated git worktrees, with native approvals and per-turn
+diffs.
 
 You choose the model route: Anthropic, OpenAI, Google, xAI, OpenRouter, a local
 Ollama daemon, or another OpenAI-compatible endpoint. Conversations can switch
