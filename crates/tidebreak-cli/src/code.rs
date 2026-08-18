@@ -762,14 +762,14 @@ async fn resolve_run_session(
         .ok_or_else(|| AgentError::msg(format!("workspace {workspace} has no active session")))
 }
 
-/// Desktop create default: Allow all when the engine can honor it.
+/// Desktop create default: Ask when the engine can honor it, otherwise the
+/// most autonomous non-bypass mode. Allow is an explicit `--mode`.
 fn default_create_permission_mode(caps: Option<&HarnessCaps>) -> CodePermissionMode {
     match caps {
-        Some(caps) if caps.allow_mode == CapLevel::Supported => CodePermissionMode::Allow,
-        Some(caps) if caps.auto_mode == CapLevel::Supported => CodePermissionMode::Auto,
         Some(caps) if caps.structured_approvals == CapLevel::Supported => CodePermissionMode::Ask,
+        Some(caps) if caps.auto_mode == CapLevel::Supported => CodePermissionMode::Auto,
         Some(caps) if caps.plan_mode == CapLevel::Supported => CodePermissionMode::Plan,
-        _ => CodePermissionMode::Allow,
+        _ => CodePermissionMode::Plan,
     }
 }
 
@@ -2501,7 +2501,7 @@ mod tests {
                 CapLevel::Supported,
                 CapLevel::Supported,
             ))),
-            CodePermissionMode::Allow
+            CodePermissionMode::Ask
         );
         assert_eq!(
             default_create_permission_mode(Some(&caps(
@@ -2528,11 +2528,11 @@ mod tests {
                 CapLevel::Unknown,
                 CapLevel::Unknown,
             ))),
-            CodePermissionMode::Allow
+            CodePermissionMode::Plan
         );
         assert_eq!(
             default_create_permission_mode(None),
-            CodePermissionMode::Allow
+            CodePermissionMode::Plan
         );
     }
 

@@ -1,20 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import type { ApiClient } from "../api/client";
 import type {
   CodePermissionMode,
   HarnessDoctorEntry,
   HarnessKind,
+  ModelInfo,
 } from "../api/types";
 import { CodeComposer } from "./CodeComposer";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
+  gatewayCodeModels,
   harnessUnusableReason,
+  type CodeModelOption,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
+
+const NO_CATALOG_MODELS: ModelInfo[] = [];
 
 /**
  * Create-time harness + permission mode for a workspace with no session.
@@ -30,6 +37,9 @@ export function StartSessionPrompt({
   selectedMode,
   onSelectMode,
   onStart,
+  client,
+  catalogModels = NO_CATALOG_MODELS,
+  defaultModelKey = null,
 }: {
   harnesses: HarnessDoctorEntry[];
   starting: boolean;
@@ -39,9 +49,16 @@ export function StartSessionPrompt({
     harness: HarnessKind,
     mode: CodePermissionMode,
     message: string,
+    model?: string,
   ) => Promise<void> | void;
+  client?: Pick<ApiClient, "listCodeHarnessModels">;
+  catalogModels?: ModelInfo[];
+  defaultModelKey?: string | null;
 }) {
   const [picked, setPicked] = useState<HarnessKind | null>(null);
+  const [model, setModel] = useState<string | undefined>();
+  const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
+  const ensureHarnessModels = useCodeCatalogStore((state) => state.ensureHarnessModels);
   const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
   const selected =
     harnesses.find((entry) => entry.kind === picked && !harnessUnusableReason(entry)) ??
@@ -53,6 +70,40 @@ export function StartSessionPrompt({
       : selected
         ? defaultCreatePermissionMode(selected.caps)
         : "plan";
+
+  const selectedKind = selected?.kind;
+
+  useEffect(() => {
+    if (!selectedKind) {
+      setModelOptions([]);
+      setModel(undefined);
+      return;
+    }
+    const gateway = gatewayCodeModels(
+      catalogModels,
+      selectedKind,
+      defaultModelKey,
+    );
+    if (gateway.length > 0) {
+      setModelOptions(gateway);
+      setModel(gateway.find((option) => option.default)?.id ?? gateway[0]?.id);
+      return;
+    }
+    if (!client) {
+      setModelOptions([]);
+      setModel(undefined);
+      return;
+    }
+    let cancelled = false;
+    void ensureHarnessModels(client, selectedKind).then((listed) => {
+      if (cancelled) return;
+      setModelOptions(listed);
+      setModel(listed.find((option) => option.default)?.id ?? listed[0]?.id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogModels, client, defaultModelKey, ensureHarnessModels, selectedKind]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -77,10 +128,14 @@ export function StartSessionPrompt({
           running={starting}
           permissionMode={mode}
           availableModes={availableModes}
+          harness={selected?.kind}
+          model={model}
+          modelOptions={modelOptions}
+          onModelChange={setModel}
           onModeChange={onSelectMode}
           onSend={async (message) => {
             if (!selected) return;
-            await onStart(selected.kind, mode, message);
+            await onStart(selected.kind, mode, message, model);
           }}
           onInterrupt={() => undefined}
         />

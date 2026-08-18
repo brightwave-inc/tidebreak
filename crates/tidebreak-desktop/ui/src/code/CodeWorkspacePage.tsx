@@ -144,13 +144,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     harness: HarnessKind,
     permissionMode: CodePermissionMode,
     message: string,
+    model?: string,
   ) {
     setStarting(true);
     try {
+      const gateway = gatewayCodeModels(models, harness, defaultModelKey);
+      const listed =
+        gateway.length > 0
+          ? gateway
+          : await catalog.ensureHarnessModels(client, harness);
+      const posted =
+        model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
       const created = await client.createCodeSession(workspaceId, {
         harness,
         permission_mode: permissionMode,
-        model: inferredHarnessModel(harness),
+        model: posted,
       });
       catalog.rememberSession(created);
       setSession(created);
@@ -321,8 +329,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     starting={starting}
                     selectedMode={createMode}
                     onSelectMode={setCreateMode}
-                    onStart={(harness, mode, message) =>
-                      startSession(harness, mode, message)
+                    client={client}
+                    catalogModels={models}
+                    defaultModelKey={defaultModelKey}
+                    onStart={(harness, mode, message, model) =>
+                      startSession(harness, mode, message, model)
                     }
                   />
                 )}
@@ -362,11 +373,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       </div>
     </>
   );
-}
-
-function inferredHarnessModel(kind: HarnessKind): string | undefined {
-  const listed = useCodeCatalogStore.getState().modelsByHarness[kind] ?? [];
-  return listed.find((option) => option.default)?.id ?? listed[0]?.id;
 }
 
 function useCodeShortcutHints(): { terminal: string } {

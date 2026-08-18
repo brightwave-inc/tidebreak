@@ -5,11 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 
 afterEach(() => {
   cleanup();
+  useCodeCatalogStore.getState().reset();
 });
 
 const CAPS = {
@@ -55,7 +57,12 @@ describe("StartSessionPrompt", () => {
     expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onStart).toHaveBeenCalledWith("claude_code", "ask", "list the files");
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      undefined,
+    );
   });
 
   it("falls back to Plan when structured approvals are not supported", async () => {
@@ -79,7 +86,12 @@ describe("StartSessionPrompt", () => {
     expect(screen.getByRole("button", { name: "Permissions: Plan" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onStart).toHaveBeenCalledWith("claude_code", "plan", "list the files");
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "plan",
+      "list the files",
+      undefined,
+    );
   });
 
   it("switches an Auto-only engine to unsupervised Auto and says so", async () => {
@@ -109,7 +121,41 @@ describe("StartSessionPrompt", () => {
     expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onStart).toHaveBeenCalledWith("grok", "auto", "list the files");
+    expect(onStart).toHaveBeenCalledWith("grok", "auto", "list the files", undefined);
+  });
+
+  it("posts the listed default model when starting", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "claude_code" as const,
+        models: [
+          { id: "claude-opus-5", label: "Claude Opus 5", default: true },
+        ],
+      })),
+    };
+    await renderWithRouter(
+      <StartSessionPrompt
+        harnesses={[entry("claude_code", {})]}
+        starting={false}
+        selectedMode={null}
+        onSelectMode={vi.fn()}
+        onStart={onStart}
+        client={client}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      "claude-opus-5",
+    );
   });
 
   it("states Allow all when that mode is chosen", async () => {

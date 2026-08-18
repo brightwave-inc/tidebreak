@@ -44,6 +44,13 @@ type CodeCatalogStore = CodeCatalogState & {
     | "getHarnessDoctor"
     | "listCodeHarnessModels"
   >) => Promise<void>;
+  refreshDoctor: (
+    client: Pick<ApiClient, "refreshHarnessDoctor">,
+  ) => Promise<void>;
+  ensureHarnessModels: (
+    client: Pick<ApiClient, "listCodeHarnessModels">,
+    kind: HarnessKind,
+  ) => Promise<CodeModelOption[]>;
   rememberHarnessModels: (
     kind: HarnessKind,
     models: CodeModelOption[],
@@ -100,6 +107,22 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       );
     }
     await Promise.all(extras);
+  },
+  refreshDoctor: async (client) => {
+    const doctor = await client.refreshHarnessDoctor();
+    set({ doctor });
+  },
+  ensureHarnessModels: async (client, kind) => {
+    const cached = get().modelsByHarness[kind];
+    if (cached && cached.length > 0) return cached;
+    try {
+      const listed = await client.listCodeHarnessModels(kind);
+      const models = harnessCodeModels(listed.models, kind);
+      get().rememberHarnessModels(kind, models);
+      return models;
+    } catch {
+      return [];
+    }
   },
   rememberHarnessModels: (kind, models) => {
     set({
