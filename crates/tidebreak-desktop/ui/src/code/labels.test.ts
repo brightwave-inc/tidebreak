@@ -5,6 +5,7 @@ import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
+  gatewayCodeModels,
   harnessUnusableReason,
 } from "./labels";
 
@@ -18,10 +19,10 @@ function caps(
 }
 
 describe("create-time permission mode", () => {
-  it("defaults to Ask when the doctor reports structured approvals", () => {
-    expect(defaultCreatePermissionMode(caps("supported", "supported", "supported"))).toBe(
-      "ask",
-    );
+  it("defaults to Ask when the engine can honor it, never Allow", () => {
+    expect(
+      defaultCreatePermissionMode(caps("supported", "supported", "supported", "supported")),
+    ).toBe("ask");
     expect(
       createPermissionModes(caps("supported", "supported", "supported", "supported")),
     ).toEqual(["plan", "ask", "auto", "allow"]);
@@ -46,6 +47,9 @@ describe("create-time permission mode", () => {
       ["auto", "allow"],
     );
     expect(defaultCreatePermissionMode(grok)).toBe("auto");
+    expect(
+      defaultCreatePermissionMode(caps("unsupported", "unsupported", "supported", "supported")),
+    ).toBe("auto");
     expect(autoIsUnsupervised(grok)).toBe(true);
     // Supervised Auto rides the approval channel and needs no statement.
     expect(autoIsUnsupervised(caps("supported", "supported", "supported"))).toBe(
@@ -88,5 +92,56 @@ describe("harnessUnusableReason", () => {
         caps: caps("unsupported", "unsupported", "supported"),
       }),
     ).toBeNull();
+  });
+});
+
+describe("gatewayCodeModels", () => {
+  it("keeps only available model-gateway rows", () => {
+    expect(
+      gatewayCodeModels([
+        {
+          key: "model_gateway::claude-opus-5",
+          id: "claude-opus-5",
+          display_name: "Claude Opus 5",
+          provider: "model_gateway",
+          vendor: null,
+          verification: "verified",
+          recommended: true,
+          available: true,
+          context_window: 1,
+          max_output_tokens: 1,
+          input_modalities: ["text"],
+          supports_reasoning: false,
+          supports_tools: true,
+          supports_structured_output: false,
+          reasoning_efforts: [],
+          supports_vision: false,
+        } as never,
+        {
+          key: "anthropic::claude-sonnet-4",
+          id: "claude-sonnet-4",
+          display_name: "Claude Sonnet 4",
+          provider: "anthropic",
+          available: true,
+        } as never,
+        {
+          key: "model_gateway::down",
+          id: "down",
+          display_name: "Down",
+          provider: "model_gateway",
+          available: false,
+        } as never,
+      ],
+        "claude_code",
+        "model_gateway::claude-opus-5",
+      ),
+    ).toEqual([
+      {
+        id: "claude-opus-5",
+        label: "Claude Opus 5",
+        source: "Claude Code · model-gateway",
+        default: true,
+      },
+    ]);
   });
 });

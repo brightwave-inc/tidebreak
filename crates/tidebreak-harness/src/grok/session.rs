@@ -54,17 +54,34 @@ impl GrokSession {
         }
     }
 
-    fn compose_plan(&self, prompt_file: &Path) -> Result<LaunchPlan, HarnessError> {
-        compose_print_plan(
-            &self.spec.binary,
-            &self.spec.extra_argv,
-            &self.spec.worktree,
-            &self.spec.extra_env,
-            self.resume_ref.lock().expect("grok resume").as_deref(),
+    fn compose_plan(
+        &self,
+        prompt_file: &Path,
+        turn_model: Option<&str>,
+    ) -> Result<LaunchPlan, HarnessError> {
+        compose_print_plan(PrintLaunch {
+            binary: &self.spec.binary,
+            extra_argv: &self.spec.extra_argv,
+            cwd: &self.spec.worktree,
+            extra_env: &self.spec.extra_env,
+            resume_ref: self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
-            self.spec.permission_mode,
-        )
+            mode: self.spec.permission_mode,
+            model: turn_model.or(self.spec.model.as_deref()),
+        })
     }
+}
+
+/// Inputs for one Grok print-mode launch.
+pub(crate) struct PrintLaunch<'a> {
+    pub binary: &'a Path,
+    pub extra_argv: &'a [String],
+    pub cwd: &'a Path,
+    pub extra_env: &'a [(String, String)],
+    pub resume_ref: Option<&'a str>,
+    pub prompt_file: &'a Path,
+    pub mode: CodePermissionMode,
+    pub model: Option<&'a str>,
 }
 
 /// 1.0.4 honors Auto and Allow.
@@ -91,36 +108,32 @@ pub(crate) fn refuse_unhonored_mode(mode: CodePermissionMode) -> Result<(), Harn
 
 /// Argv for one print-mode child. The prompt lives in `prompt_file`, never
 /// on argv. Callers must already have refused an unhonored permission mode.
-pub(crate) fn compose_print_plan(
-    binary: &Path,
-    extra_argv: &[String],
-    cwd: &Path,
-    extra_env: &[(String, String)],
-    resume_ref: Option<&str>,
-    prompt_file: &Path,
-    mode: CodePermissionMode,
-) -> Result<LaunchPlan, HarnessError> {
+pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
-        binary.to_string_lossy().into_owned(),
+        launch.binary.to_string_lossy().into_owned(),
         "--prompt-file".into(),
-        prompt_file.to_string_lossy().into_owned(),
+        launch.prompt_file.to_string_lossy().into_owned(),
         "--output-format".into(),
         "streaming-json".into(),
         "--cwd".into(),
-        cwd.to_string_lossy().into_owned(),
+        launch.cwd.to_string_lossy().into_owned(),
         "--no-auto-update".into(),
     ];
-    if mode == CodePermissionMode::Allow {
+    if launch.mode == CodePermissionMode::Allow {
         argv.push("--always-approve".into());
     }
-    if let Some(resume) = resume_ref {
+    if let Some(model) = launch.model {
+        argv.push("--model".into());
+        argv.push(model.to_owned());
+    }
+    if let Some(resume) = launch.resume_ref {
         argv.push("--resume".into());
         argv.push(resume.to_owned());
     }
-    argv.extend(extra_argv.iter().cloned());
-    let mut env = extra_env.to_vec();
+    argv.extend(launch.extra_argv.iter().cloned());
+    let mut env = launch.extra_env.to_vec();
     env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
-    let policy = match mode {
+    let policy = match launch.mode {
         CodePermissionMode::Allow => BypassPolicy::Permitted,
         CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
             BypassPolicy::Forbidden
@@ -128,7 +141,7 @@ pub(crate) fn compose_print_plan(
     };
     let plan = LaunchPlan {
         argv,
-        cwd: cwd.to_path_buf(),
+        cwd: launch.cwd.to_path_buf(),
         env,
     };
     validate_launch_plan_with(&plan, policy)?;
@@ -140,7 +153,7 @@ impl HarnessSession for GrokSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         refuse_unhonored_mode(self.spec.permission_mode)?;
         let prompt_file = write_prompt_file(&input.text)?;
-        let plan = match self.compose_plan(&prompt_file) {
+        let plan = match self.compose_plan(&prompt_file, input.model.as_deref()) {
             Ok(plan) => plan,
             Err(err) => {
                 let _ = std::fs::remove_file(&prompt_file);

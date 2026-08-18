@@ -97,6 +97,10 @@ function makeClient() {
     listCodeRepos: vi.fn(async () => [REPO]),
     listCodeWorkspaces: vi.fn(async () => [WORKSPACE]),
     getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+    listCodeHarnessModels: vi.fn(async () => ({
+      kind: "claude_code" as const,
+      models: [],
+    })),
     getCodeCloneDefaults: vi.fn(async () => ({
       gh_found: false,
       gh_remediation: "gh is not installed.",
@@ -281,10 +285,10 @@ describe("CodeWorkspacePage", () => {
 
     const inspector = screen.getByTestId("code-inspector");
     expect(
-      within(inspector).getByRole("region", { name: "Pull request" }),
+      within(inspector).getByRole("button", { name: "Files" }),
     ).toBeInTheDocument();
     expect(
-      within(inspector).getByRole("region", { name: "Comments" }),
+      within(inspector).getByRole("button", { name: "Pull request" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
@@ -293,77 +297,55 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
     expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
 
-    await user.click(screen.getByRole("button", { name: "Hide review sidebar" }));
-    expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Pull request" }));
+    expect(within(inspector).getByText("No pull request yet")).toBeInTheDocument();
   });
 
-  it("selects and closes the strip tab even when the terminal sits between them", async () => {
+  it("does not promote stale files or diff URL tabs into the conversation strip", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(
       client,
       "/code/w/ws-1?tabs=files,terminal,diff",
     );
-    const user = userEvent.setup();
 
     expect(
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Diff" }));
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({
-        tabs: "files,terminal,diff",
-        active: "diff",
-      }),
-    );
-    expect(screen.getByRole("tab", { name: "Diff" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(await screen.findByRole("heading", { name: "Diff" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Close Diff" }));
-    await waitFor(() =>
-      expect(router.state.location.search).toEqual({ tabs: "files,terminal" }),
-    );
-    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(screen.queryByRole("tab", { name: "Files" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
+    expect(router.state.location.search).toMatchObject({
+      tabs: "files,terminal,diff",
+    });
+
+    const inspector = screen.getByTestId("code-inspector");
+    expect(
+      within(inspector).getByRole("button", { name: "Files" }),
+    ).toBeInTheDocument();
   });
 
-  it("keeps the visible files tab selected when the terminal drawer opens", async () => {
+  it("opens the terminal drawer without creating a files or diff strip tab", async () => {
     const client = makeClient();
-    const { router } = await mountWorkspace(client, "/code/w/ws-1?tabs=files,diff");
+    const { router } = await mountWorkspace(client);
     const user = userEvent.setup();
 
     expect(
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
 
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({
-        tabs: "files,diff,terminal",
-      }),
+      expect(router.state.location.search).toMatchObject({ tabs: "terminal" }),
     );
-    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.getByRole("heading", { name: "Changed files" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Files" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
     expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("code-inspector")).getByRole("button", {
+        name: "Files",
+      }),
+    ).toBeInTheDocument();
   });
 });

@@ -94,6 +94,9 @@ pub struct CodeSessionSnapshot {
     #[ts(optional)]
     pub harness_resume_ref: Option<String>,
     pub permission_mode: CodePermissionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
     pub lifecycle: CodeSessionLifecycle,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -112,6 +115,7 @@ impl From<CodeSession> for CodeSessionSnapshot {
             harness_version: session.harness_version,
             harness_resume_ref: session.harness_resume_ref,
             permission_mode: session.permission_mode,
+            model: session.model,
             lifecycle: session.lifecycle,
             fence_reason: session.fence_reason,
             attention: session.attention,
@@ -196,6 +200,21 @@ pub struct HarnessDoctorEntry {
     pub remediation: String,
     pub stderr: String,
     pub unrecognized_event_count: i64,
+}
+
+/// One model a harness CLI listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct HarnessModel {
+    pub id: String,
+    pub label: String,
+    pub default: bool,
+}
+
+/// `GET /code/harnesses/{kind}/models`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct HarnessModelList {
+    pub kind: HarnessKind,
+    pub models: Vec<HarnessModel>,
 }
 
 /// Body of `POST /code/repos/clone`.
@@ -371,6 +390,8 @@ pub struct CodeActionSnapshot {
 pub struct CreateSessionBody {
     pub harness: HarnessKind,
     pub permission_mode: CodePermissionMode,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Body of `POST /code/sessions/{id}/turns`.
@@ -378,6 +399,8 @@ pub struct CreateSessionBody {
 #[serde(deny_unknown_fields)]
 pub struct SubmitTurnBody {
     pub message: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Body of `POST /code/sessions/{id}/steer`.

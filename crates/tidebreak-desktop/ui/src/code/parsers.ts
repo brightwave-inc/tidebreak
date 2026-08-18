@@ -320,23 +320,58 @@ export function parsePullRequestDigest(
       "number",
       "url",
       "state",
+      "title",
       "checks_summary",
+      "checks",
     ]) ||
     !isFiniteNumber(value.number) ||
     !nonEmpty(value.state) ||
     (value.url !== undefined && value.url !== null && typeof value.url !== "string") ||
+    (value.title !== undefined && value.title !== null && typeof value.title !== "string") ||
     (value.checks_summary !== undefined &&
       value.checks_summary !== null &&
       typeof value.checks_summary !== "string")
   ) {
     return null;
   }
+  const checks = parsePullRequestChecks(value.checks);
+  if (value.checks !== undefined && !checks) return null;
   return {
     number: value.number,
     state: value.state,
     ...(value.url ? { url: value.url } : {}),
+    ...(value.title ? { title: value.title } : {}),
     ...(value.checks_summary ? { checks_summary: value.checks_summary } : {}),
+    ...(checks && checks.length > 0 ? { checks } : {}),
   };
+}
+
+function parsePullRequestChecks(
+  value: unknown,
+): PullRequestDigest["checks"] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const checks: NonNullable<PullRequestDigest["checks"]> = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      typeof item.name !== "string" ||
+      (item.bucket !== "pass" &&
+        item.bucket !== "pending" &&
+        item.bucket !== "fail") ||
+      (item.detail !== undefined && typeof item.detail !== "string") ||
+      (item.url !== undefined && typeof item.url !== "string")
+    ) {
+      return null;
+    }
+    checks.push({
+      name: item.name,
+      bucket: item.bucket,
+      ...(item.detail ? { detail: item.detail } : {}),
+      ...(item.url ? { url: item.url } : {}),
+    });
+  }
+  return checks;
 }
 
 export function parseCodeWorkspacePr(
@@ -453,6 +488,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "harness_version",
       "harness_resume_ref",
       "permission_mode",
+      "model",
       "lifecycle",
       "fence_reason",
       "attention",
@@ -464,6 +500,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalString(value.harness_version) ||
     !optionalString(value.harness_resume_ref) ||
+    !optionalString(value.model) ||
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
@@ -493,6 +530,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     ...(value.harness_resume_ref !== undefined
       ? { harness_resume_ref: value.harness_resume_ref }
       : {}),
+    ...(value.model !== undefined ? { model: value.model } : {}),
     ...(fence_reason ? { fence_reason } : {}),
   };
 }
@@ -805,6 +843,31 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
     truncated: value.truncated,
     ended: value.ended,
   };
+}
+
+export function parseHarnessModelList(
+  value: unknown,
+): { kind: HarnessKind; models: { id: string; label: string; default: boolean }[] } | null {
+  if (
+    !isRecord(value) ||
+    !isMember(value.kind, HARNESS_KINDS) ||
+    !Array.isArray(value.models)
+  ) {
+    return null;
+  }
+  const models: { id: string; label: string; default: boolean }[] = [];
+  for (const item of value.models) {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== "string" ||
+      typeof item.label !== "string" ||
+      typeof item.default !== "boolean"
+    ) {
+      return null;
+    }
+    models.push({ id: item.id, label: item.label, default: item.default });
+  }
+  return { kind: value.kind, models };
 }
 
 export function parseHarnessDoctorReport(
@@ -1450,13 +1513,16 @@ function parsePrState(value: unknown): PullRequestDigest | null {
   ) {
     return null;
   }
+  const checks = parsePullRequestChecks(value.checks);
   return {
     number: value.number,
     state: value.state,
     ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
     ...(typeof value.checks_summary === "string"
       ? { checks_summary: value.checks_summary }
       : {}),
+    ...(checks && checks.length > 0 ? { checks } : {}),
   };
 }
 

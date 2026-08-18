@@ -414,6 +414,7 @@ mod tests {
         generate::collect_from::<crate::routes::code::QueuedCodeTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SequencedCodeEventFrame>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessDoctorReport>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::HarnessModelList>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFiles>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);

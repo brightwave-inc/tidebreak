@@ -30,6 +30,8 @@ pub struct HostEnv {
     pub env: Vec<(OsString, OsString)>,
     /// When set, replace the process environment entirely with `env`.
     pub clear_env: bool,
+    /// App data directory. When set, probe prefers a pinned install under it.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for HostEnv {
@@ -49,6 +51,7 @@ impl HostEnv {
             shell,
             env: Vec::new(),
             clear_env: false,
+            data_dir: None,
         }
     }
 }
@@ -99,6 +102,17 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     if name.is_empty() || name.contains(['/', '\\', '\0', '\'', '"', ';', '|', '&']) {
         return Err(ProbeError::NotFound(name.to_owned()));
     }
+    if let Some(data_dir) = &host.data_dir {
+        if let Some(kind) = kind_for_command(name) {
+            if let Some(binary) = crate::managed_binary(data_dir, kind) {
+                return Ok(pinned_probe_capture(host, binary).await);
+            }
+            // Do not npm-install or fall through to PATH here. Listing
+            // workspaces must not wait on a download. Create-session and
+            // doctor refresh install the pin.
+            return Err(ProbeError::NotFound(name.to_owned()));
+        }
+    }
     let token = sentinel_token();
     let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
     let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
@@ -134,6 +148,50 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
         env: parsed.env,
         stderr: output.stderr,
     })
+}
+
+fn kind_for_command(name: &str) -> Option<tidebreak_core::HarnessKind> {
+    match name {
+        "claude" => Some(tidebreak_core::HarnessKind::ClaudeCode),
+        "codex" => Some(tidebreak_core::HarnessKind::Codex),
+        "opencode" => Some(tidebreak_core::HarnessKind::Opencode),
+        "grok" => Some(tidebreak_core::HarnessKind::Grok),
+        _ => None,
+    }
+}
+
+async fn pinned_probe_capture(host: &HostEnv, binary: PathBuf) -> ProbeCapture {
+    match capture_shell_env(host).await {
+        Ok(env) => ProbeCapture {
+            binary,
+            env,
+            stderr: String::new(),
+        },
+        Err(err) => ProbeCapture {
+            binary,
+            env: process_env_without_tidebreak(),
+            stderr: err.to_string(),
+        },
+    }
+}
+
+fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
+    filter_child_env(std::env::vars_os())
+}
+
+async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
+    let token = sentinel_token();
+    let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
+    let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
+    let end = format!("TIDEBREAK_PROBE_END_{token}");
+    let script = format!(
+        "printf '%s\\n' '{begin}'; printf '%s\\n' '{env_mark}'; \
+         if env -0 >/dev/null 2>&1; then env -0; else env; fi; printf '\\n%s\\n' '{end}'"
+    );
+    let output = run_interactive_login_shell(host, &script).await?;
+    let parsed = parse_sentinel_output(&output.stdout, &begin, &env_mark, &end)
+        .ok_or_else(|| ProbeError::Shell("probe sentinels missing from shell output".into()))?;
+    Ok(parsed.env)
 }
 
 /// Drop Tidebreak-prefixed variables from a captured shell snapshot.
@@ -178,6 +236,267 @@ pub async fn observe_version(binary: &Path) -> Result<String, ProbeError> {
         return Err(ProbeError::Shell("version probe produced no output".into()));
     }
     Ok(line)
+}
+
+/// One model a harness CLI listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedHarnessModel {
+    /// Token the engine accepts on `--model`.
+    pub id: String,
+    /// Display label, when the CLI printed one.
+    pub label: String,
+    /// Whether this row is the engine's current or default model.
+    pub default: bool,
+}
+
+/// Run `<binary> models` (or `args`) and parse one model per remaining line.
+pub async fn list_cli_models(
+    binary: &Path,
+    args: &[&str],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<ListedHarnessModel> {
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let Ok(Ok(output)) = timeout(PROBE_TIMEOUT, command.output()).await else {
+        return Vec::new();
+    };
+    parse_cli_models(&String::from_utf8_lossy(&output.stdout), env)
+}
+
+/// Mark the engine's current model from listing markers or its own env.
+pub fn infer_listed_default(
+    models: &mut [ListedHarnessModel],
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
+    if models.iter().any(|model| model.default) {
+        return;
+    }
+    const KEYS: &[&str] = &[
+        "ANTHROPIC_MODEL",
+        "CLAUDE_MODEL",
+        "OPENAI_MODEL",
+        "CODEX_MODEL",
+        "GROK_MODEL",
+        "XAI_MODEL",
+        "OPENCODE_MODEL",
+    ];
+    let Some(current) = env.iter().find_map(|(key, value)| {
+        let name = key.to_string_lossy();
+        if !KEYS.contains(&name.as_ref()) {
+            return None;
+        }
+        let id = value.to_string_lossy().trim().to_owned();
+        (!id.is_empty()).then_some(id)
+    }) else {
+        return;
+    };
+    if let Some(model) = models.iter_mut().find(|model| {
+        model.id == current || current.ends_with(&model.id) || model.id.ends_with(&current)
+    }) {
+        model.default = true;
+    }
+}
+
+fn parse_cli_models(
+    stdout: &str,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<ListedHarnessModel> {
+    let mut models: Vec<ListedHarnessModel> = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("you are ") || lower.contains("not authenticated") {
+            continue;
+        }
+        if lower.starts_with("available models") {
+            continue;
+        }
+        if let Some(rest) = lower
+            .strip_prefix("default model:")
+            .or_else(|| lower.strip_prefix("current model:"))
+        {
+            if let Some(id) = rest.split_whitespace().next().and_then(normalize_model_id) {
+                push_listed(&mut models, id, true);
+            }
+            continue;
+        }
+        let default = lower.contains("(current)")
+            || lower.contains("(default)")
+            || trimmed.contains('*')
+            || trimmed.contains('✓');
+        let token = trimmed.trim_start_matches(['-', '*', '•', '✓', '►']).trim();
+        let Some(id) = token
+            .split(|ch: char| ch.is_whitespace() || ch == '(' || ch == ',')
+            .next()
+            .and_then(normalize_model_id)
+        else {
+            continue;
+        };
+        push_listed(&mut models, id, default);
+    }
+    infer_listed_default(&mut models, env);
+    models
+}
+
+fn normalize_model_id(token: &str) -> Option<String> {
+    let id = token
+        .trim_matches(|ch: char| matches!(ch, '*' | '-' | '•' | ':' | '"' | '\''))
+        .to_owned();
+    looks_like_model_id(&id).then_some(id)
+}
+
+fn looks_like_model_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 128 {
+        return false;
+    }
+    let lower = id.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "current" | "usage" | "default" | "available" | "model" | "models" | "name"
+    ) {
+        return false;
+    }
+    if matches!(lower.as_str(), "sonnet" | "opus" | "haiku" | "fable") {
+        return true;
+    }
+    let has_digit = id.chars().any(|ch| ch.is_ascii_digit());
+    let has_sep = id.contains('-') || id.contains('/') || id.contains('.');
+    has_digit
+        && has_sep
+        && id.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.' | ':' | '[' | ']')
+        })
+}
+
+fn push_listed(models: &mut Vec<ListedHarnessModel>, id: String, default: bool) {
+    if let Some(existing) = models.iter_mut().find(|model| model.id == id) {
+        existing.default |= default;
+        return;
+    }
+    models.push(ListedHarnessModel {
+        label: display_model_label(&id),
+        id,
+        default,
+    });
+}
+
+/// Human label from a CLI id: `claude-sonnet-5` → `Claude Sonnet 5`.
+pub fn display_model_label(id: &str) -> String {
+    let leaf = id.rsplit('/').next().unwrap_or(id);
+    leaf.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            if part.eq_ignore_ascii_case("gpt") {
+                "GPT".to_owned()
+            } else {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Prefer gateway ids when the listing includes any.
+pub fn prefer_gateway_models(models: Vec<ListedHarnessModel>) -> Vec<ListedHarnessModel> {
+    if models
+        .iter()
+        .any(|model| model.id.contains("model-gateway"))
+    {
+        return models
+            .into_iter()
+            .filter(|model| model.id.contains("model-gateway"))
+            .collect();
+    }
+    models
+}
+
+#[cfg(test)]
+mod list_cli_models_tests {
+    use super::parse_cli_models;
+
+    #[test]
+    fn skips_login_headers_and_dedupes() {
+        let listed = parse_cli_models(
+            "You are logged in with grok.com.\n\
+             grok-4.5\n\
+             grok-4\n\
+             grok-4.5\n",
+            &[],
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["grok-4.5", "grok-4"]
+        );
+        assert!(!listed.iter().any(|model| model.default));
+    }
+
+    #[test]
+    fn marks_the_current_row_and_env_fallback() {
+        let marked = parse_cli_models("* sonnet (current)\nopus\nhaiku\n", &[]);
+        assert_eq!(
+            marked
+                .iter()
+                .find(|model| model.default)
+                .map(|model| model.id.as_str()),
+            Some("sonnet")
+        );
+        let from_env = parse_cli_models(
+            "grok-4.5\ngrok-4\n",
+            &[(
+                std::ffi::OsString::from("GROK_MODEL"),
+                std::ffi::OsString::from("grok-4"),
+            )],
+        );
+        assert_eq!(
+            from_env
+                .iter()
+                .find(|model| model.default)
+                .map(|model| model.id.as_str()),
+            Some("grok-4")
+        );
+    }
+
+    #[test]
+    fn ignores_tui_chrome_and_keeps_real_ids() {
+        let listed = parse_cli_models(
+            "Current\n\
+             Usage\n\
+             Default model: model-gateway-model-gateway/grok-4.6\n\
+             Available models:\n\
+               - grok-4.5\n\
+               * model-gateway-model-gateway/grok-4.6 (default)\n",
+            &[],
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["model-gateway-model-gateway/grok-4.6", "grok-4.5",]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .find(|model| model.id.ends_with("grok-4.6"))
+                .map(|model| (model.label.as_str(), model.default)),
+            Some(("Grok 4.6", true))
+        );
+    }
 }
 
 struct ShellOutput {
@@ -330,6 +649,7 @@ eval "$cmd"
             shell: PathBuf::from("/bin/sh"),
             env: vec![("PATH".into(), dir.as_os_str().to_owned())],
             clear_env: true,
+            data_dir: None,
         }
     }
 
@@ -411,6 +731,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
                 ("LC_ALL".into(), "C".into()),
             ],
             clear_env: true,
+            data_dir: None,
         };
         match resolve_binary(&host, "claude").await {
             Err(ProbeError::RelativePath { name, path })
@@ -433,6 +754,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             shell,
             env: vec![("PATH".into(), dir.path().as_os_str().to_owned())],
             clear_env: true,
+            data_dir: None,
         };
         let resolved = resolve_binary(&host, "claude").await.unwrap();
         assert_eq!(resolved, bin);
@@ -483,6 +805,7 @@ eval "$cmd"
             },
             env: Vec::new(),
             clear_env: true,
+            data_dir: None,
         };
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, bin);
@@ -526,5 +849,30 @@ eval "$cmd"
         write_exec(&bin, "#!/bin/sh\necho\necho '2.1.233 (Claude Code)'\n");
         let version = observe_version(&bin).await.unwrap();
         assert!(version.contains("2.1.233"));
+    }
+
+    #[tokio::test]
+    async fn pin_probe_falls_back_to_process_env_when_the_shell_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("claude");
+        write_exec(&binary, "#!/bin/sh\necho 2.1.234\n");
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+        };
+        let capture = pinned_probe_capture(&host, binary.clone()).await;
+        assert_eq!(capture.binary, binary);
+        assert!(!capture.stderr.is_empty());
+        assert!(capture
+            .env
+            .iter()
+            .any(|(key, _)| key == "PATH" || key == "HOME"));
+        assert!(capture.env.iter().all(|(key, _)| {
+            !key.to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("TIDEBREAK_")
+        }));
     }
 }

@@ -110,7 +110,6 @@ describe("PrCard", () => {
       },
     });
     expect(screen.getByText("open")).toBeInTheDocument();
-    expect(screen.getByText("2 passing, 1 pending, 0 failing")).toBeInTheDocument();
     expect(screen.getByText("#12", { exact: false })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
   });

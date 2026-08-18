@@ -107,6 +107,7 @@ pub(super) fn code_session_table() -> TableCreateStatement {
                 .text()
                 .not_null(),
         )
+        .col(ColumnDef::new(CodeSession::Model).text())
         .col(ColumnDef::new(CodeSession::Lifecycle).text().not_null())
         .col(ColumnDef::new(CodeSession::FenceReason).json_binary())
         .col(ColumnDef::new(CodeSession::ChildPid).big_integer())

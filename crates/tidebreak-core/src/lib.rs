@@ -146,9 +146,10 @@ pub use code::{
     CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
     CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspace,
     CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
-    HarnessNoticeLevel, HarnessTier, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent,
-    ToolDetail, ToolOutcome, WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    HarnessNoticeLevel, HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestDigest,
+    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
+    MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
+    MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

@@ -97,8 +97,8 @@ pub(crate) fn compose_serve_plan(
 /// (disallows edit tools). Ask parks bash/edit. Auto allows workspace
 /// edits and still asks for bash.
 #[must_use]
-pub(crate) fn session_create_body(mode: CodePermissionMode) -> Value {
-    match mode {
+pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>) -> Value {
+    let mut body = match mode {
         CodePermissionMode::Plan => json!({ "agent": "plan" }),
         CodePermissionMode::Ask => json!({
             "agent": "build",
@@ -124,7 +124,17 @@ pub(crate) fn session_create_body(mode: CodePermissionMode) -> Value {
                 {"permission": "read", "pattern": "*", "action": "allow"}
             ]
         }),
+    };
+    if let Some(model) = model {
+        body["model"] = match model.split_once('/') {
+            Some((provider, model_id)) => json!({
+                "providerID": provider,
+                "modelID": model_id,
+            }),
+            None => json!({ "modelID": model }),
+        };
     }
+    body
 }
 
 fn pick_loopback_port() -> Result<u16, HarnessError> {
@@ -277,7 +287,7 @@ impl OpencodeSession {
         }
         let path = "/session";
         let url = format!("{}{path}", self.base_url);
-        let body = session_create_body(self.spec.permission_mode);
+        let body = session_create_body(self.spec.permission_mode, self.spec.model.as_deref());
         let query = self.directory_query();
         let (status, parsed) = self
             .http("POST", path, &url, Some(body), Some(query.as_slice()))
@@ -631,23 +641,23 @@ mod tests {
     #[test]
     fn permission_mode_mapping_matches_0033() {
         assert_eq!(
-            session_create_body(CodePermissionMode::Plan)["agent"],
+            session_create_body(CodePermissionMode::Plan, None)["agent"],
             "plan"
         );
         assert_eq!(
-            session_create_body(CodePermissionMode::Ask)["agent"],
+            session_create_body(CodePermissionMode::Ask, None)["agent"],
             "build"
         );
         assert_eq!(
-            session_create_body(CodePermissionMode::Auto)["agent"],
+            session_create_body(CodePermissionMode::Auto, None)["agent"],
             "build"
         );
-        let ask = session_create_body(CodePermissionMode::Ask);
+        let ask = session_create_body(CodePermissionMode::Ask, None);
         let rules = ask["permission"].as_array().unwrap();
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let auto = session_create_body(CodePermissionMode::Auto);
+        let auto = session_create_body(CodePermissionMode::Auto, None);
         let rules = auto["permission"].as_array().unwrap();
         assert!(rules
             .iter()
@@ -655,7 +665,7 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let allow = session_create_body(CodePermissionMode::Allow);
+        let allow = session_create_body(CodePermissionMode::Allow, None);
         assert_eq!(allow["agent"], "build");
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));

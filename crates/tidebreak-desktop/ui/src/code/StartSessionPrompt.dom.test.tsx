@@ -5,11 +5,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 
 afterEach(() => {
   cleanup();
+  useCodeCatalogStore.getState().reset();
 });
 
 const CAPS = {
@@ -52,12 +54,15 @@ describe("StartSessionPrompt", () => {
         onStart={onStart}
       />,
     );
-    expect(screen.getByRole("button", { name: "Ask" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
+    expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      undefined,
     );
-    await user.click(screen.getByRole("button", { name: "Start session" }));
-    expect(onStart).toHaveBeenCalledWith("claude_code", "ask");
   });
 
   it("falls back to Plan when structured approvals are not supported", async () => {
@@ -69,6 +74,7 @@ describe("StartSessionPrompt", () => {
           entry("claude_code", {
             structured_approvals: "unsupported",
             auto_mode: "unsupported",
+            allow_mode: "unsupported",
           }),
         ]}
         starting={false}
@@ -77,13 +83,15 @@ describe("StartSessionPrompt", () => {
         onStart={onStart}
       />,
     );
-    expect(screen.getByRole("button", { name: /Ask/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Plan" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
+    expect(screen.getByRole("button", { name: "Permissions: Plan" })).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "plan",
+      "list the files",
+      undefined,
     );
-    await user.click(screen.getByRole("button", { name: "Start session" }));
-    expect(onStart).toHaveBeenCalledWith("claude_code", "plan");
   });
 
   it("switches an Auto-only engine to unsupervised Auto and says so", async () => {
@@ -109,13 +117,45 @@ describe("StartSessionPrompt", () => {
     await user.click(screen.getByRole("combobox", { name: "Harness" }));
     await user.click(screen.getByRole("option", { name: /Grok CLI/ }));
     // The selected Ask is not honorable here; the mode follows the engine.
-    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("button", { name: "Permissions: Auto" })).toBeInTheDocument();
     expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Start session" }));
-    expect(onStart).toHaveBeenCalledWith("grok", "auto");
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith("grok", "auto", "list the files", undefined);
+  });
+
+  it("posts the listed default model when starting", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "claude_code" as const,
+        models: [
+          { id: "claude-opus-5", label: "Claude Opus 5", default: true },
+        ],
+      })),
+    };
+    await renderWithRouter(
+      <StartSessionPrompt
+        harnesses={[entry("claude_code", {})]}
+        starting={false}
+        selectedMode={null}
+        onSelectMode={vi.fn()}
+        onStart={onStart}
+        client={client}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      "claude-opus-5",
+    );
   });
 
   it("states Allow all when that mode is chosen", async () => {
@@ -130,12 +170,10 @@ describe("StartSessionPrompt", () => {
         onStart={vi.fn()}
       />,
     );
-    expect(screen.getByRole("button", { name: "Allow all" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("button", { name: "Permissions: Allow all" })).toBeInTheDocument();
     expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Ask" }));
+    await user.click(screen.getByRole("button", { name: "Permissions: Allow all" }));
+    await user.click(screen.getByRole("menuitem", { name: /Ask/ }));
     expect(onSelectMode).toHaveBeenCalledWith("ask");
   });
 });

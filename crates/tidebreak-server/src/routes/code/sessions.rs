@@ -20,7 +20,7 @@ pub async fn create_session(
     Json(body): Json<CreateSessionBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let session = require_code(&state)?
-        .create_session(workspace_id, body.harness, body.permission_mode)
+        .create_session(workspace_id, body.harness, body.permission_mode, body.model)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -57,7 +57,7 @@ pub async fn submit_turn(
     // while the engine works, not after.
     crate::code::titling::spawn_for_turn(&state, id, message.clone());
     match require_code(&state)?
-        .submit_turn(id, message.clone())
+        .submit_turn(id, message.clone(), body.model)
         .await?
     {
         SubmitTurnOutcome::Ran(turn) => {

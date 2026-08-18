@@ -224,12 +224,8 @@ purpose:
   existence would sap the pressure to keep adapters honest, and it forfeits
   approvals, resume, and durable history. Reconsider only if a harness's
   machine-readable surface proves genuinely unusable over time.
-- **Bundled or pinned harness binaries.** Tidebreak resolves the user's own
-  installed CLIs and never brokers their credentials
-  ([record 34](decisions/0034-harness-discovery-credentials.md)). If version
-  drift becomes a recurring support burden, the pinned-runtime install
-  pattern already used for the managed Node runtime is the recorded escape
-  hatch.
+- **Windows harness pins.** macOS is the supported install path
+  ([record 41](decisions/0041-pinned-harness-binaries.md)).
 - **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
   and power turn-scoped diffs; the surface that restores a workspace to an
   earlier checkpoint waits until review flows have settled.

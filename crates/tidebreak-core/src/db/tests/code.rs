@@ -68,6 +68,7 @@ async fn seeded_session() -> (
             harness_version: Some("2.1.233".into()),
             harness_resume_ref: None,
             permission_mode: CodePermissionMode::Ask,
+            model: None,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

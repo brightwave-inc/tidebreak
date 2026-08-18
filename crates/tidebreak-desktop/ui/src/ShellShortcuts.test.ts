@@ -102,6 +102,18 @@ describe("shell shortcut resolution", () => {
         context({ mode: "chat" }),
       ),
     ).toBeNull();
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "w", code: "KeyW" }),
+        context({ mode: "chat" }),
+      ),
+    ).toBeNull();
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "w", code: "KeyW" }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("close-tab");
     // Unscoped shortcuts are the frame's and act the same on both sides.
     expect(
       resolveShellShortcut(keyEvent({}), context({ mode: "code" }))?.id,

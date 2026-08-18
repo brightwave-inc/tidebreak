@@ -141,7 +141,7 @@ fn login_status_from_models(stdout: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::grok::parse::GrokStreamParser;
-    use crate::grok::session::{compose_print_plan, refuse_unhonored_mode};
+    use crate::grok::session::{compose_print_plan, refuse_unhonored_mode, PrintLaunch};
     use crate::HarnessEvent;
     use std::path::{Path, PathBuf};
     use tidebreak_core::CodePermissionMode;
@@ -295,15 +295,16 @@ mod tests {
 
     #[test]
     fn auto_launch_plan_never_includes_bypass_flags() {
-        let plan = compose_print_plan(
-            Path::new("/usr/bin/grok"),
-            &[],
-            Path::new("/workspace"),
-            &[],
-            None,
-            Path::new("/tmp/prompt.txt"),
-            CodePermissionMode::Auto,
-        )
+        let plan = compose_print_plan(PrintLaunch {
+            binary: Path::new("/usr/bin/grok"),
+            extra_argv: &[],
+            cwd: Path::new("/workspace"),
+            extra_env: &[],
+            resume_ref: None,
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            mode: CodePermissionMode::Auto,
+            model: None,
+        })
         .unwrap();
         assert!(!plan.argv.iter().any(|arg| {
             arg.contains("always-approve")
@@ -325,15 +326,16 @@ mod tests {
 
     #[test]
     fn allow_launch_plan_composes_always_approve() {
-        let plan = compose_print_plan(
-            Path::new("/usr/bin/grok"),
-            &[],
-            Path::new("/workspace"),
-            &[],
-            None,
-            Path::new("/tmp/prompt.txt"),
-            CodePermissionMode::Allow,
-        )
+        let plan = compose_print_plan(PrintLaunch {
+            binary: Path::new("/usr/bin/grok"),
+            extra_argv: &[],
+            cwd: Path::new("/workspace"),
+            extra_env: &[],
+            resume_ref: None,
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            mode: CodePermissionMode::Allow,
+            model: None,
+        })
         .unwrap();
         assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));
     }

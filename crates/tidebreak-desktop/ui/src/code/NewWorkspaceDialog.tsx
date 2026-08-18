@@ -26,16 +26,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
+  gatewayCodeModels,
   harnessUnusableReason,
+  PERMISSION_MODE_LABELS,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
+  type CodeModelOption,
 } from "./labels";
 
 /**
@@ -46,7 +48,8 @@ import {
  * are named. Typing a title here is the way to opt out of that.
  *
  * Permission mode defaults to Ask when the doctor reports structured
- * approvals, otherwise Plan — create always has a mode the harness can honor.
+ * approvals, otherwise the most autonomous non-bypass mode the harness can
+ * honor. Allow is never the create default.
  * The harness picker lists every doctor entry. Ready rows are selectable;
  * unusable ones stay visible and dimmed.
  */
@@ -63,10 +66,13 @@ export function NewWorkspaceDialog({
   defaultRepoId?: string;
 }) {
   const navigate = useNavigate();
-  const { client } = useApp();
+  const { client, models, defaultModelKey } = useApp();
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
   const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
+  const ensureHarnessModels = useCodeCatalogStore(
+    (state) => state.ensureHarnessModels,
+  );
   const [repoId, setRepoId] = useState(defaultRepoId ?? repos[0]?.id ?? "");
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
@@ -75,6 +81,8 @@ export function NewWorkspaceDialog({
     null,
   );
   const [creating, setCreating] = useState(false);
+  const [model, setModel] = useState<string | undefined>();
+  const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
 
   const allHarnesses = doctor?.harnesses ?? [];
   const readyHarnesses = allHarnesses.filter(
@@ -89,6 +97,7 @@ export function NewWorkspaceDialog({
     setBaseRef(selected?.default_base_ref ?? "");
     setHarness(readyHarnesses[0]?.kind ?? "claude_code");
     setPermissionMode(null);
+    setModel(undefined);
     // Reset against the dialog opening, not against doctor refreshes mid-open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, defaultRepoId, repos]);
@@ -107,6 +116,33 @@ export function NewWorkspaceDialog({
   const canCreate =
     Boolean(repoId && selectedRepo && selectedHarness) && !creating;
 
+  useEffect(() => {
+    if (!open || !harness) return;
+    const gateway = gatewayCodeModels(models, harness, defaultModelKey);
+    if (gateway.length > 0) {
+      setModelOptions(gateway);
+      setModel((current) =>
+        current && gateway.some((option) => option.id === current)
+          ? current
+          : (gateway.find((option) => option.default)?.id ?? gateway[0]?.id),
+      );
+      return;
+    }
+    let cancelled = false;
+    void ensureHarnessModels(client, harness).then((listed) => {
+      if (cancelled) return;
+      setModelOptions(listed);
+      setModel((current) =>
+        current && listed.some((option) => option.id === current)
+          ? current
+          : (listed.find((option) => option.default)?.id ?? listed[0]?.id),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, defaultModelKey, ensureHarnessModels, harness, models, open]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!canCreate) return;
@@ -118,9 +154,17 @@ export function NewWorkspaceDialog({
         base_ref: baseRef.trim() || undefined,
       });
       upsertWorkspace(workspace);
+      const gateway = gatewayCodeModels(models, harness, defaultModelKey);
+      const listed =
+        gateway.length > 0
+          ? gateway
+          : await ensureHarnessModels(client, harness);
+      const posted =
+        model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
       const session = await client.createCodeSession(workspace.id, {
         harness,
         permission_mode: postedMode,
+        model: posted,
       });
       rememberSession(session);
       onOpenChange(false);
@@ -197,21 +241,59 @@ export function NewWorkspaceDialog({
             />
           </div>
           <div className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Model</span>
+            <Select
+              value={model}
+              onValueChange={setModel}
+              disabled={creating || modelOptions.length === 0}
+            >
+              <SelectTrigger aria-label="Model">
+                <SelectValue
+                  placeholder={
+                    modelOptions.length === 0
+                      ? "Loading models…"
+                      : "Harness default"
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent scrollButtons={false}>
+                {modelOptions.map((option) => (
+                  <SelectItem key={option.id} value={option.id}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>
-            <PermissionModePicker
+            <Select
               value={postedMode}
-              availableModes={availableModes}
-              onChange={setPermissionMode}
-            />
+              onValueChange={(next) =>
+                setPermissionMode(next as CodePermissionMode)
+              }
+              disabled={creating || availableModes.length === 0}
+            >
+              <SelectTrigger aria-label="Permission mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent scrollButtons={false}>
+                {availableModes.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {PERMISSION_MODE_LABELS[mode]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {postedMode === "auto" &&
               selectedHarness &&
               autoIsUnsupervised(selectedHarness.caps) && (
-                <p className="text-warning-foreground text-xs">
+                <p className="text-muted-foreground text-xs">
                   {UNSUPERVISED_AUTO_NOTE}
                 </p>
               )}
             {postedMode === "allow" && (
-              <p className="text-warning-foreground text-xs">{ALLOW_ALL_NOTE}</p>
+              <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>
             )}
           </div>
           <DialogFooter>

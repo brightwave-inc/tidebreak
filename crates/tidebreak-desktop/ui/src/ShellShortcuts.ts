@@ -16,6 +16,7 @@ export type ShellShortcutAction =
   | "code-new-workspace"
   | "toggle-code-review"
   | "toggle-code-terminal"
+  | "close-tab"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
@@ -167,6 +168,15 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyJ"],
     mod: true,
     description: "Show or hide the terminal",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "close-tab",
+    codes: ["KeyW"],
+    mod: true,
+    description: "Close the current tab",
     group: "Code",
     scope: "code",
     allowInEditable: true,
@@ -393,7 +403,10 @@ function hasOpenModalDialog(doc: Document): boolean {
   );
 }
 
-export type ShellShortcutHandlers = Record<ShellShortcutAction, () => void>;
+export type ShellShortcutHandlers = Record<
+  ShellShortcutAction,
+  () => boolean | void
+>;
 
 /**
  * Bind the shell shortcuts to a single window listener for the app's lifetime.
@@ -427,8 +440,9 @@ export function useShellShortcuts(
         mode: modeRef.current(),
       });
       if (!def) return;
+      const handled = handlersRef.current[def.id]();
+      if (handled === false) return;
       event.preventDefault();
-      handlersRef.current[def.id]();
     }
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);

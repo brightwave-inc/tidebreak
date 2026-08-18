@@ -132,6 +132,7 @@ import {
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspacePr,
+  parseHarnessModelList,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
   parseCodeUpdateNotice,
@@ -1754,6 +1755,20 @@ export class ApiClient {
     );
   }
 
+  async listCodeHarnessModels(
+    kind: HarnessKind,
+  ): Promise<{ kind: HarnessKind; models: { id: string; label: string; default: boolean }[] }> {
+    return requireParsed(
+      parseHarnessModelList(
+        await this.json(
+          `/code/harnesses/${encodeURIComponent(kind)}/models`,
+          { headers: this.headers() },
+        ),
+      ),
+      "harness models",
+    );
+  }
+
   async refreshHarnessDoctor(): Promise<HarnessDoctorReport> {
     return requireParsed(
       parseHarnessDoctorReport(
@@ -1836,7 +1851,11 @@ export class ApiClient {
 
   async createCodeSession(
     workspaceId: string,
-    body: { harness: HarnessKind; permission_mode: CodePermissionMode },
+    body: {
+      harness: HarnessKind;
+      permission_mode: CodePermissionMode;
+      model?: string;
+    },
   ): Promise<CodeSessionSnapshot> {
     return requireParsed(
       parseCodeSession(
@@ -1872,6 +1891,7 @@ export class ApiClient {
   async submitCodeTurn(
     sessionId: string,
     message: string,
+    model?: string,
   ): Promise<CodeTurnSubmission> {
     return requireParsed(
       parseCodeTurnSubmission(
@@ -1880,7 +1900,10 @@ export class ApiClient {
           {
             method: "POST",
             headers: this.headers(true),
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({
+              message,
+              ...(model ? { model } : {}),
+            }),
           },
         ),
       ),

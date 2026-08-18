@@ -103,8 +103,12 @@ describe("shell shortcut delivery", () => {
     render(
       <Harness
         handlers={noopHandlers({
-          "toggle-code-terminal": () => fired.push("toggle-code-terminal"),
-          "toggle-code-review": () => fired.push("toggle-code-review"),
+          "toggle-code-terminal": () => {
+            fired.push("toggle-code-terminal");
+          },
+          "toggle-code-review": () => {
+            fired.push("toggle-code-review");
+          },
         })}
       />,
     );

@@ -334,6 +334,35 @@ pub struct QuickAction {
     pub auto_run_on_create: bool,
 }
 
+/// One CI check on a pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestCheck {
+    /// Check name as the host reports it.
+    pub name: String,
+    /// pass, pending, or fail.
+    pub bucket: PullRequestCheckBucket,
+    /// Host status phrase, when distinct from the bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    /// Host URL for this check, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+}
+
+/// Coarse CI bucket used to color a check row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestCheckBucket {
+    /// The check passed.
+    Pass,
+    /// The check is queued or still running.
+    Pending,
+    /// The check failed.
+    Fail,
+}
+
 /// Bounded pull-request digest stored on a workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct PullRequestDigest {
@@ -344,9 +373,17 @@ pub struct PullRequestDigest {
     pub url: Option<String>,
     /// Host state token (open, merged, closed, …).
     pub state: String,
+    /// PR title, when the host reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
     /// One-line checks summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks_summary: Option<String>,
+    /// Individual checks, when the host reported any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub checks: Option<Vec<PullRequestCheck>>,
 }
 
 /// Best-effort classification of what an approval is asking.
@@ -441,6 +478,8 @@ pub struct CodeSession {
     pub harness_resume_ref: Option<String>,
     /// Permission mode for this session.
     pub permission_mode: CodePermissionMode,
+    /// Engine model id for this session, when the user chose one.
+    pub model: Option<String>,
     /// Session lifecycle.
     pub lifecycle: CodeSessionLifecycle,
     /// Why the session is fenced, when it is.

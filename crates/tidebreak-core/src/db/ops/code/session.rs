@@ -21,6 +21,7 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         harness_version: Set(session.harness_version.clone()),
         harness_resume_ref: Set(session.harness_resume_ref.clone()),
         permission_mode: Set(session.permission_mode.as_str().to_owned()),
+        model: Set(session.model.clone()),
         lifecycle: Set(session.lifecycle.as_str().to_owned()),
         fence_reason: Set(match &session.fence_reason {
             Some(reason) => Some(serde_json::to_value(reason)?),
@@ -174,6 +175,10 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
             sea_orm::sea_query::Expr::value(session.permission_mode.as_str().to_owned()),
         )
         .col_expr(
+            entities::code_session::Column::Model,
+            sea_orm::sea_query::Expr::value(session.model.clone()),
+        )
+        .col_expr(
             entities::code_session::Column::Lifecycle,
             sea_orm::sea_query::Expr::value(session.lifecycle.as_str().to_owned()),
         )
@@ -267,6 +272,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         harness_version: row.harness_version,
         harness_resume_ref: row.harness_resume_ref,
         permission_mode,
+        model: row.model,
         lifecycle,
         fence_reason,
         child_pid: row.child_pid,

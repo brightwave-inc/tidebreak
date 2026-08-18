@@ -214,14 +214,15 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
             ("thread/resume", json!({ "threadId": resume }))
         } else {
             let (sandbox, approval) = thread_start_policy(session.spec.permission_mode);
-            (
-                "thread/start",
-                json!({
-                    "cwd": session.spec.worktree,
-                    "approvalPolicy": approval,
-                    "sandbox": sandbox,
-                }),
-            )
+            let mut params = json!({
+                "cwd": session.spec.worktree,
+                "approvalPolicy": approval,
+                "sandbox": sandbox,
+            });
+            if let Some(model) = &session.spec.model {
+                params["model"] = json!(model);
+            }
+            ("thread/start", params)
         };
     let thread_req = session.request(method, params).await?;
     session.read_until_rpc(thread_req).await?;
@@ -684,6 +685,7 @@ done
         SessionSpec {
             worktree: dir.to_path_buf(),
             permission_mode: CodePermissionMode::Auto,
+            model: None,
             resume_ref,
             extra_argv: Vec::new(),
             extra_env: vec![(
@@ -727,6 +729,7 @@ done
         session
             .run_turn(TurnInput {
                 text: "first turn".into(),
+                model: None,
             })
             .await
             .unwrap();
