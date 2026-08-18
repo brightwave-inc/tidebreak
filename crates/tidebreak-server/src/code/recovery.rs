@@ -1,10 +1,11 @@
 //! Boot recovery for sessions recorded as running.
 //!
-//! A recorded child pid is probed with signal 0 only. Dead → the open turn
-//! closes as Interrupted (journaled) and the session is Idle. Alive → the
-//! session is fenced until an explicit reap. A pid that was not recorded at
-//! spawn is never signaled.
+//! A recorded child pid is checked with the platform's non-mutating existence
+//! probe. Dead → the open turn closes as Interrupted (journaled) and the
+//! session is Idle. Alive → the session is fenced until an explicit reap. A
+//! pid that was not recorded at spawn is never probed or signaled.
 
+#[cfg(unix)]
 use std::io::ErrorKind;
 
 use chrono::Utc;
@@ -191,10 +192,12 @@ async fn interrupt_open_turn(
     Ok(())
 }
 
-/// Signal-0 probe of a pid that was recorded at spawn.
+/// Existence probe of a pid that was recorded at spawn.
 ///
-/// `EPERM` counts as alive. This function is the only place recovery sends a
-/// signal, and it sends only signal 0 (existence check).
+/// Unix uses signal 0 and counts `EPERM` as alive. Windows opens the process
+/// for limited query access and reads its exit code; access denial and other
+/// ambiguous failures count as alive so recovery fences rather than risks
+/// reusing an orphaned session.
 pub(crate) fn probe_recorded_pid(pid: i64) -> PidLiveness {
     if pid <= 0 {
         return PidLiveness::Dead;
@@ -225,7 +228,44 @@ pub(crate) fn probe_recorded_pid(pid: i64) -> PidLiveness {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let Ok(pid) = u32::try_from(pid) else {
+            return PidLiveness::Dead;
+        };
+        // SAFETY: `pid` is a recorded numeric process id. The returned handle
+        // is checked for null and closed on every successful open.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return match std::io::Error::last_os_error().raw_os_error() {
+                Some(code) if code as u32 == ERROR_ACCESS_DENIED => PidLiveness::Alive,
+                Some(code) if code as u32 == ERROR_INVALID_PARAMETER => PidLiveness::Dead,
+                _ => PidLiveness::Alive,
+            };
+        }
+        let mut exit_code = 0_u32;
+        // SAFETY: `process` is a live handle returned by `OpenProcess`, and
+        // `exit_code` points to writable storage for the duration of the call.
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        // SAFETY: ownership of the handle is local to this function and this
+        // is its single close, after the final query.
+        let _ = unsafe { CloseHandle(process) };
+        if queried == 0 {
+            PidLiveness::Alive
+        } else if exit_code == STILL_ACTIVE as u32 {
+            PidLiveness::Alive
+        } else {
+            PidLiveness::Dead
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         PidLiveness::Alive
@@ -551,11 +591,31 @@ mod tests {
     }
 
     #[test]
-    fn probe_never_kills_and_treats_eperm_as_alive() {
-        // Our own pid is alive; signal 0 must not terminate us.
+    fn probe_recognizes_self_and_rejects_invalid_pids() {
+        // Our own pid is alive; the existence probe must not terminate us.
         let self_pid = i64::from(std::process::id());
         assert_eq!(probe_recorded_pid(self_pid), PidLiveness::Alive);
         assert_eq!(probe_recorded_pid(-1), PidLiveness::Dead);
         assert_eq!(probe_recorded_pid(0), PidLiveness::Dead);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_probe_distinguishes_a_live_process_from_an_exited_one() {
+        let mut child = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .spawn()
+            .expect("spawn live process");
+        let live_pid = i64::from(child.id());
+        assert_eq!(probe_recorded_pid(live_pid), PidLiveness::Alive);
+        child.kill().expect("terminate test process");
+        child.wait().expect("reap test process");
+        assert_eq!(probe_recorded_pid(live_pid), PidLiveness::Dead);
     }
 }

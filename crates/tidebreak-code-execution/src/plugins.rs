@@ -465,12 +465,7 @@ pub fn parse_plugin_manifest(
     if source.len() > crate::MAX_WORKSPACE_FILE_BYTES {
         return Err(invalid("manifest exceeds the workspace file limit"));
     }
-    let rest = source
-        .strip_prefix("---\n")
-        .ok_or_else(|| invalid("missing opening frontmatter fence"))?;
-    let (frontmatter, _body) = rest
-        .split_once("\n---\n")
-        .ok_or_else(|| invalid("missing closing frontmatter fence"))?;
+    let (frontmatter, _body) = crate::skills::split_frontmatter(source).map_err(invalid)?;
 
     let mut name = None;
     let mut display_name = None;

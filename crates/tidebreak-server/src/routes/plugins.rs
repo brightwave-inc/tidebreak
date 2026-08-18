@@ -308,11 +308,15 @@ pub async fn get_skill_instructions(
 /// parsed on the way in, so the split always succeeds; falling back to the
 /// whole source keeps a malformed one readable rather than blank.
 fn manifest_body(manifest: &str) -> &str {
-    manifest
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n"))
-        .map_or(manifest, |(_, body)| body)
-        .trim()
+    let rest = manifest
+        .strip_prefix("---\r\n")
+        .or_else(|| manifest.strip_prefix("---\n"));
+    rest.and_then(|rest| {
+        rest.split_once("\r\n---\r\n")
+            .or_else(|| rest.split_once("\n---\n"))
+    })
+    .map_or(manifest, |(_, body)| body)
+    .trim()
 }
 
 /// One prompt's insertable text, fetched when the user picks it.

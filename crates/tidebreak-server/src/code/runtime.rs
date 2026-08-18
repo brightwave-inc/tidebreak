@@ -41,6 +41,8 @@ use super::session_worker::{
     attach_engine, journal_event, queue_follow_up, spawn_session_worker, WorkerCommand,
     WorkerError, WorkerHandle,
 };
+#[cfg(windows)]
+use super::worktree::repo_paths_equivalent;
 use super::worktree::{
     self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
     run_archive_script, run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
@@ -401,7 +403,17 @@ impl CodeRuntime {
     ) -> Result<CodeRepo, ServerError> {
         let validated = validate_repo_path(&root_path).await.map_err(map_worktree)?;
         let toplevel = validated.toplevel.display().to_string();
-        if let Some(existing) = get_repo_by_root_path(&self.db, &toplevel).await? {
+        let exact = get_repo_by_root_path(&self.db, &toplevel).await?;
+        #[cfg(windows)]
+        let existing = match exact {
+            Some(repo) => Some(repo),
+            None => list_repos(&self.db).await?.into_iter().find(|repo| {
+                repo_paths_equivalent(std::path::Path::new(&repo.root_path), &validated.toplevel)
+            }),
+        };
+        #[cfg(not(windows))]
+        let existing = exact;
+        if let Some(existing) = existing {
             return Err(ServerError::conflict_kind(
                 "repo_already_registered",
                 format!(

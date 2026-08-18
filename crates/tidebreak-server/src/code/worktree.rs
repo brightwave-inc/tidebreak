@@ -30,6 +30,85 @@ pub(crate) struct ValidatedRepo {
     pub toplevel: PathBuf,
 }
 
+/// Whether two canonical repository paths identify the same checkout.
+///
+/// Windows can present one path as a regular drive/UNC path or as the verbatim
+/// form returned by `canonicalize`. Repository identity is also
+/// case-insensitive there.
+#[cfg(windows)]
+pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
+    use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+    let left = windows_repo_path_identity(left);
+    let right = windows_repo_path_identity(right);
+    let (Ok(left_len), Ok(right_len)) = (i32::try_from(left.len()), i32::try_from(right.len()))
+    else {
+        return false;
+    };
+    // SAFETY: both pointers reference initialized UTF-16 buffers for the
+    // exact lengths passed. CompareStringOrdinal does not require NUL
+    // termination when explicit lengths are provided.
+    unsafe {
+        CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) == CSTR_EQUAL
+    }
+}
+
+#[cfg(windows)]
+fn windows_repo_path_identity(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+
+    let mut value = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
+        .collect::<Vec<_>>();
+    if wide_starts_with_ascii_case_insensitive(&value, VERBATIM_UNC) {
+        value.splice(..VERBATIM_UNC.len(), [b'\\' as u16, b'\\' as u16]);
+    } else if wide_starts_with_ascii_case_insensitive(&value, VERBATIM) {
+        value.drain(..VERBATIM.len());
+    }
+    while value.last() == Some(&(b'\\' as u16)) {
+        value.pop();
+    }
+    value
+}
+
+#[cfg(windows)]
+fn wide_starts_with_ascii_case_insensitive(value: &[u16], prefix: &[u16]) -> bool {
+    value.len() >= prefix.len()
+        && value
+            .iter()
+            .zip(prefix)
+            .all(|(left, right)| wide_ascii_upper(*left) == *right)
+}
+
+#[cfg(windows)]
+fn wide_ascii_upper(unit: u16) -> u16 {
+    if (b'a' as u16..=b'z' as u16).contains(&unit) {
+        unit - (b'a' - b'A') as u16
+    } else {
+        unit
+    }
+}
+
 /// Why a workspace archive needs an explicit `force`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArchiveBlock {
@@ -610,5 +689,26 @@ mod tests {
         let slug = name.strip_prefix("tidebreak/").unwrap();
         assert!(slug.contains('-'), "{slug}");
         assert_eq!(slugify("Hello, World!"), "hello-world");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_repo_identity_ignores_case_and_verbatim_presentation() {
+        assert!(repo_paths_equivalent(
+            Path::new(r"C:\Users\Dev\Repo"),
+            Path::new(r"\\?\c:\users\dev\repo\")
+        ));
+        assert!(repo_paths_equivalent(
+            Path::new(r"\\Server\Share\Repo"),
+            Path::new(r"\\?\UNC\server\share\repo\")
+        ));
+        assert!(repo_paths_equivalent(
+            Path::new(r"\\Server\Share"),
+            Path::new(r"\\?\UNC\server\share\")
+        ));
+        assert!(!repo_paths_equivalent(
+            Path::new(r"\\Server\Share\Repo"),
+            Path::new(r"\\Server\Other\Repo")
+        ));
     }
 }

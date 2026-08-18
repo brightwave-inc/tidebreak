@@ -7,18 +7,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::timeout;
 use tracing::warn;
 
-use crate::child::{signal_interrupt, turn_outcome, ChildPid};
+use crate::child::{turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
+    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
+    TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -60,7 +60,7 @@ pub(crate) fn bypass_policy(mode: CodePermissionMode) -> BypassPolicy {
 pub struct ClaudeSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
-    child: AsyncMutex<Option<Child>>,
+    child: AsyncMutex<Option<ProcessTreeChild>>,
     pid: ChildPid,
     /// Exit status of a child [`HarnessSession::interrupt`] already reaped, so
     /// `run_turn` can still report how the turn ended.
@@ -125,7 +125,7 @@ impl ClaudeSession {
     /// `run_turn` to report.
     fn finish_child(
         &self,
-        mut slot: tokio::sync::MutexGuard<'_, Option<Child>>,
+        mut slot: tokio::sync::MutexGuard<'_, Option<ProcessTreeChild>>,
         status: Option<ExitStatus>,
     ) {
         *slot = None;
@@ -145,7 +145,6 @@ impl HarnessSession for ClaudeSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
             .env_clear();
         for (key, value) in filter_child_env(self.spec.env.iter().cloned()) {
             command.env(key, value);
@@ -153,18 +152,15 @@ impl HarnessSession for ClaudeSession {
         for (key, value) in &plan.env {
             command.env(key, value);
         }
-        let mut child = command.spawn()?;
+        let mut child = spawn_process_tree(&mut command)?;
         let mut stdin = child
-            .stdin
-            .take()
+            .take_stdin()
             .ok_or_else(|| HarnessError::Other("engine child has no stdin".into()))?;
         let stdout = child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
         let stderr = child
-            .stderr
-            .take()
+            .take_stderr()
             .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
         self.reaped.lock().expect("claude child exit").take();
         // Publish before the first await: the pid is what crash recovery
@@ -254,29 +250,13 @@ impl HarnessSession for ClaudeSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
-        if let Some(pid) = self.pid.get() {
-            signal_interrupt(pid);
-        }
         let mut slot = self.child.lock().await;
         let Some(child) = slot.as_mut() else {
             return Ok(());
         };
-        match timeout(INTERRUPT_GRACE, child.wait()).await {
-            Ok(Ok(status)) => {
-                self.finish_child(slot, Some(status));
-                Ok(())
-            }
-            Ok(Err(err)) => Err(err.into()),
-            Err(_) => {
-                warn!("engine did not exit after SIGINT; killing");
-                // `kill` already reaps; `try_wait` reads the status it left
-                // without risking a second wait on a reaped child.
-                child.kill().await?;
-                let status = child.try_wait().ok().flatten();
-                self.finish_child(slot, status);
-                Ok(())
-            }
-        }
+        let status = child.interrupt(INTERRUPT_GRACE).await?;
+        self.finish_child(slot, Some(status));
+        Ok(())
     }
 
     fn resume_ref(&self) -> Option<String> {
@@ -297,7 +277,7 @@ impl HarnessSession for ClaudeSession {
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.kill().await;
+            let _ = child.terminate().await;
         }
         Ok(())
     }

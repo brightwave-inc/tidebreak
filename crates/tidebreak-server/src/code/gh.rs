@@ -13,6 +13,8 @@ use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction, WorkspaceId};
 
+use super::setup_script::spawn_workspace_script;
+
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -883,16 +885,42 @@ fn manual_pr_instructions(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| generate_pr_body(&[], stat));
     format!(
-        "{header}\n\nCreate the pull request from a terminal:\n\n  cd {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        "{header}\n\nCreate the pull request from a terminal:\n\n{commands}",
         header = gh.remediation,
-        worktree = worktree.display(),
-        title = shell_single_quote(&pr_title),
-        body = shell_single_quote(&pr_body),
+        commands = manual_pr_commands(worktree, branch, &pr_title, &pr_body),
     )
 }
 
+#[cfg(not(windows))]
+fn manual_pr_commands(worktree: &Path, branch: &str, title: &str, body: &str) -> String {
+    format!(
+        "  cd {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        worktree = shell_single_quote(&worktree.to_string_lossy()),
+        branch = shell_single_quote(branch),
+        title = shell_single_quote(title),
+        body = shell_single_quote(body),
+    )
+}
+
+#[cfg(windows)]
+fn manual_pr_commands(worktree: &Path, branch: &str, title: &str, body: &str) -> String {
+    format!(
+        "  Set-Location -LiteralPath {worktree}\n  git push -u origin {branch}\n  gh pr create --title {title} --body {body}\n",
+        worktree = powershell_single_quote(&worktree.to_string_lossy()),
+        branch = powershell_single_quote(branch),
+        title = powershell_single_quote(title),
+        body = powershell_single_quote(body),
+    )
+}
+
+#[cfg(not(windows))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 const PR_VIEW_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,baseRefName";
@@ -1070,10 +1098,20 @@ fn pr_number_from_url(url: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+#[cfg(windows)]
 fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
     let path = search_path
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("PATH").ok())
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    find_windows_gh(&path, std::env::var_os("PATHEXT").as_deref())
+}
+
+#[cfg(not(windows))]
+fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
+    let path = search_path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_default();
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("gh");
@@ -1082,6 +1120,54 @@ fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let configured = pathext
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .filter_map(|value| {
+                    if value.starts_with('.') {
+                        launchable_windows_extension(value).then(|| value.to_owned())
+                    } else {
+                        let value = format!(".{value}");
+                        launchable_windows_extension(&value).then_some(value)
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| [".COM", ".exe"].map(str::to_owned).to_vec());
+    let mut extensions = vec![".exe".to_owned()];
+    for extension in configured {
+        if !extensions
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&extension))
+        {
+            extensions.push(extension);
+        }
+    }
+    for dir in std::env::split_paths(path) {
+        for extension in &extensions {
+            let candidate = dir.join(format!("gh{extension}"));
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn launchable_windows_extension(extension: &str) -> bool {
+    [".COM", ".EXE"]
+        .iter()
+        .any(|supported| extension.eq_ignore_ascii_case(supported))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -1113,18 +1199,7 @@ async fn run_action(worktree: &Path, action: &QuickAction) -> ActionOutcome {
             timed_out: false,
         };
     }
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
-    let mut command = Command::new(shell);
-    command
-        .arg("-lc")
-        .arg(script)
-        .current_dir(worktree)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let child = match command.spawn() {
+    let child = match spawn_workspace_script(worktree, script) {
         Ok(child) => child,
         Err(err) => {
             return ActionOutcome {
@@ -1873,5 +1948,173 @@ exit 3
             .await
             .unwrap();
         assert_eq!(url, "https://github.com/acme/demo.git");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use tokio::time::{sleep, Instant};
+    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    const DESCENDANT_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn assert_windows_path_eq(actual: Option<PathBuf>, expected: &Path) {
+        let actual = actual.expect("expected an executable path");
+        assert!(
+            actual
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy()),
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn github_cli_discovery_applies_windows_executable_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([dir.path()]).unwrap();
+
+        assert_windows_path_eq(find_gh(search_path.to_str()), &gh);
+    }
+
+    #[test]
+    fn github_cli_discovery_skips_unlaunchable_pathext_entries() {
+        let unlaunchable = tempfile::tempdir().unwrap();
+        std::fs::write(unlaunchable.path().join("gh.ps1"), b"Write-Output wrong").unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let gh = installed.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([unlaunchable.path(), installed.path()]).unwrap();
+
+        assert_windows_path_eq(
+            find_windows_gh(&search_path, Some(OsStr::new(".PS1;.EXE"))),
+            &gh,
+        );
+    }
+
+    #[test]
+    fn github_cli_discovery_skips_batch_shims_that_reject_multiline_bodies() {
+        let batch_shim = tempfile::tempdir().unwrap();
+        std::fs::write(batch_shim.path().join("gh.cmd"), b"@echo wrong\r\n").unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let gh = installed.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([batch_shim.path(), installed.path()]).unwrap();
+
+        assert_windows_path_eq(
+            find_windows_gh(&search_path, Some(OsStr::new(".CMD;.EXE"))),
+            &gh,
+        );
+    }
+
+    #[test]
+    fn manual_pr_instructions_use_powershell_quoting() {
+        let gh = GhObservation {
+            found: false,
+            authenticated: None,
+            binary: None,
+            remediation: "install gh".into(),
+        };
+        let instructions = manual_pr_instructions(
+            Path::new(r"C:\Users\Jane Doe\repo"),
+            "tidebreak/jane's-fix",
+            "Jane's fix",
+            Some("It's ready"),
+            &Diffstat {
+                files: 1,
+                insertions: 2,
+                deletions: 0,
+                truncated: false,
+            },
+            &gh,
+        );
+
+        assert!(instructions.contains(r"Set-Location -LiteralPath 'C:\Users\Jane Doe\repo'"));
+        assert!(instructions.contains("git push -u origin 'tidebreak/jane''s-fix'"));
+        assert!(instructions.contains("--title 'Jane''s fix'"));
+        assert!(instructions.contains("--body 'It''s ready'"));
+        assert!(!instructions.contains("'\\''"));
+    }
+
+    #[tokio::test]
+    async fn quick_action_timeout_terminates_its_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let action = QuickAction {
+            name: "process tree timeout".into(),
+            command: format!(
+                "$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\ping.exe') \
+                 -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; \
+                 [IO.File]::WriteAllText({}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
+                 Wait-Process -Id $child.Id",
+                powershell_single_quote(&pid_file.to_string_lossy())
+            ),
+            auto_run_on_create: false,
+        };
+        let worktree = dir.path().to_path_buf();
+        let action_task = tokio::spawn(async move { run_action(&worktree, &action).await });
+
+        let pid = wait_for_pid(&pid_file, &action_task).await;
+        let descendant = open_process(pid);
+        assert_eq!(
+            wait_status(&descendant, Duration::ZERO),
+            WAIT_TIMEOUT,
+            "descendant {pid} exited before the quick-action timeout"
+        );
+        assert!(
+            !action_task.is_finished(),
+            "quick action ended before its descendant was opened"
+        );
+
+        let outcome = action_task.await.unwrap();
+        assert!(outcome.timed_out, "{outcome:?}");
+        assert!(!outcome.success, "{outcome:?}");
+        assert_eq!(
+            wait_status(&descendant, DESCENDANT_EXIT_TIMEOUT),
+            WAIT_OBJECT_0,
+            "descendant {pid} remained alive after quick-action job teardown"
+        );
+    }
+
+    async fn wait_for_pid(path: &Path, action: &tokio::task::JoinHandle<ActionOutcome>) -> u32 {
+        let deadline = Instant::now() + ACTION_TIMEOUT + DESCENDANT_EXIT_TIMEOUT;
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(path).await {
+                if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(
+                !action.is_finished(),
+                "quick action ended before publishing its descendant pid"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "quick action exceeded its timeout without publishing its descendant pid"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn open_process(pid: u32) -> OwnedHandle {
+        // SAFETY: synchronization access is requested for the descendant pid
+        // that the quick action just created and published.
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        assert!(!raw.is_null(), "could not open descendant process {pid}");
+        // SAFETY: successful OpenProcess transfers one owned handle.
+        unsafe { OwnedHandle::from_raw_handle(raw.cast()) }
+    }
+
+    fn wait_status(process: &OwnedHandle, limit: Duration) -> u32 {
+        // SAFETY: `process` is a live synchronization handle and remains owned
+        // for the duration of the bounded wait.
+        unsafe { WaitForSingleObject(process.as_raw_handle() as HANDLE, limit.as_millis() as u32) }
     }
 }

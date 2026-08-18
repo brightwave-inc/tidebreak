@@ -111,12 +111,7 @@ pub fn parse_prompt_manifest(
     source: &str,
     origin: PromptOrigin,
 ) -> Result<LoadedPrompt, PromptParseError> {
-    let rest = source
-        .strip_prefix("---\n")
-        .ok_or_else(|| invalid("missing opening frontmatter fence"))?;
-    let (frontmatter, body) = rest
-        .split_once("\n---\n")
-        .ok_or_else(|| invalid("missing closing frontmatter fence"))?;
+    let (frontmatter, body) = crate::skills::split_frontmatter(source).map_err(invalid)?;
 
     let mut name = None;
     let mut description = None;

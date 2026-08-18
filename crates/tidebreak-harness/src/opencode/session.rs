@@ -9,17 +9,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
-use tracing::warn;
 
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::opencode::parse::OpencodeStreamParser;
 use crate::{
-    filter_child_env, ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent,
-    HarnessSession, SessionSpec, StreamBudget, StreamLineBuffer, TurnInput, TurnOutcome,
+    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
+    TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -31,7 +31,7 @@ const AUTO_FLAG: &str = "--auto";
 pub struct OpencodeSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
-    child: AsyncMutex<Option<Child>>,
+    child: AsyncMutex<Option<ProcessTreeChild>>,
     child_pid: AtomicU32,
     base_url: String,
     client: reqwest::Client,
@@ -160,7 +160,6 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, Harness
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .env_clear();
     for (key, value) in filter_child_env(session.spec.env.iter().cloned()) {
         command.env(key, value);
@@ -168,14 +167,12 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, Harness
     for (key, value) in &plan.env {
         command.env(key, value);
     }
-    let mut child = command.spawn()?;
+    let mut child = spawn_process_tree(&mut command)?;
     let stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
     let stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
     if let Some(pid) = child.id() {
         session.child_pid.store(pid, Ordering::SeqCst);
@@ -492,29 +489,14 @@ impl HarnessSession for OpencodeSession {
                 }
             }
         }
-        let pid = self.child_pid.load(Ordering::SeqCst);
-        if pid != 0 {
-            signal_interrupt(pid);
-        }
         let mut slot = self.child.lock().await;
         let Some(child) = slot.as_mut() else {
             return Ok(());
         };
-        match timeout(Duration::from_secs(2), child.wait()).await {
-            Ok(Ok(_)) => {
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
-                Ok(())
-            }
-            Ok(Err(err)) => Err(err.into()),
-            Err(_) => {
-                warn!("engine did not exit after SIGINT; killing");
-                child.kill().await?;
-                *slot = None;
-                self.child_pid.store(0, Ordering::SeqCst);
-                Ok(())
-            }
-        }
+        child.interrupt(Duration::from_secs(2)).await?;
+        *slot = None;
+        self.child_pid.store(0, Ordering::SeqCst);
+        Ok(())
     }
 
     fn resume_ref(&self) -> Option<String> {
@@ -534,7 +516,7 @@ impl HarnessSession for OpencodeSession {
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.kill().await;
+            let _ = child.terminate().await;
         }
         Ok(())
     }
@@ -568,19 +550,6 @@ where
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn signal_interrupt(pid: u32) {
-    #[cfg(unix)]
-    {
-        let pid = pid as i32;
-        // SAFETY: the pid was recorded from a child we spawned this session.
-        let _ = unsafe { libc::kill(pid, libc::SIGINT) };
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
 }
 
 #[cfg(test)]

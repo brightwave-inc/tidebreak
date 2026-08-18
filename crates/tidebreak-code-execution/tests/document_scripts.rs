@@ -45,6 +45,30 @@ fn scripts_dir() -> PathBuf {
         .expect("document scripts directory exists")
 }
 
+fn compile_document_script(python: &Path, script: &Path, cache: &Path) -> std::io::Result<Output> {
+    let mut command = Command::new(python);
+    #[cfg(windows)]
+    {
+        // PYTHONPYCACHEPREFIX encodes `C:` as a `?` path component, which is
+        // not a legal Windows file name (WinError 123).
+        command
+            .args([
+                "-c",
+                "import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)",
+            ])
+            .arg(script)
+            .arg(cache.join(script.file_name().unwrap_or_default()).with_extension("pyc"));
+    }
+    #[cfg(not(windows))]
+    {
+        command
+            .args(["-m", "py_compile"])
+            .arg(script)
+            .env("PYTHONPYCACHEPREFIX", cache);
+    }
+    command.output()
+}
+
 fn run_missing_tool_case(python: &Path, script: &Path, input: &Path, needle: &str) -> Output {
     let output = Command::new(python)
         .arg("-S")
@@ -72,12 +96,8 @@ fn document_scripts_compile_and_expose_argparse_help() {
     let cache = tempfile::tempdir().unwrap();
     for script in PREVIEW_SCRIPTS.iter().chain(PACKAGE_SCRIPTS.iter()) {
         let path = directory.join(script);
-        let compiled = Command::new(&python)
-            .args(["-m", "py_compile"])
-            .arg(&path)
-            .env("PYTHONPYCACHEPREFIX", cache.path())
-            .output()
-            .expect("Python starts");
+        let compiled =
+            compile_document_script(&python, &path, cache.path()).expect("Python starts");
         assert!(
             compiled.status.success(),
             "{script} must compile: {}",

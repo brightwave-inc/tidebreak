@@ -264,6 +264,13 @@ registry and prepared-build caches. The Windows ARM job keeps the
 restores only caches for the same commit SHA, so a failed MSVC CMake tree from
 an earlier attempt cannot be reused after that compiler switch.
 
+Windows code mode uses the desktop's digest-verified managed Node ZIP and
+pinned harness packages. Setup, archive, and quick-action commands run through
+Windows PowerShell, while harness and command descendants are owned as one
+process tree for interruption and timeout. Native local execution, managed
+LibreOffice installation, and computer use remain separate platform
+capabilities and are not implied by code-mode support.
+
 ### Linux: x86_64 and ARM64 AppImage and Debian packages
 
 A release ships one portable AppImage and one `.deb` for each of `x86_64` and

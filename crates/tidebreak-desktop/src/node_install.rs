@@ -12,7 +12,7 @@
 //!
 //! The version is pinned to match the container image's `node:20-bookworm-slim`
 //! so a skill behaves the same locally and in the cloud. The npm bundled in the
-//! official tarball is the npm the sandbox uses — there is no separate npm
+//! official archive is the npm the sandbox uses — there is no separate npm
 //! install to keep in step.
 //!
 //! Supply-chain posture, deliberately rigid, and the same as the managed
@@ -22,9 +22,10 @@
 //!
 //! - <https://nodejs.org/dist/v20.20.2/SHASUMS256.txt>
 //!
-//! macOS and Linux are supported on both shipped architectures. The local
-//! sandbox remains macOS-only, but code mode uses the same managed runtime to
-//! install and launch its pinned harness packages on Linux.
+//! macOS, Linux, and Windows are supported on both shipped architectures. The
+//! local sandbox remains macOS-only, but code mode uses the same managed
+//! runtime to install and launch its pinned harness packages on Linux and
+//! Windows.
 //!
 //! Gatekeeper: a download performed by this process carries no
 //! `com.apple.quarantine` attribute — quarantine is applied by applications
@@ -37,10 +38,10 @@
 //! hands us a quarantined file.
 //!
 //! Integrity at rest: the install directory carries an `installed.json` marker
-//! recording the version and the verified tarball digest. Resolution trusts the
-//! managed install only when the marker matches the constants pinned here — a
-//! marker for a different digest (a tampered or half-written install, or a
-//! stale layout after the pin moves) makes the managed copy invisible and a
+//! recording the version and the verified artifact digest. Resolution trusts
+//! the managed install only when the marker matches the constants pinned here
+//! — a marker for a different digest (a tampered or half-written install, or
+//! a stale layout after the pin moves) makes the managed copy invisible and a
 //! fresh install replaces it. The tree is not re-hashed per turn; the marker
 //! plus the `node` and `npm` entrypoints' presence is the check.
 //!
@@ -52,67 +53,112 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::time::Duration;
 
 use tauri::AppHandle;
 use tidebreak_code_execution::managed_node::{
-    current_managed_node_pin, managed_node_install_marker, managed_node_marker_path,
-    managed_node_root as verified_managed_node_root, managed_node_version_dir,
-    MANAGED_NODE_VERSION,
+    current_managed_node_pin, managed_node_executable, managed_node_install_marker,
+    managed_node_marker_path, managed_node_root as verified_managed_node_root,
+    managed_node_version_dir, managed_npm_executable, MANAGED_NODE_VERSION,
 };
 
 /// The exact Node version this build installs and trusts, matching the
 /// container image's `node:20-bookworm-slim`.
 pub(crate) const NODE_VERSION: &str = MANAGED_NODE_VERSION;
 
-/// The unpacked runtime is about 154 MB and the tarball about 40 MB; refuse to
+/// The unpacked runtime is about 154 MB and the archive about 40 MB; refuse to
 /// start on a disk with less headroom than that plus slack.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 const REQUIRED_FREE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Official Node archives for the supported targets are below 55 MB. Bound
 /// the streamed response independently of Content-Length so a bad endpoint
 /// cannot fill the app-data volume before the digest check gets a vote.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+/// Bound decompressed output independently of the ZIP directory's declared
+/// sizes so a malformed archive cannot consume the app-data volume.
+#[cfg(any(target_os = "windows", test))]
+const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(any(target_os = "windows", test))]
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
 const DOWNLOAD_TOO_LARGE: &str = "The Node download was larger than expected and was discarded";
 
+#[derive(Clone, Copy)]
+enum ArchiveFormat {
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
+    TarGz,
+    #[cfg(any(target_os = "windows", test))]
+    Zip,
+}
+
 struct PinnedArtifact {
-    // Read only by the macOS/Linux install path; unsupported platforms carry
+    // Read only by the supported install path; unsupported platforms carry
     // the pinned shape (`PINNED = None`) without an installer to consume it.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+        allow(dead_code)
+    )]
     url: &'static str,
-    /// The single directory the official tarball unpacks into, which the
+    /// The single directory the official archive unpacks into, which the
     /// install moves into place as the version directory.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+        allow(dead_code)
+    )]
     archive_root: &'static str,
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+        allow(dead_code)
+    )]
+    archive_format: ArchiveFormat,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz",
     archive_root: "node-v20.20.2-darwin-arm64",
+    archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-x64.tar.gz",
     archive_root: "node-v20.20.2-darwin-x64",
+    archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz",
     archive_root: "node-v20.20.2-linux-arm64",
+    archive_format: ArchiveFormat::TarGz,
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz",
     archive_root: "node-v20.20.2-linux-x64",
+    archive_format: ArchiveFormat::TarGz,
+});
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
+    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-arm64.zip",
+    archive_root: "node-v20.20.2-win-arm64",
+    archive_format: ArchiveFormat::Zip,
+});
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
+    url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-win-x64.zip",
+    archive_root: "node-v20.20.2-win-x64",
+    archive_format: ArchiveFormat::Zip,
 });
 
 #[cfg(not(any(
@@ -122,6 +168,10 @@ static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     ),
     all(
         target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(
+        target_os = "windows",
         any(target_arch = "aarch64", target_arch = "x86_64")
     )
 )))]
@@ -147,7 +197,7 @@ fn managed_version_dir(data_dir: &Path) -> PathBuf {
     managed_node_version_dir(data_dir)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn staging_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("tools").join("node").join("staging")
 }
@@ -157,12 +207,12 @@ fn marker_path(version_dir: &Path) -> PathBuf {
 }
 
 fn managed_binary(version_dir: &Path) -> PathBuf {
-    version_dir.join("bin").join("node")
+    managed_node_executable(version_dir)
 }
 
 /// The managed Node runtime's root directory, if a verified install of the
-/// pinned artifact is present. This is the cheap at-rest check: marker matches
-/// the pin, and both `bin/node` and `bin/npm` exist.
+/// pinned artifact is present. This is the cheap at-rest check: the marker
+/// matches the pin and both platform entrypoints exist.
 pub(crate) fn managed_node_root(data_dir: &Path) -> Option<PathBuf> {
     verified_managed_node_root(data_dir)
 }
@@ -301,7 +351,7 @@ pub(crate) async fn status(app: &AppHandle) -> tidebreak_code_execution::HostToo
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_install(data_dir: &Path) -> Result<(), String> {
     let pinned = PINNED
         .as_ref()
@@ -322,12 +372,12 @@ async fn run_install(data_dir: &Path) -> Result<(), String> {
     result
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 async fn run_install(_data_dir: &Path) -> Result<(), String> {
     Err("Automatic install is not supported on this platform".to_owned())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn install_into(
     data_dir: &Path,
     staging: &Path,
@@ -342,19 +392,26 @@ async fn install_into(
     )
     .await?;
 
-    let tarball = staging.join("node.tar.gz");
-    download(pinned.url, &tarball).await?;
+    let archive_path = match pinned.archive_format {
+        #[cfg(any(target_os = "macos", target_os = "linux", test))]
+        ArchiveFormat::TarGz => staging.join("node.tar.gz"),
+        #[cfg(any(target_os = "windows", test))]
+        ArchiveFormat::Zip => staging.join("node.zip"),
+    };
+    download(pinned.url, &archive_path).await?;
 
     // Verify against the pinned digest before touching the archive in any way.
     let digest = {
-        let tarball = tarball.clone();
-        tokio::task::spawn_blocking(move || crate::office_install::sha256_hex_of_file(&tarball))
-            .await
-            .map_err(|error| format!("Could not verify the download: {error}"))?
-            .map_err(|error| format!("Could not verify the download: {error}"))?
+        let archive_path = archive_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::office_install::sha256_hex_of_file(&archive_path)
+        })
+        .await
+        .map_err(|error| format!("Could not verify the download: {error}"))?
+        .map_err(|error| format!("Could not verify the download: {error}"))?
     };
-    if digest != managed_pin.tarball_sha256 {
-        let _ = tokio::fs::remove_file(&tarball).await;
+    if digest != managed_pin.artifact_sha256 {
+        let _ = tokio::fs::remove_file(&archive_path).await;
         return Err(
             "The downloaded Node did not match its published checksum, so it was discarded. \
              This can mean a corrupted download or a tampered one — try again later."
@@ -366,9 +423,9 @@ async fn install_into(
     tokio::fs::create_dir(&unpacked)
         .await
         .map_err(|error| format!("Could not prepare the install directory: {error}"))?;
-    unpack(&tarball, &unpacked).await?;
+    unpack(&archive_path, &unpacked, pinned.archive_format).await?;
     let extracted = unpacked.join(pinned.archive_root);
-    if !managed_binary(&extracted).is_file() {
+    if !managed_binary(&extracted).is_file() || !managed_npm_executable(&extracted).is_file() {
         return Err("The downloaded Node archive did not contain a runtime".to_owned());
     }
 
@@ -422,25 +479,26 @@ async fn install_into(
     Ok(())
 }
 
-/// Unpack the official tarball into `destination`.
+/// Unpack the official archive into `destination`.
 ///
-/// The in-process tar reader preserves the archive's `bin/npm` and `bin/npx`
-/// symlinks into `lib/node_modules/npm`, so the installed runtime does not
-/// depend on a system `tar` binary being present on the reader's machine.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-async fn unpack(tarball: &Path, destination: &Path) -> Result<(), String> {
-    let tarball = tarball.to_path_buf();
+/// Unix tarballs preserve the archive's `bin/npm` and `bin/npx` symlinks.
+/// Windows ZIPs are extracted through a bounded path validator that accepts
+/// only regular files and directories below `destination`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn unpack(
+    archive_path: &Path,
+    destination: &Path,
+    format: ArchiveFormat,
+) -> Result<(), String> {
+    let archive_path = archive_path.to_path_buf();
     let destination = destination.to_path_buf();
     tokio::time::timeout(
         Duration::from_secs(300),
-        tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::open(&tarball)
-                .map_err(|error| format!("Could not open the Node archive: {error}"))?;
-            let gzip = flate2::read::GzDecoder::new(file);
-            let mut archive = tar::Archive::new(gzip);
-            archive
-                .unpack(&destination)
-                .map_err(|error| format!("Could not unpack Node: {error}"))
+        tokio::task::spawn_blocking(move || match format {
+            #[cfg(any(target_os = "macos", target_os = "linux", test))]
+            ArchiveFormat::TarGz => unpack_tar_gz(&archive_path, &destination),
+            #[cfg(any(target_os = "windows", test))]
+            ArchiveFormat::Zip => unpack_zip(&archive_path, &destination),
         }),
     )
     .await
@@ -448,9 +506,164 @@ async fn unpack(tarball: &Path, destination: &Path) -> Result<(), String> {
     .map_err(|error| format!("Could not join the Node unpack task: {error}"))?
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn unpack_tar_gz(tarball: &Path, destination: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(tarball)
+        .map_err(|error| format!("Could not open the Node archive: {error}"))?;
+    let gzip = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gzip);
+    archive
+        .unpack(destination)
+        .map_err(|error| format!("Could not unpack Node: {error}"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn unpack_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+
+    let destination_metadata = std::fs::symlink_metadata(destination)
+        .map_err(|error| format!("Could not inspect the Node install directory: {error}"))?;
+    if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
+        return Err("The Node install destination was not a real directory".to_owned());
+    }
+
+    let file = std::fs::File::open(archive_path)
+        .map_err(|error| format!("Could not open the Node archive: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("Could not read the Node ZIP archive: {error}"))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err("The Node ZIP archive contained too many entries".to_owned());
+    }
+
+    let mut unpacked_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Could not read the Node ZIP archive: {error}"))?;
+        if entry.encrypted() {
+            return Err("The Node ZIP archive contained an encrypted entry".to_owned());
+        }
+        if entry.is_symlink() || zip_entry_is_link_like(entry.unix_mode()) {
+            return Err("The Node ZIP archive contained a link-like entry".to_owned());
+        }
+
+        let relative = safe_zip_entry_path(entry.name())?;
+        let output_path = destination.join(&relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output_path)
+                .map_err(|error| format!("Could not unpack Node: {error}"))?;
+            continue;
+        }
+        if !entry.is_file() {
+            return Err("The Node ZIP archive contained an unsupported entry type".to_owned());
+        }
+
+        let remaining = MAX_UNPACKED_BYTES
+            .checked_sub(unpacked_bytes)
+            .ok_or_else(|| "The Node ZIP archive expanded beyond its size limit".to_owned())?;
+        if entry.size() > remaining {
+            return Err("The Node ZIP archive expanded beyond its size limit".to_owned());
+        }
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not unpack Node: {error}"))?;
+        }
+        let mut output = std::fs::File::create(&output_path)
+            .map_err(|error| format!("Could not unpack Node: {error}"))?;
+        let copied = std::io::copy(&mut entry.by_ref().take(remaining + 1), &mut output)
+            .map_err(|error| format!("Could not unpack Node: {error}"))?;
+        if copied > remaining {
+            return Err("The Node ZIP archive expanded beyond its size limit".to_owned());
+        }
+        output
+            .flush()
+            .map_err(|error| format!("Could not unpack Node: {error}"))?;
+        unpacked_bytes = unpacked_bytes
+            .checked_add(copied)
+            .ok_or_else(|| "The Node ZIP archive expanded beyond its size limit".to_owned())?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn safe_zip_entry_path(name: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    let path_name = name.strip_suffix('/').unwrap_or(name);
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || path_name.is_empty()
+        || path_name.split('/').any(windows_zip_segment_is_unsafe)
+    {
+        return Err("The Node ZIP archive contained an unsafe path".to_owned());
+    }
+
+    let path = Path::new(name);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("The Node ZIP archive contained an unsafe path".to_owned());
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_zip_segment_is_unsafe(segment: &str) -> bool {
+    if segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.ends_with(['.', ' '])
+        || segment
+            .chars()
+            .any(|character| character.is_control() || r#"<>:"|?*"#.contains(character))
+    {
+        return true;
+    }
+
+    let basename = segment.split('.').next().unwrap_or(segment);
+    matches!(
+        basename.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "CLOCK$"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn zip_entry_is_link_like(mode: Option<u32>) -> bool {
+    let Some(mode) = mode else {
+        return false;
+    };
+    let file_type = mode & 0o170_000;
+    file_type != 0 && file_type != 0o040_000 && file_type != 0o100_000
+}
+
 /// Stream the artifact to disk. Verification happens after, against the whole
 /// file.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn download(url: &str, destination: &Path) -> Result<(), String> {
     use futures::StreamExt as _;
     use tokio::io::AsyncWriteExt as _;
@@ -496,7 +709,7 @@ async fn download(url: &str, destination: &Path) -> Result<(), String> {
 
 /// Account for one response chunk before it reaches disk. Content-Length is
 /// only a hint; this is the bound for chunked or dishonest responses.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
 fn next_downloaded_size(downloaded: u64, chunk_bytes: usize) -> Result<u64, String> {
     let chunk_bytes = u64::try_from(chunk_bytes).map_err(|_| DOWNLOAD_TOO_LARGE.to_owned())?;
     let next = downloaded
@@ -566,7 +779,9 @@ mod tests {
 
         let destination = dir.path().join("unpacked");
         std::fs::create_dir(&destination).expect("destination");
-        unpack(&tarball, &destination).await.expect("unpack");
+        unpack(&tarball, &destination, ArchiveFormat::TarGz)
+            .await
+            .expect("unpack");
 
         let npm = destination.join("node-v0.0.0-test/bin/npm");
         assert!(std::fs::symlink_metadata(&npm)
@@ -583,5 +798,107 @@ mod tests {
             0,
             "the runtime remains executable"
         );
+    }
+
+    #[tokio::test]
+    async fn unpack_zip_extracts_the_windows_runtime_layout() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive_path = dir.path().join("node.zip");
+        let file = std::fs::File::create(&archive_path).expect("zip");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        archive
+            .add_directory("node-v0.0.0-win-x64/", options)
+            .expect("root");
+        archive
+            .start_file("node-v0.0.0-win-x64/node.exe", options)
+            .expect("node entry");
+        archive.write_all(b"node").expect("node");
+        archive
+            .start_file("node-v0.0.0-win-x64/npm.cmd", options)
+            .expect("npm entry");
+        archive.write_all(b"@echo off\r\n").expect("npm");
+        archive
+            .start_file(
+                "node-v0.0.0-win-x64/node_modules/npm/bin/npm-cli.js",
+                options,
+            )
+            .expect("nested entry");
+        archive.write_all(b"// npm\n").expect("nested");
+        archive.finish().expect("finish zip");
+
+        let destination = dir.path().join("unpacked");
+        std::fs::create_dir(&destination).expect("destination");
+        unpack(&archive_path, &destination, ArchiveFormat::Zip)
+            .await
+            .expect("unpack");
+
+        let root = destination.join("node-v0.0.0-win-x64");
+        assert_eq!(std::fs::read(root.join("node.exe")).expect("node"), b"node");
+        assert_eq!(
+            std::fs::read(root.join("npm.cmd")).expect("npm"),
+            b"@echo off\r\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("node_modules/npm/bin/npm-cli.js")).expect("nested"),
+            b"// npm\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpack_zip_rejects_traversal_without_writing_outside_destination() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive_path = dir.path().join("node.zip");
+        let file = std::fs::File::create(&archive_path).expect("zip");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("../escaped.txt", SimpleFileOptions::default())
+            .expect("traversal entry");
+        archive.write_all(b"escaped").expect("entry");
+        archive.finish().expect("finish zip");
+
+        let destination = dir.path().join("unpacked");
+        std::fs::create_dir(&destination).expect("destination");
+        let error = unpack(&archive_path, &destination, ArchiveFormat::Zip)
+            .await
+            .expect_err("traversal must fail");
+        assert!(error.contains("unsafe path"), "unexpected error: {error}");
+        assert!(!dir.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn zip_path_and_entry_validation_rejects_windows_escape_forms_and_links() {
+        for name in [
+            "../escape",
+            "/absolute",
+            "C:/absolute",
+            r"C:\absolute",
+            r"root\..\escape",
+            "root//file",
+            "root/./file",
+            "root/CON",
+            "root/NUL.txt",
+            "root/trailing. ",
+            "root/stream:name",
+        ] {
+            assert!(
+                safe_zip_entry_path(name).is_err(),
+                "unsafe path was accepted: {name}"
+            );
+        }
+        assert!(safe_zip_entry_path("node-v0.0.0-win-x64/node.exe").is_ok());
+        assert!(safe_zip_entry_path("node-v0.0.0-win-x64/").is_ok());
+
+        assert!(zip_entry_is_link_like(Some(0o120_777)));
+        assert!(zip_entry_is_link_like(Some(0o060_644)));
+        assert!(!zip_entry_is_link_like(Some(0o100_644)));
+        assert!(!zip_entry_is_link_like(Some(0o040_755)));
+        assert!(!zip_entry_is_link_like(None));
     }
 }

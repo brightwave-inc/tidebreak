@@ -703,10 +703,9 @@ pub(crate) async fn run_tool(
     Ok(())
 }
 
-/// Refuse to start a large install on a nearly full disk. `df` because the
-/// standard library has no free-space query and the callers are Unix-only.
-/// `shortfall` is the message the caller wants when the check fails, so each
-/// managed install names itself and its own size.
+/// Refuse to start a large install on a nearly full disk. `shortfall` is the
+/// message the caller wants when the check fails, so each managed install
+/// names itself and its own size.
 #[cfg(unix)]
 pub(crate) async fn ensure_free_disk(
     directory: &Path,
@@ -727,6 +726,38 @@ pub(crate) async fn ensure_free_disk(
         .and_then(|field| field.parse().ok())
         .ok_or_else(|| "Could not check free disk space".to_owned())?;
     if available_kib.saturating_mul(1024) < required {
+        return Err(shortfall.to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) async fn ensure_free_disk(
+    directory: &Path,
+    required: u64,
+    shortfall: &str,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut directory = directory.as_os_str().encode_wide().collect::<Vec<_>>();
+    directory.push(0);
+    let mut available = 0_u64;
+    let status = unsafe {
+        GetDiskFreeSpaceExW(
+            directory.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if status == 0 {
+        return Err(format!(
+            "Could not check free disk space: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if available < required {
         return Err(shortfall.to_owned());
     }
     Ok(())

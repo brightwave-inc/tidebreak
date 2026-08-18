@@ -547,6 +547,15 @@ jobs:
       # native host, not a second copy of the workspace suite.
       - name: Host broker Windows tests
         run: cargo test -p tidebreak-host-broker --locked
+      # Code mode crosses Windows-native executable, environment, PowerShell,
+      # path-identity, and process-tree boundaries. A cross-target check cannot
+      # prove those behaviors; run the harness suite and the server's code-mode
+      # modules on NTFS with the Windows process APIs available.
+      - name: Code mode Windows lifecycle tests
+        run: |
+          cargo test -p tidebreak-code-execution --locked
+          cargo test -p tidebreak-harness --locked
+          cargo test -p tidebreak-server --lib code:: --locked
       # Boot-critical persistence, proven on the OS that ships it: the desktop
       # profile's SQLite open/migrate lifecycle (tidebreak-server's
       # desktop_schema module, including the Windows MoveFileExW marker swap)

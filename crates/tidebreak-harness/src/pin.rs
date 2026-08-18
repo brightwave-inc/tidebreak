@@ -8,11 +8,14 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tidebreak_code_execution::managed_node::{
+    managed_node_executable, managed_node_path_dir, managed_npm_executable,
+};
 use tidebreak_core::HarnessKind;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::is_absolute_executable;
+use crate::{is_absolute_executable, spawn_process_tree};
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -78,7 +81,12 @@ fn marker_path(dir: &Path) -> PathBuf {
 }
 
 fn binary_path(dir: &Path, pin: &HarnessPin) -> PathBuf {
-    dir.join("node_modules").join(".bin").join(pin.bin)
+    let name = if cfg!(windows) {
+        format!("{}.cmd", pin.bin)
+    } else {
+        pin.bin.to_owned()
+    };
+    dir.join("node_modules").join(".bin").join(name)
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,7 +121,7 @@ pub async fn ensure_installed(
     kind: HarnessKind,
     managed_node_root: Option<&Path>,
 ) -> Result<PathBuf, String> {
-    let node_bin = managed_node_bin(managed_node_root)
+    let node_root = verified_managed_node_root(managed_node_root)
         .ok_or_else(|| "install the managed Node runtime before pinning harnesses".to_owned())?;
     if let Some(existing) = managed_binary(data_dir, kind) {
         return Ok(existing);
@@ -124,7 +132,7 @@ pub async fn ensure_installed(
         .await
         .map_err(|err| format!("could not create harness install dir: {err}"))?;
     let spec = format!("{}@{}", pin.package, pin.version);
-    let mut command = Command::new(node_bin.join("npm"));
+    let mut command = Command::new(managed_npm_executable(node_root));
     command
         .args([
             "install",
@@ -135,12 +143,13 @@ pub async fn ensure_installed(
             &spec,
         ])
         .current_dir(&dir)
-        .env("PATH", prepend_path(&node_bin))
+        .env("PATH", prepend_path(&managed_node_path_dir(node_root)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = timeout(INSTALL_TIMEOUT, command.output())
+        .stderr(Stdio::piped());
+    let child =
+        spawn_process_tree(&mut command).map_err(|err| format!("npm install {spec}: {err}"))?;
+    let output = timeout(INSTALL_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| format!("npm install {spec} timed out"))?
         .map_err(|err| format!("npm install {spec}: {err}"))?;
@@ -169,14 +178,17 @@ pub async fn ensure_installed(
     })
 }
 
-/// `<verified-root>/bin` when both `node` and `npm` exist.
+/// The verified root when both platform-native Node and npm entrypoints exist.
 ///
-/// Official Node's `bin/npm` is `#!/usr/bin/env node`, so the sibling `node`
-/// must be first on the child PATH. GUI PATH is never consulted.
-fn managed_node_bin(managed_node_root: Option<&Path>) -> Option<PathBuf> {
-    let bin = managed_node_root?.join("bin");
-    (is_absolute_executable(&bin.join("node")) && is_absolute_executable(&bin.join("npm")))
-        .then_some(bin)
+/// Unix npm is a script that resolves `node` from PATH. Windows npm is a
+/// `.cmd` shim that first resolves the sibling `node.exe`. Both are validated
+/// here and the managed runtime directory is still placed first on PATH for
+/// the harness shims installed under `node_modules/.bin`.
+fn verified_managed_node_root(managed_node_root: Option<&Path>) -> Option<&Path> {
+    let root = managed_node_root?;
+    (is_absolute_executable(&managed_node_executable(root))
+        && is_absolute_executable(&managed_npm_executable(root)))
+    .then_some(root)
 }
 
 fn prepend_path(bin: &Path) -> std::ffi::OsString {
@@ -234,6 +246,16 @@ mod tests {
             managed_binary(tmp.path(), HarnessKind::ClaudeCode),
             Some(binary)
         );
+    }
+
+    #[test]
+    fn harness_binary_uses_the_platform_npm_shim_name() {
+        let pin = pin_for(HarnessKind::ClaudeCode).unwrap();
+        let path = binary_path(Path::new("install"), pin);
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "claude.cmd");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "claude");
     }
 
     #[test]
