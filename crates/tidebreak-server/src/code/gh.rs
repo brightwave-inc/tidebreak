@@ -1142,7 +1142,7 @@ fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) ->
                 .collect::<Vec<_>>()
         })
         .filter(|extensions| !extensions.is_empty())
-        .unwrap_or_else(|| [".COM", ".EXE", ".BAT", ".CMD"].map(str::to_owned).to_vec());
+        .unwrap_or_else(|| [".COM", ".EXE"].map(str::to_owned).to_vec());
     let mut extensions = vec![".EXE".to_owned()];
     for extension in configured {
         if !extensions
@@ -1159,17 +1159,13 @@ fn find_windows_gh(path: &std::ffi::OsStr, pathext: Option<&std::ffi::OsStr>) ->
                 return Some(candidate);
             }
         }
-        let extensionless = dir.join("gh");
-        if is_executable(&extensionless) {
-            return Some(extensionless);
-        }
     }
     None
 }
 
 #[cfg(windows)]
 fn launchable_windows_extension(extension: &str) -> bool {
-    [".COM", ".EXE", ".BAT", ".CMD"]
+    [".COM", ".EXE"]
         .iter()
         .any(|supported| extension.eq_ignore_ascii_case(supported))
 }
@@ -1989,6 +1985,21 @@ mod windows_tests {
 
         assert_eq!(
             find_windows_gh(&search_path, Some(OsStr::new(".PS1;.EXE"))),
+            Some(gh)
+        );
+    }
+
+    #[test]
+    fn github_cli_discovery_skips_batch_shims_that_reject_multiline_bodies() {
+        let batch_shim = tempfile::tempdir().unwrap();
+        std::fs::write(batch_shim.path().join("gh.cmd"), b"@echo wrong\r\n").unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let gh = installed.path().join("gh.exe");
+        std::fs::write(&gh, b"synthetic executable").unwrap();
+        let search_path = std::env::join_paths([batch_shim.path(), installed.path()]).unwrap();
+
+        assert_eq!(
+            find_windows_gh(&search_path, Some(OsStr::new(".CMD;.EXE"))),
             Some(gh)
         );
     }
