@@ -1616,8 +1616,8 @@ pub(super) fn pending_package_cache_pin_sets(
 ) -> Vec<Vec<String>> {
     pin_sets
         .iter()
+        .filter(|&pins| !pins.is_empty() && !already_populated(pins))
         .cloned()
-        .filter(|pins| !pins.is_empty() && !already_populated(pins))
         .collect()
 }
 
