@@ -854,8 +854,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         );
       case "agent":
         return <BackgroundAgentPanel chatId={chatId} runId={panel.runId} />;
-      case "files":
-      case "diff":
       case "terminal":
         return null;
     }

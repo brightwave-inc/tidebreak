@@ -11,9 +11,6 @@ import {
  *
  * The terminal stays in the URL so a reload or a shared link still opens it.
  * Only the rendering changes: it is not a tab in the side region.
- *
- * Files and Diff live in the inspector. A stale URL tab would duplicate
- * them in the conversation region, so they are stripped here too.
  */
 export function splitCodeChromeLayout(layout: LayoutState): {
   panels: LayoutState;
@@ -22,14 +19,14 @@ export function splitCodeChromeLayout(layout: LayoutState): {
   const terminal = layout.tabs.find((tab) => tab.type === "terminal") as
     | Extract<PanelContent, { type: "terminal" }>
     | undefined;
-  const tabs = layout.tabs.filter((tab) => !isInspectorOrDrawerTab(tab));
+  const tabs = layout.tabs.filter((tab) => !isDrawerTab(tab));
   if (tabs.length === 0) {
     return { panels: EMPTY_LAYOUT, terminal: terminal ?? null };
   }
 
   const active = layout.tabs[layout.activeIndex];
   let activeIndex = 0;
-  if (active && !isInspectorOrDrawerTab(active)) {
+  if (active && !isDrawerTab(active)) {
     const found = tabs.findIndex((tab) => panelKey(tab) === panelKey(active));
     if (found >= 0) activeIndex = found;
   }
@@ -44,23 +41,22 @@ export function splitCodeChromeLayout(layout: LayoutState): {
   };
 }
 
-function isInspectorOrDrawerTab(tab: PanelContent): boolean {
-  return tab.type === "files" || tab.type === "diff" || tab.type === "terminal";
+function isDrawerTab(tab: PanelContent): boolean {
+  return tab.type === "terminal";
 }
 
 /**
  * URL-tab index of the side-region tab at `stripIndex`.
  *
- * The strip is the URL tabs with the terminal, files, and diff removed, so a
- * click or close on the strip has to skip those rather than treat them as
- * neighbours.
+ * The strip is the URL tabs with the terminal removed, so a click or close on
+ * the strip has to skip it rather than treat it as a neighbour.
  */
 function codeChromeUrlIndex(layout: LayoutState, stripIndex: number): number {
   if (stripIndex < 0) return -1;
   let remaining = stripIndex;
   for (let index = 0; index < layout.tabs.length; index += 1) {
     const tab = layout.tabs[index];
-    if (!tab || isInspectorOrDrawerTab(tab)) continue;
+    if (!tab || isDrawerTab(tab)) continue;
     if (remaining === 0) return index;
     remaining -= 1;
   }

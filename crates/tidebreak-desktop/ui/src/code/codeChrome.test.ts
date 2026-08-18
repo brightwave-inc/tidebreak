@@ -19,14 +19,10 @@ const foldersTerminalAgents = {
 };
 
 describe("code chrome layout", () => {
-  it("lifts the terminal out and drops files/diff so they stay in the inspector", () => {
+  it("lifts the terminal out of the side region into the drawer", () => {
     const layout = {
-      tabs: [
-        { type: "files" as const },
-        { type: "terminal" as const },
-        { type: "diff" as const },
-      ],
-      activeIndex: 1,
+      tabs: [{ type: "terminal" as const }],
+      activeIndex: 0,
       fullscreen: false,
     };
 

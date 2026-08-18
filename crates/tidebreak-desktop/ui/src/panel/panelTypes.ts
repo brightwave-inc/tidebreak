@@ -23,10 +23,6 @@ export type PanelContent =
   | { type: "agents" }
   /** One background agent run, opened from the agents table or the transcript. */
   | { type: "agent"; runId: string }
-  /** Changed files in a code-mode workspace; `turnId` filters to one turn. */
-  | { type: "files"; turnId?: string }
-  /** Server-produced unified diff; `turnId`/`file` anchor within the tab. */
-  | { type: "diff"; turnId?: string; file?: string }
   /** Auxiliary workspace shell; `terminalId` pins a live PTY when known. */
   | { type: "terminal"; terminalId?: string };
 
