@@ -8,6 +8,7 @@ import {
 import {
   applyAcceptedTurn,
   hydrateCodeTurns,
+  markCodeSessionHydrated,
   type CodeSessionDeps,
 } from "./CodeSessionReducer";
 
@@ -91,6 +92,9 @@ export function acquireCodeSession(
     hydrateTurns,
     onHydrate: (turns) => {
       store.getState().update((session) => hydrateCodeTurns(session, turns));
+    },
+    onHydrateSettled: () => {
+      store.getState().update(markCodeSessionHydrated);
     },
   });
   registry.set(sessionId, { store, controller, refCount: 1 });

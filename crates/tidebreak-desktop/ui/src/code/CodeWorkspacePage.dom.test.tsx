@@ -14,6 +14,7 @@ import {
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { PanelSearch } from "@/panel/panelUrl";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
@@ -75,10 +76,47 @@ const REPO = {
   created_at: "2026-08-15T00:00:00.000Z",
 };
 
+const SESSION = {
+  id: "sess-1",
+  workspace_id: "ws-1",
+  harness_kind: "claude_code" as const,
+  permission_mode: "ask" as const,
+  lifecycle: "idle" as const,
+  attention: {
+    state: { type: "done_unreviewed" as const },
+    source: "lifecycle" as const,
+  },
+  unrecognized_event_count: 0,
+  created_at: "2026-08-15T00:00:00.000Z",
+};
+
+const TURN = {
+  id: "turn-1",
+  session_id: "sess-1",
+  ordinal: 1,
+  status: "completed" as const,
+  user_input: "list the files",
+  started_at: "2026-08-15T00:00:00.000Z",
+  ended_at: "2026-08-15T00:02:14.000Z",
+  diffstat: { files: 2, insertions: 42, deletions: 7, truncated: false },
+};
+
 function makeClient() {
   return {
     getCodeWorkspace: vi.fn(async () => WORKSPACE),
-    listCodeWorkspaceSessions: vi.fn(async () => []),
+    listCodeWorkspaceSessions: vi.fn(
+      async (): Promise<(typeof SESSION)[]> => [],
+    ),
+    listCodeSessionTurns: vi.fn(async () => [TURN]),
+    listCodeApprovals: vi.fn(async () => []),
+    openCodeEvents: vi.fn(
+      () =>
+        ({
+          close() {},
+          addEventListener() {},
+          removeEventListener() {},
+        }) as unknown as WebSocket,
+    ),
     getCodeRepo: vi.fn(async () => REPO),
     archiveCodeWorkspace: vi.fn(async () => ({
       ...WORKSPACE,
@@ -243,6 +281,7 @@ async function mountWorkspace(
 
 afterEach(() => {
   cleanup();
+  resetCodeSessionRegistry();
   useCodeCatalogStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
@@ -250,6 +289,26 @@ afterEach(() => {
 });
 
 describe("CodeWorkspacePage", () => {
+  it("gives the transcript chat's scrolling frame and closes the turn it hydrated", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const { container } = await mountWorkspace(client);
+
+    expect(
+      await screen.findByRole("article", { name: "You" }),
+    ).toHaveTextContent("list the files");
+
+    const view = container.querySelector(".message-view");
+    expect(view).not.toBeNull();
+    // The transcript, not the panel slot, is the scroller: the pane claims its
+    // own height, so `.messages` is what overflows.
+    expect(view?.querySelector(".messages > .messages-column")).not.toBeNull();
+
+    const seam = await screen.findByRole("group", { name: "Turn finished" });
+    expect(seam).toHaveTextContent("2m 14s");
+    expect(seam).toHaveTextContent("2 files +42 −7");
+  });
+
   it("leaves the archived workspace for its repo", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);
