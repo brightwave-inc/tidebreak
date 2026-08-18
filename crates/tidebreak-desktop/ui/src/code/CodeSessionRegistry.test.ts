@@ -24,6 +24,24 @@ afterEach(() => {
 });
 
 describe("CodeSessionRegistry", () => {
+  it("marks the session hydrated even when the snapshot cannot be read", async () => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => new FakeSocket(after, onFrame) as unknown as WebSocket;
+
+    const store = acquireCodeSession("s1", openSocket, undefined, async () => {
+      throw new Error("offline");
+    });
+    expect(store.getState().hydrated).toBe(false);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    // The skeleton has to come down either way: a snapshot that never arrives
+    // must leave a transcript the reader can send into.
+    expect(store.getState().hydrated).toBe(true);
+  });
+
   it("shares one store across two acquires and closes the socket on last release", () => {
     const sockets: FakeSocket[] = [];
     const openSocket = (after: number, onFrame: (frame: SequencedCodeEventFrame) => void) => {
@@ -83,6 +101,7 @@ describe("CodeSessionRegistry", () => {
       id: userItemId("t1"),
       turnId: "t1",
       text: "list the files",
+      createdAt: "2026-08-15T12:00:00.000Z",
     });
     expect(sockets[0]?.after).toBe(0);
 
@@ -153,6 +172,7 @@ describe("CodeSessionRegistry", () => {
       id: userItemId("t2"),
       turnId: "t2",
       text: "and run the tests",
+      createdAt: "2026-08-15T12:00:03.000Z",
     });
     expect(calls).toBe(2);
   });

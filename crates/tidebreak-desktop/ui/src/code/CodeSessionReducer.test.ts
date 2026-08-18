@@ -218,6 +218,7 @@ describe("hydrate then replay", () => {
       id: userItemId("t1"),
       turnId: "t1",
       text: "list the files",
+      createdAt: NOW,
     });
     expect(hydrated.items[1]).toMatchObject({
       kind: "turn_boundary",

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
@@ -9,8 +9,21 @@ afterEach(() => {
   cleanup();
 });
 
+const USAGE = {
+  input_tokens: 12_400,
+  output_tokens: 3_100,
+  cache_read_input_tokens: 900,
+  cache_creation_input_tokens: 40,
+};
+
 const items: CodeTranscriptItem[] = [
-  { kind: "user", id: "u1", turnId: "t1", text: "list the files" },
+  {
+    kind: "user",
+    id: "u1",
+    turnId: "t1",
+    text: "list the **files**",
+    createdAt: "2026-08-15T12:00:00.000Z",
+  },
   {
     kind: "assistant",
     id: "a1",
@@ -39,25 +52,95 @@ const items: CodeTranscriptItem[] = [
     id: "b1",
     turnId: "t1",
     status: "completed",
-    durationMs: 1500,
-    usage: {
-      input_tokens: 12,
-      output_tokens: 3,
-      cache_read_input_tokens: 0,
-      cache_creation_input_tokens: 0,
-    },
+    durationMs: 134_000,
+    usage: USAGE,
     error: null,
-    diffstat: null,
+    diffstat: { files: 2, insertions: 42, deletions: 7, truncated: false },
   },
 ];
 
 describe("CodeTranscript", () => {
   it("renders assistant text, a tool card, and a harness notice", () => {
     render(<CodeTranscript items={items} />);
-    expect(screen.getByText("list the files")).toBeInTheDocument();
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Bash succeeded" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Bash succeeded" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
-    expect(screen.queryByText("Turn completed")).toBeNull();
+  });
+
+  it("renders the prompt as markdown with a timestamped footer", () => {
+    render(<CodeTranscript items={items} />);
+    const prompt = screen.getByRole("article", { name: "You" });
+    expect(within(prompt).getByText("files").tagName).toBe("STRONG");
+    expect(
+      screen.getByText((_, element) => element?.tagName === "TIME"),
+    ).toHaveAttribute("datetime", "2026-08-15T12:00:00.000Z");
+  });
+
+  it("closes a completed turn with its duration, diffstat, and usage", () => {
+    render(<CodeTranscript items={items} />);
+    const seam = screen.getByRole("group", { name: "Turn finished" });
+    expect(within(seam).getByText("· 2m 14s")).toBeInTheDocument();
+    expect(within(seam).getByText(/2 files \+42 −7/)).toBeInTheDocument();
+    expect(within(seam).getByText("12k in / 3k out")).toBeInTheDocument();
+  });
+
+  it("says why a failed turn failed", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "turn_boundary",
+            id: "b2",
+            turnId: "t2",
+            status: "failed",
+            durationMs: 4_000,
+            usage: null,
+            error: "claude exited with status 1",
+            diffstat: null,
+          },
+        ]}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Turn failed");
+    expect(alert).toHaveTextContent("claude exited with status 1");
+    expect(alert).toHaveTextContent("4s");
+  });
+
+  it("holds the transcript's shape until the session hydrates", () => {
+    const { container, rerender } = render(
+      <CodeTranscript items={[]} hydrated={false} />,
+    );
+    expect(container.querySelector(".animate-pulse")).not.toBeNull();
+    expect(screen.queryByText("Send a message to start a turn.")).toBeNull();
+
+    rerender(<CodeTranscript items={[]} hydrated />);
+    expect(container.querySelector(".animate-pulse")).toBeNull();
+    expect(
+      screen.getByText("Send a message to start a turn."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the engine working only where nothing else says so", () => {
+    const { rerender } = render(<CodeTranscript items={items} busy />);
+    expect(screen.getByText("Working")).toBeInTheDocument();
+
+    rerender(
+      <CodeTranscript
+        items={[
+          {
+            kind: "assistant",
+            id: "a2",
+            turnId: "t1",
+            text: "Reading",
+            streaming: true,
+          },
+        ]}
+        busy
+      />,
+    );
+    expect(screen.queryByText("Working")).toBeNull();
   });
 });

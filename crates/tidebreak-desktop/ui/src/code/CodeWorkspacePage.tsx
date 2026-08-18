@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { SquareTerminal } from "lucide-react";
+import { ArrowDown, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
@@ -22,7 +22,10 @@ import { PanelLayout } from "@/panel/PanelLayout";
 import type { PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { followScrollBehavior } from "@/ChatScroll";
+import { useStreamStalled } from "@/useStreamStalled";
+import { useTranscriptFollow } from "@/useTranscriptFollow";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import {
   SHELL_SHORTCUTS,
   shortcutKeycaps,
@@ -440,16 +443,30 @@ function CodeSessionPane({
   catalogModels,
   defaultModelKey,
   disabled,
+  onOpenTurnDiff,
 }: {
   session: CodeSessionSnapshot;
   client: ApiClient;
   catalogModels: ModelInfo[];
   defaultModelKey: string | null;
   disabled: boolean;
+  /**
+   * Scope the review sidebar to one turn's changes, from a turn's diffstat.
+   * Left unset until the inspector can hold a scope; the diffstat reads as a
+   * plain count meanwhile rather than a control that does nothing.
+   */
+  onOpenTurnDiff?: (turnId: string) => void;
 }) {
+  const follow = useTranscriptFollow();
   const store = useRegisteredCodeSession(session.id, client);
   const items = store((state) => state.items);
   const busy = store((state) => state.busy);
+  const hydrated = store((state) => state.hydrated);
+  const animateStreaming = store((state) => state.animateStreaming);
+  // The reducer's own applied-event cursor is the activity signal the stall
+  // timer wants: every delta, tool result, and boundary advances it.
+  const lastSeq = store((state) => state.lastSeq);
+  const streamStalled = useStreamStalled(busy, lastSeq);
   const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
   const [approvals, setApprovals] = useState<Record<string, CodeApprovalSnapshot>>(
     {},
@@ -549,6 +566,10 @@ function CodeSessionPane({
   }, [client, session.id, approvalKey]);
 
   function send(message: string) {
+    // Sending is a deliberate return to the tail: whatever the reader was
+    // reading, they now want to watch their own turn run.
+    follow.armFollow();
+    follow.requestSmoothFollow();
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
     return submitAcceptedTurn(store.getState().update, () =>
@@ -566,12 +587,20 @@ function CodeSessionPane({
 
   return (
     <>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className={cn("message-view", follow.fadeClass)}>
         <CodeTranscript
           items={items}
+          hydrated={hydrated}
+          busy={busy}
+          streamStalled={streamStalled}
+          animateStreaming={animateStreaming}
           approvals={approvals}
           decidingId={decidingId}
           approvalError={approvalError}
+          onOpenTurnDiff={onOpenTurnDiff}
+          scrollRef={follow.scrollRef}
+          contentRef={follow.contentRef}
+          onScroll={follow.onScroll}
           onDecide={async (approvalId, decision, feedback) => {
             setDecidingId(approvalId);
             setApprovalError(undefined);
@@ -590,6 +619,19 @@ function CodeSessionPane({
             }
           }}
         />
+        <button
+          type="button"
+          className={cn(
+            "border-border text-foreground bg-background pointer-events-none absolute bottom-3 left-1/2 z-[1] inline-flex -translate-x-1/2 items-center justify-center rounded-full border p-2 opacity-0 shadow transition-[opacity,background-color] duration-150 ease-in-out hover:bg-accent motion-reduce:transition-none",
+            follow.scrolledAway && "pointer-events-auto opacity-100",
+          )}
+          aria-label="Scroll to latest"
+          aria-hidden={!follow.scrolledAway}
+          tabIndex={follow.scrolledAway ? 0 : -1}
+          onClick={() => follow.armFollow(followScrollBehavior(false))}
+        >
+          <ArrowDown size={16} />
+        </button>
       </div>
       {lifecycle !== "ended" && (
         <CodeComposer

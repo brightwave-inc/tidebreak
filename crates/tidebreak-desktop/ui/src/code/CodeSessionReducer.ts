@@ -28,6 +28,8 @@ export type CodeTranscriptItem =
       id: string;
       turnId: string;
       text: string;
+      /** When the server accepted the turn, for the message footer's time. */
+      createdAt: string;
     }
   | {
       kind: "assistant";
@@ -81,6 +83,15 @@ export type CodeSessionState = {
   lastSeq: number;
   /** Whether new stream presentation should animate rather than catch up. */
   animateStreaming: boolean;
+  /**
+   * Whether the durable turn snapshot has settled, either way.
+   *
+   * A session that has not hydrated yet is transiently empty, which reads
+   * exactly like a session with nothing in it. The transcript shows a skeleton
+   * until this flips, so an existing session does not flash its empty state
+   * before its history lands.
+   */
+  hydrated: boolean;
   items: CodeTranscriptItem[];
   busy: boolean;
   activeTurnId: string | null;
@@ -119,6 +130,7 @@ export function initialCodeSessionState(): CodeSessionState {
   return {
     lastSeq: 0,
     animateStreaming: true,
+    hydrated: false,
     items: [],
     busy: false,
     activeTurnId: null,
@@ -142,6 +154,19 @@ export function boundaryItemId(turnId: string): string {
 }
 
 /**
+ * The durable snapshot has settled, whether it arrived or failed.
+ *
+ * The skeleton comes down either way: a snapshot that could not be read leaves
+ * an empty transcript the reader can send into, not a placeholder that never
+ * resolves.
+ */
+export function markCodeSessionHydrated(
+  state: CodeSessionState,
+): CodeSessionState {
+  return state.hydrated ? state : { ...state, hydrated: true };
+}
+
+/**
  * Record a turn the server accepted. Create and hydrate share this so a
  * reopen and a live send produce the same turn-keyed user item.
  */
@@ -154,6 +179,9 @@ export function applyAcceptedTurn(
     id: userItemId(turn.id),
     turnId: turn.id,
     text: turn.user_input,
+    // Every accepted turn carries its own start, live or replayed, so the
+    // prompt's timestamp never depends on when this client happened to see it.
+    createdAt: turn.started_at,
   };
   const hasUser = state.items.some(
     (item) => item.kind === "user" && item.turnId === turn.id,

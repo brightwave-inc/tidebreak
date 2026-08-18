@@ -26,6 +26,12 @@ export type CodeSessionControllerOptions = {
    */
   hydrateTurns?: () => Promise<CodeTurnSnapshot[]>;
   onHydrate?: (turns: CodeTurnSnapshot[]) => void;
+  /**
+   * The snapshot settled, whether it arrived or failed. The transcript hangs
+   * its skeleton on this rather than on `onHydrate`, so a session whose history
+   * could not be read still reaches a state the reader can send from.
+   */
+  onHydrateSettled?: () => void;
 };
 
 /**
@@ -69,6 +75,7 @@ export class CodeSessionController {
         if (this.disposed) return;
       }
     }
+    this.options.onHydrateSettled?.();
     this.connect();
   }
 
