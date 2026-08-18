@@ -18,5 +18,12 @@ rename may use the former OpenWave name. Current documentation and source code
 use Tidebreak terminology; the historical wording is not a second product or
 an active compatibility alias.
 
-[`CLAUDE.md`](../../CLAUDE.md) has the rest of the convention, including when a
-change warrants a record at all.
+Write one before building when a change fixes something later work has to live
+with: a data-model or ownership boundary, a wire or persisted contract, a
+vocabulary that will spread through the codebase, or a rule two subsystems will
+both be held to. Ordinary implementation, bug fixes, and work whose shape an
+existing record already settles go straight to an issue or a PR.
+
+Record the alternatives you rejected and why, and say what would make you
+revisit the decision. A record that states only the chosen design cannot stop
+the same argument being reopened.
