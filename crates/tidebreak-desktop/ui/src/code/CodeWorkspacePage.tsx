@@ -456,8 +456,10 @@ function CodeSessionPane({
   );
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
+  // No `?? []` fallback here: a fresh array is a new snapshot every render,
+  // and zustand v5 loops on referentially unstable snapshots.
   const cachedModels = useCodeCatalogStore(
-    (state) => state.modelsByHarness[session.harness_kind] ?? [],
+    (state) => state.modelsByHarness[session.harness_kind],
   );
   const rememberHarnessModels = useCodeCatalogStore(
     (state) => state.rememberHarnessModels,
@@ -468,7 +470,7 @@ function CodeSessionPane({
       session.harness_kind,
       defaultModelKey,
     );
-    return gateway.length > 0 ? gateway : cachedModels;
+    return gateway.length > 0 ? gateway : (cachedModels ?? []);
   }, [cachedModels, catalogModels, defaultModelKey, session.harness_kind]);
   const inferred = modelOptions.find((option) => option.default)?.id;
   const [model, setModel] = useState(session.model ?? inferred);
@@ -481,7 +483,7 @@ function CodeSessionPane({
     if (gatewayCodeModels(catalogModels, session.harness_kind, defaultModelKey).length > 0) {
       return;
     }
-    if (cachedModels.length > 0) return;
+    if (cachedModels && cachedModels.length > 0) return;
     let cancelled = false;
     void client.listCodeHarnessModels(session.harness_kind).then(
       (listed) => {
@@ -497,7 +499,7 @@ function CodeSessionPane({
       cancelled = true;
     };
   }, [
-    cachedModels.length,
+    cachedModels,
     catalogModels,
     client,
     defaultModelKey,
