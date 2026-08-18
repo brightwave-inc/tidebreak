@@ -64,10 +64,6 @@ export default defineConfig(async () => ({
     setupFiles: ["./src/test/setup.ts"],
     alias: {
       "monaco-editor/editor/editor.worker.js?worker": monacoWorkerStub,
-      "monaco-editor/language/css/css.worker.js?worker": monacoWorkerStub,
-      "monaco-editor/language/html/html.worker.js?worker": monacoWorkerStub,
-      "monaco-editor/language/json/json.worker.js?worker": monacoWorkerStub,
-      "monaco-editor/language/typescript/ts.worker.js?worker": monacoWorkerStub,
     },
   },
   clearScreen: false,

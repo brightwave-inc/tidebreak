@@ -8,8 +8,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
 import { useLiveResource } from "./useLiveContent";
 
-configureMonaco();
-
 /**
  * Read-only Monaco view of one worktree file.
  */

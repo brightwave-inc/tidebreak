@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -50,7 +50,11 @@ import {
 } from "./codeChrome";
 import { CodeCenterTabs } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
-import { FileViewer } from "./FileViewer";
+
+const FileViewer = lazy(async () => {
+  const module = await import("./FileViewer");
+  return { default: module.FileViewer };
+});
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -316,12 +320,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       {!showingChat && activeEditor && (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {activeEditor.type === "file" ? (
-            <FileViewer
-              client={client}
-              workspaceId={workspaceId}
-              path={activeEditor.path}
-              contentRevision={contentRevision}
-            />
+            <Suspense fallback={<Skeleton className="h-full w-full" />}>
+              <FileViewer
+                client={client}
+                workspaceId={workspaceId}
+                path={activeEditor.path}
+                contentRevision={contentRevision}
+              />
+            </Suspense>
           ) : activeEditor.type === "diff" ? (
             <DiffPanel
               client={client}
