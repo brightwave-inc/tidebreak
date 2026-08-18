@@ -57,6 +57,17 @@ export function planDraftReconciliation({
 
   const keep = drafts.find((draft) => draft.id === resolvedReleaseId);
   if (!keep) {
+    const reportedRelease = allReleases.find(
+      (release) => release?.id === resolvedReleaseId,
+    );
+    if (!reportedRelease) {
+      return {
+        action: "retry",
+        keep_id: null,
+        delete_ids: [],
+        reason: `Release Drafter reported release ${resolvedReleaseId}, but the releases list does not include it yet`,
+      };
+    }
     throw new Error(
       `Release Drafter reported release ${resolvedReleaseId} but it is not a non-prerelease draft`,
     );

@@ -122,24 +122,46 @@ jobs:
           RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
           RESOLVED_VERSION: ${{ steps.release_drafter.outputs.resolved_version }}
         run: |
-          gh api --paginate \
-            -H 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
-            jq -s '[.[][]]' > "$RUNNER_TEMP/releases.json"
-          plan="$(node scripts/reconcile-release-drafts.mjs \
-            --releases "$RUNNER_TEMP/releases.json" \
-            --resolved-version "$RESOLVED_VERSION" \
-            --release-id "$RELEASE_ID")"
-          echo "$plan"
-          while IFS= read -r id; do
-            gh api --method DELETE \
-              "repos/$GITHUB_REPOSITORY/releases/$id" >/dev/null
-            echo "Deleted extra draft $id"
-          done < <(jq -r '.delete_ids[]' <<<"$plan")
-          if [[ "$(jq -r .action <<<"$plan")" = fail ]]; then
-            jq -r .reason <<<"$plan" >&2
-            exit 1
-          fi
+          attempt=1
+          max_attempts=5
+          while (( attempt <= max_attempts )); do
+            if gh api --paginate \
+                 -H 'Accept: application/vnd.github+json' \
+                 "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                 > "$RUNNER_TEMP/releases.raw.json" \
+              && jq -s '[.[][]]' "$RUNNER_TEMP/releases.raw.json" \
+                 > "$RUNNER_TEMP/releases.json"
+            then
+              plan="$(node scripts/reconcile-release-drafts.mjs \
+                --releases "$RUNNER_TEMP/releases.json" \
+                --resolved-version "$RESOLVED_VERSION" \
+                --release-id "$RELEASE_ID")"
+              echo "attempt ${attempt}: ${plan}"
+              action="$(jq -r .action <<<"$plan")"
+              if [[ "$action" != retry ]]; then
+                while IFS= read -r id; do
+                  gh api --method DELETE \
+                    "repos/$GITHUB_REPOSITORY/releases/$id" >/dev/null
+                  echo "Deleted extra draft $id"
+                done < <(jq -r '.delete_ids[]' <<<"$plan")
+                if [[ "$action" = fail ]]; then
+                  jq -r .reason <<<"$plan" >&2
+                  exit 1
+                fi
+                exit 0
+              fi
+              reason="$(jq -r .reason <<<"$plan")"
+            else
+              reason="failed to list GitHub releases"
+              echo "attempt ${attempt}: ${reason}"
+            fi
+            if (( attempt == max_attempts )); then
+              echo "$reason" >&2
+              exit 1
+            fi
+            sleep $((attempt * 5))
+            attempt=$((attempt + 1))
+          done
       - name: Group release notes by Conventional Commit scope
         env:
           GH_TOKEN: ${{ github.token }}
