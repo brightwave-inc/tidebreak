@@ -181,9 +181,9 @@ replacement always requires — not relaxing the refusal.
 
 ## Additional desktop distribution
 
-Production releases ship x86_64 macOS, Windows, and Linux packages. Three
-distribution improvements remain deliberately outside that first
-cross-platform slice:
+Production releases ship universal macOS packages plus x86_64 and ARM64
+Windows and Linux packages. One distribution improvement remains deliberately
+outside the cross-platform release contract:
 
 - **Windows Authenticode signing.** The NSIS installer is signed by the Tauri
   updater key but not by a Windows-trusted code-signing certificate, so
@@ -191,15 +191,6 @@ cross-platform slice:
   provider, protected release-environment credentials, verification of the
   signed installer, and a recovery procedure for certificate or provider
   failure.
-- **Windows and Linux ARM64 packages.** The release manifest can add another
-  architecture without changing the package formats, but the desktop, host
-  broker, native dependencies, installer, and clean-machine launch path all
-  need native-runner or proven cross-build coverage first.
-- **Automatic updates outside macOS.** Production publishes authenticated
-  `windows-x86_64`, `linux-x86_64-appimage`, and `linux-x86_64-deb` updater
-  entries, but the app's update loop stays macOS-only until NSIS, AppImage, and
-  Debian replacement have clean-install, broker-quiescence, failed-install
-  recovery, and restart smoke tests.
 
 Reliability work also remains ahead of the product surface: replayable adapter
 contracts, recorded response decoding, and a protected live canary matrix would

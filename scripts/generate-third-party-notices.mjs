@@ -494,10 +494,28 @@ function runCargoMetadata(root) {
   return JSON.parse(output);
 }
 
+export function pnpmInvocation(
+  platform = process.platform,
+  commandInterpreter = process.env.ComSpec,
+) {
+  const args = ["licenses", "list", "--json", "--prod"];
+  if (platform === "win32") {
+    return {
+      executable: commandInterpreter?.trim() || "cmd.exe",
+      args: ["/d", "/c", "pnpm", ...args],
+    };
+  }
+  return { executable: "pnpm", args };
+}
+
 function runPnpmLicenses(uiDirectory) {
+  // On Windows pnpm is exposed as a .cmd shim, which Node cannot execute
+  // directly. Run it through cmd.exe even when this script was launched from
+  // Git Bash; Unix hosts keep the direct, shell-free invocation.
+  const pnpm = pnpmInvocation();
   const output = execFileSync(
-    "pnpm",
-    ["licenses", "list", "--json", "--prod"],
+    pnpm.executable,
+    pnpm.args,
     { cwd: uiDirectory, encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
   );
   const parsed = JSON.parse(output);

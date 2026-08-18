@@ -21,6 +21,7 @@ import {
   licenseTextId,
   normalizeLicenseText,
   parseSpdxIdentifiers,
+  pnpmInvocation,
   renderNotices,
 } from "./generate-third-party-notices.mjs";
 
@@ -52,6 +53,17 @@ function writePackage(root, directory, files) {
   }
   return packageDirectory;
 }
+
+test("the notices generator resolves the Windows pnpm command shim", () => {
+  assert.deepEqual(pnpmInvocation("win32", "C:\\Windows\\System32\\cmd.exe"), {
+    executable: "C:\\Windows\\System32\\cmd.exe",
+    args: ["/d", "/c", "pnpm", "licenses", "list", "--json", "--prod"],
+  });
+  assert.deepEqual(pnpmInvocation("linux"), {
+    executable: "pnpm",
+    args: ["licenses", "list", "--json", "--prod"],
+  });
+});
 
 test("the Rust collector covers the whole non-workspace graph and preserves its terms", () => {
   const root = scratchTree();

@@ -171,9 +171,9 @@ automatic.
    sources. The macOS job then signs the app with the Developer ID identity,
    notarizes and staples the app and DMG, verifies them with Apple tooling, and
    creates a signed Tauri updater archive. Parallel Windows and Linux jobs
-   produce the x86_64 NSIS, AppImage, and Debian packages; all three are signed
-   with the Tauri updater key after packaging. A fresh release cannot continue
-   unless all three operating-system builds succeed.
+   produce x86_64 and ARM64 NSIS, AppImage, and Debian packages; every package
+   is signed with the Tauri updater key after packaging. A fresh release cannot
+   continue unless every operating-system and architecture build succeeds.
 8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
@@ -187,8 +187,8 @@ automatic.
    download names include the notarized disk image as
    `Tidebreak-macos-universal.dmg`, plus the byte-identical legacy
    `Tidebreak-macos-apple-silicon.dmg` alias that keeps the existing README URL
-   live through the transition, `Tidebreak-windows-x86_64-setup.exe`,
-   `Tidebreak-linux-x86_64.AppImage`, and `Tidebreak-linux-x86_64.deb`. It also
+   live through the transition, plus architecture-specific Windows installers,
+   Linux AppImages, and Linux Debian packages. It also
    retains the versioned packages, updater artifacts and signatures, source
    SBOM, and checksum sidecars on GitHub as recovery inputs. This job holds no
    signing or AWS credentials. The stable names omit the version so that
@@ -239,40 +239,38 @@ current platform set. A release published before this platform change cannot
 be re-dispatched: it fails on the artifact paths and updater keys instead of
 silently republishing a different release shape.
 
-### Windows: unsigned x86_64 NSIS
+### Windows: unsigned x86_64 and ARM64 NSIS
 
-A release ships one `x86_64` Windows build as a single NSIS `-setup.exe`
-installer. NSIS is the one installer format for v1 because Tauri bundles it
+A release ships one Windows NSIS `-setup.exe` installer for each of `x86_64`
+and `aarch64`. NSIS is the one installer format for v1 because Tauri bundles it
 with no additional configuration and it installs per-user without elevation.
 The installer is deliberately **not** Authenticode-signed yet, so Windows
 SmartScreen will warn on first run; code signing is tracked separately and
 must not be confused with the Tauri updater signature the release does carry.
-That updater signature covers the exact installer bytes and feeds
-`latest.json`'s `windows-x86_64` entry — Tauri v2 installs updates from the
-installer itself, so no separate updater archive exists on Windows. Packaged
-apps currently run the update loop only on macOS; the Windows metadata is
-published so updater-enabled Windows builds can adopt it without a manifest
-change.
+Each updater signature covers the exact installer bytes and feeds the matching
+`windows-x86_64` or `windows-aarch64` entry. Tauri v2 installs updates from the
+installer itself, so no separate updater archive exists on Windows. Release
+builds check that authenticated feed and ask before restarting into the new
+installer.
 
 Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
 `prepare_windows` job compiles the tag from scratch (or from an earlier
 release's prepared cache) and is the single writer of the Windows Cargo
 registry and prepared-build caches.
 
-### Linux: x86_64 AppImage and Debian package
+### Linux: x86_64 and ARM64 AppImage and Debian packages
 
-A release ships one portable AppImage and one `.deb` for x86_64 Linux. Both
-carry Tauri updater signatures over their exact bytes, and `latest.json`
-publishes separate `linux-x86_64-appimage` and `linux-x86_64-deb` entries so an
-installed package can only select its own format. Neither package is
-distribution-signed in this first shipping slice.
+A release ships one portable AppImage and one `.deb` for each of `x86_64` and
+`aarch64` Linux. Every package carries a Tauri updater signature over its exact
+bytes, and `latest.json` publishes architecture- and format-specific entries so
+an installed package can only select its own architecture and format. None of
+the packages is distribution-signed in this shipping slice.
 
-Packaged apps currently run the update loop only on macOS. The Linux updater
-metadata is published now so enabling verified AppImage or Debian updates later
-does not require changing the public manifest shape. Native local execution,
-managed Node and LibreOffice installation, computer use, and code mode remain
-governed by their existing platform capability checks; packaging the desktop
-does not claim those features on Linux.
+Release builds check the authenticated feed and ask before restarting. Tauri's
+installed-bundle detection selects AppImage or Debian metadata before download.
+Native local execution, managed Node and LibreOffice installation, computer use,
+and code mode remain governed by their existing platform capability checks;
+packaging the desktop does not claim those features on Linux.
 
 The Linux packaging job uses compiler and Cargo download caches in read-only
 mode and does not enable pnpm caching. It builds both formats from the validated
@@ -295,9 +293,11 @@ tidebreak/releases/vMAJOR.MINOR.PATCH/
 ├── macos/
 │   └── universal/
 ├── windows/
-│   └── x86_64/
+│   ├── x86_64/
+│   └── aarch64/
 └── linux/
-    └── x86_64/
+    ├── x86_64/
+    └── aarch64/
 ```
 
 The macOS directory contains a notarized DMG, a zip of the notarized app, a
@@ -587,8 +587,9 @@ its local profile until this checklist is complete:
    The lifecycle must preserve supported data, migrate transactionally, fail
    safely, and test upgrades from the latest 0.x state.
 3. Verify the provisioned release pipeline with clean install and 0.x upgrade
-   smoke tests on macOS and Windows, clean install and launch checks for the
-   Linux Debian package, and AppImage launch checks on a second distribution.
+   smoke tests on macOS and both Windows architectures, clean install and
+   update checks for both Linux Debian architectures, and AppImage launch and
+   update checks on a second distribution.
 4. Update `SECURITY.md` with supported release lines, security-fix policy, and
    end-of-support expectations. Document backup, migration, and rollback.
 5. In the same readiness work, change the `semver:breaking` version resolver's
