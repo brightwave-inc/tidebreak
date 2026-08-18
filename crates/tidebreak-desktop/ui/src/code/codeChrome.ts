@@ -154,31 +154,6 @@ function closeLayoutTab(layout: LayoutState, index: number): LayoutState {
   };
 }
 
-function mergeTerminalLayout(
-  panels: LayoutState,
-  terminal: Extract<PanelContent, { type: "terminal" }> | null,
-): LayoutState {
-  if (!terminal) return panels;
-  if (panels.tabs.length === 0) {
-    return {
-      tabs: [terminal],
-      activeIndex: 0,
-      fullscreen: false,
-      conversationFocused: panels.conversationFocused,
-    };
-  }
-  const tabs = [...panels.tabs, terminal];
-  const active = panels.tabs[panels.activeIndex];
-  const activeIndex = active
-    ? tabs.findIndex((tab) => panelKey(tab) === panelKey(active))
-    : 0;
-  return {
-    ...panels,
-    tabs,
-    activeIndex: Math.max(0, activeIndex),
-  };
-}
-
 /** Open the terminal drawer, or close it if it is already in the layout. */
 export function toggleTerminalLayout(layout: LayoutState): LayoutState {
   const index = layout.tabs.findIndex((tab) => tab.type === "terminal");

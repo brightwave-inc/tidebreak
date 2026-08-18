@@ -293,11 +293,11 @@ describe("NewWorkspaceDialog", () => {
       <AppContextProvider
         value={app({
           listCodeHarnessModels: vi.fn(async () => ({
-            kind: "opencode" as const,
+            kind: "opencode" as HarnessKind,
             models: [
               { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
-              { id: "claude-opus-5", label: "Claude Opus 5" },
-              { id: "grok-4.5", label: "Grok 4.5" },
+              { id: "claude-opus-5", label: "Claude Opus 5", default: false },
+              { id: "grok-4.5", label: "Grok 4.5", default: false },
             ],
           })),
         })}

@@ -111,10 +111,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
-  const setReviewSidebarOpen = useCodeUiStore(
-    (state) => state.setReviewSidebarOpen,
-  );
-  const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
@@ -326,7 +322,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               path={activeEditor.path}
               contentRevision={contentRevision}
             />
-          ) : (
+          ) : activeEditor.type === "diff" ? (
             <DiffPanel
               client={client}
               workspaceId={workspaceId}
@@ -335,7 +331,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               contentRevision={contentRevision}
               onOpenFile={openFile}
             />
-          )}
+          ) : null}
         </div>
       )}
       {chrome.terminal && (
