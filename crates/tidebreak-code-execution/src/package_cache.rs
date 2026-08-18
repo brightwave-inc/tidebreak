@@ -50,10 +50,12 @@ pub const PACKAGE_CACHE_DIR: &str = ".code-execution-package-cache";
 pub const PACKAGE_CACHE_ENV: &str = "TIDEBREAK_PACKAGE_CACHE";
 
 const MANIFEST_FILE: &str = "manifest.json";
+const POPULATED_PINS_FILE: &str = "populated-pins.json";
 const WHEELS_DIR: &str = "wheels";
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_TOTAL_BYTES: u64 = 1_024 * 1_024 * 1_024;
 const MAX_MANIFEST_BYTES: u64 = 4 * 1_024 * 1_024;
+const MAX_POPULATED_PINS_BYTES: u64 = 64 * 1_024;
 const MAX_RUNTIME_KEY_BYTES: usize = 64;
 const RUNTIME_KEY_TIMEOUT: Duration = Duration::from_secs(10);
 const PIP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -109,6 +111,13 @@ fn is_valid_runtime_key(key: &str) -> bool {
 
 /// Whether `name` is a plausible wheel filename safe to record and serve:
 /// bounded ASCII, no separators or leading dot, ending in `.whl`.
+fn canonicalize_pins(pins: &[String]) -> Vec<String> {
+    let mut key = pins.to_vec();
+    key.sort();
+    key.dedup();
+    key
+}
+
 fn is_valid_artifact_name(name: &str) -> bool {
     name.len() <= 255
         && name.ends_with(".whl")
@@ -189,6 +198,34 @@ impl SharedPackageCache {
             .is_some_and(|manifest| !manifest.entries.is_empty())
     }
 
+    /// Whether a previous successful pass already acquired `pins`.
+    ///
+    /// False when the cache is empty so a leftover sidecar cannot hide a
+    /// wiped wheels directory.
+    #[must_use]
+    pub fn has_populated_pins(&self, pins: &[String]) -> bool {
+        let key = canonicalize_pins(pins);
+        if key.is_empty() || !self.is_ready() {
+            return false;
+        }
+        self.load_populated_pins().iter().any(|set| set == &key)
+    }
+
+    /// Remember that `pins` resolved into this cache so a later boot can skip
+    /// another `pip download` for the same set.
+    pub fn record_populated_pins(&self, pins: &[String]) {
+        let key = canonicalize_pins(pins);
+        if key.is_empty() {
+            return;
+        }
+        let mut sets = self.load_populated_pins();
+        if sets.iter().any(|set| set == &key) {
+            return;
+        }
+        sets.push(key);
+        let _ = self.store_populated_pins(&sets);
+    }
+
     /// An unreadable or unparseable manifest is `None`: integrity is unknown,
     /// so nothing is served until verification rebuilds from an empty record.
     fn load_manifest(&self) -> Option<Manifest> {
@@ -202,6 +239,48 @@ impl SharedPackageCache {
             .read_to_end(&mut bytes)
             .ok()?;
         serde_json::from_slice(&bytes).ok()
+    }
+
+    fn load_populated_pins(&self) -> Vec<Vec<String>> {
+        let path = self.runtime_dir.join(POPULATED_PINS_FILE);
+        let Ok(file) = fs::File::open(&path) else {
+            return Vec::new();
+        };
+        let Ok(metadata) = file.metadata() else {
+            return Vec::new();
+        };
+        if metadata.len() > MAX_POPULATED_PINS_BYTES {
+            return Vec::new();
+        }
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_POPULATED_PINS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let Ok(raw) = serde_json::from_slice::<Vec<Vec<String>>>(&bytes) else {
+            return Vec::new();
+        };
+        raw.into_iter()
+            .map(|pins| canonicalize_pins(&pins))
+            .filter(|pins| {
+                !pins.is_empty()
+                    && pins
+                        .iter()
+                        .all(|pin| crate::skills::is_pinned_python_dep(pin))
+            })
+            .collect()
+    }
+
+    fn store_populated_pins(&self, sets: &[Vec<String>]) -> Result<(), CodeExecutionError> {
+        let bytes = serde_json::to_vec_pretty(sets)
+            .map_err(|_| cache_error("could not encode populated package cache pins"))?;
+        let temporary = self.runtime_dir.join(format!(".{POPULATED_PINS_FILE}.tmp"));
+        fs::write(&temporary, bytes)
+            .and_then(|()| fs::rename(&temporary, self.runtime_dir.join(POPULATED_PINS_FILE)))
+            .map_err(|_| cache_error("could not persist populated package cache pins"))
     }
 
     fn store_manifest(&self, manifest: &Manifest) -> Result<(), CodeExecutionError> {
@@ -346,6 +425,11 @@ impl SharedPackageCache {
         }
 
         self.store_manifest(&manifest)?;
+        // Eviction or invalidation can drop wheels a recorded pin set needed.
+        // Forget the sidecar rather than guess which sets are still complete.
+        if report.invalidated > 0 || report.evicted > 0 {
+            let _ = fs::remove_file(self.runtime_dir.join(POPULATED_PINS_FILE));
+        }
         Ok(report)
     }
 
@@ -390,7 +474,7 @@ impl SharedPackageCache {
         python: &Path,
         pins: &[String],
     ) -> Result<PromotionReport, CodeExecutionError> {
-        if pins.is_empty() {
+        if pins.is_empty() || self.has_populated_pins(pins) {
             return Ok(PromotionReport::default());
         }
         if !pins
@@ -405,12 +489,18 @@ impl SharedPackageCache {
             .runtime_dir
             .join(format!(".staging-{}", uuid::Uuid::new_v4()));
         secure_dir(&staging)?;
-        let result = self.download_into(python, pins, &staging).await;
+        let result = match self.download_into(python, pins, &staging, true).await {
+            Ok(()) => Ok(()),
+            Err(_) => self.download_into(python, pins, &staging, false).await,
+        };
         let promoted = match result {
             Ok(()) => self.verify_and_promote(&staging),
             Err(error) => Err(error),
         };
         let _ = fs::remove_dir_all(&staging);
+        if promoted.is_ok() {
+            self.record_populated_pins(pins);
+        }
         promoted
     }
 
@@ -419,19 +509,27 @@ impl SharedPackageCache {
         python: &Path,
         pins: &[String],
         staging: &Path,
+        offline: bool,
     ) -> Result<(), CodeExecutionError> {
-        let download = tokio::process::Command::new(python)
-            .args([
-                "-m",
-                "pip",
-                "download",
-                "--only-binary=:all:",
-                "--disable-pip-version-check",
-                "--no-input",
-                "--quiet",
-                "--dest",
-            ])
-            .arg(staging)
+        let mut download = tokio::process::Command::new(python);
+        download.args([
+            "-m",
+            "pip",
+            "download",
+            "--only-binary=:all:",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--quiet",
+            "--dest",
+        ]);
+        download.arg(staging);
+        if offline {
+            download
+                .arg("--no-index")
+                .arg("--find-links")
+                .arg(self.wheels_dir());
+        }
+        let download = download
             .args(pins)
             .current_dir(&self.runtime_dir)
             .stdin(std::process::Stdio::null())
@@ -564,5 +662,33 @@ mod tests {
         assert_eq!(oversized.promoted, 0);
         assert_eq!(oversized.refused, 1);
         assert!(!wheels.join("huge-1.0-py3-none-any.whl").exists());
+    }
+
+    #[test]
+    fn populated_pin_sets_are_remembered_until_the_cache_is_invalidated() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        let pins = vec!["pypdf==5.1.0".to_owned(), "fpdf2==2.8.3".to_owned()];
+        let reordered = vec!["fpdf2==2.8.3".to_owned(), "pypdf==5.1.0".to_owned()];
+        assert!(!cache.has_populated_pins(&pins));
+
+        let staging = root.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        stage(&staging, "fpdf2-2.8.3-py3-none-any.whl", b"fpdf-bytes");
+        cache.verify_and_promote(&staging).unwrap();
+        cache.record_populated_pins(&pins);
+        assert!(cache.has_populated_pins(&reordered));
+
+        let reopened = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        assert!(reopened.has_populated_pins(&pins));
+
+        fs::write(
+            cache.wheels_dir().join("fpdf2-2.8.3-py3-none-any.whl"),
+            b"tampered",
+        )
+        .unwrap();
+        cache.verify().unwrap();
+        assert!(!cache.has_populated_pins(&pins));
+        assert!(!reopened.has_populated_pins(&pins));
     }
 }

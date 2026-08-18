@@ -44,6 +44,17 @@ vi.mock("@xterm/addon-fit", () => ({
 
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
+vi.mock("./FileViewer", () => ({
+  FileViewer: ({ path }: { path: string }) => (
+    <div data-testid="file-viewer">{path}</div>
+  ),
+}));
+
+vi.mock("@monaco-editor/react", () => ({
+  default: () => null,
+  loader: { config() {} },
+}));
+
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
 }));
@@ -175,6 +186,12 @@ function makeClient() {
       files: [],
       truncated: false,
       stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    })),
+    getCodeWorkspaceBlob: vi.fn(async () => ({
+      path: "src/lib.rs",
+      content: "fn main() {}",
+      truncated: false,
+      binary: false,
     })),
     getCodeWorkspaceDiff: vi.fn(async () => ({
       diff: "",
@@ -324,9 +341,34 @@ describe("CodeWorkspacePage", () => {
     // own height, so `.messages` is what overflows.
     expect(view?.querySelector(".messages > .messages-column")).not.toBeNull();
 
+    const pane = view?.closest(".chat-pane");
+    expect(pane).not.toBeNull();
+    expect(view?.parentElement?.className).toMatch(/flex/);
+    expect(view?.nextElementSibling).toContainElement(
+      screen.getByRole("button", { name: "Send message" }),
+    );
+
     const seam = await screen.findByRole("group", { name: "Turn finished" });
     expect(seam).toHaveTextContent("2m 14s");
     expect(seam).toHaveTextContent("2 files +42 −7");
+  });
+
+  it("pins the composer to the bottom of a full-height column on an empty start", async () => {
+    const client = makeClient();
+    const { container } = await mountWorkspace(client);
+
+    expect(
+      await screen.findByText("Start a session on this workspace."),
+    ).toBeInTheDocument();
+
+    const pane = container.querySelector(".chat-pane");
+    expect(pane).not.toBeNull();
+    expect(pane).toContainElement(
+      screen.getByRole("button", { name: "Send message" }),
+    );
+    // The start prompt is a flex child of the pane so `mt-auto` on the
+    // composer can consume the empty region under the header.
+    expect(pane?.firstElementChild?.className).toMatch(/flex-1/);
   });
 
   it("shows header skeleton bars instead of Workspace and a repo UUID", async () => {
@@ -458,11 +500,11 @@ describe("CodeWorkspacePage", () => {
     expect(within(inspector).getByText("No pull request yet")).toBeInTheDocument();
   });
 
-  it("does not promote stale files or diff URL tabs into the conversation strip", async () => {
+  it("does not promote a stale files catalog into the conversation strip", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(
       client,
-      "/code/w/ws-1?tabs=files,terminal,diff",
+      "/code/w/ws-1?tabs=files,terminal",
     );
 
     expect(
@@ -471,11 +513,10 @@ describe("CodeWorkspacePage", () => {
     expect(
       screen.queryByRole("tablist", { name: "Open panels" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
     expect(router.state.location.search).toMatchObject({
-      tabs: "files,terminal,diff",
+      tabs: "files,terminal",
     });
 
     const inspector = screen.getByTestId("code-inspector");
@@ -510,7 +551,7 @@ describe("CodeWorkspacePage", () => {
     ).toBeInTheDocument();
   });
 
-  it("scopes the inspector to a turn from the review seam", async () => {
+  it("opens a turn diff as a center tab from the review seam", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
     const user = userEvent.setup();
@@ -520,10 +561,8 @@ describe("CodeWorkspacePage", () => {
       await screen.findByRole("button", { name: "Review this turn's changes" }),
     );
 
-    expect(
-      await screen.findByRole("button", { name: "Clear Turn 1 scope" }),
-    ).toHaveTextContent("Turn 1 ×");
-    expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
+    expect(await screen.findByRole("tab", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Turn diff" })).toHaveAttribute(
       "aria-selected",
       "true",
     );

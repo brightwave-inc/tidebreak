@@ -291,6 +291,8 @@ export type ComposerProps = {
   /** Prior user messages, newest first, for terminal-style Up/Down recall. */
   history?: readonly string[];
   modelMenu?: ReactNode;
+  /** Sits immediately to the right of `modelMenu` when the surface offers one. */
+  effortMenu?: ReactNode;
   permissionMenu?: ReactNode;
   /** Context-window reading, shown with the composer's own controls. */
   contextUsage?: {
@@ -341,6 +343,7 @@ export function Composer({
   draft,
   history = [],
   modelMenu,
+  effortMenu,
   permissionMenu,
   contextUsage,
   network,
@@ -1084,6 +1087,7 @@ export function Composer({
             }
           />
           {modelMenu}
+          {effortMenu}
         </div>
         <div className="flex items-center gap-2">
           {/* The permission mode sits with the send cluster: it is what the

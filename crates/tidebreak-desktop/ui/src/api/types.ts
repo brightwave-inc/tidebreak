@@ -120,6 +120,7 @@ import {
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   type CodeWorkspaceTree as WireCodeWorkspaceTree,
+  type CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
   type CodeActionSnapshot as WireCodeActionSnapshot,
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
@@ -1019,6 +1020,7 @@ export type FileChangeKind = WireFileChangeKind;
 export type CodeFileChange = WireCodeFileChange;
 export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
 export type CodeWorkspaceTree = WireCodeWorkspaceTree;
+export type CodeWorkspaceBlob = WireCodeWorkspaceBlob;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
 export type CodeCommitSnapshot = WireCodeCommitSnapshot;

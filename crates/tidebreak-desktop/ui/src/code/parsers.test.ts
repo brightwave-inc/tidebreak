@@ -17,6 +17,7 @@ import {
   parseCodeTurn,
   parseCodeTurnList,
   parseCodeTurnSubmission,
+  parseCodeWorkspaceBlob,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspaceTree,
@@ -179,6 +180,19 @@ describe("parseCodeApproval", () => {
         requested_at: "2026-08-15T12:00:00.000Z",
       }),
     ).toBeNull();
+  });
+});
+
+describe("parseCodeWorkspaceBlob", () => {
+  it("accepts GET /code/workspaces/{id}/blob", () => {
+    const blob = {
+      path: "src/lib.rs",
+      content: "fn main() {}",
+      truncated: false,
+      binary: false,
+    };
+    expect(parseCodeWorkspaceBlob(blob)).toEqual(blob);
+    expect(parseCodeWorkspaceBlob({ ...blob, extra: true })).toBeNull();
   });
 });
 

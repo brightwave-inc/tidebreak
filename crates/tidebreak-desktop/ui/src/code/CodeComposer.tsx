@@ -1,9 +1,22 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from "react";
-import { Check, ChevronDown, Search } from "lucide-react";
+import { Check, ChevronDown, Gauge, Search } from "lucide-react";
 
-import type { CodePermissionMode, HarnessKind, PermissionMode } from "../api/types";
+import type {
+  CodePermissionMode,
+  HarnessKind,
+  PermissionMode,
+  ReasoningEffort,
+} from "../api/types";
 import { HttpError } from "../api/client";
 import { Composer } from "../Composer";
+import {
+  IMAGE_MEDIA_TYPES,
+  imageAttachmentName,
+  imageAttachmentRejection,
+  type ImageAttachment,
+  withoutAttachment,
+} from "../ImageAttachments";
+import { reasoningEffortOptions } from "../ModelMenu";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import {
   ClaudeIcon,
@@ -17,6 +30,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -113,11 +127,16 @@ export function HarnessModelMenu({
   options,
   value,
   onChange,
+  disabled,
+  variant = "composer",
 }: {
   harness: HarnessKind;
   options: readonly CodeModelOption[];
   value?: string;
   onChange?: (model: string) => void;
+  disabled?: boolean;
+  /** Composer sits above the draft; field fills a form row. */
+  variant?: "composer" | "field";
 }) {
   const current =
     options.find((option) => option.id === value) ??
@@ -150,7 +169,22 @@ export function HarnessModelMenu({
       );
   }, [groups, query]);
   const visible = searching ? matches : (activeGroup?.options ?? []);
-  if (!current) return null;
+  const locked = disabled || !onChange;
+  if (!current) {
+    if (variant !== "field") return null;
+    return (
+      <Button
+        type="button"
+        variant="outline"
+        className="h-10 w-full justify-between px-3 font-normal"
+        disabled
+        aria-label="Model"
+      >
+        <span className="text-muted-foreground">Loading models…</span>
+        <ChevronDown className="size-4 opacity-50" />
+      </Button>
+    );
+  }
 
   function modelRow(option: CodeModelOption, index: number) {
     const selected = option.id === current?.id;
@@ -189,30 +223,40 @@ export function HarnessModelMenu({
     >
       <DropdownMenuTrigger asChild>
         <Button
-          variant="ghost"
-          className="h-8 max-w-56 gap-2"
-          disabled={!onChange}
+          type="button"
+          variant={variant === "field" ? "outline" : "ghost"}
+          className={
+            variant === "field"
+              ? "h-10 w-full justify-between px-3 font-normal"
+              : "h-8 max-w-56 gap-2"
+          }
+          disabled={locked}
           aria-label={`Model: ${current.label}`}
           title={
-            onChange
-              ? `Model: ${current.label}`
-              : `Model: ${current.label} (set when this session started)`
+            locked && !onChange
+              ? `Model: ${current.label} (set when this session started)`
+              : `Model: ${current.label}`
           }
         >
-          <CodeModelMark
-            harness={harness}
-            option={current}
-            className="size-4 shrink-0"
-          />
-          <span className="truncate">{current.label}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <CodeModelMark
+              harness={harness}
+              option={current}
+              className="size-4 shrink-0"
+            />
+            <span className="truncate">{current.label}</span>
+          </span>
           <ChevronDown className="size-4 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
-        side="top"
+        side={variant === "field" ? "bottom" : "top"}
         collisionPadding={12}
-        className="model-menu-content w-80 p-0"
+        className={cn(
+          "model-menu-content w-80 p-0",
+          variant === "field" && "z-[60]",
+        )}
         onKeyDownCapture={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key >= "1" && event.key <= "9") {
             const option = visible[Number(event.key) - 1];
@@ -300,6 +344,79 @@ export function HarnessModelMenu({
   );
 }
 
+/** Session-local effort, keyed like `session.model` when no PATCH route exists. */
+const sessionReasoningEffort = new Map<string, ReasoningEffort | null>();
+
+/**
+ * Composer-chrome effort picker. Chat's `ReasoningEffortSubMenu` is a tools
+ * submenu; code wants the same levels sitting next to the model button.
+ */
+export function ReasoningEffortMenu({
+  levels,
+  value,
+  disabled,
+  onChange,
+}: {
+  levels: readonly ReasoningEffort[];
+  value: ReasoningEffort | null;
+  disabled?: boolean;
+  onChange: (effort: ReasoningEffort | null) => void;
+}) {
+  const options = reasoningEffortOptions(levels);
+  if (options.length === 0) return null;
+  const isDefault = value === null;
+  const label = isDefault
+    ? "Default"
+    : (reasoningEffortOptions([value])[0]?.label ?? "Default");
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-8 max-w-40 gap-2"
+          disabled={disabled}
+          aria-label={`Reasoning: ${label}`}
+          title={`Reasoning: ${label}`}
+        >
+          <Gauge className="size-4" />
+          <span className="truncate">{label}</span>
+          <ChevronDown className="size-4 opacity-50" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="top" className="w-48">
+        <DropdownMenuItem
+          disabled={disabled}
+          onSelect={() => {
+            if (!isDefault) onChange(null);
+          }}
+          className="flex items-center gap-2"
+        >
+          <span className="text-sm">Default</span>
+          {isDefault && <Check className="ml-auto size-4" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        {options.map((option) => {
+          const selected = !isDefault && value === option.value;
+          return (
+            <DropdownMenuItem
+              key={option.value}
+              disabled={disabled}
+              onSelect={() => {
+                if (!selected) onChange(option.value);
+              }}
+              className="flex items-center gap-2"
+            >
+              <span className="text-sm">{option.label}</span>
+              {selected && <Check className="ml-auto size-4" />}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function CodeComposer({
   disabled,
   running,
@@ -357,16 +474,29 @@ export function CodeComposer({
 }) {
   const [draft, setDraft] = useState("");
   const [selectedModel, setSelectedModel] = useState(model ?? "");
+  const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(
+    () => (sessionId ? (sessionReasoningEffort.get(sessionId) ?? null) : null),
+  );
   const [notice, setNotice] = useState<{ text: string } | null>(null);
   const [followUpQueued, setFollowUpQueued] = useState(false);
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
   const canSteer = onSteer !== undefined;
   const showQueued = queued || followUpQueued;
   const [pathItems, setPathItems] = useState<string[]>([]);
   const searchPathsRef = useRef(searchPaths);
   searchPathsRef.current = searchPaths;
+  const selectedOption =
+    modelOptions?.find((option) => option.id === selectedModel) ??
+    modelOptions?.find((option) => option.default) ??
+    modelOptions?.[0];
+  const effortLevels = selectedOption?.reasoning_efforts ?? [];
 
   const onPathQueryChange = useCallback((query: string | null) => {
     if (query === null || !searchPathsRef.current) {
@@ -403,8 +533,52 @@ export function CodeComposer({
   }, [model]);
 
   useEffect(() => {
+    setSelectedEffort(
+      sessionId ? (sessionReasoningEffort.get(sessionId) ?? null) : null,
+    );
+  }, [sessionId]);
+
+  useEffect(() => {
     setFollowUpQueued(false);
   }, [lastTurnBeganId]);
+
+  useEffect(() => {
+    return () => {
+      for (const image of imagesRef.current) {
+        revokePreview(image.previewUrl);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setImages((current) => {
+      for (const image of current) revokePreview(image.previewUrl);
+      return [];
+    });
+    setImageError(null);
+  }, [sessionId]);
+
+  function attachImageFiles(files: readonly File[]) {
+    const rejection = imageAttachmentRejection(imagesRef.current, files);
+    if (rejection) {
+      setImageError(rejection);
+      return;
+    }
+    setImageError(null);
+    const now = new Date();
+    setImages((current) => [
+      ...current,
+      ...files.map((file) => localImageAttachment(file, now)),
+    ]);
+  }
+
+  function removeImage(id: string) {
+    setImages((current) => {
+      const found = current.find((image) => image.id === id);
+      if (found) revokePreview(found.previewUrl);
+      return withoutAttachment(current, id);
+    });
+  }
 
   async function submit() {
     const message = draft.trim();
@@ -479,6 +653,18 @@ export function CodeComposer({
             />
           ) : undefined
         }
+        effortMenu={
+          effortLevels.length > 0 ? (
+            <ReasoningEffortMenu
+              levels={effortLevels}
+              value={selectedEffort}
+              onChange={(next) => {
+                setSelectedEffort(next);
+                if (sessionId) sessionReasoningEffort.set(sessionId, next);
+              }}
+            />
+          ) : undefined
+        }
         permissionMenu={
           <PermissionModePicker
             value={permissionMode}
@@ -489,6 +675,20 @@ export function CodeComposer({
         }
         pathMentions={pathMentions}
         slash={slash}
+        images={{
+          items: images,
+          error: imageError,
+          unsupportedModel: null,
+          onAttachFiles: attachImageFiles,
+          onRemove: removeImage,
+          onRetry: () => undefined,
+        }}
+        files={{
+          items: [],
+          attaching: false,
+          onAttach: () => imageInputRef.current?.click(),
+          onRemove: () => undefined,
+        }}
         onDraftChange={(value) => {
           setSteerError(null);
           setSteerStatus(null);
@@ -505,6 +705,28 @@ export function CodeComposer({
         steerPending={canSteer ? steerPending : false}
         steerStatus={canSteer ? steerStatus : null}
       />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept={IMAGE_MEDIA_TYPES.join(",")}
+        multiple
+        className="hidden"
+        aria-label="Attach images"
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          event.target.value = "";
+          attachImageFiles(files);
+        }}
+      />
+      {images.length > 0 && (
+        <p
+          role="status"
+          className="text-muted-foreground mx-auto max-w-3xl pt-1 text-[11px]"
+        >
+          Code turns cannot carry images yet. Attached images stay in the
+          composer.
+        </p>
+      )}
       {notice && (
         <p
           role="alert"
@@ -515,4 +737,37 @@ export function CodeComposer({
       )}
     </div>
   );
+}
+
+function previewFor(file: File): string | null {
+  return typeof URL.createObjectURL === "function"
+    ? URL.createObjectURL(file)
+    : null;
+}
+
+function revokePreview(url: string | null): void {
+  if (url && typeof URL.revokeObjectURL === "function") {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * A chip the composer can show without publishing. The code-turn body is
+ * `{ message, model? }` and rejects unknown fields, so these bytes never
+ * leave the renderer.
+ */
+function localImageAttachment(file: File, at: Date): ImageAttachment {
+  return {
+    id: crypto.randomUUID(),
+    name: imageAttachmentName(file, at),
+    byteLen: file.size,
+    uploadedBytes: file.size,
+    status: "ready",
+    previewUrl: previewFor(file),
+    attachmentId: null,
+    mediaType: file.type,
+    width: null,
+    height: null,
+    error: null,
+  };
 }

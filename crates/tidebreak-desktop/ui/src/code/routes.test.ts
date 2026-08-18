@@ -10,8 +10,8 @@ import {
 describe("code routes", () => {
   it("reads mode and repo from the path the reader is on", () => {
     // Mode-scoped shortcuts hang off these answers, so a path family read
-    // wrongly here sends Cmd+N to the other half of the app — or locks the
-    // new-workspace dialog to something that is not a repo.
+    // wrongly here sends Cmd+N to the other half of the app — or seeds the
+    // new-workspace dialog with something that is not a repo.
     expect(isCodeRoute("/code")).toBe(true);
     expect(isCodeRoute("/code/w/ws-1")).toBe(true);
     expect(isCodeRoute("/codex")).toBe(false);

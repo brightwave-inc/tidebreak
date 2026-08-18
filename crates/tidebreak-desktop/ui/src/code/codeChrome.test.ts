@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import { EMPTY_LAYOUT } from "@/panel/panelTypes";
 import {
   closeCodeChromeTab,
+  closeEditorTab,
   focusCodeChromeTab,
+  focusConversation,
+  focusEditorTab,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
@@ -28,6 +31,7 @@ describe("code chrome layout", () => {
 
     expect(splitCodeChromeLayout(layout)).toEqual({
       panels: EMPTY_LAYOUT,
+      editors: EMPTY_LAYOUT,
       terminal: { type: "terminal" },
     });
   });
@@ -38,6 +42,7 @@ describe("code chrome layout", () => {
       { type: "folders" },
       { type: "agents" },
     ]);
+    expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual([]);
   });
 
   it("leaves a terminal-only layout as the conversation plus a drawer", () => {
@@ -49,6 +54,7 @@ describe("code chrome layout", () => {
       }),
     ).toEqual({
       panels: EMPTY_LAYOUT,
+      editors: EMPTY_LAYOUT,
       terminal: { type: "terminal" },
     });
   });
@@ -104,5 +110,33 @@ describe("code chrome layout", () => {
       activeIndex: 0,
       fullscreen: false,
     });
+  });
+
+  it("keeps file tabs in the center and focuses chat without closing them", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/lib.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+    };
+    const split = splitCodeChromeLayout(layout);
+    expect(split.editors.tabs).toEqual([
+      { type: "file", path: "src/lib.rs" },
+      { type: "diff", path: "src/lib.rs" },
+    ]);
+    expect(split.panels.tabs).toEqual([]);
+    expect(split.terminal).toEqual({ type: "terminal" });
+
+    const chat = focusConversation(layout);
+    expect(chat.conversationFocused).toBe(true);
+    expect(focusEditorTab(chat, 1).conversationFocused).toBe(false);
+    expect(focusEditorTab(chat, 1).activeIndex).toBe(1);
+    expect(closeEditorTab(layout, 0).tabs.map((tab) => tab.type)).toEqual([
+      "diff",
+      "terminal",
+    ]);
   });
 });

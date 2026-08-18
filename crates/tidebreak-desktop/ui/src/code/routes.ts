@@ -22,8 +22,8 @@ export function shellShortcutMode(pathname: string): ShellShortcutMode {
 /**
  * The repo a path is showing, when it is showing one.
  *
- * Lets a shortcut fired on a repo page open the same repo-locked flow the
- * page's own button does, rather than a form asking which repo again.
+ * Lets a shortcut fired on a repo page open the same pre-selected repo the
+ * page's own button does. The reader can still pick a different one.
  */
 export function codeRepoIdFromPath(pathname: string): string | undefined {
   const match = /^\/code\/r\/([^/]+)$/.exec(pathname);

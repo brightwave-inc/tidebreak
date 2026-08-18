@@ -1,6 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { SearchIcon, XIcon } from "lucide-react";
-import { type ComponentProps, useRef, useState } from "react";
+import { type ComponentProps, type RefObject, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ type Props = {
   value?: string;
   onValueChange?: (value: string) => void;
   placeholder?: string;
+  inputRef?: RefObject<HTMLInputElement | null>;
 } & VariantProps<typeof variants> &
   Omit<ComponentProps<"label">, "size">;
 
@@ -37,12 +38,14 @@ export function SearchInput({
   value,
   onValueChange,
   placeholder,
+  inputRef,
   size,
   className,
   ...props
 }: Props) {
   const [isFocused, setIsFocused] = useState(false);
-  const ref = useRef<HTMLInputElement | null>(null);
+  const localRef = useRef<HTMLInputElement | null>(null);
+  const ref = inputRef ?? localRef;
   const empty = (value ?? "").length === 0;
 
   useHotkeys(
