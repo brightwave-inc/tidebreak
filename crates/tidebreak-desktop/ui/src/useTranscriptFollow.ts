@@ -30,6 +30,14 @@ export type TranscriptFollow = {
   armFollow: (behavior?: ScrollBehavior) => void;
   /** Stop following: the reader has been sent somewhere specific. */
   disarmFollow: () => void;
+  /**
+   * Stop following without claiming the reader has scrolled away.
+   *
+   * For a reveal opened in place — a tool line, a disclosure — where dragging
+   * the reader to the tail would move the very row they clicked. The next
+   * content measurement reports where they actually ended up.
+   */
+  pauseFollow: () => void;
   /** Whether follow is armed, readable without a re-render. */
   isFollowing: () => boolean;
   /** The viewport element, once mounted, for consumers that re-render on it. */
@@ -157,6 +165,10 @@ export function useTranscriptFollow({
     setScrolledAway(true);
   }, []);
 
+  const pauseFollow = useCallback(() => {
+    followsLatestRef.current = false;
+  }, []);
+
   const isFollowing = useCallback(() => followsLatestRef.current, []);
 
   const beginProgrammaticScroll = useCallback(() => {
@@ -244,6 +256,7 @@ export function useTranscriptFollow({
     scrollToBottom,
     armFollow,
     disarmFollow,
+    pauseFollow,
     isFollowing,
     scrollElement,
     viewportRef: scrollRef,

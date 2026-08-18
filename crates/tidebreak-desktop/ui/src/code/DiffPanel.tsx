@@ -5,6 +5,7 @@ import type { ApiClient } from "../api/client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 
@@ -138,13 +139,17 @@ function FileDiffSection({
       <header className="bg-background sticky top-0 z-10">
         <button
           type="button"
-          className="hover:bg-muted/40 flex w-full items-center gap-1.5 px-3 py-1.5 text-left"
+          className={cn(
+            "hover:bg-muted/40 flex w-full cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
           aria-expanded={expanded}
           onClick={() => setExpanded((current) => !current)}
         >
           <ChevronRight
             className={cn(
-              "text-muted-foreground size-3 shrink-0 transition-transform duration-150 ease-out motion-reduce:transition-none",
+              "text-muted-foreground size-3 shrink-0 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
               expanded && "rotate-90",
             )}
             aria-hidden="true"
@@ -159,7 +164,11 @@ function FileDiffSection({
             <span
               role="link"
               tabIndex={0}
-              className="text-muted-foreground hover:text-foreground shrink-0 text-[11px] underline-offset-2 hover:underline"
+              className={cn(
+                "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm text-[11px] underline-offset-2 hover:underline",
+                FOCUS_RING_TIGHT,
+                HOVER_TINT,
+              )}
               onClick={(event) => {
                 event.stopPropagation();
                 onOpenFile(group.path);
@@ -192,7 +201,11 @@ function FileDiffSection({
       ) : large ? (
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground px-3 py-2 text-xs"
+          className={cn(
+            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm px-3 py-2 text-xs",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
           onClick={() => setExpanded(true)}
         >
           Show diff

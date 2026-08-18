@@ -40,6 +40,7 @@ import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { useCodeUiStore } from "./CodeUiStore";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
+import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { PrCard } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
@@ -142,7 +143,11 @@ export function CodeInspector({
           {scope && (
             <button
               type="button"
-              className="text-muted-foreground hover:text-foreground ml-auto truncate rounded-full border px-2 py-0.5 font-mono text-[11px]"
+              className={cn(
+                "text-muted-foreground hover:bg-muted hover:text-foreground ml-auto cursor-pointer truncate rounded-full border px-2 py-0.5 font-mono text-[11px]",
+                FOCUS_RING,
+                HOVER_TINT,
+              )}
               aria-label={`Clear ${scope.label} scope`}
               title={scope.label}
               onClick={() => setInspectorScope(null)}
@@ -364,7 +369,10 @@ function PrTab({
             {pr.url ? (
               <a
                 href={pr.url}
-                className="text-foreground truncate text-sm font-semibold underline-offset-2 hover:underline"
+                className={cn(
+                  "text-foreground cursor-pointer truncate rounded-sm text-sm font-semibold underline-offset-2 hover:underline",
+                  FOCUS_RING,
+                )}
                 title={pr.title ?? `#${pr.number}`}
                 onClick={(event) => {
                   event.preventDefault();
@@ -597,7 +605,11 @@ function CheckList({
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        className="hover:bg-muted/50 -mx-1 flex items-center gap-2 rounded-md px-1 py-1 text-left text-xs"
+        className={cn(
+          "hover:bg-muted/50 -mx-1 flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-left text-xs",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
+        )}
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
       >
@@ -677,7 +689,11 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
   return (
     <a
       href={check.url}
-      className="hover:bg-muted/50 -mx-1 flex items-center gap-2 rounded-md px-1 py-1 text-xs"
+      className={cn(
+        "hover:bg-muted/50 -mx-1 flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-xs",
+        FOCUS_RING_TIGHT,
+        HOVER_TINT,
+      )}
       onClick={(event) => {
         event.preventDefault();
         void openExternal(check.url!).catch(() => undefined);

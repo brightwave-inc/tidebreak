@@ -3,11 +3,13 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { CodeSidebar } from "./CodeSidebar";
 import { DoctorList } from "./DoctorList";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { isHarnessReady } from "./labels";
 
 /**
@@ -102,7 +104,11 @@ function CodeHomeBody() {
                   <li key={repo.id}>
                     <button
                       type="button"
-                      className="hover:bg-muted w-full rounded-md px-3 py-2 text-left text-sm"
+                      className={cn(
+                        "hover:bg-muted w-full cursor-pointer rounded-md px-3 py-2 text-left text-sm",
+                        FOCUS_RING,
+                        HOVER_TINT,
+                      )}
                       onClick={() =>
                         void navigate({
                           to: "/code/r/$repoId",

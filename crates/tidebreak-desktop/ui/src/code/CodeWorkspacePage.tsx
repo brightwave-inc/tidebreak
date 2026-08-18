@@ -68,6 +68,7 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
@@ -607,7 +608,11 @@ function WorktreePathChip({ path }: { path: string }) {
       <WithTooltip label={label}>
         <button
           type="button"
-          className="text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink truncate rounded-md px-1.5 py-0.5 font-mono text-[11px] motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink cursor-pointer truncate rounded-md px-1.5 py-0.5 font-mono text-[11px]",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
           aria-label={
             copyState === "idle" ? `Copy worktree path ${path}` : label
           }
@@ -648,7 +653,10 @@ function PendingApprovalBadge({
     <button
       type="button"
       data-testid="pending-approval-badge"
-      className="cursor-pointer rounded-full border-0 bg-transparent p-0"
+      className={cn(
+        "cursor-pointer rounded-full border-0 bg-transparent p-0",
+        FOCUS_RING,
+      )}
       onClick={() => {
         document
           .querySelector('[data-code-approval-state="pending"]')
@@ -858,6 +866,7 @@ function CodeSessionPane({
           decidingId={decidingId}
           approvalError={approvalError}
           onOpenTurnDiff={onOpenTurnDiff}
+          onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
@@ -882,7 +891,8 @@ function CodeSessionPane({
         <button
           type="button"
           className={cn(
-            "border-border text-foreground bg-background pointer-events-none absolute bottom-3 left-1/2 z-[1] inline-flex -translate-x-1/2 items-center justify-center rounded-full border p-2 opacity-0 shadow transition-[opacity,background-color] duration-150 ease-in-out hover:bg-accent motion-reduce:transition-none",
+            "border-border text-foreground bg-background hover:bg-accent pointer-events-none absolute bottom-3 left-1/2 z-[1] inline-flex -translate-x-1/2 cursor-pointer items-center justify-center rounded-full border p-2 opacity-0 shadow transition-[opacity,background-color] duration-[140ms] ease-out motion-reduce:transition-none",
+            FOCUS_RING,
             follow.scrolledAway && "pointer-events-auto opacity-100",
           )}
           aria-label="Scroll to latest"

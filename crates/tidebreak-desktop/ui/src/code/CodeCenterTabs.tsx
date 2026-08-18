@@ -2,6 +2,7 @@ import { FileCode, FileDiff, MessageSquare, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
+import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 /**
  * Center strip: Chat is always first and cannot close. File and diff tabs
@@ -36,6 +37,8 @@ export function CodeCenterTabs({
         aria-selected={conversationFocused}
         className={cn(
           "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
           conversationFocused
             ? "bg-muted text-foreground"
             : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
@@ -53,6 +56,7 @@ export function CodeCenterTabs({
             key={panelKey(panel)}
             className={cn(
               "flex min-w-0 shrink-0 items-center rounded-md pr-1",
+              HOVER_TINT,
               active ? "bg-muted" : "hover:bg-muted/60",
             )}
           >
@@ -61,7 +65,9 @@ export function CodeCenterTabs({
               role="tab"
               aria-selected={active}
               className={cn(
-                "flex min-w-0 cursor-pointer items-center gap-1.5 py-1 pl-2 pr-1 text-xs font-medium",
+                "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
+                FOCUS_RING_TIGHT,
+                HOVER_TINT,
                 active ? "text-foreground" : "text-muted-foreground",
               )}
               onClick={() => onSelectEditor(index)}
@@ -77,7 +83,11 @@ export function CodeCenterTabs({
             </button>
             <button
               type="button"
-              className="grid size-4 shrink-0 cursor-pointer place-items-center rounded-sm text-muted-foreground hover:text-foreground"
+              className={cn(
+                "text-muted-foreground hover:text-foreground grid size-4 shrink-0 cursor-pointer place-items-center rounded-sm",
+                FOCUS_RING_TIGHT,
+                HOVER_TINT,
+              )}
               onClick={() => onCloseEditor(index)}
             >
               <X className="size-3" />
