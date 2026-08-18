@@ -107,6 +107,14 @@ const DESKTOP_SIGNING_JOBS = [
   },
 ];
 
+if (/^  build_linux:/m.test(workflows["release.yml"])) {
+  DESKTOP_SIGNING_JOBS.push({
+    file: "release.yml",
+    name: "build_linux",
+    validate: "Verify and collect Linux artifacts",
+  });
+}
+
 function desktopSigningJobs() {
   return DESKTOP_SIGNING_JOBS.map((spec) => ({
     ...spec,
@@ -1188,7 +1196,7 @@ test("cache warming cannot access production credentials or publish", () => {
     for (const step of downloadCaches) {
       assert.match(
         step,
-        /shared-key: (?:macos-release-cargo-registry-v2|windows-release-cargo-registry-v1)-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
+        /shared-key: (?:macos-release-cargo-registry-v2|windows-release-cargo-registry-v1|linux-release-cargo-registry-v1)-\$\{\{ hashFiles\('Cargo\.lock'\) \}\}/,
       );
       assert.match(step, /add-rust-environment-hash-key: "false"/);
       assert.match(step, /cache-targets: false/);
@@ -1448,8 +1456,9 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   );
 
   // Identical path lists keep the cache version shared between the writing
-  // and restoring jobs; every restorable key pins at least the lockfile and
-  // toolchain hashes.
+  // and restoring jobs. The current workflow permits source-pinned fallback
+  // keys; the upcoming cross-platform workflow may tighten the credentialed
+  // job to the exact release SHA and version.
   const cachedPaths = (step) =>
     step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
   assert.ok(cachedPaths(buildCacheRestore));
@@ -1458,11 +1467,19 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
     .split("\n")
     .map((line) => line.trim().replace(/^key: /, ""))
     .filter((line) => line.startsWith("windows-release-"));
-  assert.ok(restorableKeys.length >= 3);
-  for (const key of restorableKeys) {
-    assert.ok(
-      key.includes("hashFiles('Cargo.lock',"),
-      `restorable Windows cache key does not pin the source: ${key}`,
+  if (/restore-keys:/.test(buildCacheRestore)) {
+    assert.ok(restorableKeys.length >= 3);
+    for (const key of restorableKeys) {
+      assert.ok(
+        key.includes("hashFiles('Cargo.lock',"),
+        `restorable Windows cache key does not pin the source: ${key}`,
+      );
+    }
+  } else {
+    assert.equal(restorableKeys.length, 1);
+    assert.match(
+      restorableKeys[0],
+      /hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\).*needs\.validate\.outputs\.sha.*needs\.validate\.outputs\.version/,
     );
   }
 
@@ -1498,6 +1515,34 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   )?.[0];
   assert.ok(buildStep);
   assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
+});
+
+test("Linux packaging writes no shared cache before loading updater material", () => {
+  const release = workflows["release.yml"];
+  if (!/^  build_linux:/m.test(release)) return;
+
+  assert.doesNotMatch(release, /^  prepare_linux:/m);
+  const buildJob = workflowJob(release, "build_linux");
+  assert.match(buildJob, /needs: \[validate, inspect_hosted\]/);
+  assert.match(buildJob, /runs-on: ubuntu-22\.04/);
+  assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.doesNotMatch(buildJob, /actions\/cache\/save/);
+  assert.doesNotMatch(buildJob, /cache: pnpm/);
+
+  const rustCache = cargoDownloadCache(buildJob);
+  assert.ok(rustCache);
+  assert.match(rustCache, /save-if: false/);
+
+  const packageStep = buildJob.match(
+    /- name: Build the Tauri Linux packages[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(packageStep);
+  assert.doesNotMatch(packageStep, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.ok(
+    buildJob.indexOf("Build the Tauri Linux packages") <
+      buildJob.indexOf("Verify and collect Linux artifacts"),
+    "Linux packages must be built before updater signing material is loaded",
+  );
 });
 
 test("an existing immutable release resumes without rebuilding or overwriting", () => {
@@ -1578,7 +1623,10 @@ test("source SBOM generation is isolated from production credentials", () => {
   assert.match(sbomJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
   assert.doesNotMatch(publishJob, /anchore\/sbom-action/);
 
-  assert.match(publishJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom, finalize_release\]/);
+  assert.match(
+    publishJob,
+    /needs: \[validate, inspect_hosted, build_macos, build_windows(?:, build_linux)?, source_sbom, finalize_release\]/,
+  );
   assert.match(publishJob, /needs\.source_sbom\.result == 'success'/);
   assert.match(
     publishJob,
@@ -1615,7 +1663,10 @@ test("GitHub release assets are attached before immutable publication", () => {
   const finalizeJob = workflowJob(release, "finalize_release");
   const publishJob = workflowJob(release, "publish");
 
-  assert.match(attachJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, source_sbom\]/);
+  assert.match(
+    attachJob,
+    /needs: \[validate, inspect_hosted, build_macos, build_windows(?:, build_linux)?, source_sbom\]/,
+  );
   assert.match(attachJob, /contents: write/);
   assert.doesNotMatch(attachJob, /^    environment:/m);
   assert.doesNotMatch(attachJob, /secrets\./);
