@@ -3779,7 +3779,9 @@ async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
 /// immutable cancelled result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_drop() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // Above the sum of the inner waits, so a slow provision surfaces their
+    // diagnostics instead of the outer guard's bare Elapsed.
+    tokio::time::timeout(Duration::from_secs(120), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "account before cancellation").await;
 
@@ -3802,10 +3804,16 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             store.clone(),
             backend.clone(),
             Arc::new(UsageThenPendingResolver(provider.clone())),
+            // Cancellation quiescing and usage accounting are under test, not
+            // lease or fence timing. The quiet cadence keeps the fence from
+            // writing every 250 ms against the fixture database's single
+            // writer, and the long lease removes the 2-second expiry that a
+            // stalled heartbeat could cross under suite contention. The
+            // heartbeat stays sub-second so nothing riding a periodic tick
+            // waits a quiet period.
             SandboxContainerRunConfig {
-                lease: Duration::from_secs(2),
-                heartbeat: Duration::from_millis(100),
-                ..fast_config()
+                heartbeat: Duration::from_millis(250),
+                ..quiet_drive_config()
             },
         ));
         let drive = tokio::spawn({
@@ -3824,7 +3832,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             .unwrap()
             .expect("the cancellation request lands");
 
-        let outcome = match tokio::time::timeout(Duration::from_secs(15), drive).await {
+        let outcome = match tokio::time::timeout(Duration::from_secs(30), drive).await {
             Ok(joined) => joined
                 .expect("the drive task finished")
                 .expect("driving succeeds")
