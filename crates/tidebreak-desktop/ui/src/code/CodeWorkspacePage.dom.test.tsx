@@ -97,6 +97,7 @@ const TURN = {
   ordinal: 1,
   status: "completed" as const,
   user_input: "list the files",
+  attachments: [],
   started_at: "2026-08-15T00:00:00.000Z",
   ended_at: "2026-08-15T00:02:14.000Z",
   diffstat: { files: 2, insertions: 42, deletions: 7, truncated: false },
@@ -166,6 +167,10 @@ function makeClient() {
           removeEventListener() {},
         }) as unknown as WebSocket,
     ),
+    listCodeWorkspaceTree: vi.fn(async () => ({
+      paths: [],
+      truncated: false,
+    })),
     listCodeWorkspaceFiles: vi.fn(async () => ({
       files: [],
       truncated: false,

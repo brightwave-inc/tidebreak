@@ -56,6 +56,7 @@ impl HarnessAdapter for OpencodeAdapter {
                     authenticated,
                     stderr: capture.stderr,
                     env: capture.env,
+                    commands: Vec::new(),
                 }
             }
             Err(err) => HarnessProbe {
@@ -65,6 +66,7 @@ impl HarnessAdapter for OpencodeAdapter {
                 authenticated: None,
                 stderr: err.to_string(),
                 env: Vec::new(),
+                commands: Vec::new(),
             },
         }
     }
@@ -87,6 +89,8 @@ impl HarnessAdapter for OpencodeAdapter {
             // session.diff was empty arrays; file.edited was not seen.
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
+            image_input: CapLevel::Unknown,
+            slash_commands: CapLevel::Unknown,
         }
     }
 
@@ -280,6 +284,7 @@ mod tests {
             authenticated: Some(true),
             stderr: String::new(),
             env: Vec::new(),
+            commands: Vec::new(),
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -291,6 +296,8 @@ mod tests {
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
+        assert_eq!(caps.image_input, CapLevel::Unknown);
+        assert_eq!(caps.slash_commands, CapLevel::Unknown);
     }
 
     #[test]

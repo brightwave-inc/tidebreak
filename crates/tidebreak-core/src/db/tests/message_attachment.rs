@@ -653,13 +653,15 @@ enum ReferenceClass {
     Document,
     ChatImagePublication,
     MessageAttachment,
+    CodeTurnAttachment,
 }
 
 impl ReferenceClass {
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::Document,
         Self::ChatImagePublication,
         Self::MessageAttachment,
+        Self::CodeTurnAttachment,
     ];
 
     /// Create one live reference of this class to `blob`.
@@ -697,8 +699,103 @@ impl ReferenceClass {
                 };
                 accept_turn_with_images(store, chat.id, "keep this blob", &[image]).await;
             }
+            Self::CodeTurnAttachment => {
+                pin_code_turn_attachment(store, blob).await;
+            }
         }
     }
+}
+
+async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
+    use crate::code::{
+        Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
+        CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
+        CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+    };
+    use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
+
+    let now = Utc::now();
+    let repo_id = RepoId::new();
+    insert_repo(
+        store,
+        &CodeRepo {
+            id: repo_id,
+            root_path: format!("/tmp/code-turn-{}", blob.id),
+            display_name: "example".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: Vec::new(),
+            created_at: now,
+        },
+    )
+    .await
+    .unwrap();
+    let workspace_id = WorkspaceId::new();
+    insert_workspace(
+        store,
+        &CodeWorkspace {
+            id: workspace_id,
+            repo_id,
+            title: "first".into(),
+            worktree_path: format!("/tmp/code-turn-wt-{}", blob.id),
+            branch_name: "tidebreak/first".into(),
+            base_ref: "main".into(),
+            status: CodeWorkspaceStatus::Active,
+            pr: None,
+            created_at: now,
+            archived_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let session_id = CodeSessionId::new();
+    insert_session(
+        store,
+        &CodeSession {
+            id: session_id,
+            workspace_id,
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: Some("scripted".into()),
+            harness_resume_ref: None,
+            permission_mode: CodePermissionMode::Plan,
+            model: None,
+            lifecycle: CodeSessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            spawn_epoch: 0,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            created_at: now,
+        },
+    )
+    .await
+    .unwrap();
+    insert_turn(
+        store,
+        &CodeTurn {
+            id: CodeTurnId::new(),
+            session_id,
+            ordinal: 1,
+            status: CodeTurnStatus::Completed,
+            user_input: "look".into(),
+            user_input_blob_id: None,
+            attachments: vec![CodeTurnAttachment {
+                blob_id: blob.id,
+                media_type: ImageMediaType::Png,
+                byte_len: blob.byte_len,
+            }],
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            started_at: now,
+            ended_at: Some(now),
+        },
+    )
+    .await
+    .unwrap();
 }
 
 /// Force a queued retirement for a blob that is already referenced.

@@ -79,6 +79,18 @@ where
     if by_attachment {
         return Ok(true);
     }
+    let by_code_turn = entities::code_turn_attachment::Entity::find()
+        .select_only()
+        .column(entities::code_turn_attachment::Column::TurnId)
+        .filter(entities::code_turn_attachment::Column::BlobId.eq(blob_id))
+        .into_tuple::<uuid::Uuid>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if by_code_turn {
+        return Ok(true);
+    }
     // The file-change journal keeps the only surviving copy of bytes the agent
     // overwrote in a user's folder. Reaping one of these deletes the thing undo
     // restores, so it belongs in the union like any other referrer.

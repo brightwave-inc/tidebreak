@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 
 import type { CodePermissionMode, HarnessKind, PermissionMode } from "../api/types";
@@ -314,6 +314,8 @@ export function CodeComposer({
   lastTurnBeganId,
   onModelChange,
   onModeChange,
+  slashCommands,
+  searchPaths,
   onSend,
   onSteer,
   onInterrupt,
@@ -338,6 +340,13 @@ export function CodeComposer({
   lastTurnBeganId?: string | null;
   onModelChange?: (model: string) => void;
   onModeChange?: (mode: CodePermissionMode) => void;
+  /**
+   * Engine-discovered slash commands. Empty or absent hides the `/` popup;
+   * free-typed `/` text still submits verbatim.
+   */
+  slashCommands?: readonly { name: string; description: string }[];
+  /** Name-matched workspace paths for `@` completion. */
+  searchPaths?: (query: string) => Promise<readonly string[]>;
   onSend: (message: string) => Promise<CodeTurnSubmission | void> | void;
   /**
    * Redirect the in-flight turn. Absent when the harness cannot steer, so a
@@ -355,6 +364,39 @@ export function CodeComposer({
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const canSteer = onSteer !== undefined;
   const showQueued = queued || followUpQueued;
+  const [pathItems, setPathItems] = useState<string[]>([]);
+  const searchPathsRef = useRef(searchPaths);
+  searchPathsRef.current = searchPaths;
+
+  const onPathQueryChange = useCallback((query: string | null) => {
+    if (query === null || !searchPathsRef.current) {
+      setPathItems([]);
+      return;
+    }
+    void searchPathsRef.current(query).then(
+      (paths) => setPathItems([...paths]),
+      () => setPathItems([]),
+    );
+  }, []);
+
+  const pathMentions = searchPaths
+    ? { items: pathItems, onQueryChange: onPathQueryChange }
+    : undefined;
+  const slash =
+    slashCommands && slashCommands.length > 0
+      ? {
+          options: slashCommands.map((command) => ({
+            kind: "prompt" as const,
+            name: command.name,
+            label: `/${command.name}`,
+            description: command.description,
+          })),
+          invoked: [],
+          onInvoke: () => undefined,
+          onRemove: () => undefined,
+          loadPromptBody: async (name: string) => `/${name}`,
+        }
+      : undefined;
 
   useEffect(() => {
     if (model) setSelectedModel(model);
@@ -445,6 +487,8 @@ export function CodeComposer({
             scopeKey={sessionId ?? "code-create"}
           />
         }
+        pathMentions={pathMentions}
+        slash={slash}
         onDraftChange={(value) => {
           setSteerError(null);
           setSteerStatus(null);

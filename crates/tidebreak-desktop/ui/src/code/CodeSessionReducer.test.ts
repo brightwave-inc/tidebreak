@@ -204,6 +204,7 @@ const SNAPSHOT_TURN = {
   ordinal: 1,
   status: "completed" as const,
   user_input: "list the files",
+  attachments: [],
   started_at: NOW,
   ended_at: LATER,
 };

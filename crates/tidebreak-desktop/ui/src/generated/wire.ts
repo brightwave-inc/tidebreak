@@ -1200,6 +1200,26 @@ export type CodeTerminalRead = { id: CodeTerminalId, workspace_id: WorkspaceId, 
 export type CodeTerminalSnapshot = { id: CodeTerminalId, workspace_id: WorkspaceId, cols: number, rows: number, ended: boolean, created_at: string, };
 
 /**
+ * Bounded image reference recorded on a code-mode user turn.
+ *
+ * Identity only: the journal never carries pixels. `byte_len` is the blob
+ * store's length at submit time.
+ */
+export type CodeTurnAttachment = { 
+/**
+ * Content-addressed blob holding the pixels.
+ */
+blob_id: string, 
+/**
+ * Format declared on submit, already validated.
+ */
+media_type: ImageMediaType, 
+/**
+ * Size of the stored bytes.
+ */
+byte_len: number, };
+
+/**
  * Identifies one user→engine cycle inside a code session.
  */
 export type CodeTurnId = string;
@@ -1207,7 +1227,7 @@ export type CodeTurnId = string;
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, attachments: Array<CodeTurnAttachment>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1275,6 +1295,13 @@ export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: s
  * Status of a persisted workspace.
  */
 export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived";
+
+/**
+ * Bounded path listing for `GET /code/workspaces/{id}/tree`.
+ *
+ * Paths only. Never file contents.
+ */
+export type CodeWorkspaceTree = { paths: Array<string>, truncated: boolean, };
 
 /**
  * What one on-demand compaction did.
@@ -1827,12 +1854,41 @@ native_file_change_events: CapLevel,
 /**
  * The engine honors a native interrupt.
  */
-native_interrupt: CapLevel, };
+native_interrupt: CapLevel, 
+/**
+ * The engine consumes an image on its machine-readable input path.
+ *
+ * Adapters may only state [`CapLevel::Supported`] with a fixture that
+ * proves a captured image round-trip. The product must not offer
+ * attachments otherwise.
+ */
+image_input: CapLevel, 
+/**
+ * The engine has a discoverable slash-command vocabulary.
+ *
+ * Independent of whether free-typed `/` text is accepted — that is
+ * always pass-through. This flag only says a machine-readable listing
+ * exists to feed the composer popup.
+ */
+slash_commands: CapLevel, };
+
+/**
+ * One engine-owned slash command, captured from the engine's own listing.
+ */
+export type HarnessCommand = { 
+/**
+ * The word typed after `/`. No leading slash.
+ */
+name: string, 
+/**
+ * One-line description from the engine, already bounded.
+ */
+description: string, };
 
 /**
  * One engine's probe, capabilities, and remediation.
  */
-export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
+export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
 
 /**
  * Doctor report for every registered engine adapter.

@@ -66,6 +66,20 @@ it("bounds the transcript scan at the list's size", () => {
   expect(recentChatFiles(messages, [])).toHaveLength(MAX_MENTION_ROWS);
 });
 
+it("offers workspace paths as insertable mention rows", () => {
+  const rows = mentionRows(
+    [{ kind: "path", path: "src/lib.rs", label: "src/lib.rs" }],
+    [],
+    "lib",
+  );
+  expect(rows).toEqual([
+    {
+      kind: "candidate",
+      candidate: { kind: "path", path: "src/lib.rs", label: "src/lib.rs" },
+    },
+  ]);
+});
+
 it("offers only approved folders this conversation has not attached", () => {
   const approved = [
     { rootId: "root-1", displayName: "Reports", status: "connected" as const },
@@ -78,7 +92,7 @@ it("offers only approved folders this conversation has not attached", () => {
 });
 
 function describe(row: ReturnType<typeof mentionRows>[number]): string {
-  return row.kind === "action"
-    ? `action:${row.action}`
-    : `${row.candidate.kind}:${row.candidate.id}`;
+  if (row.kind === "action") return `action:${row.action}`;
+  if (row.candidate.kind === "path") return `path:${row.candidate.path}`;
+  return `${row.candidate.kind}:${row.candidate.id}`;
 }

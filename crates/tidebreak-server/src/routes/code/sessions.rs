@@ -52,12 +52,19 @@ pub async fn submit_turn(
     if message.is_empty() {
         return Err(ServerError::bad_request("message must not be empty"));
     }
+    let runtime = require_code(&state)?;
+    let requested = body
+        .attachments
+        .iter()
+        .map(|item| (item.blob_id, item.media_type.clone()))
+        .collect::<Vec<_>>();
+    let attachments = runtime.resolve_turn_attachments(&requested).await?;
     // From the front of the submit, like chat titling from the front of a
     // turn: a code turn can run for minutes, and the derived name should land
     // while the engine works, not after.
     crate::code::titling::spawn_for_turn(&state, id, message.clone());
-    match require_code(&state)?
-        .submit_turn(id, message.clone(), body.model)
+    match runtime
+        .submit_turn(id, message.clone(), body.model, attachments)
         .await?
     {
         SubmitTurnOutcome::Ran(turn) => {

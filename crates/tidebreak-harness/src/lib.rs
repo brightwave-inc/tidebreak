@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
     BoundedError, CodePermissionMode, CodeUsage, Diffstat, FileChangeKind, HarnessCaps,
-    HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    HarnessCommand, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
 };
 
 pub mod budget;
@@ -399,6 +399,8 @@ pub struct HarnessProbe {
     pub stderr: String,
     /// Shell-resolved environment captured by the same probe.
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Engine-owned slash commands, empty when the adapter has no listing.
+    pub commands: Vec<HarnessCommand>,
 }
 
 /// Adapter failure.
@@ -543,5 +545,61 @@ mod tests {
         assert!(env
             .iter()
             .any(|(key, value)| { key == "GATEWAY_URL" && value == "keep" }));
+    }
+
+    #[test]
+    fn no_adapter_declares_image_input_without_an_image_fixture() {
+        use tidebreak_core::CapLevel;
+
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("test".into()),
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        };
+        let cases: [(&str, Box<dyn HarnessAdapter>, &str); 4] = [
+            (
+                "claude_code",
+                Box::new(claude::ClaudeCodeAdapter::new()),
+                "claude-code/2.1.233",
+            ),
+            (
+                "codex",
+                Box::new(codex::CodexAdapter::new()),
+                "codex/0.147.0",
+            ),
+            (
+                "opencode",
+                Box::new(opencode::OpencodeAdapter::new()),
+                "opencode/1.18.18",
+            ),
+            ("grok", Box::new(grok::GrokAdapter::new()), "grok/1.0.4"),
+        ];
+        for (kind, adapter, fixture_rel) in cases {
+            let caps = adapter.capabilities(&probe);
+            if caps.image_input != CapLevel::Supported {
+                continue;
+            }
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(fixture_rel);
+            assert!(
+                fixture_dir_has_image_roundtrip(&dir),
+                "{kind} declares image_input Supported without a fixture directory containing an image round-trip capture"
+            );
+        }
+    }
+
+    fn fixture_dir_has_image_roundtrip(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            name.contains("image") && (name.ends_with(".ndjson") || name.ends_with(".json"))
+        })
     }
 }

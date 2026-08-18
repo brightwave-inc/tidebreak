@@ -90,6 +90,7 @@ async fn seeded_session() -> (
             status: CodeTurnStatus::Running,
             user_input: "hello".into(),
             user_input_blob_id: None,
+            attachments: Vec::new(),
             checkpoint_ref: None,
             diffstat: None,
             usage: None,

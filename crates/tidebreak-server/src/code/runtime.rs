@@ -102,6 +102,7 @@ pub(crate) struct CodeRuntime {
     pub bus: Arc<CodeEventBus>,
     pub adapters: AdapterRegistry,
     pub data_dir: PathBuf,
+    pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
@@ -135,6 +136,7 @@ impl CodeRuntime {
             db,
             bus: Arc::new(CodeEventBus::default()),
             adapters: builtin_registry(),
+            blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir: data_dir.clone(),
             approvals: ApprovalBridge::new(),
             host: HostEnv {
@@ -193,6 +195,7 @@ impl CodeRuntime {
             db,
             bus: Arc::new(CodeEventBus::default()),
             adapters,
+            blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir,
             approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
@@ -921,11 +924,59 @@ impl CodeRuntime {
             .ok_or_else(|| ServerError::not_found(format!("session {id} not found")))
     }
 
+    pub(crate) async fn resolve_turn_attachments(
+        &self,
+        requested: &[(uuid::Uuid, String)],
+    ) -> Result<Vec<tidebreak_core::CodeTurnAttachment>, ServerError> {
+        if requested.len() > tidebreak_core::MAX_MESSAGE_ATTACHMENTS {
+            return Err(ServerError::bad_request(format!(
+                "a turn may carry at most {} image attachments",
+                tidebreak_core::MAX_MESSAGE_ATTACHMENTS
+            )));
+        }
+        let mut resolved = Vec::with_capacity(requested.len());
+        for (blob_id, media_type) in requested {
+            if blob_id.is_nil() {
+                return Err(ServerError::bad_request(
+                    "attachment blob_id must not be nil",
+                ));
+            }
+            let media_type = parse_turn_media_type(media_type).ok_or_else(|| {
+                ServerError::bad_request(format!("unsupported attachment media type {media_type}"))
+            })?;
+            let Some(meta) = self
+                .blobs
+                .metadata(*blob_id)
+                .await
+                .map_err(|err| ServerError::internal(format!("blob metadata: {err}")))?
+            else {
+                return Err(ServerError::bad_request(format!(
+                    "attachment blob {blob_id} was not found"
+                )));
+            };
+            if meta.byte_len == 0 {
+                return Err(ServerError::bad_request("attachment blob is empty"));
+            }
+            if meta.byte_len > tidebreak_core::MAX_IMAGE_BYTES {
+                return Err(ServerError::bad_request(
+                    "attachment exceeds the maximum image size",
+                ));
+            }
+            resolved.push(tidebreak_core::CodeTurnAttachment {
+                blob_id: *blob_id,
+                media_type,
+                byte_len: meta.byte_len,
+            });
+        }
+        Ok(resolved)
+    }
+
     pub(crate) async fn submit_turn(
         &self,
         id: CodeSessionId,
         message: String,
         model: Option<String>,
+        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let mut session = self.get_session(id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
@@ -940,6 +991,20 @@ impl CodeRuntime {
                 "session has ended",
             ));
         }
+        if !attachments.is_empty() {
+            let adapter = self.adapter(session.harness_kind)?;
+            let probe = self.probe(adapter.as_ref()).await;
+            let caps = adapter.capabilities(&probe);
+            if caps.image_input != CapLevel::Supported {
+                return Err(ServerError::unprocessable_kind(
+                    "unsupported_attachment",
+                    format!(
+                        "{harness} does not support image attachments",
+                        harness = session.harness_kind
+                    ),
+                ));
+            }
+        }
         let handle = self.require_worker(id)?;
         if let Some(model) = normalize_model(model) {
             session.model = Some(model);
@@ -951,7 +1016,7 @@ impl CodeRuntime {
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
             || get_open_turn(&self.db, id).await?.is_some();
         if in_flight {
-            if !queue_follow_up(&handle, message, session.model.clone()) {
+            if !queue_follow_up(&handle, message, session.model.clone(), attachments) {
                 return Err(ServerError::conflict_kind(
                     "queue_full",
                     "a follow-up is already queued on this session",
@@ -965,6 +1030,7 @@ impl CodeRuntime {
             .send(WorkerCommand::RunTurn {
                 message,
                 model: session.model.clone(),
+                attachments,
                 reply,
             })
             .await
@@ -1058,6 +1124,22 @@ impl CodeRuntime {
     ) -> Result<Vec<CodeTurn>, ServerError> {
         let _ = self.get_session(session_id).await?;
         Ok(list_turns(&self.db, session_id).await?)
+    }
+
+    pub(crate) async fn workspace_tree(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<(Vec<String>, bool), ServerError> {
+        let workspace = self.get_workspace(workspace_id).await?;
+        worktree::list_tree_paths(
+            std::path::Path::new(&workspace.worktree_path),
+            query,
+            limit.unwrap_or(worktree::DEFAULT_TREE_LIMIT),
+        )
+        .await
+        .map_err(map_worktree)
     }
 
     pub(crate) async fn workspace_files(
@@ -1463,6 +1545,19 @@ impl CodeRuntime {
             .await;
         }
         Ok(approval)
+    }
+}
+
+fn parse_turn_media_type(value: &str) -> Option<tidebreak_core::ImageMediaType> {
+    if let Some(parsed) = tidebreak_core::ImageMediaType::parse(value) {
+        return Some(parsed);
+    }
+    match value.trim().to_ascii_lowercase().as_str() {
+        "png" => Some(tidebreak_core::ImageMediaType::Png),
+        "jpeg" | "jpg" => Some(tidebreak_core::ImageMediaType::Jpeg),
+        "webp" => Some(tidebreak_core::ImageMediaType::Webp),
+        "gif" => Some(tidebreak_core::ImageMediaType::Gif),
+        _ => None,
     }
 }
 

@@ -24,6 +24,8 @@ const CAPS = {
   reasoning_levels: "unknown",
   native_file_change_events: "unsupported",
   native_interrupt: "supported",
+  image_input: "unknown",
+  slash_commands: "unknown",
 } as const;
 
 function entry(
@@ -35,6 +37,7 @@ function entry(
     found: true,
     tier: "reference",
     caps: { ...CAPS, structured_approvals: "supported", ...caps },
+    commands: [],
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,

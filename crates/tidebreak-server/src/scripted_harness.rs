@@ -79,6 +79,7 @@ pub(crate) struct ScriptedAdapter {
     structured_approvals: CapLevel,
     auto_mode: CapLevel,
     allow_mode: CapLevel,
+    image_input: CapLevel,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
@@ -100,6 +101,7 @@ impl ScriptedAdapter {
             structured_approvals: CapLevel::Unsupported,
             auto_mode: CapLevel::Unsupported,
             allow_mode: CapLevel::Unsupported,
+            image_input: CapLevel::Unknown,
             child_pid: None,
             unrecognized_per_turn: 0,
             silent_interrupt: false,
@@ -151,6 +153,12 @@ impl ScriptedAdapter {
     /// Overrides the allow-everything posture independently of Auto.
     pub(crate) fn with_allow_mode(mut self, level: CapLevel) -> Self {
         self.allow_mode = level;
+        self
+    }
+
+    /// Declares whether this scripted engine consumes image attachments.
+    pub(crate) fn with_image_input(mut self, level: CapLevel) -> Self {
+        self.image_input = level;
         self
     }
 
@@ -208,6 +216,7 @@ impl HarnessAdapter for ScriptedAdapter {
             authenticated: Some(true),
             stderr: String::new(),
             env: Vec::new(),
+            commands: Vec::new(),
         }
     }
 
@@ -223,6 +232,8 @@ impl HarnessAdapter for ScriptedAdapter {
             reasoning_levels: CapLevel::Unsupported,
             native_file_change_events: CapLevel::Unsupported,
             native_interrupt: CapLevel::Supported,
+            image_input: self.image_input,
+            slash_commands: CapLevel::Unknown,
         }
     }
 

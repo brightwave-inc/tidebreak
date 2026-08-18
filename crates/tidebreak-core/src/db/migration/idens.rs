@@ -860,6 +860,16 @@ pub(crate) enum CodeTurn {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum CodeTurnAttachment {
+    Table,
+    TurnId,
+    Ordinal,
+    BlobId,
+    MediaType,
+    ByteLen,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum CodeEvent {
     Table,
     SessionId,

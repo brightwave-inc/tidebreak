@@ -133,6 +133,7 @@ pub struct CodeTurnSnapshot {
     pub ordinal: i64,
     pub status: CodeTurnStatus,
     pub user_input: String,
+    pub attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub usage: Option<tidebreak_core::CodeUsage>,
@@ -156,6 +157,7 @@ impl From<CodeTurn> for CodeTurnSnapshot {
             ordinal: turn.ordinal,
             status: turn.status,
             user_input: turn.user_input,
+            attachments: turn.attachments,
             usage: turn.usage,
             checkpoint_ref: turn.checkpoint_ref,
             diffstat: turn.diffstat,
@@ -194,6 +196,7 @@ pub struct HarnessDoctorEntry {
     pub version: Option<String>,
     pub tier: HarnessTier,
     pub caps: HarnessCaps,
+    pub commands: Vec<tidebreak_core::HarnessCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub authenticated: Option<bool>,
@@ -431,6 +434,16 @@ pub struct SubmitTurnBody {
     pub message: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<SubmitTurnAttachment>,
+}
+
+/// One image the client already published to the blob store.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitTurnAttachment {
+    pub blob_id: uuid::Uuid,
+    pub media_type: String,
 }
 
 /// Body of `POST /code/sessions/{id}/steer`.
@@ -456,6 +469,24 @@ pub struct QueuedCodeTurn {
 pub struct ListWorkspacesQuery {
     #[serde(default)]
     pub repo_id: Option<RepoId>,
+}
+
+/// Query for `GET /code/workspaces/{id}/tree`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceTreeQuery {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Bounded path listing for `GET /code/workspaces/{id}/tree`.
+///
+/// Paths only. Never file contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceTree {
+    pub paths: Vec<String>,
+    pub truncated: bool,
 }
 
 /// Query for `GET /code/workspaces/{id}/files`.

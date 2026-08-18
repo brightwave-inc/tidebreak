@@ -119,6 +119,7 @@ import {
   type CodeUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  type CodeWorkspaceTree as WireCodeWorkspaceTree,
   type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
   type CodeActionSnapshot as WireCodeActionSnapshot,
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
@@ -1017,6 +1018,7 @@ export type Diffstat = WireDiffstat;
 export type FileChangeKind = WireFileChangeKind;
 export type CodeFileChange = WireCodeFileChange;
 export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
+export type CodeWorkspaceTree = WireCodeWorkspaceTree;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
 export type CodeCommitSnapshot = WireCodeCommitSnapshot;

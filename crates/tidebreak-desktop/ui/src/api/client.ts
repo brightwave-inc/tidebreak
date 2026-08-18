@@ -89,6 +89,7 @@ import {
   type CodeTerminalSnapshot,
   type CodeWorkspaceDiff,
   type CodeWorkspaceFiles,
+  type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
   type CodePrCommentsSnapshot,
   type CodePrMergeMethod,
@@ -133,6 +134,7 @@ import {
   parseCodeWorkspace,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
   parseCodePrComments,
   parseHarnessModelList,
@@ -1947,6 +1949,25 @@ export class ApiClient {
       method: "POST",
       headers: this.headers(),
     });
+  }
+
+  async listCodeWorkspaceTree(
+    workspaceId: string,
+    query?: { query?: string; limit?: number },
+  ): Promise<CodeWorkspaceTree> {
+    const params = new URLSearchParams();
+    if (query?.query) params.set("query", query.query);
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    const suffix = params.size > 0 ? `?${params}` : "";
+    return requireParsed(
+      parseCodeWorkspaceTree(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/tree${suffix}`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code workspace tree",
+    );
   }
 
   async listCodeWorkspaceFiles(

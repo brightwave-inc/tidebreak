@@ -19,6 +19,7 @@ import {
   parseCodeTurnSubmission,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
   parseCodePrComments,
 } from "./parsers";
@@ -60,6 +61,7 @@ const TURN = {
   ordinal: 1,
   status: "completed",
   user_input: "list the files",
+  attachments: [],
   started_at: "2026-08-15T12:00:00.000Z",
   ended_at: "2026-08-15T12:00:02.000Z",
 };
@@ -102,6 +104,23 @@ describe("parseCodeTurnSubmission", () => {
     };
     expect(parseCodeTurnSubmission(queued)).toEqual({ kind: "queued", queued });
     expect(parseCodeTurnSubmission({ session_id: "sess-1" })).toBeNull();
+  });
+});
+
+describe("parseCodeWorkspaceTree", () => {
+  it("accepts GET /code/workspaces/{id}/tree", () => {
+    const tree = { paths: ["README.md", "src/lib.rs"], truncated: false };
+    expect(parseCodeWorkspaceTree(tree)).toEqual(tree);
+  });
+
+  it("rejects contents-shaped payloads", () => {
+    expect(
+      parseCodeWorkspaceTree({
+        paths: ["README.md"],
+        truncated: false,
+        contents: "hello",
+      }),
+    ).toBeNull();
   });
 });
 

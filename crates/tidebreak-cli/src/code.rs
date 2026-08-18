@@ -2492,6 +2492,8 @@ mod tests {
                 reasoning_levels: CapLevel::Unknown,
                 native_file_change_events: CapLevel::Unknown,
                 native_interrupt: CapLevel::Supported,
+                image_input: CapLevel::Unknown,
+                slash_commands: CapLevel::Unknown,
             }
         }
         assert_eq!(

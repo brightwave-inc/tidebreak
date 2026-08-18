@@ -284,6 +284,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               <CodeSessionPane
                 key={session.id}
                 session={session}
+                workspaceId={workspaceId}
                 client={client}
                 catalogModels={models}
                 defaultModelKey={defaultModelKey}
@@ -617,6 +618,7 @@ function PendingApprovalBadge({
 
 function CodeSessionPane({
   session,
+  workspaceId,
   client,
   catalogModels,
   defaultModelKey,
@@ -624,6 +626,7 @@ function CodeSessionPane({
   onOpenTurnDiff,
 }: {
   session: CodeSessionSnapshot;
+  workspaceId: string;
   client: ApiClient;
   catalogModels: ModelInfo[];
   defaultModelKey: string | null;
@@ -854,6 +857,12 @@ function CodeSessionPane({
           history={composerHistory}
           queued={queued}
           lastTurnBeganId={lastTurnBeganId}
+          slashCommands={doctorEntry?.commands}
+          searchPaths={(query) =>
+            client
+              .listCodeWorkspaceTree(workspaceId, { query })
+              .then((tree) => tree.paths)
+          }
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
           }

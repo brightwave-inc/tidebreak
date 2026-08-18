@@ -726,6 +726,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::list_workspace_files),
         )
         .route(
+            "/code/workspaces/{id}/tree",
+            get(routes::code::list_workspace_tree),
+        )
+        .route(
             "/code/workspaces/{id}/diff",
             get(routes::code::get_workspace_diff),
         )

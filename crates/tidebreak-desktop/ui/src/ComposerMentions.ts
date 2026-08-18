@@ -1,4 +1,4 @@
-import { FolderOpen, FolderPlus, Paperclip } from "lucide-react";
+import { File, FolderOpen, FolderPlus, Paperclip } from "lucide-react";
 
 import { activeTokenQuery } from "./ComposerSlash";
 import { documentIcon } from "./documentIcon";
@@ -27,7 +27,13 @@ export type MentionCandidate =
       label: string;
       mediaType: string;
     }
-  | { kind: "folder"; /** The broker's root id. */ id: string; label: string };
+  | { kind: "folder"; /** The broker's root id. */ id: string; label: string }
+  | {
+      kind: "path";
+      /** Workspace-relative path the engine sees as plain text. */
+      path: string;
+      label: string;
+    };
 
 /** A row that hands off to the picker the tools menu opens. */
 export type MentionAction = "browse-files" | "connect-folder";
@@ -130,19 +136,28 @@ export function mentionOptionRows(rows: readonly MentionRow[]): OptionRow[] {
       };
     }
     const { candidate } = row;
-    return candidate.kind === "file"
-      ? {
-          key: `file:${candidate.id}`,
-          label: candidate.label,
-          icon: documentIcon(candidate.mediaType),
-          hint: "File",
-        }
-      : {
-          key: `folder:${candidate.id}`,
-          label: candidate.label,
-          icon: FolderOpen,
-          hint: "Folder",
-        };
+    if (candidate.kind === "file") {
+      return {
+        key: `file:${candidate.id}`,
+        label: candidate.label,
+        icon: documentIcon(candidate.mediaType),
+        hint: "File",
+      };
+    }
+    if (candidate.kind === "folder") {
+      return {
+        key: `folder:${candidate.id}`,
+        label: candidate.label,
+        icon: FolderOpen,
+        hint: "Folder",
+      };
+    }
+    return {
+      key: `path:${candidate.path}`,
+      label: candidate.label,
+      icon: File,
+      hint: "Path",
+    };
   });
 }
 
@@ -177,5 +192,16 @@ export function attachableFiles(
     id: file.documentId,
     label: file.name,
     mediaType: file.mediaType,
+  }));
+}
+
+/** Workspace paths `@` can insert as plain relative text. */
+export function workspacePathCandidates(
+  paths: readonly string[],
+): MentionCandidate[] {
+  return paths.map((path) => ({
+    kind: "path",
+    path,
+    label: path,
   }));
 }

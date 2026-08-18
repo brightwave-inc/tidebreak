@@ -56,6 +56,7 @@ impl HarnessAdapter for GrokAdapter {
                     authenticated,
                     stderr: capture.stderr,
                     env: capture.env,
+                    commands: Vec::new(),
                 }
             }
             Err(err) => HarnessProbe {
@@ -65,6 +66,7 @@ impl HarnessAdapter for GrokAdapter {
                 authenticated: None,
                 stderr: err.to_string(),
                 env: Vec::new(),
+                commands: Vec::new(),
             },
         }
     }
@@ -92,6 +94,8 @@ impl HarnessAdapter for GrokAdapter {
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
+            image_input: CapLevel::Unknown,
+            slash_commands: CapLevel::Unknown,
         }
     }
 
@@ -281,6 +285,7 @@ mod tests {
             authenticated: Some(true),
             stderr: String::new(),
             env: Vec::new(),
+            commands: Vec::new(),
         });
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.streaming_deltas, CapLevel::Supported);
@@ -290,6 +295,8 @@ mod tests {
         assert_eq!(caps.plan_mode, CapLevel::Unsupported);
         assert_eq!(caps.auto_mode, CapLevel::Supported);
         assert_eq!(caps.allow_mode, CapLevel::Supported);
+        assert_eq!(caps.image_input, CapLevel::Unknown);
+        assert_eq!(caps.slash_commands, CapLevel::Unknown);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unsupported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
     }

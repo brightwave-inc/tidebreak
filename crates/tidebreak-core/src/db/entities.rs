@@ -1763,6 +1763,27 @@ pub mod code_turn {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_turn_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_turn_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub turn_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub ordinal: i32,
+        pub blob_id: Uuid,
+        pub media_type: String,
+        pub byte_len: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_event {
     use sea_orm::entity::prelude::*;
 
