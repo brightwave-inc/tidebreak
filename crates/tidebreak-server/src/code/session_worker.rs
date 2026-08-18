@@ -126,8 +126,9 @@ impl LiveSink {
             requested_at: Utc::now(),
             decided_at: None,
         };
-        // Attention first: a client that can list the pending approval must
-        // already see NeedsYou.
+        if insert_approval(&self.db, &approval).await.is_err() {
+            return;
+        }
         let _ = super::attention::apply_attention(
             &self.db,
             &self.bus,
@@ -136,9 +137,6 @@ impl LiveSink {
             false,
         )
         .await;
-        if insert_approval(&self.db, &approval).await.is_err() {
-            return;
-        }
         let _ = persist_and_publish(
             &self.db,
             &self.bus,

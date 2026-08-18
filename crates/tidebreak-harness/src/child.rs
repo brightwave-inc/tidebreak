@@ -437,7 +437,7 @@ mod windows_tests {
 
     use tokio::process::Command;
     use tokio::time::{sleep, Instant};
-    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
@@ -487,6 +487,11 @@ mod windows_tests {
         let child = spawn_process_tree(&mut command).unwrap();
         let pid = wait_for_pid(&pid_file).await;
         let descendant = open_process(pid);
+        assert_eq!(
+            wait_status(&descendant, Duration::ZERO),
+            WAIT_TIMEOUT,
+            "descendant {pid} exited before ProcessTreeChild teardown"
+        );
         // The temp directory only carries the synchronization file. Keeping it
         // until the pid has been read avoids cleanup racing the parent write.
         drop(dir);
@@ -519,18 +524,22 @@ mod windows_tests {
     }
 
     fn assert_process_exits(process: OwnedHandle) {
-        // SAFETY: `process` is a live synchronization handle and remains owned
-        // for the duration of the bounded wait.
-        let result = unsafe {
-            WaitForSingleObject(
-                process.as_raw_handle() as HANDLE,
-                DESCENDANT_TIMEOUT.as_millis() as u32,
-            )
-        };
+        let result = wait_status(&process, DESCENDANT_TIMEOUT);
         assert_eq!(
             result, WAIT_OBJECT_0,
             "descendant remained alive after its ProcessTreeChild ended"
         );
+    }
+
+    fn wait_status(process: &OwnedHandle, timeout: Duration) -> u32 {
+        // SAFETY: `process` is a live synchronization handle and remains owned
+        // for the duration of the bounded wait.
+        unsafe {
+            WaitForSingleObject(
+                process.as_raw_handle() as HANDLE,
+                timeout.as_millis() as u32,
+            )
+        }
     }
 
     fn powershell_path() -> PathBuf {
