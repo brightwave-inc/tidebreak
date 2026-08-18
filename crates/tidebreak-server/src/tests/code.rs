@@ -2006,7 +2006,20 @@ async fn deny_feedback_reaches_the_scripted_engine() {
             assert_eq!(listed.status(), reqwest::StatusCode::OK);
             let body: Vec<serde_json::Value> = listed.json().await.unwrap();
             if let Some(row) = body.into_iter().next() {
-                return row;
+                let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+                let session = tidebreak_core::db::code::get_session(&runtime.db, parsed)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if matches!(
+                    session.attention.state,
+                    AttentionState::NeedsYou {
+                        source: AttentionSource::Structured,
+                        ..
+                    }
+                ) {
+                    return row;
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
