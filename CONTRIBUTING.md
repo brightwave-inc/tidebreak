@@ -126,6 +126,19 @@ dev`, or run the React UI in a browser against `tidebreak serve` via
   becomes the squash commit used for release calculation.
 - Write a clear PR description: what changed and why.
 
+## Merging
+
+`main` uses a batched merge queue. After review, add the pull request to the
+queue or enable auto-merge. GitHub groups ready pull requests, runs the
+required checks on that combined tree, and squash-merges the group if those
+checks pass.
+
+You do not need to rebase onto `main` first. If the group fails, GitHub
+removes the pull request that broke it. Rebase, fix, and queue it again.
+
+Every queued pull request must target `main`. Do not stack pull requests that
+target each other.
+
 ## Contributor License Agreement
 
 By submitting a contribution, you agree that your contribution is provided under
