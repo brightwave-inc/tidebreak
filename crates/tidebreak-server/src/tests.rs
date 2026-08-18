@@ -41,7 +41,9 @@ mod app_invoke;
 mod app_library;
 mod chat_titling;
 mod code;
+#[cfg(unix)]
 mod code_clone;
+#[cfg(unix)]
 mod code_git;
 mod code_terminals;
 mod code_titling;

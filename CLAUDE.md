@@ -188,13 +188,14 @@ is the whole rule, and it is coarse on purpose:
   change's scope reports a successful skip. The always-running change detector
   rejects impossible narrower-scope combinations before conditional jobs
   consume them. There is no serial aggregate wrapper after the slowest job.
-- The native Windows lane is **parked**, along with the release workflow's
-  Windows build — see [`docs/deferred.md`](docs/deferred.md). `windows-check`
-  and `prepare_windows`/`build_windows` are each gated behind a literal `false`
-  and never run; the `windows-ci` label currently does nothing. Releases are
-  macOS-only until those literals flip back. Nothing about the Windows boundary
-  has been declared unsupported, so a change that touches Windows-gated code
-  still deserves the same care — it just gets no CI signal right now.
+- The native Windows lane runs automatically for Rust-scoped pushes to `main`,
+  schedules, and manual dispatches. Pull requests opt in with the `windows-ci`
+  label when they touch a Windows-native boundary. It stays non-required because
+  it is the slowest lane; the post-merge and scheduled runs are the backstop.
+- Production releases require macOS, Windows x86_64, and Linux x86_64 packages.
+  Windows ships NSIS; Linux ships AppImage and `.deb`. Windows Authenticode,
+  ARM64 packages, and automatic updates outside macOS remain parked in
+  [`docs/deferred.md`](docs/deferred.md).
 
 **The remaining trap is a PR that ran nothing.** A conflicting PR runs nothing
 but trivial policy checks; rebase it before believing its status. Judge a PR by

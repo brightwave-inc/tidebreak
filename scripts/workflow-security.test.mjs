@@ -105,15 +105,12 @@ const DESKTOP_SIGNING_JOBS = [
     name: "build_windows",
     validate: "Validate updater signing configuration",
   },
-];
-
-if (/^  build_linux:/m.test(workflows["release.yml"])) {
-  DESKTOP_SIGNING_JOBS.push({
+  {
     file: "release.yml",
     name: "build_linux",
     validate: "Verify and collect Linux artifacts",
-  });
-}
+  },
+];
 
 function desktopSigningJobs() {
   return DESKTOP_SIGNING_JOBS.map((spec) => ({
@@ -1432,6 +1429,12 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   // The prerequisite compiles without any production credential and never
   // uploads what it built; only the cache carries its outputs forward.
   assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.match(prepareJob, /version: 10\.18\.3/);
+  assert.match(prepareJob, /pnpm install --frozen-lockfile --ignore-scripts/);
+  assert.match(
+    prepareJob,
+    /node scripts\/generate-third-party-notices\.mjs --check/,
+  );
   assert.match(prepareJob, /--no-bundle --ci/);
   assert.match(prepareJob, /continue-on-error: true/);
   assert.doesNotMatch(prepareJob, /^    environment:/m);
@@ -1456,32 +1459,18 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   );
 
   // Identical path lists keep the cache version shared between the writing
-  // and restoring jobs. The current workflow permits source-pinned fallback
-  // keys; the upcoming cross-platform workflow may tighten the credentialed
-  // job to the exact release SHA and version.
+  // and restoring jobs. The credentialed job accepts only the exact cache for
+  // this release SHA and version; broader warm-cache fallback stays confined
+  // to the credential-free prerequisite.
   const cachedPaths = (step) =>
     step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
   assert.ok(cachedPaths(buildCacheRestore));
   assert.equal(cachedPaths(buildCacheRestore), cachedPaths(prepareCacheSave));
-  const restorableKeys = buildCacheRestore
-    .split("\n")
-    .map((line) => line.trim().replace(/^key: /, ""))
-    .filter((line) => line.startsWith("windows-release-"));
-  if (/restore-keys:/.test(buildCacheRestore)) {
-    assert.ok(restorableKeys.length >= 3);
-    for (const key of restorableKeys) {
-      assert.ok(
-        key.includes("hashFiles('Cargo.lock',"),
-        `restorable Windows cache key does not pin the source: ${key}`,
-      );
-    }
-  } else {
-    assert.equal(restorableKeys.length, 1);
-    assert.match(
-      restorableKeys[0],
-      /hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\).*needs\.validate\.outputs\.sha.*needs\.validate\.outputs\.version/,
-    );
-  }
+  assert.match(
+    buildCacheRestore,
+    /key: windows-release-prepared-v1-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
+  );
+  assert.doesNotMatch(buildCacheRestore, /restore-keys:/);
 
   // Whatever a restore extracts, the products that get packaged are relinked
   // from the tag's own sources.
@@ -1519,25 +1508,36 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
 
 test("Linux packaging writes no shared cache before loading updater material", () => {
   const release = workflows["release.yml"];
-  if (!/^  build_linux:/m.test(release)) return;
-
   assert.doesNotMatch(release, /^  prepare_linux:/m);
   const buildJob = workflowJob(release, "build_linux");
   assert.match(buildJob, /needs: \[validate, inspect_hosted\]/);
   assert.match(buildJob, /runs-on: ubuntu-22\.04/);
+  assert.match(buildJob, /libwebkit2gtk-4\.1-dev/);
   assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
+  assert.match(buildJob, /version: 10\.18\.3/);
+  assert.match(buildJob, /pnpm install --frozen-lockfile --ignore-scripts/);
+  assert.match(
+    buildJob,
+    /node scripts\/generate-third-party-notices\.mjs --check/,
+  );
   assert.doesNotMatch(buildJob, /actions\/cache\/save/);
+  assert.doesNotMatch(buildJob, /actions\/cache\/restore/);
   assert.doesNotMatch(buildJob, /cache: pnpm/);
-
   const rustCache = cargoDownloadCache(buildJob);
   assert.ok(rustCache);
   assert.match(rustCache, /save-if: false/);
 
-  const packageStep = buildJob.match(
+  assert.match(buildJob, /--bundles appimage,deb/);
+  assert.match(buildJob, /\.AppImage/);
+  assert.match(buildJob, /\.deb/);
+  assert.match(buildJob, /tauri signer sign "\$appimage_path"/);
+  assert.match(buildJob, /tauri signer sign "\$deb_path"/);
+  assert.match(buildJob, /\$\{base_name\}\.deb\.sig/);
+  const buildStep = buildJob.match(
     /- name: Build the Tauri Linux packages[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
-  assert.ok(packageStep);
-  assert.doesNotMatch(packageStep, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.ok(buildStep);
+  assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.ok(
     buildJob.indexOf("Build the Tauri Linux packages") <
       buildJob.indexOf("Verify and collect Linux artifacts"),
@@ -1623,10 +1623,7 @@ test("source SBOM generation is isolated from production credentials", () => {
   assert.match(sbomJob, /name: tidebreak-source-sbom-\$\{\{ needs\.validate\.outputs\.version \}\}/);
   assert.doesNotMatch(publishJob, /anchore\/sbom-action/);
 
-  assert.match(
-    publishJob,
-    /needs: \[validate, inspect_hosted, build_macos, build_windows(?:, build_linux)?, source_sbom, finalize_release\]/,
-  );
+  assert.match(publishJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, build_linux, source_sbom, finalize_release\]/);
   assert.match(publishJob, /needs\.source_sbom\.result == 'success'/);
   assert.match(
     publishJob,
@@ -1663,10 +1660,7 @@ test("GitHub release assets are attached before immutable publication", () => {
   const finalizeJob = workflowJob(release, "finalize_release");
   const publishJob = workflowJob(release, "publish");
 
-  assert.match(
-    attachJob,
-    /needs: \[validate, inspect_hosted, build_macos, build_windows(?:, build_linux)?, source_sbom\]/,
-  );
+  assert.match(attachJob, /needs: \[validate, inspect_hosted, build_macos, build_windows, build_linux, source_sbom\]/);
   assert.match(attachJob, /contents: write/);
   assert.doesNotMatch(attachJob, /^    environment:/m);
   assert.doesNotMatch(attachJob, /secrets\./);
@@ -1676,14 +1670,20 @@ test("GitHub release assets are attached before immutable publication", () => {
   // publication. A published retry verifies those assets and can reconstruct
   // an incomplete hosted publication without rebuilding signed packages.
   assert.match(attachJob, /name: tidebreak-macos-universal-/);
+  assert.match(attachJob, /name: tidebreak-windows-x86_64-/);
+  assert.match(attachJob, /name: tidebreak-linux-x86_64-/);
   assert.match(attachJob, /name: tidebreak-source-sbom-/);
   assert.match(attachJob, /gh release download "\$RELEASE_TAG"/);
   assert.match(attachJob, /sha256sum --check --strict/);
   assert.match(attachJob, /Tidebreak-macos-universal\.dmg/);
   assert.match(attachJob, /Tidebreak-macos-apple-silicon\.dmg/);
+  assert.match(attachJob, /Tidebreak-windows-x86_64-setup\.exe/);
+  assert.match(attachJob, /Tidebreak-linux-x86_64\.AppImage/);
+  assert.match(attachJob, /Tidebreak-linux-x86_64\.deb/);
   assert.match(attachJob, /\.app\.zip/);
   assert.match(attachJob, /\.app\.tar\.gz/);
   assert.match(attachJob, /\.app\.tar\.gz\.sig/);
+  assert.match(attachJob, /Tidebreak_\$\{TIDEBREAK_VERSION\}_x86_64\.deb\.sig/);
   assert.match(attachJob, /gh release upload "\$RELEASE_TAG"/);
   assert.match(attachJob, /if \[\[ "\$RELEASE_DRAFT" = true \]\]/);
   assert.match(attachJob, /releases\/\$RELEASE_ID\/assets/);
@@ -1715,6 +1715,20 @@ test("GitHub release assets are attached before immutable publication", () => {
     attachJob.includes(`downloads/${macDownloadLink}`),
     `attach_downloads must upload ${macDownloadLink}`,
   );
+
+  for (const [platform, pattern] of [
+    ["Windows", /releases\/latest\/download\/(Tidebreak-windows-[\w-]+\.exe)/],
+    ["Linux AppImage", /releases\/latest\/download\/(Tidebreak-linux-[\w-]+\.AppImage)/],
+    ["Linux Debian", /releases\/latest\/download\/(Tidebreak-linux-[\w-]+\.deb)/],
+  ]) {
+    const downloadLink = readFileSync(repositoryFile("README.md"), "utf8")
+      .match(pattern)?.[1];
+    assert.ok(downloadLink, `the README must publish a ${platform} download link`);
+    assert.ok(
+      attachJob.includes(`downloads/${downloadLink}`),
+      `attach_downloads must upload ${downloadLink}`,
+    );
+  }
 });
 
 test("the updater private key is isolated from compilation", () => {

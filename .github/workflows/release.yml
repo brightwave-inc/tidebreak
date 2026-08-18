@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Leave blank to publish the current draft. Set a tag only to retry that draft or published release.
+        description: Leave blank to publish the current draft. Set a tag only to retry a draft or release created with the current artifact contract.
         required: false
         type: string
 
@@ -607,7 +607,7 @@ jobs:
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
-          version: 10
+          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
@@ -615,7 +615,7 @@ jobs:
           cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       # The signed bundle ships legal/THIRD-PARTY-NOTICES.md as a resource, so
       # the released tag must not carry a stale copy. Both dependency graphs are
@@ -1057,14 +1057,9 @@ jobs:
   prepare_windows:
     name: prepare unsigned Windows · ${{ matrix.arch }}
     needs: [validate, inspect_hosted]
-    # Windows packaging is paused; see docs/deferred.md. The leading `false`
-    # parks this job and `build_windows` without disturbing the rest of the
-    # release gating, so resuming Windows is flipping two literals plus the
-    # `windows` descriptor in scripts/create-release-manifests.mjs.
     if: >-
       ${{
-        false
-        && needs.validate.outputs.draft == 'true'
+        needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
     runs-on: windows-latest
@@ -1137,7 +1132,7 @@ jobs:
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
-          version: 10
+          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
@@ -1145,7 +1140,10 @@ jobs:
           cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify the third-party notices match the released graph
+        run: node scripts/generate-third-party-notices.mjs --check
 
       - name: Compile without production credentials or bundles
         id: compile
@@ -1183,8 +1181,7 @@ jobs:
     needs: [validate, inspect_hosted, prepare_windows]
     if: >-
       ${{
-        false
-        && always()
+        always()
         && needs.validate.result == 'success'
         && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
@@ -1225,11 +1222,10 @@ jobs:
 
       # This restore-only step runs before the updater-signing secret is
       # loaded. The matching cache is written by a credential-free prerequisite
-      # job, and every restorable key pins at minimum the Cargo.lock and
-      # toolchain hashes. The path list must stay byte-identical to the writing
-      # job's — `actions/cache` folds it into the cache version. The next step
-      # deletes the linked products the archive carries, so only compiler
-      # intermediates survive into the packaged build.
+      # job for this exact release commit and version. The path list must stay
+      # byte-identical to the writing job's — `actions/cache` folds it into the
+      # cache version. The next step deletes the linked products the archive
+      # carries, so only compiler intermediates survive into the packaged build.
       - name: Restore unsigned Rust build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1247,9 +1243,6 @@ jobs:
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
-          restore-keys: |
-            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       # A restore extracts the whole archive, including the linked products a
       # prerequisite run left in it. Delete them and let this build relink them
@@ -1402,6 +1395,178 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build_linux:
+    name: Linux · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted]
+    if: >-
+      ${{
+        needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.outputs.exists != 'true'
+      }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          shared-key: linux-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Install UI dependencies
+        working-directory: crates/tidebreak-desktop/ui
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify the third-party notices match the released graph
+        run: node scripts/generate-third-party-notices.mjs --check
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.TIDEBREAK_VERSION,
+              bundle: { targets: ["appimage", "deb"], category: "Office" },
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
+            }));
+          '
+
+      - name: Build the Tauri Linux packages
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/tidebreak-desktop
+          args: >-
+            --target ${{ matrix.target }}
+            --config ${{ runner.temp }}/tidebreak-release.json
+            --bundles appimage,deb
+
+      - name: Verify and collect Linux artifacts
+        env:
+          RELEASE_ARCH: ${{ matrix.arch }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing desktop-production updater-signing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          bundle_dir="$target_dir/$RELEASE_TARGET/release/bundle"
+          appimage_paths=("$bundle_dir"/appimage/*.AppImage)
+          deb_paths=("$bundle_dir"/deb/*.deb)
+          (( ${#appimage_paths[@]} == 1 )) && [[ -f "${appimage_paths[0]}" ]] || {
+            echo "Expected exactly one AppImage in $bundle_dir/appimage" >&2
+            exit 1
+          }
+          (( ${#deb_paths[@]} == 1 )) && [[ -f "${deb_paths[0]}" ]] || {
+            echo "Expected exactly one Debian package in $bundle_dir/deb" >&2
+            exit 1
+          }
+          appimage_path="${appimage_paths[0]}"
+          deb_path="${deb_paths[0]}"
+
+          sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+          [[ -x "$sidecar" ]] || {
+            echo "Missing executable target-named host broker sidecar: $sidecar" >&2
+            exit 1
+          }
+
+          appimage_signature_path="${appimage_path}.sig"
+          rm -f "$appimage_signature_path"
+          tauri signer sign "$appimage_path"
+          [[ -s "$appimage_signature_path" ]] || {
+            echo "Tauri updater signature is empty: $appimage_signature_path" >&2
+            exit 1
+          }
+
+          deb_signature_path="${deb_path}.sig"
+          rm -f "$deb_signature_path"
+          tauri signer sign "$deb_path"
+          [[ -s "$deb_signature_path" ]] || {
+            echo "Tauri updater signature is empty: $deb_signature_path" >&2
+            exit 1
+          }
+
+          output_dir="dist/linux/$RELEASE_ARCH"
+          base_name="Tidebreak_${TIDEBREAK_VERSION}_${RELEASE_ARCH}"
+          mkdir -p "$output_dir"
+          cp "$appimage_path" "$output_dir/${base_name}.AppImage"
+          cp "$appimage_signature_path" "$output_dir/${base_name}.AppImage.sig"
+          cp "$deb_path" "$output_dir/${base_name}.deb"
+          cp "$deb_signature_path" "$output_dir/${base_name}.deb.sig"
+          find "$output_dir" -type f -print
+
+      - name: Upload verified Linux artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-linux-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          path: dist/linux/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 7
+
   source_sbom:
     name: generate source SBOM
     needs: [validate, inspect_hosted]
@@ -1453,9 +1618,7 @@ jobs:
 
   publish:
     name: publish downloads.brightwave.io
-    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom, finalize_release]
-    # `build_windows` is parked (see docs/deferred.md), so a skipped result is
-    # the expected steady state; only an outright failure may block publishing.
+    needs: [validate, inspect_hosted, build_macos, build_windows, build_linux, source_sbom, finalize_release]
     if: >-
       ${{
         always()
@@ -1467,8 +1630,8 @@ jobs:
           || needs.validate.outputs.draft != 'true'
           || (
             needs.build_macos.result == 'success'
-            && needs.build_windows.result != 'failure'
-            && needs.build_windows.result != 'cancelled'
+            && needs.build_windows.result == 'success'
+            && needs.build_linux.result == 'success'
             && needs.source_sbom.result == 'success'
           )
         )
@@ -1523,18 +1686,27 @@ jobs:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: dist/macos/universal
 
-      # Parked with the Windows build; see docs/deferred.md.
       - name: Download Windows artifacts
         if: >-
           ${{
-            false
-            && needs.validate.outputs.draft == 'true'
+            needs.validate.outputs.draft == 'true'
             && needs.inspect_hosted.outputs.exists != 'true'
           }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
           path: dist/windows/x86_64
+
+      - name: Download Linux artifacts
+        if: >-
+          ${{
+            needs.validate.outputs.draft == 'true'
+            && needs.inspect_hosted.outputs.exists != 'true'
+          }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
+          path: dist/linux/x86_64
 
       - name: Recover build inputs from the immutable GitHub Release
         if: >-
@@ -1545,7 +1717,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p recovery dist/macos/universal
+          mkdir -p \
+            recovery \
+            dist/macos/universal \
+            dist/windows/x86_64 \
+            dist/linux/x86_64
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir recovery
@@ -1564,6 +1740,26 @@ jobs:
               exit 1
             }
             cp "recovery/$file" "dist/macos/universal/$file"
+          done
+
+          windows_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
+          for suffix in setup.exe setup.exe.sig; do
+            file="$windows_base-$suffix"
+            [[ -f "recovery/$file" ]] || {
+              echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+              exit 1
+            }
+            cp "recovery/$file" "dist/windows/x86_64/$file"
+          done
+
+          linux_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
+          for suffix in AppImage AppImage.sig deb deb.sig; do
+            file="$linux_base.$suffix"
+            [[ -f "recovery/$file" ]] || {
+              echo "Immutable GitHub Release is missing recovery asset: $file" >&2
+              exit 1
+            }
+            cp "recovery/$file" "dist/linux/x86_64/$file"
           done
 
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
@@ -1670,6 +1866,8 @@ jobs:
               *.json) echo application/json ;;
               *.dmg) echo application/x-apple-diskimage ;;
               *.exe) echo application/vnd.microsoft.portable-executable ;;
+              *.AppImage) echo application/vnd.appimage ;;
+              *.deb) echo application/vnd.debian.binary-package ;;
               *.zip) echo application/zip ;;
               *.tar.gz) echo application/gzip ;;
               *.sig|*.sha256) echo text/plain ;;
@@ -1761,7 +1959,7 @@ jobs:
 
   attach_downloads:
     name: prepare GitHub release downloads
-    needs: [validate, inspect_hosted, build_macos, build_windows, source_sbom]
+    needs: [validate, inspect_hosted, build_macos, build_windows, build_linux, source_sbom]
     # A published release already owns immutable assets. A draft instead needs
     # the fresh package build and SBOM before those assets can be attached.
     if: >-
@@ -1773,8 +1971,8 @@ jobs:
           needs.validate.outputs.draft != 'true'
           || (
             needs.build_macos.result == 'success'
-            && needs.build_windows.result != 'failure'
-            && needs.build_windows.result != 'cancelled'
+            && needs.build_windows.result == 'success'
+            && needs.build_linux.result == 'success'
             && needs.source_sbom.result == 'success'
           )
         )
@@ -1792,6 +1990,20 @@ jobs:
         with:
           name: tidebreak-macos-universal-${{ needs.validate.outputs.version }}
           path: release-artifacts/macos
+
+      - name: Download the verified Windows build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-windows-x86_64-${{ needs.validate.outputs.version }}
+          path: release-artifacts/windows
+
+      - name: Download the verified Linux build
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-linux-x86_64-${{ needs.validate.outputs.version }}
+          path: release-artifacts/linux
 
       - name: Download the checksummed source SBOM
         if: ${{ needs.validate.outputs.draft == 'true' }}
@@ -1824,6 +2036,40 @@ jobs:
             (cd downloads && sha256sum "$file" > "$file.sha256")
           done
 
+          windows_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
+          windows_installer="$windows_base-setup.exe"
+          for file in "$windows_installer" "$windows_installer.sig"; do
+            [[ -f "release-artifacts/windows/$file" ]] || {
+              echo "The verified Windows build did not contain $file." >&2
+              exit 1
+            }
+            cp "release-artifacts/windows/$file" "downloads/$file"
+            (cd downloads && sha256sum "$file" > "$file.sha256")
+          done
+          cp "release-artifacts/windows/$windows_installer" \
+            downloads/Tidebreak-windows-x86_64-setup.exe
+          (cd downloads && sha256sum Tidebreak-windows-x86_64-setup.exe \
+            > Tidebreak-windows-x86_64-setup.exe.sha256)
+
+          linux_base="Tidebreak_${TIDEBREAK_VERSION}_x86_64"
+          for suffix in AppImage AppImage.sig deb deb.sig; do
+            file="$linux_base.$suffix"
+            [[ -f "release-artifacts/linux/$file" ]] || {
+              echo "The verified Linux build did not contain $file." >&2
+              exit 1
+            }
+            cp "release-artifacts/linux/$file" "downloads/$file"
+            (cd downloads && sha256sum "$file" > "$file.sha256")
+          done
+          cp "release-artifacts/linux/$linux_base.AppImage" \
+            downloads/Tidebreak-linux-x86_64.AppImage
+          cp "release-artifacts/linux/$linux_base.deb" \
+            downloads/Tidebreak-linux-x86_64.deb
+          (cd downloads && sha256sum Tidebreak-linux-x86_64.AppImage \
+            > Tidebreak-linux-x86_64.AppImage.sha256)
+          (cd downloads && sha256sum Tidebreak-linux-x86_64.deb \
+            > Tidebreak-linux-x86_64.deb.sha256)
+
           sbom="Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"
           cp "release-artifacts/sbom/$sbom" "downloads/$sbom"
           cp "release-artifacts/sbom/$sbom.sha256" "downloads/$sbom.sha256"
@@ -1852,6 +2098,15 @@ jobs:
             (cd downloads && sha256sum "$(basename "$compatibility_dmg")" \
               > "$(basename "$compatibility_dmg").sha256")
           fi
+          for required in \
+            downloads/Tidebreak-windows-x86_64-setup.exe \
+            downloads/Tidebreak-linux-x86_64.AppImage \
+            downloads/Tidebreak-linux-x86_64.deb; do
+            [[ -f "$required" ]] || {
+              echo "The cross-platform download was not prepared: ${required#downloads/}" >&2
+              exit 1
+            }
+          done
 
           while IFS= read -r -d '' file; do
             case "$file" in
@@ -1873,6 +2128,12 @@ jobs:
               "$base.app.zip" \
               "$base.app.tar.gz" \
               "$base.app.tar.gz.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64-setup.exe.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.AppImage.sig" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb" \
+              "Tidebreak_${TIDEBREAK_VERSION}_x86_64.deb.sig" \
               "Tidebreak_${TIDEBREAK_VERSION}_source.spdx.json"; do
               [[ -f "downloads/$file" ]] || {
                 echo "Immutable release cannot recover hosted publication without $file." >&2
