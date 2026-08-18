@@ -17,6 +17,148 @@ const STALL_MS = 3_000;
 const TRUNCATION_TEXT = "[output truncated]";
 
 /**
+ * xterm theme built from the live CSS tokens on `:root`.
+ *
+ * Status quads supply the ANSI hues. Magenta has no token of its own, so it
+ * reuses the critical foreground; cyan reuses info.
+ */
+export type XtermTheme = {
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursorAccent: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+};
+
+export function readXtermTheme(
+  style: CSSStyleDeclaration = getComputedStyle(document.documentElement),
+): XtermTheme {
+  const token = (name: string, fallback: string) =>
+    resolveCssColor(style.getPropertyValue(name).trim() || fallback);
+
+  const background = token("--background", "#18181b");
+  const foreground = token("--foreground", "#e4e4e7");
+  const muted = token("--muted-foreground", "#71717a");
+  const success = token("--success", "#22c55e");
+  const successFg = token("--success-foreground", "#86efac");
+  const warning = token("--warning", "#eab308");
+  const warningFg = token("--warning-foreground", "#fde047");
+  const critical = token("--critical", "#ef4444");
+  const criticalFg = token("--critical-foreground", "#fca5a5");
+  const info = token("--info", "#3b82f6");
+  const infoFg = token("--info-foreground", "#93c5fd");
+
+  return {
+    background,
+    foreground,
+    cursor: foreground,
+    cursorAccent: background,
+    black: muted,
+    red: critical,
+    green: success,
+    yellow: warning,
+    blue: info,
+    magenta: criticalFg,
+    cyan: infoFg,
+    white: foreground,
+    brightBlack: muted,
+    brightRed: criticalFg,
+    brightGreen: successFg,
+    brightYellow: warningFg,
+    brightBlue: infoFg,
+    brightMagenta: criticalFg,
+    brightCyan: infoFg,
+    brightWhite: foreground,
+  };
+}
+
+/**
+ * Turn a CSS color (including `oklch(...)`) into something the xterm canvas
+ * renderer can paint. A live element's computed `color` is the first try;
+ * a 1×1 canvas `fillStyle` assignment is the fallback.
+ */
+export function resolveCssColor(value: string): string {
+  if (!value) return value;
+  const already = normalizeCssColor(value);
+  if (already) return already;
+  const computed = resolveViaComputedStyle(value);
+  if (computed) return computed;
+  const painted = resolveViaCanvas(value);
+  if (painted) return painted;
+  return value;
+}
+
+function resolveViaComputedStyle(value: string): string | null {
+  if (typeof document === "undefined") return null;
+  const probe = document.createElement("span");
+  probe.style.color = value;
+  document.documentElement.appendChild(probe);
+  const computed = getComputedStyle(probe).color.trim();
+  probe.remove();
+  return normalizeCssColor(computed);
+}
+
+function resolveViaCanvas(value: string): string | null {
+  if (typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.fillStyle = "#010101";
+  ctx.fillStyle = value;
+  const filled = String(ctx.fillStyle);
+  if (filled === "#010101") return null;
+  const fromFill = normalizeCssColor(filled);
+  if (fromFill) return fromFill;
+  // Modern syntax such as oklch() survives as the fillStyle string in
+  // Chromium. Paint a pixel and read it back so xterm always gets #rrggbb.
+  ctx.fillRect(0, 0, 1, 1);
+  const pixel = ctx.getImageData(0, 0, 1, 1).data;
+  if (pixel[3] === 0) return null;
+  return toHex(String(pixel[0]), String(pixel[1]), String(pixel[2]));
+}
+
+function normalizeCssColor(color: string): string | null {
+  if (!color) return null;
+  if (color.startsWith("#") && (color.length === 7 || color.length === 4)) {
+    return color;
+  }
+  const comma = color.match(
+    /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*[\d.]+\s*)?\)$/i,
+  );
+  if (comma) return toHex(comma[1], comma[2], comma[3]);
+  const space = color.match(
+    /^rgba?\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*[\d.%]+\s*)?\)$/i,
+  );
+  if (space) return toHex(space[1], space[2], space[3]);
+  return null;
+}
+
+function toHex(r: string, g: string, b: string): string {
+  const byte = (part: string) =>
+    Math.max(0, Math.min(255, Math.round(Number(part))))
+      .toString(16)
+      .padStart(2, "0");
+  return `#${byte(r)}${byte(g)}${byte(b)}`;
+}
+
+/**
  * Ephemeral renderer over the cursor-pull terminal API.
  *
  * Created on open, disposed on close. Reopening re-fetches recent ring bytes
@@ -61,11 +203,7 @@ export function TerminalPane({
       convertEol: true,
       fontSize: 13,
       cursorBlink: true,
-      theme: {
-        background: "#18181b",
-        foreground: "#e4e4e7",
-        cursor: "#e4e4e7",
-      },
+      theme: readXtermTheme(),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -111,7 +249,14 @@ export function TerminalPane({
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
     observer?.observe(host);
 
+    const root = document.documentElement;
+    const themeObserver = new MutationObserver(() => {
+      term.options.theme = readXtermTheme();
+    });
+    themeObserver.observe(root, { attributes: true, attributeFilter: ["class"] });
+
     return () => {
+      themeObserver.disconnect();
       window.removeEventListener("resize", onResize);
       observer?.disconnect();
       host.removeEventListener("keydown", onKeyDownCapture, true);
@@ -254,7 +399,12 @@ export function TerminalPane({
         </div>
       )}
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
-      <div ref={hostRef} className="min-h-0 flex-1" data-testid="terminal-host" />
+      <div
+        ref={hostRef}
+        className="min-h-0 flex-1"
+        data-testid="terminal-host"
+        aria-label="Terminal output"
+      />
     </div>
   );
 }

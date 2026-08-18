@@ -10,6 +10,7 @@ import {
 const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
 const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
+const TERMINAL_DRAWER_HEIGHTS_KEY = "tidebreak.code-terminal-drawer-heights";
 
 /** What the reader picked the last time they created a workspace. */
 export type CodeCreateDefaults = {
@@ -83,6 +84,37 @@ function storeWorkspaceSort(mode: WorkspaceSortMode): void {
   }
 }
 
+function readStoredTerminalDrawerHeights(): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(TERMINAL_DRAWER_HEIGHTS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const heights: Record<string, number> = {};
+    for (const [workspaceId, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        heights[workspaceId] = value;
+      }
+    }
+    return heights;
+  } catch {
+    return {};
+  }
+}
+
+function storeTerminalDrawerHeights(heights: Record<string, number>): void {
+  try {
+    window.localStorage.setItem(
+      TERMINAL_DRAWER_HEIGHTS_KEY,
+      JSON.stringify(heights),
+    );
+  } catch {
+    // Preference persistence is best-effort.
+  }
+}
+
 /**
  * Code mode's dialog and chrome state, held outside the components that draw it.
  *
@@ -93,7 +125,8 @@ function storeWorkspaceSort(mode: WorkspaceSortMode): void {
  * button that opens it.
  *
  * The review rail is the same kind of chrome as the left sidebar: it is not
- * a URL, and a reload should not forget whether it was showing.
+ * a URL, and a reload should not forget whether it was showing. Terminal
+ * drawer height is the same kind of chrome, remembered per workspace.
  *
  * `lastCreate` is the tie-breaker for the new-workspace dialog's defaults.
  * The catalog answers "what did you work on last" for anyone with a
@@ -108,6 +141,8 @@ export type CodeUiStore = {
   reviewSidebarOpen: boolean;
   workspaceSortMode: WorkspaceSortMode;
   lastCreate: CodeCreateDefaults | null;
+  /** Per-workspace terminal drawer height, remembered across reloads. */
+  terminalDrawerHeights: Record<string, number>;
   /**
    * Ask for a workspace, from a repo page or from anywhere in code mode.
    *
@@ -123,6 +158,7 @@ export type CodeUiStore = {
   setWorkspaceSortMode: (mode: WorkspaceSortMode) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
+  setTerminalDrawerHeight: (workspaceId: string, height: number) => void;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set) => ({
@@ -132,6 +168,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
   workspaceSortMode: readStoredWorkspaceSort(),
   lastCreate: readStoredCreateDefaults(),
+  terminalDrawerHeights: readStoredTerminalDrawerHeights(),
   startNewWorkspace: (repoId) => {
     const { repos } = useCodeCatalogStore.getState();
     if (repos.length === 0) {
@@ -163,5 +200,15 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   rememberCreate: (defaults) => {
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });
+  },
+  setTerminalDrawerHeight: (workspaceId, height) => {
+    set((state) => {
+      const terminalDrawerHeights = {
+        ...state.terminalDrawerHeights,
+        [workspaceId]: height,
+      };
+      storeTerminalDrawerHeights(terminalDrawerHeights);
+      return { terminalDrawerHeights };
+    });
   },
 }));
