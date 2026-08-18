@@ -41,3 +41,11 @@ Thumbs.db
 .vercel/
 .env.local
 .env.*.local
+
+# design-sync working state (never committed; .design-sync/ config/notes/previews ARE committed)
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+.ds-compiled.css
