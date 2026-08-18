@@ -28,7 +28,6 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { NewProjectDialog } from "./NewProjectDialog";
 import { RecentChatRow } from "./RecentChatRow";
-import { useSidebarWidth } from "./primitives";
 
 /**
  * The rail's projects, above the chat list.
@@ -87,12 +86,7 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
   const chatIdsWithPendingPrompts = useChatAttention(
     (state) => state.chatIdsWithPendingPrompts,
   );
-  const isCompact = useSidebarWidth() === "compact";
   const [creatingOpen, setCreatingOpen] = useState(false);
-
-  // Icons-only leaves no room for a nested tree, the same reason the chat list
-  // stands down at this width.
-  if (isCompact) return null;
 
   return (
     <div className="mt-4 flex shrink-0 flex-col">

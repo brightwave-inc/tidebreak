@@ -85,9 +85,8 @@
   --sidebar-expanded-min: 200px;
   --sidebar-expanded-max: 480px;
   --sidebar-expanded-width: 280px;
-  --sidebar-compact-width: calc(var(--spacing) * 14);
   /* macOS overlay traffic lights at trafficLightPosition (16, 20), plus a
-     gap before the history buttons. The compact rail is narrower than this. */
+     gap before the history buttons. */
   --mac-traffic-light-inset: 84px;
 
   --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.06);
@@ -1655,39 +1654,10 @@ body {
   padding-top: 40px;
 }
 
-/* A compact rail is narrower than the macOS traffic-light cluster. It remains
-   the drag target, but the optional history buttons disappear until the rail
-   is expanded rather than spilling over the routed header. */
-.app-shell:has([data-sidebar="compact"]) .titlebar {
-  width: var(--sidebar-compact-width);
-  padding-inline: 0.25rem;
-}
-
-.app-shell:has([data-sidebar="compact"]) .titlebar.is-mac-overlay {
-  /* Cover the overflowing lights so the window still drags there. */
-  width: var(--mac-traffic-light-inset);
-  padding-left: 0;
-}
-
-.app-shell:has([data-sidebar="compact"])
-  .titlebar.is-mac-overlay
-  .titlebar-nav {
-  display: none;
-}
-
-/* Chrome that shares the traffic-light row (the chat breadcrumb) has to start
-   after the cluster when the rail cannot contain it. The extra inset is only
-   the overflow past the rail — the same 84px line the expanded history
-   buttons already use. */
+/* Chrome that shares the traffic-light row (the chat breadcrumb) starts after
+   the cluster the same way the expanded history buttons do. */
 .window-chrome-row {
   padding-left: 1rem;
-}
-
-.app-shell:has([data-sidebar="compact"]):has(.titlebar.is-mac-overlay)
-  .window-chrome-row {
-  padding-left: calc(
-    var(--mac-traffic-light-inset) - var(--sidebar-compact-width)
-  );
 }
 
 /* Full-window surfaces that replace the shell (boot and error screens, the
@@ -1700,6 +1670,28 @@ body {
   right: 0;
   height: 40px;
   z-index: 50;
+}
+
+/* A collapsed sidebar leaves no rail, so the shell pins a single expand
+   button beside the traffic lights instead (at the plain left edge
+   elsewhere). It is the window's drag region where the overlay titlebar
+   would be. */
+.sidebar-expand-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  height: 40px;
+  width: 120px;
+  align-items: center;
+  gap: 0.5rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+.sidebar-expand-strip.is-mac-overlay {
+  padding-left: var(--mac-traffic-light-inset);
 }
 
 .app-body {

@@ -5,7 +5,6 @@ import {
   Monitor,
   Moon,
   PanelLeftClose,
-  PanelLeftOpen,
   RotateCw,
   Settings,
   Sun,
@@ -21,7 +20,6 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarHeader,
-  useSidebarWidth,
 } from "./primitives";
 import { useTheme } from "@/theme";
 import { useUiStore } from "@/UiStore";
@@ -39,7 +37,6 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
   const { updateState, restartForUpdate } = useApp();
   const { mode: themeMode, cycle: cycleTheme } = useTheme();
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
-  const isCompact = useSidebarWidth() === "compact";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [appName, setAppName] = useState("Tidebreak");
 
@@ -67,45 +64,30 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
           aria-label="Home"
           onClick={() => void navigate({ to: "/" })}
         >
-          {/* Compact keeps a square footprint so the home control lines up
-              with the column of square rail buttons under it. Expanded uses
-              the mark's own ratio beside the name, the same lockup as the
+          {/* The mark's own ratio beside the name, the same lockup as the
               public site header. */}
-          <Logomark
-            width={isCompact ? "28" : "30"}
-            height={isCompact ? "28" : "16"}
-          />
-          {!isCompact && (
-            <span className="truncate font-mono text-sm font-medium leading-none">
-              {appName}
-            </span>
-          )}
+          <Logomark width="30" height="16" />
+          <span className="truncate font-mono text-sm font-medium leading-none">
+            {appName}
+          </span>
         </button>
         <span className="grow" />
-        {!isCompact && (
-          <WithTooltip label="Collapse sidebar" side="bottom">
-            <button
-              type="button"
-              className="cursor-pointer rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              aria-label="Collapse sidebar"
-              onClick={toggleSidebar}
-            >
-              <PanelLeftClose size={15} />
-            </button>
-          </WithTooltip>
-        )}
+        <WithTooltip label="Collapse sidebar" side="bottom">
+          <button
+            type="button"
+            className="cursor-pointer rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Collapse sidebar"
+            onClick={toggleSidebar}
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        </WithTooltip>
       </SidebarHeader>
 
       {/* min-h-0 so the chat list inside can be the part that scrolls: without
           it the content column grows to its content and the rail's own rows
           scroll away with the list. */}
       <SidebarContent className="min-h-0 gap-1 overflow-y-auto px-2">
-        {isCompact && (
-          <SidebarButton aria-label="Expand sidebar" onClick={toggleSidebar}>
-            <PanelLeftOpen />
-            <span>Expand sidebar</span>
-          </SidebarButton>
-        )}
         {children}
       </SidebarContent>
 

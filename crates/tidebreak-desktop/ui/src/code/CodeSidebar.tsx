@@ -19,11 +19,7 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { useLayoutState } from "@/panel/usePanelNav";
-import {
-  SidebarButton,
-  SidebarSectionTitle,
-  useSidebarWidth,
-} from "@/sidebar/primitives";
+import { SidebarButton, SidebarSectionTitle } from "@/sidebar/primitives";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import type {
   CodeSessionDigest,
@@ -75,7 +71,6 @@ export function CodeSidebar() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const isCompact = useSidebarWidth() === "compact";
   const repos = useCodeCatalogStore((state) => state.repos);
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
@@ -115,25 +110,17 @@ export function CodeSidebar() {
     <SidebarFrame>
       <CodeModeSwitch />
 
-      {!isCompact && (
-        <div className="flex items-center justify-between px-2">
-          <SidebarSectionTitle className="px-0">Repos</SidebarSectionTitle>
-          <button
-            type="button"
-            className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Add repo"
-            onClick={() => setAddRepoOpen(true)}
-          >
-            <Plus size={14} />
-          </button>
-        </div>
-      )}
-      {isCompact && (
-        <SidebarButton aria-label="Add repo" onClick={() => setAddRepoOpen(true)}>
-          <Plus />
-          <span>Add repo</span>
-        </SidebarButton>
-      )}
+      <div className="flex items-center justify-between px-2">
+        <SidebarSectionTitle className="px-0">Repos</SidebarSectionTitle>
+        <button
+          type="button"
+          className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label="Add repo"
+          onClick={() => setAddRepoOpen(true)}
+        >
+          <Plus size={14} />
+        </button>
+      </div>
       <div className="flex shrink-0 flex-col gap-0.5">
         {repos.map((repo) => {
           const active = pathname === `/code/r/${repo.id}`;
@@ -155,134 +142,92 @@ export function CodeSidebar() {
             </SidebarButton>
           );
         })}
-        {repos.length === 0 && !isCompact && (
+        {repos.length === 0 && (
           <p className="px-2 py-1 text-xs text-muted-foreground">
             No repos registered
           </p>
         )}
       </div>
 
-      {!isCompact && (
-        <div className="mt-3 flex items-center justify-between gap-1 px-2">
-          <SidebarSectionTitle className="px-0">Workspaces</SidebarSectionTitle>
-          <div className="flex items-center">
-            <button
-              type="button"
-              className="cursor-pointer rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-              aria-label={`Sort workspaces: ${sortLabel}. Activate to cycle.`}
-              onClick={() => setSortMode(nextWorkspaceSortMode(sortMode))}
-            >
-              {sortLabel}
-            </button>
-            <button
-              type="button"
-              className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-              aria-label="New workspace"
-              onClick={() => startNewWorkspace()}
-            >
-              <Plus size={14} />
-            </button>
-          </div>
+      <div className="mt-3 flex items-center justify-between gap-1 px-2">
+        <SidebarSectionTitle className="px-0">Workspaces</SidebarSectionTitle>
+        <div className="flex items-center">
+          <button
+            type="button"
+            className="cursor-pointer rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label={`Sort workspaces: ${sortLabel}. Activate to cycle.`}
+            onClick={() => setSortMode(nextWorkspaceSortMode(sortMode))}
+          >
+            {sortLabel}
+          </button>
+          <button
+            type="button"
+            className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="New workspace"
+            onClick={() => startNewWorkspace()}
+          >
+            <Plus size={14} />
+          </button>
         </div>
-      )}
-      {isCompact && (
-        <SidebarButton
-          aria-label="New workspace"
-          onClick={() => startNewWorkspace()}
-        >
-          <Plus />
-          <span>New workspace</span>
-        </SidebarButton>
-      )}
+      </div>
       <div className="flex min-h-0 flex-col gap-0.5">
-        {isCompact &&
-          groups
-            .flatMap((group) => group.workspaces)
-            .map((workspace) => {
-              const active = pathname === `/code/w/${workspace.id}`;
+        {groups.map((group) => (
+          <div key={group.key} className="flex flex-col gap-0.5">
+            {group.label && (
+              <div
+                className="truncate px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground/90"
+                title={group.label}
+              >
+                {group.label}
+              </div>
+            )}
+            {group.workspaces.map((workspace) => {
               const digest = digests[workspace.id];
+              const pr = digest?.pr_state ?? workspace.pr;
               return (
-                <SidebarButton
+                <WorkspaceCard
                   key={workspace.id}
-                  aria-current={active ? "page" : undefined}
-                  data-active={active || undefined}
-                  className="data-[active]:bg-muted"
-                  onClick={() =>
+                  workspace={workspace}
+                  digest={digest}
+                  session={sessions[workspace.id]}
+                  repoName={
+                    repos.find((repo) => repo.id === workspace.repo_id)
+                      ?.display_name ?? workspace.repo_id
+                  }
+                  active={pathname === `/code/w/${workspace.id}`}
+                  terminalOpen={terminalOpen && viewedWorkspaceId === workspace.id}
+                  commands={workspaceCommands({
+                    hasPr: Boolean(pr),
+                    archived: workspace.status === "archived",
+                    hasSession: Boolean(sessions[workspace.id]),
+                    attentionPinned:
+                      (digest?.attention ?? sessions[workspace.id]?.attention)
+                        ?.state.type === "manual",
+                  })}
+                  onOpen={() =>
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
                     })
                   }
-                >
-                  <FolderGit2 />
-                  {/* The digest restates the title on every notice, so a
-                      background rename lands here without a catalog refresh. */}
-                  <span>{digest?.title ?? workspace.title}</span>
-                  <AttentionBadge attention={digest?.attention} compact />
-                </SidebarButton>
+                  onCommand={(command) =>
+                    run(command, {
+                      workspace,
+                      title: digest?.title ?? workspace.title,
+                      pr,
+                      session: sessions[workspace.id],
+                    })
+                  }
+                />
               );
             })}
-        {!isCompact &&
-          groups.map((group) => (
-            <div key={group.key} className="flex flex-col gap-0.5">
-              {group.label && (
-                <div
-                  className="truncate px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground/90"
-                  title={group.label}
-                >
-                  {group.label}
-                </div>
-              )}
-              {group.workspaces.map((workspace) => {
-                const digest = digests[workspace.id];
-                const pr = digest?.pr_state ?? workspace.pr;
-                return (
-                  <WorkspaceCard
-                    key={workspace.id}
-                    workspace={workspace}
-                    digest={digest}
-                    session={sessions[workspace.id]}
-                    repoName={
-                      repos.find((repo) => repo.id === workspace.repo_id)
-                        ?.display_name ?? workspace.repo_id
-                    }
-                    active={pathname === `/code/w/${workspace.id}`}
-                    terminalOpen={
-                      terminalOpen && viewedWorkspaceId === workspace.id
-                    }
-                    commands={workspaceCommands({
-                      hasPr: Boolean(pr),
-                      archived: workspace.status === "archived",
-                      hasSession: Boolean(sessions[workspace.id]),
-                      attentionPinned:
-                        (digest?.attention ?? sessions[workspace.id]?.attention)
-                          ?.state.type === "manual",
-                    })}
-                    onOpen={() =>
-                      void navigate({
-                        to: "/code/w/$workspaceId",
-                        params: { workspaceId: workspace.id },
-                      })
-                    }
-                    onCommand={(command) =>
-                      run(command, {
-                        workspace,
-                        title: digest?.title ?? workspace.title,
-                        pr,
-                        session: sessions[workspace.id],
-                      })
-                    }
-                  />
-                );
-              })}
-            </div>
-          ))}
-        {!isCompact &&
-          groups.every((group) => group.workspaces.length === 0) && (
-            <p className="px-2 py-1 text-xs text-muted-foreground">
-              No workspaces yet
-            </p>
-          )}
+          </div>
+        ))}
+        {groups.every((group) => group.workspaces.length === 0) && (
+          <p className="px-2 py-1 text-xs text-muted-foreground">
+            No workspaces yet
+          </p>
+        )}
       </div>
 
       {dialogs}

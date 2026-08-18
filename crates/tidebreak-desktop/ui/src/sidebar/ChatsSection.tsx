@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { RecentChatRow } from "./RecentChatRow";
-import { useSidebarWidth } from "./primitives";
 
 /** Case-insensitive match on the title, with untitled chats matching "new chat". */
 export function matchesChatSearch(chat: Chat, query: string): boolean {
@@ -122,17 +121,12 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   const filtering = useChatsSectionState((state) => state.filtering);
   const query = useChatsSectionState((state) => state.query);
   const { toggleCollapsed, setFiltering, setQuery } = useChatsSectionState.getState();
-  const isCompact = useSidebarWidth() === "compact";
 
   // The filter appears from a menu selection, so nothing natural has focus.
   const filterRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (filtering) filterRef.current?.querySelector("input")?.focus();
   }, [filtering]);
-
-  // Icons-only has no room for titles, and a column of identical glyphs says
-  // nothing — the list stands down and the rail's rows carry the narrow width.
-  if (isCompact) return null;
 
   const listed = listedChats(chats, query);
   // A collapsed list hides the per-row markers, so the header has to say when
