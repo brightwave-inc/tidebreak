@@ -330,7 +330,7 @@ export function CodeToolCard({
     >
       <button
         type="button"
-        className="flex w-full items-center gap-2 py-0.5 text-left text-[13px]"
+        className="flex w-full items-center gap-2 py-0.5 text-left text-[13.5px]"
         aria-expanded={expanded || showTail}
         aria-controls={hasOutput ? bodyId : undefined}
         onClick={() => setExpanded((current) => !current)}
@@ -441,7 +441,7 @@ function StreamingTail({ text }: { text: string }) {
   return (
     <pre
       aria-label="Output"
-      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13.5px] break-words whitespace-pre-wrap [overflow-anchor:none]"
     >
       {tail}
     </pre>
@@ -616,7 +616,7 @@ function FileActivityRow({
                 {FILE_KIND_LETTER[file.kind]}
               </span>
               <PathLabel path={path} />
-              <span className="shrink-0 tabular-nums">
+              <span className="ml-auto shrink-0 tabular-nums">
                 +{file.diffstat.insertions} −{file.diffstat.deletions}
               </span>
             </li>
