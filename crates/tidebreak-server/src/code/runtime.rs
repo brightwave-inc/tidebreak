@@ -12,7 +12,7 @@ use tidebreak_core::db::code::{
     delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
     get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
     list_repos, list_sessions, list_sessions_for_workspace, list_turns, list_workspaces,
-    save_approval, save_repo, save_workspace,
+    save_approval, save_repo, save_session, save_workspace,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -86,9 +86,12 @@ impl CodeRuntime {
             db,
             bus: Arc::new(CodeEventBus::default()),
             adapters: builtin_registry(),
-            data_dir,
+            data_dir: data_dir.clone(),
             approvals: ApprovalBridge::new(),
-            host: HostEnv::from_process(),
+            host: HostEnv {
+                data_dir: Some(data_dir),
+                ..HostEnv::from_process()
+            },
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
@@ -643,6 +646,7 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         permission_mode: CodePermissionMode,
+        model: Option<String>,
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
@@ -662,6 +666,16 @@ impl CodeRuntime {
             ));
         }
         let adapter = self.adapter(harness)?;
+        #[cfg(not(test))]
+        {
+            if let Err(err) = tidebreak_harness::ensure_installed(&self.data_dir, harness).await {
+                return Err(ServerError::unprocessable_kind(
+                    "harness_not_found",
+                    format!("{harness} could not be installed: {err}"),
+                ));
+            }
+            self.probes.lock().expect("harness probes").remove(&harness);
+        }
         let probe = self.probe(adapter.as_ref()).await;
         if !probe.found {
             return Err(ServerError::unprocessable_kind(
@@ -691,6 +705,7 @@ impl CodeRuntime {
             harness_version: probe.version.clone(),
             harness_resume_ref: None,
             permission_mode,
+            model: normalize_model(model),
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -713,8 +728,9 @@ impl CodeRuntime {
         &self,
         id: CodeSessionId,
         message: String,
+        model: Option<String>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        let session = self.get_session(id).await?;
+        let mut session = self.get_session(id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "session_fenced",
@@ -728,13 +744,17 @@ impl CodeRuntime {
             ));
         }
         let handle = self.require_worker(id)?;
+        if let Some(model) = normalize_model(model) {
+            session.model = Some(model);
+            let _ = save_session(&self.db, &session).await?;
+        }
         // Queue-default (0009): a send while a turn is in flight parks one
         // follow-up. This does not consult mid_turn_steering — that cap
         // gates the separate /steer route only.
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
             || get_open_turn(&self.db, id).await?.is_some();
         if in_flight {
-            if !queue_follow_up(&handle, message) {
+            if !queue_follow_up(&handle, message, session.model.clone()) {
                 return Err(ServerError::conflict_kind(
                     "queue_full",
                     "a follow-up is already queued on this session",
@@ -745,7 +765,11 @@ impl CodeRuntime {
         let (reply, rx) = oneshot::channel();
         handle
             .commands
-            .send(WorkerCommand::RunTurn { message, reply })
+            .send(WorkerCommand::RunTurn {
+                message,
+                model: session.model.clone(),
+                reply,
+            })
             .await
             .map_err(|_| ServerError::internal("session worker is gone"))?;
         let turn = rx
@@ -1022,6 +1046,7 @@ impl CodeRuntime {
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
+            model: session.model.clone(),
             resume_ref: session.harness_resume_ref.clone(),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -1242,6 +1267,17 @@ impl CodeRuntime {
         }
         Ok(approval)
     }
+}
+
+fn normalize_model(model: Option<String>) -> Option<String> {
+    model.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 fn refuse_unhonored_mode(

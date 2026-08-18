@@ -83,7 +83,7 @@ impl ClaudeSession {
         }
     }
 
-    fn compose_plan(&self) -> Result<LaunchPlan, HarnessError> {
+    fn compose_plan_for(&self, turn_model: Option<&str>) -> Result<LaunchPlan, HarnessError> {
         // Prompt travels on stdin (`claude -p` with no prompt argument) so a
         // user message cannot trip the bypass-flag denylist.
         let mut argv = vec![
@@ -95,6 +95,10 @@ impl ClaudeSession {
             "--include-partial-messages".into(),
         ];
         argv.extend(permission_mode_flags(self.spec.permission_mode));
+        if let Some(model) = turn_model.or(self.spec.model.as_deref()) {
+            argv.push("--model".into());
+            argv.push(model.to_owned());
+        }
         if let Some(channel) = &self.spec.approval {
             if let Some(flags) = crate::claude::approvals::launch_args_for_approval_channel(channel)
             {
@@ -133,7 +137,7 @@ impl ClaudeSession {
 #[async_trait]
 impl HarnessSession for ClaudeSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        let plan = self.compose_plan()?;
+        let plan = self.compose_plan_for(input.model.as_deref())?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -376,6 +380,7 @@ mod tests {
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
+            model: None,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -391,6 +396,7 @@ mod tests {
 
         let run = session.run_turn(TurnInput {
             text: "hello".into(),
+            model: None,
         });
         let observe = async {
             tokio::time::sleep(Duration::from_millis(50)).await;

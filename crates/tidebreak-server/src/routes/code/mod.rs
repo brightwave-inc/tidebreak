@@ -16,7 +16,7 @@ pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, push_workspace, run_workspace_action,
 };
-pub(crate) use harnesses::{list_harnesses, refresh_harnesses};
+pub(crate) use harnesses::{list_harness_models, list_harnesses, refresh_harnesses};
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_repos, patch_repo,
     start_clone,
@@ -37,7 +37,7 @@ pub(crate) use types::{
     CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
     CodeTerminalSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceDiff,
     CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessDoctorReport,
-    QueuedCodeTurn, SequencedCodeEventFrame,
+    HarnessModelList, QueuedCodeTurn, SequencedCodeEventFrame,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use workspaces::{

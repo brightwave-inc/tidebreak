@@ -27,6 +27,7 @@ pub mod codex;
 pub mod grok;
 pub mod launch;
 pub mod opencode;
+pub mod pin;
 pub mod probe;
 mod text;
 
@@ -35,8 +36,10 @@ pub use child::ChildPid;
 pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };
+pub use pin::{ensure_installed, managed_binary, pin_for, HarnessPin, PINS};
 pub use probe::{
-    filter_child_env, observe_version, probe_shell, resolve_binary, HostEnv, ProbeCapture,
+    display_model_label, filter_child_env, infer_listed_default, list_cli_models, observe_version,
+    prefer_gateway_models, probe_shell, resolve_binary, HostEnv, ListedHarnessModel, ProbeCapture,
     ProbeError,
 };
 
@@ -167,6 +170,8 @@ pub enum ApprovalDecision {
 pub struct TurnInput {
     /// The user's message.
     pub text: String,
+    /// Model for this turn, when the engine takes one per child.
+    pub model: Option<String>,
 }
 
 /// How the engine process behind one turn ended.
@@ -248,6 +253,8 @@ pub struct SessionSpec {
     pub worktree: PathBuf,
     /// Permission mode. Adapters refuse a mode they cannot honor.
     pub permission_mode: CodePermissionMode,
+    /// Engine model id, when the session chose one.
+    pub model: Option<String>,
     /// Engine-native resume token, when continuing a prior session.
     pub resume_ref: Option<String>,
     /// Extra argv from settings. Still subject to the bypass-flag denylist.
@@ -285,6 +292,14 @@ pub trait HarnessAdapter: Send + Sync {
     /// Every capability flag stated for the probed version. `Unknown` is
     /// legal; silence is not.
     fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps;
+
+    /// Models this engine currently lists. Empty when the CLI has no catalog.
+    async fn list_models(&self, probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
+        let Some(binary) = probe.binary_path.as_deref() else {
+            return Vec::new();
+        };
+        prefer_gateway_models(list_cli_models(binary, &["models"], &probe.env).await)
+    }
 
     /// Spawn or connect for one session.
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError>;

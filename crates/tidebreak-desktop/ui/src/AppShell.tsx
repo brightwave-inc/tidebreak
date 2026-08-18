@@ -194,6 +194,36 @@ export function AppShell() {
         search: searchFromLayout(next),
       });
     },
+    "close-tab": () => {
+      const { pathname, search } = router.state.location;
+      const workspaceId = codeWorkspaceIdFromPath(pathname);
+      if (!workspaceId) return;
+      const layout = layoutFromSearch(search as PanelSearch);
+      if (layout.tabs.length === 0) return;
+      const index = layout.activeIndex;
+      const tabs = layout.tabs.filter((_, at) => at !== index);
+      if (tabs.length === 0) {
+        void navigate({
+          to: "/code/w/$workspaceId",
+          params: { workspaceId },
+          search: searchFromLayout({ tabs: [], activeIndex: 0, fullscreen: false }),
+        });
+        return;
+      }
+      let activeIndex = layout.activeIndex;
+      if (index < activeIndex) activeIndex -= 1;
+      else if (index === activeIndex) activeIndex = Math.max(index - 1, 0);
+      void navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId },
+        search: searchFromLayout({
+          ...layout,
+          tabs,
+          activeIndex: Math.min(activeIndex, tabs.length - 1),
+          fullscreen: layout.fullscreen && tabs.length > 0,
+        }),
+      });
+    },
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,

@@ -334,7 +334,9 @@ pub(crate) async fn create_pull_request(
         number,
         url,
         state: "open".into(),
+        title: None,
         checks_summary: None,
+        checks: None,
     };
     cache.put(workspace_id, digest.clone());
     Ok(digest)
@@ -651,7 +653,7 @@ async fn load_pr_digest(
     let view = run_gh(
         worktree,
         binary,
-        &["pr", "view", "--json", "number,url,state"],
+        &["pr", "view", "--json", "number,url,state,title"],
         GH_TIMEOUT,
     )
     .await;
@@ -673,47 +675,101 @@ async fn load_pr_digest(
         .and_then(|value| value.as_str())
         .unwrap_or("open")
         .to_ascii_lowercase();
-    let checks = run_gh(worktree, binary, &["pr", "checks"], GH_TIMEOUT)
+    let title = parsed
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let checks_table = run_gh(worktree, binary, &["pr", "checks"], GH_TIMEOUT)
         .await
         .unwrap_or_default();
+    let checks = parse_pr_checks(&checks_table);
     Ok(Some(PullRequestDigest {
         number,
         url,
         state,
+        title,
         checks_summary: summarize_checks(&checks),
+        checks: if checks.is_empty() {
+            None
+        } else {
+            Some(checks)
+        },
     }))
 }
 
-pub(crate) fn summarize_checks(output: &str) -> Option<String> {
-    if output.trim().is_empty() {
+pub(crate) fn parse_pr_checks(output: &str) -> Vec<tidebreak_core::PullRequestCheck> {
+    use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
+
+    let mut checks = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("name\t") || lower.starts_with("check\t") {
+            continue;
+        }
+        let columns: Vec<&str> = trimmed.split('\t').collect();
+        let name = columns.first().copied().unwrap_or(trimmed).trim();
+        if name.is_empty() {
+            continue;
+        }
+        let status = columns.get(1).copied().unwrap_or(trimmed);
+        let status_lower = status.to_ascii_lowercase();
+        let bucket = if status_lower.contains("pass") || status_lower.contains("success") {
+            PullRequestCheckBucket::Pass
+        } else if status_lower.contains("fail") || status_lower.contains("error") {
+            PullRequestCheckBucket::Fail
+        } else if status_lower.contains("pend")
+            || status_lower.contains("progress")
+            || status_lower.contains("queued")
+        {
+            PullRequestCheckBucket::Pending
+        } else if lower.contains("pass") || lower.contains("success") {
+            PullRequestCheckBucket::Pass
+        } else if lower.contains("fail") || lower.contains("error") {
+            PullRequestCheckBucket::Fail
+        } else {
+            PullRequestCheckBucket::Pending
+        };
+        let detail = columns
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let url = columns
+            .iter()
+            .map(|value| value.trim())
+            .find(|value| value.starts_with("http://") || value.starts_with("https://"))
+            .map(ToOwned::to_owned);
+        checks.push(PullRequestCheck {
+            name: name.to_owned(),
+            bucket,
+            detail,
+            url,
+        });
+    }
+    checks
+}
+
+pub(crate) fn summarize_checks(checks: &[tidebreak_core::PullRequestCheck]) -> Option<String> {
+    use tidebreak_core::PullRequestCheckBucket;
+
+    if checks.is_empty() {
         return Some("no checks".into());
     }
     let mut passing = 0_u32;
     let mut failing = 0_u32;
     let mut pending = 0_u32;
-    let mut other = 0_u32;
-    for line in output.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.contains('\t') {
-            // skip header-ish lines that name the columns
-            if lower.starts_with("name\t") || lower.starts_with("check\t") {
-                continue;
-            }
-        } else if lower.trim().is_empty() {
-            continue;
+    for check in checks {
+        match check.bucket {
+            PullRequestCheckBucket::Pass => passing += 1,
+            PullRequestCheckBucket::Fail => failing += 1,
+            PullRequestCheckBucket::Pending => pending += 1,
         }
-        if lower.contains("pass") || lower.contains("success") {
-            passing += 1;
-        } else if lower.contains("fail") || lower.contains("error") {
-            failing += 1;
-        } else if lower.contains("pend") || lower.contains("progress") || lower.contains("queued") {
-            pending += 1;
-        } else {
-            other += 1;
-        }
-    }
-    if passing + failing + pending + other == 0 {
-        return Some("no checks".into());
     }
     Some(format!(
         "{passing} passing, {pending} pending, {failing} failing"
@@ -1039,11 +1095,14 @@ mod tests {
     #[test]
     fn checks_summary_counts_buckets() {
         let table = "lint\tpass\t1s\thttps://example.test/lint\ntest\tpending\t0\thttps://example.test/test\nfmt\tfail\t2s\thttps://example.test/fmt\n";
+        let checks = parse_pr_checks(table);
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].name, "lint");
         assert_eq!(
-            summarize_checks(table).as_deref(),
+            summarize_checks(&checks).as_deref(),
             Some("1 passing, 1 pending, 1 failing")
         );
-        assert_eq!(summarize_checks("").as_deref(), Some("no checks"));
+        assert_eq!(summarize_checks(&[]).as_deref(), Some("no checks"));
     }
 
     #[tokio::test]

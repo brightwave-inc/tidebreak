@@ -8,25 +8,23 @@ import { ThinkingAccordion } from "@/ThinkingAccordion";
 import { ToolCardShell } from "@/ToolCardShell";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
-import { TurnReviewCard } from "./TurnReviewCard";
 
 /**
  * The code-session transcript: markdown for assistant text, tool-card chrome
  * for engine work, and visible harness notices.
  *
- * Approvals stay out of this surface. Turn boundaries open the Diff panel.
+ * Approvals stay out of this surface. Completed-turn review chrome lives in
+ * the inspector, not in the transcript.
  */
 
 export function CodeTranscript({
   items,
-  onOpenTurnDiff,
   approvals = {},
   decidingId,
   approvalError,
   onDecide,
 }: {
   items: CodeTranscriptItem[];
-  onOpenTurnDiff?: (turnId: string) => void;
   approvals?: Record<string, CodeApprovalSnapshot>;
   decidingId?: string | null;
   approvalError?: string;
@@ -49,7 +47,6 @@ export function CodeTranscript({
         <TranscriptItem
           key={item.id}
           item={item}
-          onOpenTurnDiff={onOpenTurnDiff}
           approval={
             item.kind === "approval" ? approvals[item.approvalId] : undefined
           }
@@ -68,14 +65,12 @@ export function CodeTranscript({
 
 function TranscriptItem({
   item,
-  onOpenTurnDiff,
   approval,
   deciding,
   approvalError,
   onDecide,
 }: {
   item: CodeTranscriptItem;
-  onOpenTurnDiff?: (turnId: string) => void;
   approval?: CodeApprovalSnapshot;
   deciding?: boolean;
   approvalError?: string;
@@ -130,20 +125,7 @@ function TranscriptItem({
         />
       );
     case "turn_boundary":
-      return (
-        <TurnReviewCard
-          status={item.status}
-          durationMs={item.durationMs}
-          usage={item.usage}
-          error={item.error}
-          diffstat={item.diffstat}
-          onOpenDiff={
-            item.turnId && onOpenTurnDiff
-              ? () => onOpenTurnDiff(item.turnId as string)
-              : undefined
-          }
-        />
-      );
+      return null;
   }
 }
 

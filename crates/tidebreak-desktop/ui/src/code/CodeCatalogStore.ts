@@ -6,7 +6,16 @@ import type {
   CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
   HarnessDoctorReport,
+  HarnessKind,
 } from "../api/types";
+import { harnessCodeModels, type CodeModelOption } from "./labels";
+
+const HARNESS_KINDS: HarnessKind[] = [
+  "claude_code",
+  "codex",
+  "opencode",
+  "grok",
+];
 
 /**
  * Repos, workspaces, and the last session each workspace opened.
@@ -22,6 +31,7 @@ type CodeCatalogState = {
   workspaces: CodeWorkspaceSnapshot[];
   sessionsByWorkspace: Record<string, CodeSessionSnapshot>;
   doctor: HarnessDoctorReport | null;
+  modelsByHarness: Partial<Record<HarnessKind, CodeModelOption[]>>;
   loaded: boolean;
   error: string | null;
 };
@@ -29,8 +39,15 @@ type CodeCatalogState = {
 type CodeCatalogStore = CodeCatalogState & {
   refresh: (client: Pick<
     ApiClient,
-    "listCodeRepos" | "listCodeWorkspaces" | "getHarnessDoctor"
+    | "listCodeRepos"
+    | "listCodeWorkspaces"
+    | "getHarnessDoctor"
+    | "listCodeHarnessModels"
   >) => Promise<void>;
+  rememberHarnessModels: (
+    kind: HarnessKind,
+    models: CodeModelOption[],
+  ) => void;
   rememberSession: (session: CodeSessionSnapshot) => void;
   forgetWorkspaceSession: (workspaceId: string) => void;
   upsertRepo: (repo: CodeRepoSnapshot) => void;
@@ -43,22 +60,51 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   workspaces: [],
   sessionsByWorkspace: {},
   doctor: null,
+  modelsByHarness: {},
   loaded: false,
   error: null,
   refresh: async (client) => {
     try {
-      const [repos, workspaces, doctor] = await Promise.all([
+      const [repos, workspaces] = await Promise.all([
         client.listCodeRepos(),
         client.listCodeWorkspaces(),
-        client.getHarnessDoctor(),
       ]);
-      set({ repos, workspaces, doctor, loaded: true, error: null });
+      set({ repos, workspaces, loaded: true, error: null });
     } catch (error) {
       set({
         loaded: true,
         error: error instanceof Error ? error.message : String(error),
       });
+      return;
     }
+    const extras: Promise<void>[] = [
+      client
+        .getHarnessDoctor()
+        .then((doctor) => set({ doctor }))
+        .catch(() => {
+          // The rail does not need the doctor. A missing report just delays
+          // start-session until the next refresh.
+        }),
+    ];
+    for (const kind of HARNESS_KINDS) {
+      extras.push(
+        client
+          .listCodeHarnessModels(kind)
+          .then((listed) => {
+            get().rememberHarnessModels(
+              kind,
+              harnessCodeModels(listed.models, kind),
+            );
+          })
+          .catch(() => undefined),
+      );
+    }
+    await Promise.all(extras);
+  },
+  rememberHarnessModels: (kind, models) => {
+    set({
+      modelsByHarness: { ...get().modelsByHarness, [kind]: models },
+    });
   },
   rememberSession: (session) => {
     set({
@@ -95,6 +141,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       workspaces: [],
       sessionsByWorkspace: {},
       doctor: null,
+      modelsByHarness: {},
       loaded: false,
       error: null,
     });

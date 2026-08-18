@@ -303,6 +303,7 @@ mod tests {
             None,
             Path::new("/tmp/prompt.txt"),
             CodePermissionMode::Auto,
+            None,
         )
         .unwrap();
         assert!(!plan.argv.iter().any(|arg| {
@@ -333,6 +334,7 @@ mod tests {
             None,
             Path::new("/tmp/prompt.txt"),
             CodePermissionMode::Allow,
+            None,
         )
         .unwrap();
         assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));

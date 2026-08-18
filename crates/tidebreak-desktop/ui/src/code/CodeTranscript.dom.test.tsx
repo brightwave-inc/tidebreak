@@ -52,14 +52,12 @@ const items: CodeTranscriptItem[] = [
 ];
 
 describe("CodeTranscript", () => {
-  it("renders assistant text, a tool card, a harness notice, and the turn boundary", () => {
+  it("renders assistant text, a tool card, and a harness notice", () => {
     render(<CodeTranscript items={items} />);
     expect(screen.getByText("list the files")).toBeInTheDocument();
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "Bash succeeded" })).toBeInTheDocument();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
-    expect(screen.getByText("Turn completed")).toBeInTheDocument();
-    expect(screen.getByText("1.5s")).toBeInTheDocument();
-    expect(screen.getByText("15 tokens")).toBeInTheDocument();
+    expect(screen.queryByText("Turn completed")).toBeNull();
   });
 });

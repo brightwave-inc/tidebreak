@@ -5,8 +5,7 @@ import type {
   HarnessDoctorEntry,
   HarnessKind,
 } from "../api/types";
-import { Button } from "@/components/ui/button";
-import { PermissionModePicker } from "./CodeComposer";
+import { CodeComposer } from "./CodeComposer";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
@@ -36,7 +35,11 @@ export function StartSessionPrompt({
   starting: boolean;
   selectedMode: CodePermissionMode | null;
   onSelectMode: (mode: CodePermissionMode) => void;
-  onStart: (harness: HarnessKind, mode: CodePermissionMode) => void;
+  onStart: (
+    harness: HarnessKind,
+    mode: CodePermissionMode,
+    message: string,
+  ) => Promise<void> | void;
 }) {
   const [picked, setPicked] = useState<HarnessKind | null>(null);
   const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
@@ -52,33 +55,36 @@ export function StartSessionPrompt({
         : "plan";
 
   return (
-    <div className="flex flex-col gap-3 px-4 py-6">
-      <p className="text-sm">Start a session on this workspace.</p>
-      <HarnessPicker
-        harnesses={harnesses}
-        value={selected?.kind ?? null}
-        disabled={starting}
-        onChange={setPicked}
-      />
-      <PermissionModePicker
-        value={mode}
-        availableModes={availableModes}
-        onChange={onSelectMode}
-      />
-      {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
-        <p className="text-warning-foreground text-xs">{UNSUPERVISED_AUTO_NOTE}</p>
-      )}
-      {mode === "allow" && (
-        <p className="text-warning-foreground text-xs">{ALLOW_ALL_NOTE}</p>
-      )}
-      <Button
-        type="button"
-        className="w-fit"
-        disabled={starting || !selected}
-        onClick={() => selected && onStart(selected.kind, mode)}
-      >
-        {starting ? "Starting…" : "Start session"}
-      </Button>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-col gap-3 px-4 py-6">
+        <p className="text-sm">Start a session on this workspace.</p>
+        <HarnessPicker
+          harnesses={harnesses}
+          value={selected?.kind ?? null}
+          disabled={starting}
+          onChange={setPicked}
+        />
+        {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
+          <p className="text-muted-foreground text-xs">{UNSUPERVISED_AUTO_NOTE}</p>
+        )}
+        {mode === "allow" && (
+          <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>
+        )}
+      </div>
+      <div className="mt-auto">
+        <CodeComposer
+          disabled={starting || !selected}
+          running={starting}
+          permissionMode={mode}
+          availableModes={availableModes}
+          onModeChange={onSelectMode}
+          onSend={async (message) => {
+            if (!selected) return;
+            await onStart(selected.kind, mode, message);
+          }}
+          onInterrupt={() => undefined}
+        />
+      </div>
     </div>
   );
 }

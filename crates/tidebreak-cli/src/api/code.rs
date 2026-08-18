@@ -60,6 +60,8 @@ pub struct CodeSessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_resume_ref: Option<String>,
     pub permission_mode: CodePermissionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub lifecycle: CodeSessionLifecycle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fence_reason: Option<FenceReason>,

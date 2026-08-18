@@ -54,7 +54,11 @@ impl GrokSession {
         }
     }
 
-    fn compose_plan(&self, prompt_file: &Path) -> Result<LaunchPlan, HarnessError> {
+    fn compose_plan(
+        &self,
+        prompt_file: &Path,
+        turn_model: Option<&str>,
+    ) -> Result<LaunchPlan, HarnessError> {
         compose_print_plan(
             &self.spec.binary,
             &self.spec.extra_argv,
@@ -63,6 +67,7 @@ impl GrokSession {
             self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
             self.spec.permission_mode,
+            turn_model.or(self.spec.model.as_deref()),
         )
     }
 }
@@ -99,6 +104,7 @@ pub(crate) fn compose_print_plan(
     resume_ref: Option<&str>,
     prompt_file: &Path,
     mode: CodePermissionMode,
+    model: Option<&str>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -112,6 +118,10 @@ pub(crate) fn compose_print_plan(
     ];
     if mode == CodePermissionMode::Allow {
         argv.push("--always-approve".into());
+    }
+    if let Some(model) = model {
+        argv.push("--model".into());
+        argv.push(model.to_owned());
     }
     if let Some(resume) = resume_ref {
         argv.push("--resume".into());
@@ -140,7 +150,7 @@ impl HarnessSession for GrokSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         refuse_unhonored_mode(self.spec.permission_mode)?;
         let prompt_file = write_prompt_file(&input.text)?;
-        let plan = match self.compose_plan(&prompt_file) {
+        let plan = match self.compose_plan(&prompt_file, input.model.as_deref()) {
             Ok(plan) => plan,
             Err(err) => {
                 let _ = std::fs::remove_file(&prompt_file);

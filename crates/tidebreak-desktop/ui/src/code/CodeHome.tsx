@@ -69,9 +69,9 @@ function CodeHomeBody() {
         <section className="flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Install a coding harness</h2>
           <p className="text-muted-foreground text-sm">
-            No harness is installed and signed in. Code mode drives an engine
-            already on this machine — install one, sign in from your own
-            terminal, then refresh.
+            No pinned harness is ready yet. Refresh to install the engines
+            this build drives, sign in from your own terminal, then start a
+            workspace.
           </p>
           <DoctorList
             report={doctor}

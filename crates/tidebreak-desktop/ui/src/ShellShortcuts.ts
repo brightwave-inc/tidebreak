@@ -16,6 +16,7 @@ export type ShellShortcutAction =
   | "code-new-workspace"
   | "toggle-code-review"
   | "toggle-code-terminal"
+  | "close-tab"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
@@ -169,6 +170,14 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     description: "Show or hide the terminal",
     group: "Code",
     scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "close-tab",
+    codes: ["KeyW"],
+    mod: true,
+    description: "Close the current tab",
+    group: "View",
     allowInEditable: true,
   },
   {

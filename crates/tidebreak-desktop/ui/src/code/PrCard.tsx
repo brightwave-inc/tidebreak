@@ -192,10 +192,10 @@ export function PrCardView({
           ? "border-border bg-card flex flex-col gap-3 rounded-lg border px-3 py-3"
           : "flex flex-col gap-3"
       }
-      aria-label="Pull request"
+      aria-label="Git"
     >
       <header className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-medium">Pull request</h2>
+        <h2 className="text-sm font-medium">Git</h2>
         <div className="flex items-center gap-1">
           {snapshot ? (
             <GitStateChips snapshot={snapshot} />
@@ -274,11 +274,6 @@ function GitStateChips({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
         <Badge variant={prStateVariant(snapshot.pr.state)} size="sm">
           {snapshot.pr.state}
         </Badge>
-        {snapshot.pr.checks_summary && (
-          <Badge variant={checksVariant(snapshot.pr.checks_summary)} size="sm">
-            {snapshot.pr.checks_summary}
-          </Badge>
-        )}
       </div>
     );
   }
@@ -370,10 +365,4 @@ function prStateVariant(state: string): StatusTone {
   return "outline";
 }
 
-function checksVariant(summary: string): StatusTone {
-  const lower = summary.toLowerCase();
-  if (/\b[1-9]\d* failing/.test(lower)) return "critical";
-  if (/\b[1-9]\d* pending/.test(lower)) return "warning";
-  if (/\b[1-9]\d* passing/.test(lower) || lower.includes("passing")) return "success";
-  return "outline";
-}
+

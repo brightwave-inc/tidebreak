@@ -706,6 +706,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::refresh_harnesses),
         )
         .route(
+            "/code/harnesses/{kind}/models",
+            get(routes::code::list_harness_models),
+        )
+        .route(
             "/code/workspaces",
             post(routes::code::create_workspace).get(routes::code::list_workspaces),
         )

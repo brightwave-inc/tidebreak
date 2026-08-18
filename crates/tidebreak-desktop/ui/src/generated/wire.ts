@@ -1151,7 +1151,7 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
 
 /**
  * Unsequenced activity notice published on the updates channel.
@@ -1821,6 +1821,16 @@ export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>, };
  * stay engine-neutral; this enum is only the catalog of known engines.
  */
 export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
+
+/**
+ * One model a harness CLI listed.
+ */
+export type HarnessModel = { id: string, label: string, default: boolean, };
+
+/**
+ * `GET /code/harnesses/{kind}/models`.
+ */
+export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>, };
 
 /**
  * Severity of a visible-degradation notice.
@@ -2617,6 +2627,32 @@ models: Array<CustomModelConfig>, };
 export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "fireworks" | "together" | "openrouter" | "ollama" | "openai_compatible" | "model_gateway";
 
 /**
+ * One CI check on a pull request.
+ */
+export type PullRequestCheck = { 
+/**
+ * Check name as the host reports it.
+ */
+name: string, 
+/**
+ * pass, pending, or fail.
+ */
+bucket: PullRequestCheckBucket, 
+/**
+ * Host status phrase, when distinct from the bucket.
+ */
+detail?: string, 
+/**
+ * Host URL for this check, when known.
+ */
+url?: string, };
+
+/**
+ * Coarse CI bucket used to color a check row.
+ */
+export type PullRequestCheckBucket = "pass" | "pending" | "fail";
+
+/**
  * Bounded pull-request digest stored on a workspace.
  */
 export type PullRequestDigest = { 
@@ -2633,9 +2669,17 @@ url?: string | null,
  */
 state: string, 
 /**
+ * PR title, when the host reported one.
+ */
+title?: string, 
+/**
  * One-line checks summary.
  */
-checks_summary?: string | null, };
+checks_summary?: string | null, 
+/**
+ * Individual checks, when the host reported any.
+ */
+checks?: Array<PullRequestCheck>, };
 
 /**
  * A follow-up parked while the session is already running a turn.

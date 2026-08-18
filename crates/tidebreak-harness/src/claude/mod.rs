@@ -25,6 +25,54 @@ impl ClaudeCodeAdapter {
     }
 }
 
+fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let path = home.join(".claude").join("settings.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let current = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let mut models = Vec::new();
+    if let Some(list) = value
+        .get("availableModels")
+        .and_then(serde_json::Value::as_array)
+    {
+        for item in list {
+            let Some(id) = item.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            models.push(crate::ListedHarnessModel {
+                label: crate::display_model_label(id),
+                default: current == Some(id),
+                id: id.to_owned(),
+            });
+        }
+    }
+    if let Some(current) = current {
+        if !models.iter().any(|model| model.id == current) {
+            models.insert(
+                0,
+                crate::ListedHarnessModel {
+                    label: crate::display_model_label(current),
+                    id: current.to_owned(),
+                    default: true,
+                },
+            );
+        }
+    }
+    models
+}
+
 #[async_trait]
 impl HarnessAdapter for ClaudeCodeAdapter {
     fn kind(&self) -> HarnessKind {
@@ -61,33 +109,24 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
-            // Hidden `--permission-prompt-tool` + HTTP MCP captured on 2.1.233.
-            structured_approvals: if version_is_2_1_233(_probe.version.as_deref()) {
-                CapLevel::Supported
-            } else {
-                CapLevel::Unknown
-            },
+            // Permission flags are documented on the 2.1 line. The product
+            // pins 2.1.234 and offers every mode that pin can honor.
+            structured_approvals: CapLevel::Supported,
             mid_turn_steering: CapLevel::Unknown,
             plan_mode: CapLevel::Supported,
-            // `--permission-mode acceptEdits`; supervised by the approval
-            // channel, so it carries the same version gate — unsupervised
-            // Auto has not been probed on other versions.
-            auto_mode: if version_is_2_1_233(_probe.version.as_deref()) {
-                CapLevel::Supported
-            } else {
-                CapLevel::Unknown
-            },
-            // `--dangerously-skip-permissions` is documented on 2.1.233;
-            // same version gate as the rest of the permission mapping.
-            allow_mode: if version_is_2_1_233(_probe.version.as_deref()) {
-                CapLevel::Supported
-            } else {
-                CapLevel::Unknown
-            },
+            auto_mode: CapLevel::Supported,
+            allow_mode: CapLevel::Supported,
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
         }
+    }
+
+    async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
+        // `claude models` is not a catalog command — it starts a session
+        // with that prompt. Read the user's Claude settings instead.
+        let _ = probe;
+        claude_settings_models()
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
@@ -96,10 +135,6 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         }
         Ok(Box::new(ClaudeSession::new(spec)))
     }
-}
-
-fn version_is_2_1_233(version: Option<&str>) -> bool {
-    version.is_some_and(|value| value.starts_with("2.1.233"))
 }
 
 #[cfg(test)]
@@ -286,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_approvals_stay_unknown_off_the_captured_version() {
+    fn permission_modes_stay_supported_off_the_original_capture() {
         let caps = ClaudeCodeAdapter::new().capabilities(&HarnessProbe {
             found: true,
             binary_path: None,
@@ -295,8 +330,8 @@ mod tests {
             stderr: String::new(),
             env: Vec::new(),
         });
-        assert_eq!(caps.structured_approvals, CapLevel::Unknown);
-        assert_eq!(caps.allow_mode, CapLevel::Unknown);
+        assert_eq!(caps.structured_approvals, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
     }
 
     #[test]

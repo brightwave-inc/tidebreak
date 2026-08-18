@@ -301,7 +301,7 @@ mod tests {
             CodePermissionMode::Ask,
             CodePermissionMode::Auto,
         ] {
-            let body = session_create_body(mode);
+            let body = session_create_body(mode, None);
             assert_ne!(body.get("agent").and_then(|v| v.as_str()), Some(""));
             if let Some(rules) = body["permission"].as_array() {
                 assert!(
@@ -310,7 +310,7 @@ mod tests {
                 );
             }
         }
-        let allow = session_create_body(CodePermissionMode::Allow);
+        let allow = session_create_body(CodePermissionMode::Allow, None);
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));
     }

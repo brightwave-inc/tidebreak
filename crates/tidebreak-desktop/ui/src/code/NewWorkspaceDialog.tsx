@@ -26,7 +26,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { PermissionModePicker } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
@@ -34,6 +33,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   harnessUnusableReason,
+  PERMISSION_MODE_LABELS,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
@@ -198,20 +198,33 @@ export function NewWorkspaceDialog({
           </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>
-            <PermissionModePicker
+            <Select
               value={postedMode}
-              availableModes={availableModes}
-              onChange={setPermissionMode}
-            />
+              onValueChange={(next) =>
+                setPermissionMode(next as CodePermissionMode)
+              }
+              disabled={creating || availableModes.length === 0}
+            >
+              <SelectTrigger aria-label="Permission mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent scrollButtons={false}>
+                {availableModes.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {PERMISSION_MODE_LABELS[mode]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {postedMode === "auto" &&
               selectedHarness &&
               autoIsUnsupervised(selectedHarness.caps) && (
-                <p className="text-warning-foreground text-xs">
+                <p className="text-muted-foreground text-xs">
                   {UNSUPERVISED_AUTO_NOTE}
                 </p>
               )}
             {postedMode === "allow" && (
-              <p className="text-warning-foreground text-xs">{ALLOW_ALL_NOTE}</p>
+              <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>
             )}
           </div>
           <DialogFooter>

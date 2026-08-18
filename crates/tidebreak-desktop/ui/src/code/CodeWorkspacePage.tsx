@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { FileCode, Files, FolderOpen, GitPullRequest, SquareTerminal } from "lucide-react";
+import { SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
@@ -11,14 +11,13 @@ import type {
   CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
   HarnessKind,
+  ModelInfo,
 } from "../api/types";
 import { useApp } from "@/AppContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ClipboardCopyButton } from "@/ClipboardCopyButton";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { openExternal } from "@/host";
 import { PanelLayout } from "@/panel/PanelLayout";
 import type { PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
@@ -39,8 +38,8 @@ import {
 } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector } from "./CodeInspector";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import {
@@ -50,8 +49,6 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
-import { DiffPanel } from "./DiffPanel";
-import { FilesPanel } from "./FilesPanel";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
@@ -59,6 +56,8 @@ import { useCodeContentRevision } from "./useLiveContent";
 import {
   createPermissionModes,
   fenceReasonText,
+  gatewayCodeModels,
+  harnessCodeModels,
   HARNESS_LABELS,
   LIFECYCLE_LABELS,
 } from "./labels";
@@ -82,16 +81,14 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
 }
 
 function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
-  const { client } = useApp();
+  const { client, models, defaultModelKey } = useApp();
   const { confirm, dialog } = useConfirm();
   const navigate = useNavigate();
   const catalog = useCodeCatalogStore();
   const layout = useLayoutState();
-  const { openPanel, closeTab, setLayout } = usePanelNav();
+  const { setLayout } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
-  const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
-  const setReviewSidebarOpen = useCodeUiStore((state) => state.setReviewSidebarOpen);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
@@ -142,7 +139,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     };
   }, [client, workspaceId]);
 
-  async function startSession(harness: HarnessKind, permissionMode: CodePermissionMode) {
+  async function startSession(
+    harness: HarnessKind,
+    permissionMode: CodePermissionMode,
+    message: string,
+  ) {
     setStarting(true);
     try {
       const created = await client.createCodeSession(workspaceId, {
@@ -151,6 +152,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       });
       catalog.rememberSession(created);
       setSession(created);
+      await client.submitCodeTurn(created.id, message);
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not start a session"));
     } finally {
@@ -235,127 +237,56 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       {dialog}
-      <header className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
-            <h1 className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-              <span className="text-muted-foreground truncate">
-                {repo?.display_name ?? workspace?.repo_id ?? "Repo"}
-              </span>
-              <span className="text-muted-foreground/70 shrink-0">/</span>
-              <span className="truncate">
-                {digest?.title ?? workspace?.title ?? "Workspace"}
-              </span>
-            </h1>
-            <p className="text-muted-foreground truncate text-xs">
-              {workspace?.branch_name}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {session && (
-              <>
-                <AttentionBadge attention={digest?.attention ?? session.attention} />
-                <AttentionPin
-                  sessionId={session.id}
-                  attention={digest?.attention ?? session.attention}
-                  client={client}
-                />
-                <PendingApprovalBadge sessionId={session.id} client={client} />
-                <UnrecognizedEventsBadge session={session} />
-                <SessionLifecycleBadge
-                  session={session}
-                  client={client}
-                  lifecycle={digest?.lifecycle ?? session.lifecycle}
-                />
-              </>
-            )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => openPanel({ type: "files" })}
-            >
-              <Files />
-              Files
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => openPanel({ type: "diff" })}
-            >
-              <FileCode />
-              Diff
-            </Button>
-            <WithTooltip
-              label={
-                chrome.terminal
-                  ? `Hide terminal ${shortcutHints.terminal}`
-                  : `Terminal ${shortcutHints.terminal}`
-              }
-            >
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                aria-pressed={chrome.terminal !== null}
-                onClick={() => setLayout(toggleTerminalLayout(layout))}
-              >
-                <SquareTerminal />
-                Terminal
-              </Button>
-            </WithTooltip>
-            <WithTooltip
-              label={
-                reviewSidebarOpen
-                  ? `Hide review sidebar ${shortcutHints.review}`
-                  : `Review sidebar ${shortcutHints.review}`
-              }
-            >
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                aria-pressed={reviewSidebarOpen}
-                onClick={() => toggleReviewSidebar()}
-              >
-                <GitPullRequest />
-                Review
-              </Button>
-            </WithTooltip>
-            {workspace && workspace.status !== "archived" && (
-              <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
-                Archive
-              </Button>
-            )}
-          </div>
+      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
+        <div className="min-w-0">
+          <h1 className="flex min-w-0 items-baseline gap-2 text-sm font-medium">
+            <span className="truncate">
+              {digest?.title ?? workspace?.title ?? "Workspace"}
+            </span>
+            <span className="text-muted-foreground truncate text-xs font-normal">
+              {repo?.display_name ?? workspace?.repo_id}
+            </span>
+          </h1>
         </div>
-        {workspace && (
-          <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-            <span className="font-mono">{workspace.worktree_path}</span>
-            <ClipboardCopyButton
-              value={workspace.worktree_path}
-              label="Copy worktree path"
-              copiedAnnouncement="Copied worktree path"
-              failedAnnouncement="Could not copy worktree path"
-            />
+        <div className="flex items-center gap-2">
+          {session && (
+            <>
+              <AttentionBadge
+                compact
+                attention={digest?.attention ?? session.attention}
+              />
+              <PendingApprovalBadge sessionId={session.id} client={client} />
+              <span className="text-muted-foreground text-xs">
+                {LIFECYCLE_LABELS[digest?.lifecycle ?? session.lifecycle]}
+                {" · "}
+                {HARNESS_LABELS[session.harness_kind]}
+              </span>
+            </>
+          )}
+          <WithTooltip
+            label={
+              chrome.terminal
+                ? `Hide terminal ${shortcutHints.terminal}`
+                : `Terminal ${shortcutHints.terminal}`
+            }
+          >
             <Button
               type="button"
               variant="ghost"
-              size="2xs"
-              onClick={() => void revealPath(workspace.worktree_path)}
+              size="icon-xs"
+              aria-pressed={chrome.terminal !== null}
+              aria-label="Terminal"
+              onClick={() => setLayout(toggleTerminalLayout(layout))}
             >
-              <FolderOpen />
-              Reveal
+              <SquareTerminal />
             </Button>
-            {session && (
-              <span>
-                {HARNESS_LABELS[session.harness_kind]}
-                {session.harness_version ? ` ${session.harness_version}` : ""}
-              </span>
-            )}
-          </div>
-        )}
+          </WithTooltip>
+          {workspace && workspace.status !== "archived" && (
+            <Button type="button" variant="ghost" size="xs" onClick={() => void archive()}>
+              Archive
+            </Button>
+          )}
+        </div>
       </header>
       {error && <p className="text-critical px-4 py-2 text-sm">{error}</p>}
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -388,7 +319,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     starting={starting}
                     selectedMode={createMode}
                     onSelectMode={setCreateMode}
-                    onStart={(harness, mode) => void startSession(harness, mode)}
+                    onStart={(harness, mode, message) =>
+                      startSession(harness, mode, message)
+                    }
                   />
                 )}
                 {session && (
@@ -396,14 +329,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     key={session.id}
                     session={session}
                     client={client}
+                    catalogModels={models}
+                    defaultModelKey={defaultModelKey}
                     disabled={fenced || workspace?.status !== "active"}
-                    onOpenTurnDiff={(turnId) => openPanel({ type: "diff", turnId })}
                   />
                 )}
               </div>
             )}
             renderPanel={(panel) =>
-              renderCodePanel(panel, client, workspaceId, openPanel, contentRevision)
+              renderCodePanel(panel, client, workspaceId)
             }
           />
           {chrome.terminal && (
@@ -411,7 +345,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               client={client}
               workspaceId={workspaceId}
               shortcutHint={shortcutHints.terminal}
-              onClose={() => closeTab(chrome.terminal!)}
+              onClose={() => setLayout(toggleTerminalLayout(layout))}
             />
           )}
         </div>
@@ -421,8 +355,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             workspaceId={workspaceId}
             workspace={workspace}
             contentRevision={contentRevision}
-            shortcutHint={shortcutHints.review}
-            onClose={() => setReviewSidebarOpen(false)}
           />
         )}
       </div>
@@ -430,11 +362,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function useCodeShortcutHints(): { review: string; terminal: string } {
+function useCodeShortcutHints(): { terminal: string } {
   return useMemo(() => {
     const command = usesCommandModifier(navigator.userAgent);
     return {
-      review: shortcutHint("toggle-code-review", command),
       terminal: shortcutHint("toggle-code-terminal", command),
     };
   }, []);
@@ -449,145 +380,14 @@ function renderCodePanel(
   panel: PanelContent,
   client: ApiClient,
   workspaceId: string,
-  openPanel: (panel: PanelContent) => void,
-  contentRevision: number,
 ) {
-  switch (panel.type) {
-    case "files":
-      return (
-        <FilesPanel
-          client={client}
-          workspaceId={workspaceId}
-          turnId={panel.turnId}
-          contentRevision={contentRevision}
-          onOpenFile={(file) =>
-            openPanel({ type: "diff", turnId: panel.turnId, file })
-          }
-        />
-      );
-    case "diff":
-      return (
-        <DiffPanel
-          client={client}
-          workspaceId={workspaceId}
-          turnId={panel.turnId}
-          file={panel.file}
-          contentRevision={contentRevision}
-        />
-      );
-    case "terminal":
-      return <TerminalPane client={client} workspaceId={workspaceId} />;
-    default:
-      return (
-        <p className="text-muted-foreground px-3 py-6 text-sm">
-          This panel is not available here.
-        </p>
-      );
+  if (panel.type === "terminal") {
+    return <TerminalPane client={client} workspaceId={workspaceId} />;
   }
-}
-
-function AttentionPin({
-  sessionId,
-  attention,
-  client,
-}: {
-  sessionId: string;
-  attention: CodeSessionSnapshot["attention"];
-  client: ApiClient;
-}) {
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const remember = useCodeCatalogStore((state) => state.rememberSession);
-
-  async function pin() {
-    const next = note.trim();
-    if (!next) return;
-    setBusy(true);
-    try {
-      const session = await client.setCodeAttention(sessionId, { note: next });
-      remember(session);
-      setNote("");
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not pin attention"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function clear() {
-    setBusy(true);
-    try {
-      const session = await client.setCodeAttention(sessionId, { clear: true });
-      remember(session);
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not clear the pin"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (attention.state.type === "manual") {
-    return (
-      <Button
-        type="button"
-        variant="ghost"
-        size="xs"
-        disabled={busy}
-        onClick={() => void clear()}
-      >
-        Clear pin
-      </Button>
-    );
-  }
-
   return (
-    <form
-      className="flex items-center gap-1"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void pin();
-      }}
-    >
-      <input
-        className="border-input bg-background h-6 w-36 rounded-md border px-2 text-xs"
-        value={note}
-        onChange={(event) => setNote(event.target.value)}
-        placeholder="Pin a note"
-        aria-label="Pin a note"
-        disabled={busy}
-      />
-      <Button type="submit" variant="ghost" size="xs" disabled={busy || !note.trim()}>
-        Pin
-      </Button>
-    </form>
-  );
-}
-
-function SessionLifecycleBadge({
-  session,
-  client,
-  lifecycle: digestLifecycle,
-}: {
-  session: CodeSessionSnapshot;
-  client: ApiClient;
-  lifecycle?: CodeSessionSnapshot["lifecycle"];
-}) {
-  const store = useRegisteredCodeSession(session.id, client);
-  const fromStore = store((state) => state.lifecycle);
-  const lifecycle = digestLifecycle ?? fromStore ?? session.lifecycle;
-  return (
-    <Badge
-      variant={
-        lifecycle === "running"
-          ? "success"
-          : lifecycle === "fenced"
-            ? "warning"
-            : "outline"
-      }
-      size="sm"
-    >
-      {LIFECYCLE_LABELS[lifecycle]}
-    </Badge>
+    <p className="text-muted-foreground px-3 py-6 text-sm">
+      This panel is not available here.
+    </p>
   );
 }
 
@@ -621,49 +421,76 @@ function PendingApprovalBadge({
  * looks exactly like a complete one (decision 0031). The count comes from the
  * session row, so it settles at the end of a turn rather than mid-stream.
  */
-function UnrecognizedEventsBadge({
-  session,
-}: {
-  session: CodeSessionSnapshot;
-}) {
-  const dropped = session.unrecognized_event_count;
-  if (dropped <= 0) return null;
-  return (
-    <Badge
-      variant="warning"
-      size="sm"
-      data-testid="unrecognized-events-badge"
-      title={
-        `${dropped} engine ${dropped === 1 ? "event" : "events"} could not be read by this ` +
-        "build and are missing from the transcript. Check the harness doctor page."
-      }
-    >
-      {dropped} unread {dropped === 1 ? "event" : "events"}
-    </Badge>
-  );
-}
-
 function CodeSessionPane({
   session,
   client,
+  catalogModels,
+  defaultModelKey,
   disabled,
-  onOpenTurnDiff,
 }: {
   session: CodeSessionSnapshot;
   client: ApiClient;
+  catalogModels: ModelInfo[];
+  defaultModelKey: string | null;
   disabled: boolean;
-  onOpenTurnDiff: (turnId: string) => void;
 }) {
   const store = useRegisteredCodeSession(session.id, client);
   const items = store((state) => state.items);
   const busy = store((state) => state.busy);
-  const harnessVersion = store((state) => state.harnessVersion);
   const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
   const [approvals, setApprovals] = useState<Record<string, CodeApprovalSnapshot>>(
     {},
   );
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
+  const cachedModels = useCodeCatalogStore(
+    (state) => state.modelsByHarness[session.harness_kind] ?? [],
+  );
+  const rememberHarnessModels = useCodeCatalogStore(
+    (state) => state.rememberHarnessModels,
+  );
+  const modelOptions = useMemo(() => {
+    const gateway = gatewayCodeModels(
+      catalogModels,
+      session.harness_kind,
+      defaultModelKey,
+    );
+    return gateway.length > 0 ? gateway : cachedModels;
+  }, [cachedModels, catalogModels, defaultModelKey, session.harness_kind]);
+  const inferred = modelOptions.find((option) => option.default)?.id;
+  const [model, setModel] = useState(session.model ?? inferred);
+
+  useEffect(() => {
+    setModel(session.model ?? inferred);
+  }, [inferred, session.model]);
+
+  useEffect(() => {
+    if (gatewayCodeModels(catalogModels, session.harness_kind, defaultModelKey).length > 0) {
+      return;
+    }
+    if (cachedModels.length > 0) return;
+    let cancelled = false;
+    void client.listCodeHarnessModels(session.harness_kind).then(
+      (listed) => {
+        if (cancelled) return;
+        rememberHarnessModels(
+          session.harness_kind,
+          harnessCodeModels(listed.models, session.harness_kind),
+        );
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cachedModels.length,
+    catalogModels,
+    client,
+    defaultModelKey,
+    rememberHarnessModels,
+    session.harness_kind,
+  ]);
   const doctorEntry = useCodeCatalogStore(
     (state) =>
       state.doctor?.harnesses.find(
@@ -710,7 +537,7 @@ function CodeSessionPane({
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
     return submitAcceptedTurn(store.getState().update, () =>
-      client.submitCodeTurn(session.id, message),
+      client.submitCodeTurn(session.id, message, model ?? undefined),
     );
   }
 
@@ -724,15 +551,9 @@ function CodeSessionPane({
 
   return (
     <>
-      {harnessVersion && harnessVersion !== session.harness_version && (
-        <p className="text-muted-foreground px-4 pt-2 text-xs">
-          {HARNESS_LABELS[session.harness_kind]} {harnessVersion}
-        </p>
-      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <CodeTranscript
           items={items}
-          onOpenTurnDiff={onOpenTurnDiff}
           approvals={approvals}
           decidingId={decidingId}
           approvalError={approvalError}
@@ -761,6 +582,11 @@ function CodeSessionPane({
           disabled={disabled}
           permissionMode={session.permission_mode}
           availableModes={availableModes}
+          harness={session.harness_kind}
+          model={model ?? undefined}
+          modelOptions={modelOptions}
+          sessionId={session.id}
+          onModelChange={setModel}
           onSend={send}
           onInterrupt={interrupt}
         />
@@ -788,9 +614,4 @@ function useRegisteredCodeSession(
   return storeRef.current;
 }
 
-async function revealPath(path: string): Promise<void> {
-  const fileUrl = path.startsWith("/") ? `file://${path}` : path;
-  if (!(await openExternal(fileUrl).catch(() => false))) {
-    toast.message("Copy the path to open it in the Finder.");
-  }
-}
+

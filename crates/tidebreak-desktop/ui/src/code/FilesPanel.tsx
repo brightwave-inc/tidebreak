@@ -2,10 +2,9 @@ import { useCallback } from "react";
 
 import type { ApiClient } from "../api/client";
 import type { CodeFileChange } from "../api/types";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { DiffstatBadge } from "./TurnReviewCard";
+import { cn } from "@/lib/utils";
 import { useLiveResource } from "./useLiveContent";
 
 /**
@@ -19,12 +18,14 @@ export function FilesPanel({
   client,
   workspaceId,
   turnId,
+  selected,
   onOpenFile,
   contentRevision = 0,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceFiles">;
   workspaceId: string;
   turnId?: string;
+  selected?: string;
   onOpenFile: (file: string) => void;
   /** Bumped by the session journal when the worktree may have moved. */
   contentRevision?: number;
@@ -46,17 +47,16 @@ export function FilesPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+      <div className="px-3 pt-3">
         <h2 className="text-sm font-medium">Changed files</h2>
-        <div className="flex items-center gap-2">
-          {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
-          {listing && <DiffstatBadge stat={listing.stat} />}
-        </div>
-      </header>
+        {refreshing && (
+          <Spinner className="mt-2 size-3.5" aria-label="Refreshing" />
+        )}
+      </div>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
       {listing?.truncated && (
         <p className="text-muted-foreground px-3 py-2 text-xs">
-          File list was truncated. Open a turn or a single file for a smaller view.
+          File list was truncated. Open a single file for the rest.
         </p>
       )}
       {!listing && !error && (
@@ -66,20 +66,22 @@ export function FilesPanel({
           <Skeleton className="h-4 w-3/5" />
         </div>
       )}
-      <ul className="min-h-0 flex-1 overflow-y-auto">
+      <ul className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
         {(listing?.files ?? []).map((file) => (
           <li key={`${file.kind}:${file.path}`}>
             <button
               type="button"
-              className="hover:bg-muted/60 flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
+              className={cn(
+                "flex w-full items-baseline justify-between gap-3 border-b py-2 text-left text-xs",
+                selected === file.path && "bg-muted/40",
+              )}
               onClick={() => onOpenFile(file.path)}
             >
-              <KindBadge kind={file.kind} />
-              <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>
+              <code className="min-w-0 truncate" title={file.path}>
                 {fileLabel(file)}
-              </span>
-              <span className="text-muted-foreground shrink-0">
-                +{file.insertions} −{file.deletions}
+              </code>
+              <span className="text-success shrink-0 tabular-nums">
+                {statLabel(file)}
               </span>
             </button>
           </li>
@@ -92,25 +94,15 @@ export function FilesPanel({
   );
 }
 
-function KindBadge({ kind }: { kind: CodeFileChange["kind"] }) {
-  const label =
-    kind === "added"
-      ? "A"
-      : kind === "deleted"
-        ? "D"
-        : kind === "renamed"
-          ? "R"
-          : "M";
-  return (
-    <Badge variant="outline" size="sm">
-      {label}
-    </Badge>
-  );
-}
-
 function fileLabel(file: CodeFileChange): string {
   if (file.kind === "renamed" && file.previous_path) {
     return `${file.previous_path} → ${file.path}`;
   }
   return file.path;
+}
+
+function statLabel(file: CodeFileChange): string {
+  const added = file.insertions > 0 ? `+${file.insertions}` : "";
+  const removed = file.deletions > 0 ? `-${file.deletions}` : "";
+  return [added, removed].filter(Boolean).join(" ") || "+0";
 }

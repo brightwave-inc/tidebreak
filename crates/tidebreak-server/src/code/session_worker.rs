@@ -40,6 +40,7 @@ use super::bus::CodeEventBus;
 pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
+        model: Option<String>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
     Decide {
@@ -65,9 +66,14 @@ pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
     pub commands: mpsc::Sender<WorkerCommand>,
     /// Single follow-up parked while a turn is running (queue-default).
-    pub pending: Arc<std::sync::Mutex<Option<String>>>,
+    pub pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
     pub wake: Arc<Notify>,
     pub sink: Arc<LiveSink>,
+}
+
+pub(crate) struct QueuedFollowUp {
+    pub message: String,
+    pub model: Option<String>,
 }
 
 pub(crate) struct LiveSink {
@@ -218,12 +224,16 @@ pub(crate) fn spawn_session_worker(
 }
 
 /// Park one follow-up. Returns `false` when the single slot is already taken.
-pub(crate) fn queue_follow_up(handle: &WorkerHandle, message: String) -> bool {
+pub(crate) fn queue_follow_up(
+    handle: &WorkerHandle,
+    message: String,
+    model: Option<String>,
+) -> bool {
     let mut pending = handle.pending.lock().expect("code turn queue");
     if pending.is_some() {
         return false;
     }
-    *pending = Some(message);
+    *pending = Some(QueuedFollowUp { message, model });
     handle.wake.notify_one();
     true
 }
@@ -235,7 +245,7 @@ async fn run_worker(
     mut session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
-    pending: Arc<std::sync::Mutex<Option<String>>>,
+    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
     wake: Arc<Notify>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
@@ -261,7 +271,11 @@ async fn run_worker(
         tokio::select! {
             _ = wake.notified() => {}
             command = commands.recv() => match command {
-                Some(WorkerCommand::RunTurn { message, reply }) => {
+                Some(WorkerCommand::RunTurn {
+                    message,
+                    model,
+                    reply,
+                }) => {
                     let result = drive_turn(
                         &db,
                         &bus,
@@ -270,6 +284,7 @@ async fn run_worker(
                         &sink,
                         &mut commands,
                         message,
+                        model,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -350,15 +365,15 @@ async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    pending: &Arc<std::sync::Mutex<Option<String>>>,
+    pending: &Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
         let next = pending.lock().expect("code turn queue").take();
-        let Some(message) = next else {
+        let Some(QueuedFollowUp { message, model }) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, sink, commands, message).await;
+        let _ = drive_turn(db, bus, session, engine, sink, commands, message, model).await;
     }
 }
 
@@ -370,6 +385,7 @@ async fn drive_turn(
     sink: &LiveSink,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     message: String,
+    model: Option<String>,
 ) -> Result<CodeTurn, WorkerError> {
     if session.lifecycle == CodeSessionLifecycle::Running {
         return Err(WorkerError::Conflict(
@@ -383,6 +399,9 @@ async fn drive_turn(
     }
     if session.lifecycle == CodeSessionLifecycle::Ended {
         return Err(WorkerError::Conflict("session has ended".into()));
+    }
+    if let Some(model) = model.clone() {
+        session.model = Some(model);
     }
 
     let ordinal = next_turn_ordinal(db, session.id)
@@ -430,7 +449,10 @@ async fn drive_turn(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    let run = engine.run_turn(TurnInput { text: message });
+    let run = engine.run_turn(TurnInput {
+        text: message,
+        model: model.or_else(|| session.model.clone()),
+    });
     tokio::pin!(run);
     // Adapters that spawn one child per turn have no pid to report until the
     // turn is under way. Record every transition as it happens: the session

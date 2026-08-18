@@ -130,6 +130,8 @@ import {
   type CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type PullRequestDigest as WirePullRequestDigest,
+  type PullRequestCheck as WirePullRequestCheck,
+  type PullRequestCheckBucket as WirePullRequestCheckBucket,
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
@@ -1016,6 +1018,8 @@ export type CodeCommitSnapshot = WireCodeCommitSnapshot;
 export type CodePushSnapshot = WireCodePushSnapshot;
 export type CodeActionSnapshot = WireCodeActionSnapshot;
 export type PullRequestDigest = WirePullRequestDigest;
+export type PullRequestCheck = WirePullRequestCheck;
+export type PullRequestCheckBucket = WirePullRequestCheckBucket;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
 export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;

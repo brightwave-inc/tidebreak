@@ -386,6 +386,7 @@ mod tests {
             harness_version: None,
             harness_resume_ref: None,
             permission_mode: tidebreak_core::CodePermissionMode::Plan,
+            model: None,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

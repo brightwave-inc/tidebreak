@@ -11,54 +11,56 @@ import {
  *
  * The terminal stays in the URL so a reload or a shared link still opens it.
  * Only the rendering changes: it is not a tab in the side region.
+ *
+ * Files and Diff live in the inspector. A stale URL tab would duplicate
+ * them in the conversation region, so they are stripped here too.
  */
 export function splitCodeChromeLayout(layout: LayoutState): {
   panels: LayoutState;
   terminal: Extract<PanelContent, { type: "terminal" }> | null;
 } {
-  const terminalIndex = layout.tabs.findIndex((tab) => tab.type === "terminal");
-  if (terminalIndex === -1) {
-    return { panels: layout, terminal: null };
-  }
-
-  const terminal = layout.tabs[terminalIndex] as Extract<
-    PanelContent,
-    { type: "terminal" }
-  >;
-  const tabs = layout.tabs.filter((_, index) => index !== terminalIndex);
+  const terminal = layout.tabs.find((tab) => tab.type === "terminal") as
+    | Extract<PanelContent, { type: "terminal" }>
+    | undefined;
+  const tabs = layout.tabs.filter((tab) => !isInspectorOrDrawerTab(tab));
   if (tabs.length === 0) {
-    return { panels: EMPTY_LAYOUT, terminal };
+    return { panels: EMPTY_LAYOUT, terminal: terminal ?? null };
   }
 
-  let activeIndex = layout.activeIndex;
-  if (terminalIndex < activeIndex) activeIndex -= 1;
-  else if (terminalIndex === activeIndex) {
-    // The URL named the drawer. Pick a remaining side tab rather than
-    // leaving the strip pointing at a hole.
-    activeIndex = Math.min(terminalIndex, tabs.length - 1);
+  const active = layout.tabs[layout.activeIndex];
+  let activeIndex = 0;
+  if (active && !isInspectorOrDrawerTab(active)) {
+    const found = tabs.findIndex((tab) => panelKey(tab) === panelKey(active));
+    if (found >= 0) activeIndex = found;
   }
 
   return {
     panels: {
       tabs,
-      activeIndex: Math.max(0, Math.min(activeIndex, tabs.length - 1)),
+      activeIndex,
       fullscreen: layout.fullscreen,
     },
-    terminal,
+    terminal: terminal ?? null,
   };
+}
+
+function isInspectorOrDrawerTab(tab: PanelContent): boolean {
+  return tab.type === "files" || tab.type === "diff" || tab.type === "terminal";
 }
 
 /**
  * URL-tab index of the side-region tab at `stripIndex`.
  *
- * The strip is the URL tabs with the terminal removed, so a click or close
- * on the strip has to skip over the drawer rather than treat it as a neighbour.
+ * The strip is the URL tabs with the terminal, files, and diff removed, so a
+ * click or close on the strip has to skip those rather than treat them as
+ * neighbours.
  */
 function codeChromeUrlIndex(layout: LayoutState, stripIndex: number): number {
   if (stripIndex < 0) return -1;
   let remaining = stripIndex;
   for (let index = 0; index < layout.tabs.length; index += 1) {
-    if (layout.tabs[index]?.type === "terminal") continue;
+    const tab = layout.tabs[index];
+    if (!tab || isInspectorOrDrawerTab(tab)) continue;
     if (remaining === 0) return index;
     remaining -= 1;
   }
@@ -118,7 +120,7 @@ export function toggleTerminalLayout(layout: LayoutState): LayoutState {
   const index = layout.tabs.findIndex((tab) => tab.type === "terminal");
   if (index === -1) {
     // Leave the still-visible side tab selected. splitCodeChromeLayout remaps
-    // only when a reload or shared link actually named the terminal.
+    // only when a reload or a shared link actually named the terminal.
     return {
       ...layout,
       tabs: [...layout.tabs, { type: "terminal" }],
