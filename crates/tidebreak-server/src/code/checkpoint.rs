@@ -776,7 +776,7 @@ pub(crate) async fn user_git_fingerprint(
     Ok((head, bytes))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

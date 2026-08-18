@@ -947,7 +947,7 @@ async fn run_gh(
     Err(if stderr.is_empty() { stdout } else { stderr })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
