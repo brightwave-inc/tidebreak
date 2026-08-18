@@ -49,6 +49,23 @@ test("treats an in-flight prerelease as a published baseline", () => {
   );
 });
 
+test("does not treat a draft prerelease as a published baseline", () => {
+  assert.equal(
+    planReleaseBaseline({
+      releases: [
+        {
+          id: 4,
+          tag_name: "v0.51.0",
+          draft: true,
+          prerelease: true,
+        },
+      ],
+      tags: ["v0.47.0"],
+    }).action,
+    "fail",
+  );
+});
+
 test("refuses to draft when version tags exist but no release is listed", () => {
   assert.deepEqual(
     planReleaseBaseline({

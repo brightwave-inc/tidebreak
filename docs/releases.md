@@ -145,9 +145,11 @@ automatic.
    tag on a retry. It snapshots the draft metadata so a later merge cannot
    change the notes or proposed version while the build is running, and pins
    every later job to the frozen commit SHA. Immediately after the snapshot, the
-   draft becomes a GitHub prerelease. This lets Release Drafter start the next
-   draft for any PRs that merge during the build, instead of appending them to
-   the in-flight release.
+   draft is marked as a prerelease but stays a draft so assets can still be
+   attached. Release Drafter only updates non-prerelease drafts, so later
+   merges start a new notes draft instead of appending to the in-flight
+   release. The GitHub Release is published only after those assets are
+   attached.
 5. In parallel with the desktop build, the documentation builder checks out
    that validated SHA and builds `docs-site/` as a static export under `/docs`.
    Publication waits until the GitHub Release itself has been published. It

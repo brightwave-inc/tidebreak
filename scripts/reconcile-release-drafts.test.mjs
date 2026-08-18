@@ -124,6 +124,34 @@ test("ignores an in-flight prerelease when collapsing drafts", () => {
   );
 });
 
+test("ignores an in-flight draft prerelease when collapsing drafts", () => {
+  const nextDraft = {
+    id: 50,
+    tag_name: "v0.51.0",
+    draft: true,
+    prerelease: false,
+  };
+  const inFlightDraft = {
+    id: 60,
+    tag_name: "v0.50.0",
+    draft: true,
+    prerelease: true,
+  };
+  assert.deepEqual(
+    planDraftReconciliation({
+      releases: [nextDraft, inFlightDraft, published],
+      resolvedVersion: "0.51.0",
+      releaseId: 50,
+    }),
+    {
+      action: "ok",
+      keep_id: 50,
+      delete_ids: [],
+      reason: "kept the single draft v0.51.0",
+    },
+  );
+});
+
 test("flattens paginated GitHub release pages", () => {
   assert.deepEqual(normalizeReleaseList([[currentDraft], [published]]), [
     currentDraft,
