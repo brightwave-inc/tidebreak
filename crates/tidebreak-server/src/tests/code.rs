@@ -17,9 +17,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CapLevel, CodePermissionMode, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
-    WorkspaceId,
+    Attention, AttentionSource, AttentionState, CapLevel, CodeEvent, CodePermissionMode,
+    CodeSessionId, CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason,
+    HarnessKind, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -689,7 +689,7 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
 
 #[tokio::test]
 async fn interrupt_stops_a_running_scripted_turn() {
-    let (router, token, _runtime, dir) = code_app_with(
+    let (router, token, runtime, dir) = code_app_with(
         ScriptedAdapter::new(vec![
             HarnessEvent::TurnStarted,
             HarnessEvent::AssistantDelta {
@@ -723,6 +723,9 @@ async fn interrupt_stops_a_running_scripted_turn() {
         .await
         .unwrap();
 
+    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let mut events = runtime.bus.subscribe(session_id);
+
     let turn_req = client
         .post(format!(
             "http://{addr}/code/sessions/{}/turns",
@@ -731,7 +734,15 @@ async fn interrupt_stops_a_running_scripted_turn() {
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "slow" }));
     let interrupt = async {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Wait for the turn to actually start before sending the interrupt.
+        // A fixed sleep is flaky because the turn request may still be
+        // queuing on a slow CI runner.
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event.event, CodeEvent::TurnStarted { .. }) {
+                break;
+            }
+        }
         client
             .post(format!(
                 "http://{addr}/code/sessions/{}/interrupt",
@@ -757,7 +768,7 @@ async fn interrupt_stops_a_running_scripted_turn() {
 /// completed turn with zero tokens.
 #[tokio::test]
 async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
-    let (router, token, _runtime, dir) = code_app_with(
+    let (router, token, runtime, dir) = code_app_with(
         ScriptedAdapter::new(vec![
             HarnessEvent::TurnStarted,
             HarnessEvent::AssistantDelta {
@@ -792,6 +803,9 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         .await
         .unwrap();
 
+    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let mut events = runtime.bus.subscribe(session_id);
+
     let turn_req = client
         .post(format!(
             "http://{addr}/code/sessions/{}/turns",
@@ -800,7 +814,15 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "slow" }));
     let interrupt = async {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Wait for the turn to actually start before sending the interrupt.
+        // A fixed sleep is flaky because the turn request may still be
+        // queuing on a slow CI runner.
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event.event, CodeEvent::TurnStarted { .. }) {
+                break;
+            }
+        }
         client
             .post(format!(
                 "http://{addr}/code/sessions/{}/interrupt",
