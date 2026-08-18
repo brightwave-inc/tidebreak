@@ -1220,7 +1220,7 @@ fn render_update(notice: &CodeUpdateNotice) {
             pr_state,
         } => {
             let pr = pr_state
-                .as_ref()
+                .as_deref()
                 .map(|pr| format!("  pr #{} {}", pr.number, pr.state))
                 .unwrap_or_default();
             println!(
