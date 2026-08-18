@@ -199,7 +199,9 @@ export function HarnessModelMenu({
           option={option}
           className="size-4 shrink-0"
         />
-        <span className="min-w-0 flex-1 truncate text-sm">{option.label}</span>
+        <span className="min-w-0 flex-1 truncate text-sm" title={option.label}>
+          {option.label}
+        </span>
         {index < 9 && (
           <span className="text-muted-foreground rounded-md border px-1.5 py-0.5 font-mono text-2xs">
             ⌘{index + 1}
