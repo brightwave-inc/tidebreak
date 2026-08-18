@@ -13,6 +13,7 @@ import {
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { PanelSearch } from "@/panel/panelUrl";
+import { toast } from "sonner";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -72,7 +73,7 @@ const REPO = {
   display_name: "app",
   default_base_ref: "main",
   branch_prefix: "tidebreak",
-  quick_actions: [],
+  quick_actions: [] as { name: string; command: string; auto_run_on_create: boolean }[],
   created_at: "2026-08-15T00:00:00.000Z",
 };
 
@@ -121,6 +122,20 @@ function makeClient() {
     archiveCodeWorkspace: vi.fn(async () => ({
       ...WORKSPACE,
       status: "archived" as const,
+    })),
+    patchCodeWorkspace: vi.fn(async (id: string, body: { title: string }) => ({
+      ...WORKSPACE,
+      id,
+      title: body.title,
+    })),
+    setCodeAttention: vi.fn(async () => SESSION),
+    runCodeWorkspaceAction: vi.fn(async () => ({
+      name: "lint",
+      success: false,
+      exit_code: 1,
+      stdout: "oops",
+      stderr: "failed",
+      timed_out: false,
     })),
     getCodeWorkspacePr: vi.fn(async () => ({
       dirty: false,
@@ -309,6 +324,83 @@ describe("CodeWorkspacePage", () => {
     expect(seam).toHaveTextContent("2 files +42 −7");
   });
 
+  it("shows header skeleton bars instead of Workspace and a repo UUID", async () => {
+    const client = makeClient();
+    client.getCodeWorkspace.mockImplementation(() => new Promise(() => {}));
+    await mountWorkspace(client);
+
+    expect(screen.getByTestId("workspace-header-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText("repo-1")).not.toBeInTheDocument();
+  });
+
+  it("marks unread engine events with a warning dot", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([
+      { ...SESSION, unrecognized_event_count: 3 },
+    ]);
+    await mountWorkspace(client);
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("unrecognized-event-dot")).toHaveAttribute(
+      "aria-label",
+      "3 unread engine events",
+    );
+  });
+
+  it("toggles the review sidebar from the header control", async () => {
+    const client = makeClient();
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("code-inspector")).toBeInTheDocument();
+    expect(useCodeUiStore.getState().reviewSidebarOpen).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Review sidebar" }));
+
+    expect(useCodeUiStore.getState().reviewSidebarOpen).toBe(false);
+    expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a quick-action exit code on the result toast", async () => {
+    const client = makeClient();
+    client.getCodeRepo.mockResolvedValue({
+      ...REPO,
+      quick_actions: [
+        { name: "lint", command: "pnpm lint", auto_run_on_create: false },
+      ],
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /Fix login/ })).toHaveTextContent(
+        "app",
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Run: lint" }));
+
+    await waitFor(() =>
+      expect(client.runCodeWorkspaceAction).toHaveBeenCalledWith("ws-1", "lint"),
+    );
+    expect(toast.error).toHaveBeenCalledWith(
+      "lint exited 1",
+      expect.objectContaining({
+        action: expect.objectContaining({ label: "View output" }),
+      }),
+    );
+  });
+
   it("leaves the archived workspace for its repo", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);
@@ -318,7 +410,8 @@ describe("CodeWorkspacePage", () => {
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Archive" }));
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
     const confirmation = await screen.findByRole("alertdialog");
     await user.click(
       within(confirmation).getByRole("button", { name: "Archive" }),

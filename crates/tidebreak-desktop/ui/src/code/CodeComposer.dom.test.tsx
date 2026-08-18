@@ -31,6 +31,25 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
   });
 
+  it("explains why the session permission mode cannot change", async () => {
+    const user = userEvent.setup();
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Permissions: Ask" });
+    expect(trigger).toBeDisabled();
+    await user.hover(trigger.parentElement!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Set when the session started — start a new session to change it",
+    );
+  });
+
   it("queues a follow-up written while a turn is running", async () => {
     const onSend = vi.fn().mockResolvedValue(QUEUED);
     render(

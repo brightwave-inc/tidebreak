@@ -8,6 +8,7 @@ import {
   gatewayCodeModels,
   groupCodeModelOptions,
   harnessUnusableReason,
+  sessionLifecycleTooltip,
 } from "./labels";
 
 function caps(
@@ -18,6 +19,30 @@ function caps(
 ): ModeCaps {
   return { plan_mode, structured_approvals, auto_mode, allow_mode };
 }
+
+describe("sessionLifecycleTooltip", () => {
+  it("joins the harness version and unread engine events", () => {
+    expect(
+      sessionLifecycleTooltip({
+        lifecycle: "idle",
+        harness: "claude_code",
+        version: "2.1.233",
+        unrecognizedEventCount: 3,
+      }),
+    ).toBe(
+      "Idle · Claude Code 2.1.233 · 3 unread engine events — transcript may be incomplete",
+    );
+    expect(
+      sessionLifecycleTooltip({
+        lifecycle: "running",
+        harness: "codex",
+        unrecognizedEventCount: 1,
+      }),
+    ).toBe(
+      "Running · Codex CLI · 1 unread engine event — transcript may be incomplete",
+    );
+  });
+});
 
 describe("create-time permission mode", () => {
   it("defaults to the most autonomous mode the engine honors", () => {

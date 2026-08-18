@@ -1,9 +1,15 @@
 import { useState, type ReactElement } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 
 import { archiveForceKind, type ApiClient } from "../api/client";
-import type { CodeWorkspaceSnapshot, PullRequestDigest } from "../api/types";
+import type {
+  CodeActionSnapshot,
+  CodeSessionSnapshot,
+  CodeWorkspaceSnapshot,
+  PullRequestDigest,
+} from "../api/types";
 import { useApp } from "@/AppContext";
 import { copyPlainText } from "@/ClipboardCopyButton";
 import { useConfirm, type ConfirmOptions } from "@/components/ConfirmDialog";
@@ -15,7 +21,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { EMPTY_LAYOUT } from "@/panel/panelTypes";
@@ -25,8 +39,8 @@ import { toggleTerminalLayout } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 
 /**
- * Workspace commands shared by the card context menu and, later, the
- * workspace header overflow. One list, two surfaces.
+ * Workspace commands shared by the card context menu and the workspace
+ * header overflow. One list, two surfaces.
  */
 export type WorkspaceCommandId =
   | "open"
@@ -36,6 +50,9 @@ export type WorkspaceCommandId =
   | "copy-worktree"
   | "open-pr"
   | "toggle-terminal"
+  | "pin-attention"
+  | "clear-attention"
+  | "run-quick-action"
   | "archive";
 
 export type WorkspaceCommand = {
@@ -44,17 +61,23 @@ export type WorkspaceCommand = {
   destructive?: boolean;
   /** Draw a separator before this item. */
   separated?: boolean;
+  /** Set when `id` is `run-quick-action`. */
+  actionName?: string;
 };
 
 export type WorkspaceCommandContext = {
   workspace: CodeWorkspaceSnapshot;
   title: string;
   pr?: PullRequestDigest;
+  session?: CodeSessionSnapshot;
+  actionName?: string;
 };
 
 export function workspaceCommands(input: {
   hasPr: boolean;
   archived: boolean;
+  hasSession?: boolean;
+  attentionPinned?: boolean;
 }): WorkspaceCommand[] {
   const items: WorkspaceCommand[] = [
     { id: "open", label: "Open workspace" },
@@ -67,6 +90,13 @@ export function workspaceCommands(input: {
     items.push({ id: "open-pr", label: "Open pull request" });
   }
   items.push({ id: "toggle-terminal", label: "Toggle terminal" });
+  if (input.hasSession) {
+    items.push(
+      input.attentionPinned
+        ? { id: "clear-attention", label: "Clear attention" }
+        : { id: "pin-attention", label: "Pin attention" },
+    );
+  }
   if (!input.archived) {
     items.push({
       id: "archive",
@@ -76,6 +106,95 @@ export function workspaceCommands(input: {
     });
   }
   return items;
+}
+
+/**
+ * Header overflow: rename, pin/clear, repo quick actions, then archive.
+ * Card-only items (open, copy, terminal) stay off this surface.
+ */
+export function workspaceHeaderCommands(input: {
+  archived: boolean;
+  hasSession: boolean;
+  attentionPinned: boolean;
+  quickActions: readonly { name: string }[];
+}): WorkspaceCommand[] {
+  const items: WorkspaceCommand[] = [{ id: "rename", label: "Rename…" }];
+  if (input.hasSession) {
+    items.push(
+      input.attentionPinned
+        ? { id: "clear-attention", label: "Clear attention" }
+        : { id: "pin-attention", label: "Pin attention" },
+    );
+  }
+  if (!input.archived) {
+    for (const action of input.quickActions) {
+      items.push({
+        id: "run-quick-action",
+        label: `Run: ${action.name}`,
+        actionName: action.name,
+      });
+    }
+    items.push({
+      id: "archive",
+      label: "Archive",
+      destructive: true,
+      separated: true,
+    });
+  }
+  return items;
+}
+
+export function WorkspaceOverflowMenu({
+  commands,
+  onCommand,
+}: {
+  commands: readonly WorkspaceCommand[];
+  onCommand: (command: WorkspaceCommand) => void;
+}) {
+  if (commands.length === 0) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Workspace actions"
+        >
+          <MoreHorizontal />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {commands.map((command) => (
+          <WorkspaceOverflowItem
+            key={`${command.id}:${command.actionName ?? ""}`}
+            command={command}
+            onSelect={() => onCommand(command)}
+          />
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function WorkspaceOverflowItem({
+  command,
+  onSelect,
+}: {
+  command: WorkspaceCommand;
+  onSelect: () => void;
+}) {
+  return (
+    <>
+      {command.separated && <DropdownMenuSeparator />}
+      <DropdownMenuItem
+        variant={command.destructive ? "destructive" : "default"}
+        onSelect={onSelect}
+      >
+        {command.label}
+      </DropdownMenuItem>
+    </>
+  );
 }
 
 export async function archiveWorkspaceWithConfirm(options: {
@@ -122,6 +241,7 @@ export function useWorkspaceCardCommands(): {
   const layout = useLayoutState();
   const { setLayout } = usePanelNav();
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
+  const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const forgetWorkspaceSession = useCodeCatalogStore(
     (state) => state.forgetWorkspaceSession,
   );
@@ -130,6 +250,9 @@ export function useWorkspaceCardCommands(): {
   );
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [actionOutput, setActionOutput] = useState<CodeActionSnapshot | null>(
+    null,
+  );
 
   function openWorkspace(workspaceId: string) {
     void navigate({
@@ -226,6 +349,54 @@ export function useWorkspaceCardCommands(): {
         });
         return;
       }
+      case "pin-attention": {
+        if (!context.session) return;
+        void client
+          .setCodeAttention(context.session.id, { note: "Pinned" })
+          .then((next) => {
+            rememberSession(next);
+            toast.success("Attention pinned");
+          })
+          .catch((error) =>
+            toast.error(friendlyErrorMessage(error, "Could not pin attention")),
+          );
+        return;
+      }
+      case "clear-attention": {
+        if (!context.session) return;
+        void client
+          .setCodeAttention(context.session.id, { clear: true })
+          .then((next) => {
+            rememberSession(next);
+            toast.success("Attention cleared");
+          })
+          .catch((error) =>
+            toast.error(
+              friendlyErrorMessage(error, "Could not clear attention"),
+            ),
+          );
+        return;
+      }
+      case "run-quick-action": {
+        const name = context.actionName;
+        if (!name) return;
+        void client
+          .runCodeWorkspaceAction(context.workspace.id, name)
+          .then((result) => {
+            const detail = quickActionToast(result);
+            const show = result.success && !result.timed_out ? toast.success : toast.error;
+            show(detail, {
+              action: {
+                label: "View output",
+                onClick: () => setActionOutput(result),
+              },
+            });
+          })
+          .catch((error) =>
+            toast.error(friendlyErrorMessage(error, "Could not run that action")),
+          );
+        return;
+      }
       case "archive":
         void runArchive(context.workspace);
         return;
@@ -276,13 +447,47 @@ export function useWorkspaceCardCommands(): {
     </Dialog>
   );
 
+  const outputDialog = (
+    <Dialog
+      open={actionOutput !== null}
+      onOpenChange={(open) => {
+        if (!open) setActionOutput(null);
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            {actionOutput
+              ? `${actionOutput.name} · ${quickActionToast(actionOutput)}`
+              : "Action output"}
+          </DialogTitle>
+        </DialogHeader>
+        {actionOutput && (
+          <div className="flex flex-col gap-3">
+            <ToolOutputPreview text={actionOutput.stdout} label="stdout" />
+            <ToolOutputPreview text={actionOutput.stderr} label="stderr" />
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+
   return {
     run,
     dialogs: (
       <>
         {dialog}
         {renameDialog}
+        {outputDialog}
       </>
     ),
   };
+}
+
+export function quickActionToast(result: CodeActionSnapshot): string {
+  if (result.timed_out) return `${result.name} timed out`;
+  if (result.exit_code !== undefined) {
+    return `${result.name} exited ${result.exit_code}`;
+  }
+  return result.success ? `${result.name} finished` : `${result.name} failed`;
 }
