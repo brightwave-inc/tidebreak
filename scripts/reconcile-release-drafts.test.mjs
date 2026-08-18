@@ -131,11 +131,28 @@ test("flattens paginated GitHub release pages", () => {
   ]);
 });
 
-test("rejects a Release Drafter id that is not a live draft", () => {
+test("retries when GitHub has not listed the new Release Drafter id yet", () => {
+  assert.deepEqual(
+    planDraftReconciliation({
+      releases: [published],
+      resolvedVersion: "0.47.0",
+      releaseId: 20,
+    }),
+    {
+      action: "retry",
+      keep_id: null,
+      delete_ids: [],
+      reason:
+        "Release Drafter reported release 20, but the releases list does not include it yet",
+    },
+  );
+});
+
+test("rejects a Release Drafter id that is listed but is not a live draft", () => {
   assert.throws(
     () =>
       planDraftReconciliation({
-        releases: [published],
+        releases: [{ ...inFlight, id: 20 }, published],
         resolvedVersion: "0.47.0",
         releaseId: 20,
       }),

@@ -281,6 +281,8 @@ test("release-drafter retains a stable draft tag after formatting", () => {
   );
   assert.match(draftJob, /node scripts\/reconcile-release-drafts\.mjs/);
   assert.match(draftJob, /Keep exactly one native release draft/);
+  assert.match(draftJob, /max_attempts=5/);
+  assert.match(draftJob, /\[\[ "\$action" != retry \]\]/);
   assert.match(draftJob, /\.delete_ids\[\]/);
   assert.match(draftJob, /jq -r \.action/);
 });
