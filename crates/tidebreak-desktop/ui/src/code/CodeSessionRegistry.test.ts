@@ -92,6 +92,7 @@ describe("CodeSessionRegistry", () => {
           ordinal: 1,
           status: "completed",
           user_input: "list the files",
+          attachments: [],
           started_at: "2026-08-15T12:00:00.000Z",
           ended_at: "2026-08-15T12:00:02.500Z",
         },
@@ -180,6 +181,7 @@ describe("CodeSessionRegistry", () => {
                 ordinal: 2,
                 status: "running" as const,
                 user_input: "and run the tests",
+                attachments: [],
                 started_at: "2026-08-15T12:00:03.000Z",
               },
             ];

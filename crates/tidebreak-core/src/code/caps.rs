@@ -77,6 +77,27 @@ pub struct HarnessCaps {
     pub native_file_change_events: CapLevel,
     /// The engine honors a native interrupt.
     pub native_interrupt: CapLevel,
+    /// The engine consumes an image on its machine-readable input path.
+    ///
+    /// Adapters may only state [`CapLevel::Supported`] with a fixture that
+    /// proves a captured image round-trip. The product must not offer
+    /// attachments otherwise.
+    pub image_input: CapLevel,
+    /// The engine has a discoverable slash-command vocabulary.
+    ///
+    /// Independent of whether free-typed `/` text is accepted — that is
+    /// always pass-through. This flag only says a machine-readable listing
+    /// exists to feed the composer popup.
+    pub slash_commands: CapLevel,
+}
+
+/// One engine-owned slash command, captured from the engine's own listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HarnessCommand {
+    /// The word typed after `/`. No leading slash.
+    pub name: String,
+    /// One-line description from the engine, already bounded.
+    pub description: String,
 }
 
 #[cfg(test)]
@@ -97,8 +118,12 @@ mod tests {
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
+            image_input: CapLevel::Unknown,
+            slash_commands: CapLevel::Unknown,
         };
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Unknown);
+        assert_eq!(caps.image_input, CapLevel::Unknown);
+        assert_eq!(caps.slash_commands, CapLevel::Unknown);
     }
 }

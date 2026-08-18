@@ -4,6 +4,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -42,6 +43,7 @@ import {
   attachableFolders,
   mentionOptionRows,
   mentionRows,
+  workspacePathCandidates,
   MENTION_LIST_LABEL,
   type MentionAction,
   type MentionCandidate,
@@ -303,6 +305,14 @@ export type ComposerProps = {
   images?: ComposerImages;
   files?: ComposerFiles;
   folders?: ComposerFolders;
+  /**
+   * Workspace-relative paths `@` can insert as plain text. The parent fetches
+   * them from the tree route as the query changes.
+   */
+  pathMentions?: {
+    items: readonly string[];
+    onQueryChange?: (query: string | null) => void;
+  };
   voice?: ComposerVoice;
   nativeDropTarget?: ReactNode;
   attachError?: string | null;
@@ -340,6 +350,7 @@ export function Composer({
   images,
   files,
   folders,
+  pathMentions,
   voice,
   nativeDropTarget,
   attachError = null,
@@ -459,6 +470,7 @@ export function Composer({
    * are for.
    */
   const mentionCandidates: MentionCandidate[] = [
+    ...workspacePathCandidates(pathMentions?.items ?? []),
     ...attachableFiles(files?.recent ?? []),
     ...attachableFolders(folders?.approved ?? [], folders?.items ?? []),
   ];
@@ -474,6 +486,11 @@ export function Composer({
   const mentionOpen =
     mentionToken !== null && !slashOpen && mentionMatches.length > 0;
   const mentionIndex = Math.min(mentionHighlight, mentionMatches.length - 1);
+
+  const onPathQueryChange = pathMentions?.onQueryChange;
+  useEffect(() => {
+    onPathQueryChange?.(mentionToken?.query ?? null);
+  }, [mentionToken, onPathQueryChange]);
 
   /** Re-read whether the caret sits inside a `/` token, and reset the cursor. */
   function syncSlashToken(value: string, caret: number) {
@@ -496,6 +513,15 @@ export function Composer({
     row: MentionRow,
     token: { start: number; query: string },
   ) {
+    if (row.kind === "candidate" && row.candidate.kind === "path") {
+      applySlashReplacement(
+        draft,
+        token.start,
+        token.start + 1 + token.query.length,
+        row.candidate.path,
+      );
+      return;
+    }
     applySlashReplacement(draft, token.start, token.start + 1 + token.query.length, "");
     if (row.kind === "action") {
       if (row.action === "browse-files") files?.onAttach?.();
@@ -507,6 +533,7 @@ export function Composer({
       folders?.onConnect?.(candidate.id);
       return;
     }
+    if (candidate.kind !== "file") return;
     const file = files?.recent?.find(
       (recent) => recent.documentId === candidate.id,
     );

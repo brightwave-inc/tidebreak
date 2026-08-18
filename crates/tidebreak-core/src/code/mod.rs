@@ -16,7 +16,7 @@ pub use attention::{
     should_replace, Attention, AttentionSource, AttentionState, FenceReason, MAX_ATTENTION_NOTE,
     MAX_ATTENTION_PROMPT,
 };
-pub use caps::{CapLevel, HarnessCaps, HarnessTier};
+pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
     FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
@@ -586,6 +586,10 @@ pub struct CodeTurn {
     pub user_input: String,
     /// Blob id when the input was spilled, unused in this layer.
     pub user_input_blob_id: Option<Uuid>,
+    /// Bounded image references on this user turn. Bytes live in the blob
+    /// store; these rows pin them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CodeTurnAttachment>,
     /// Hidden checkpoint ref recorded at turn end, when any.
     pub checkpoint_ref: Option<String>,
     /// Diffstat of the turn's checkpoint, when recorded.
@@ -598,6 +602,20 @@ pub struct CodeTurn {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// End time, when terminal.
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Bounded image reference recorded on a code-mode user turn.
+///
+/// Identity only: the journal never carries pixels. `byte_len` is the blob
+/// store's length at submit time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeTurnAttachment {
+    /// Content-addressed blob holding the pixels.
+    pub blob_id: Uuid,
+    /// Format declared on submit, already validated.
+    pub media_type: crate::image::ImageMediaType,
+    /// Size of the stored bytes.
+    pub byte_len: u64,
 }
 
 /// Persisted approval record.

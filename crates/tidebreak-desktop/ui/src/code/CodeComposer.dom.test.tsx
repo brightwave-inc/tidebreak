@@ -147,6 +147,25 @@ describe("CodeComposer", () => {
     expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
   });
 
+  it("submits free-typed slash text verbatim when the engine lists no commands", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "/status --json" } });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/status --json"));
+  });
+
   it("says the queue is full and keeps the draft", async () => {
     const onSend = vi
       .fn()

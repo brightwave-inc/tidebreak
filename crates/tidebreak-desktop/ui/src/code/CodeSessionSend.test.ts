@@ -10,6 +10,7 @@ const TURN = {
   ordinal: 1,
   status: "running" as const,
   user_input: "list the files",
+  attachments: [],
   started_at: "2026-08-15T12:00:00.000Z",
 };
 

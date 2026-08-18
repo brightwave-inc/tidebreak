@@ -18,6 +18,7 @@ import type {
   CodeTerminalSnapshot,
   CodeWorkspaceDiff,
   CodeWorkspaceFiles,
+  CodeWorkspaceTree,
   CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
   CodeActionSnapshot,
@@ -56,6 +57,8 @@ import type {
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  CodeWorkspaceTree as WireCodeWorkspaceTree,
+  CodeTurnAttachment as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
   CodeActionSnapshot as WireCodeActionSnapshot,
@@ -663,6 +666,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "ordinal",
       "status",
       "user_input",
+      "attachments",
       "usage",
       "checkpoint_ref",
       "diffstat",
@@ -680,6 +684,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   ) {
     return null;
   }
+  const attachments = parseCodeTurnAttachments(value.attachments);
+  if (!attachments) return null;
   const usage =
     value.usage === undefined ? undefined : parseUsage(value.usage);
   if (value.usage !== undefined && !usage) return null;
@@ -693,6 +699,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     status: value.status,
     user_input: value.user_input,
     started_at: value.started_at,
+    attachments,
     ...(usage ? { usage } : {}),
     ...(value.checkpoint_ref !== undefined
       ? { checkpoint_ref: value.checkpoint_ref }
@@ -700,6 +707,39 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     ...(diffstat ? { diffstat } : {}),
     ...(value.ended_at !== undefined ? { ended_at: value.ended_at } : {}),
   };
+}
+
+const IMAGE_MEDIA_TYPES = new Set<
+  import("../generated/wire").ImageMediaType
+>(["png", "jpeg", "webp", "gif"]);
+
+function parseCodeTurnAttachments(
+  value: unknown,
+): import("../generated/wire").CodeTurnAttachment[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const attachments: import("../generated/wire").CodeTurnAttachment[] = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys<WireCodeTurnAttachment>(item, [
+        "blob_id",
+        "media_type",
+        "byte_len",
+      ]) ||
+      !nonEmpty(item.blob_id) ||
+      !isMember(item.media_type, IMAGE_MEDIA_TYPES) ||
+      !isFiniteNumber(item.byte_len)
+    ) {
+      return null;
+    }
+    attachments.push({
+      blob_id: item.blob_id,
+      media_type: item.media_type,
+      byte_len: item.byte_len,
+    });
+  }
+  return attachments;
 }
 
 /**
@@ -737,6 +777,25 @@ export function parseCodeTurnSubmission(
   if (turn) return { kind: "ran", turn };
   const queued = parseQueuedCodeTurn(value);
   return queued ? { kind: "queued", queued } : null;
+}
+
+export function parseCodeWorkspaceTree(
+  value: unknown,
+): CodeWorkspaceTree | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceTree>(value, ["paths", "truncated"]) ||
+    !Array.isArray(value.paths) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  const paths: string[] = [];
+  for (const item of value.paths) {
+    if (typeof item !== "string" || item.length === 0) return null;
+    paths.push(item);
+  }
+  return { paths, truncated: value.truncated };
 }
 
 export function parseCodeWorkspaceFiles(
@@ -999,6 +1058,7 @@ export function parseHarnessDoctorEntry(
       "version",
       "tier",
       "caps",
+      "commands",
       "authenticated",
       "remediation",
       "stderr",
@@ -1019,6 +1079,8 @@ export function parseHarnessDoctorEntry(
   }
   const caps = parseHarnessCaps(value.caps);
   if (!caps) return null;
+  const commands = parseHarnessCommands(value.commands);
+  if (!commands) return null;
   return {
     kind: value.kind,
     found: value.found,
@@ -1027,12 +1089,33 @@ export function parseHarnessDoctorEntry(
     remediation: value.remediation,
     stderr: value.stderr,
     unrecognized_event_count: value.unrecognized_event_count,
+    commands,
     ...(value.path !== undefined ? { path: value.path } : {}),
     ...(value.version !== undefined ? { version: value.version } : {}),
     ...(value.authenticated !== undefined
       ? { authenticated: value.authenticated }
       : {}),
   };
+}
+
+function parseHarnessCommands(
+  value: unknown,
+): { name: string; description: string }[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const commands: { name: string; description: string }[] = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      typeof item.name !== "string" ||
+      item.name.length === 0 ||
+      typeof item.description !== "string"
+    ) {
+      return null;
+    }
+    commands.push({ name: item.name, description: item.description });
+  }
+  return commands;
 }
 
 function parseHarnessCaps(value: unknown): HarnessCaps | null {
@@ -1049,6 +1132,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "reasoning_levels",
       "native_file_change_events",
       "native_interrupt",
+      "image_input",
+      "slash_commands",
     ]) ||
     !isMember(value.resume, CAP_LEVELS) ||
     !isMember(value.streaming_deltas, CAP_LEVELS) ||
@@ -1059,7 +1144,9 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.allow_mode, CAP_LEVELS) ||
     !isMember(value.reasoning_levels, CAP_LEVELS) ||
     !isMember(value.native_file_change_events, CAP_LEVELS) ||
-    !isMember(value.native_interrupt, CAP_LEVELS)
+    !isMember(value.native_interrupt, CAP_LEVELS) ||
+    !isMember(value.image_input, CAP_LEVELS) ||
+    !isMember(value.slash_commands, CAP_LEVELS)
   ) {
     return null;
   }
@@ -1074,6 +1161,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     reasoning_levels: value.reasoning_levels,
     native_file_change_events: value.native_file_change_events,
     native_interrupt: value.native_interrupt,
+    image_input: value.image_input,
+    slash_commands: value.slash_commands,
   };
 }
 

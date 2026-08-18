@@ -1601,6 +1601,7 @@ describe("code workspace sessions", () => {
       ordinal: 1,
       status: "completed",
       user_input: "list the files",
+      attachments: [],
       started_at: "2026-08-15T12:00:00.000Z",
       ended_at: "2026-08-15T12:00:02.000Z",
     };

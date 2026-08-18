@@ -193,6 +193,10 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         entry(code::code_workspace_table(), code::code_workspace_indexes()),
         entry(code::code_session_table(), code::code_session_indexes()),
         entry(code::code_turn_table(), code::code_turn_indexes()),
+        entry(
+            code::code_turn_attachment_table(),
+            code::code_turn_attachment_indexes(),
+        ),
         entry(code::code_event_table(), code::code_event_indexes()),
         entry(code::code_approval_table(), code::code_approval_indexes()),
     ]

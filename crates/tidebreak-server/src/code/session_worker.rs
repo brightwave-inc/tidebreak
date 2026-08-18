@@ -41,6 +41,7 @@ pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
         model: Option<String>,
+        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
     Decide {
@@ -74,6 +75,7 @@ pub(crate) struct WorkerHandle {
 pub(crate) struct QueuedFollowUp {
     pub message: String,
     pub model: Option<String>,
+    pub attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 }
 
 pub(crate) struct LiveSink {
@@ -228,12 +230,17 @@ pub(crate) fn queue_follow_up(
     handle: &WorkerHandle,
     message: String,
     model: Option<String>,
+    attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 ) -> bool {
     let mut pending = handle.pending.lock().expect("code turn queue");
     if pending.is_some() {
         return false;
     }
-    *pending = Some(QueuedFollowUp { message, model });
+    *pending = Some(QueuedFollowUp {
+        message,
+        model,
+        attachments,
+    });
     handle.wake.notify_one();
     true
 }
@@ -274,6 +281,7 @@ async fn run_worker(
                 Some(WorkerCommand::RunTurn {
                     message,
                     model,
+                    attachments,
                     reply,
                 }) => {
                     let result = drive_turn(
@@ -283,7 +291,11 @@ async fn run_worker(
                         engine.as_ref(),
                         &sink,
                         &mut commands,
-                        QueuedFollowUp { message, model },
+                        QueuedFollowUp {
+                            message,
+                            model,
+                            attachments,
+                        },
                     )
                     .await;
                     let _ = reply.send(result);
@@ -369,19 +381,10 @@ async fn drain_queued(
 ) {
     loop {
         let next = pending.lock().expect("code turn queue").take();
-        let Some(QueuedFollowUp { message, model }) = next else {
+        let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(
-            db,
-            bus,
-            session,
-            engine,
-            sink,
-            commands,
-            QueuedFollowUp { message, model },
-        )
-        .await;
+        let _ = drive_turn(db, bus, session, engine, sink, commands, follow_up).await;
     }
 }
 
@@ -392,7 +395,11 @@ async fn drive_turn(
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     commands: &mut mpsc::Receiver<WorkerCommand>,
-    QueuedFollowUp { message, model }: QueuedFollowUp,
+    QueuedFollowUp {
+        message,
+        model,
+        attachments,
+    }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
     if session.lifecycle == CodeSessionLifecycle::Running {
         return Err(WorkerError::Conflict(
@@ -421,6 +428,7 @@ async fn drive_turn(
         status: CodeTurnStatus::Running,
         user_input: message.clone(),
         user_input_blob_id: None,
+        attachments,
         checkpoint_ref: None,
         diffstat: None,
         usage: None,

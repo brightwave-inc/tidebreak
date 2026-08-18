@@ -202,6 +202,65 @@ pub(super) fn code_turn_indexes() -> Vec<IndexCreateStatement> {
         .to_owned()]
 }
 
+/// Image references on a code-mode user turn. Another class of live blob
+/// reference: these rows pin bytes the journal only names.
+pub(super) fn code_turn_attachment_table() -> TableCreateStatement {
+    Table::create()
+        .table(CodeTurnAttachment::Table)
+        .col(ColumnDef::new(CodeTurnAttachment::TurnId).uuid().not_null())
+        .col(
+            ColumnDef::new(CodeTurnAttachment::Ordinal)
+                .integer()
+                .not_null(),
+        )
+        .col(ColumnDef::new(CodeTurnAttachment::BlobId).uuid().not_null())
+        .col(
+            ColumnDef::new(CodeTurnAttachment::MediaType)
+                .string_len(64)
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeTurnAttachment::ByteLen)
+                .big_integer()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(CodeTurnAttachment::TurnId)
+                .col(CodeTurnAttachment::Ordinal),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_turn_attachment_turn")
+                .from(CodeTurnAttachment::Table, CodeTurnAttachment::TurnId)
+                .to(CodeTurn::Table, CodeTurn::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .check(Expr::col(CodeTurnAttachment::BlobId).ne(uuid::Uuid::nil()))
+        .check(Expr::col(CodeTurnAttachment::Ordinal).gte(0))
+        .check(
+            Expr::col(CodeTurnAttachment::Ordinal).lt(crate::model::MAX_MESSAGE_ATTACHMENTS as i32),
+        )
+        .check(Expr::col(CodeTurnAttachment::MediaType).is_in([
+            crate::image::ImageMediaType::Png.as_str(),
+            crate::image::ImageMediaType::Jpeg.as_str(),
+            crate::image::ImageMediaType::Webp.as_str(),
+            crate::image::ImageMediaType::Gif.as_str(),
+        ]))
+        .check(
+            Expr::col(CodeTurnAttachment::ByteLen).between(1, crate::image::MAX_IMAGE_BYTES as i64),
+        )
+        .to_owned()
+}
+
+pub(super) fn code_turn_attachment_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_code_turn_attachment_blob")
+        .table(CodeTurnAttachment::Table)
+        .col(CodeTurnAttachment::BlobId)
+        .to_owned()]
+}
+
 pub(super) fn code_event_table() -> TableCreateStatement {
     Table::create()
         .table(CodeEvent::Table)

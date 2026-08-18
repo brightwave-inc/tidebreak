@@ -2908,6 +2908,203 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
     assert_eq!(refused_body["kind"], "session_fenced");
 }
 
+#[tokio::test]
+async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Unsupported);
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+
+    let blob = tidebreak_core::DocumentBlob::from_bytes(b"\x89PNG\r\n\x1a\n pretend pixels");
+    runtime
+        .blobs
+        .put(blob.id, b"\x89PNG\r\n\x1a\n pretend pixels".to_vec())
+        .await
+        .unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "message": "look at this",
+            "attachments": [{
+                "blob_id": blob.id,
+                "media_type": "image/png",
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "unsupported_attachment");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("claude_code"),
+        "{}",
+        body["message"]
+    );
+}
+
+#[tokio::test]
+async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_support() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+
+    let pixels = b"\x89PNG\r\n\x1a\n pretend pixels";
+    let blob = tidebreak_core::DocumentBlob::from_bytes(pixels);
+    runtime.blobs.put(blob.id, pixels.to_vec()).await.unwrap();
+
+    let accepted = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "message": "look at this",
+            "attachments": [{
+                "blob_id": blob.id,
+                "media_type": "image/png",
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = accepted.json().await.unwrap();
+    assert_eq!(turn["attachments"][0]["blob_id"], blob.id.to_string());
+    assert_eq!(turn["attachments"][0]["media_type"], "png");
+    assert_eq!(turn["attachments"][0]["byte_len"], pixels.len() as u64);
+    assert!(
+        turn["attachments"][0].get("bytes").is_none(),
+        "journaled attachment must stay a bounded reference: {turn}"
+    );
+
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["attachments"][0]["blob_id"], blob.id.to_string());
+    assert_eq!(listed[0]["attachments"][0]["byte_len"], pixels.len() as u64);
+}
+
+#[tokio::test]
+async fn workspace_tree_is_bounded_ignores_and_never_returns_contents() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    std::fs::write(repo.join(".gitignore"), "secret.bin\n").unwrap();
+    std::fs::write(repo.join("src.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(repo.join("secret.bin"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+    std::fs::write(repo.join("notes.md"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["add", ".gitignore", "src.rs"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["commit", "-m", "more"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(worktree.join(".gitignore"), "secret.bin\n").unwrap();
+    std::fs::write(worktree.join("src.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(worktree.join("secret.bin"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+    std::fs::write(worktree.join("notes.md"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+    for index in 0..80 {
+        std::fs::write(worktree.join(format!("bulk-{index:03}.txt")), "x\n").unwrap();
+    }
+
+    let listed = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/tree?query=bulk-&limit=50",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = listed.json().await.unwrap();
+    assert_eq!(body["paths"].as_array().unwrap().len(), 50);
+    assert_eq!(body["truncated"], true);
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains("UNIQUE_PAYLOAD_xyz"),
+        "tree route leaked file contents: {rendered}"
+    );
+    assert!(!rendered.contains("secret.bin"));
+
+    let named = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/tree?query=notes",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(named["paths"][0], "notes.md");
+}
+
 #[allow(dead_code)]
 fn _types(
     _id: WorkspaceId,

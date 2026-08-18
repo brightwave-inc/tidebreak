@@ -306,6 +306,7 @@ mod tests {
                 status: CodeTurnStatus::Running,
                 user_input: "hello".into(),
                 user_input_blob_id: None,
+                attachments: Vec::new(),
                 checkpoint_ref: None,
                 diffstat: None,
                 usage: None,
@@ -513,6 +514,7 @@ mod tests {
             .send(crate::code::session_worker::WorkerCommand::RunTurn {
                 message: "hello".into(),
                 model: None,
+                attachments: Vec::new(),
                 reply,
             })
             .await

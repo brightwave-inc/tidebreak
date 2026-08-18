@@ -22,6 +22,8 @@ const CAPS = {
   native_file_change_events: "unsupported",
   native_interrupt: "supported",
   structured_approvals: "supported",
+  image_input: "unknown",
+  slash_commands: "unknown",
 } as const;
 
 function entry(
@@ -33,6 +35,7 @@ function entry(
     path: "/opt/harness",
     tier: "reference",
     caps: { ...CAPS },
+    commands: [],
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,

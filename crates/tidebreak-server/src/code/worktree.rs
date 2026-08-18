@@ -14,6 +14,10 @@ use super::setup_script::run_workspace_script;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default number of paths the tree route returns.
+pub(crate) const DEFAULT_TREE_LIMIT: u32 = 50;
+/// Hard cap on the tree route. The composer is a shortlist, not a browser.
+pub(crate) const MAX_TREE_LIMIT: u32 = 200;
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brave", "calm", "crisp", "dusk", "ember", "faint", "gentle", "hidden", "ivory",
@@ -144,6 +148,57 @@ impl WorktreeError {
     fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
+}
+
+/// Name-matched git-tracked and untracked-unignored paths. Never file contents.
+pub(crate) async fn list_tree_paths(
+    worktree_path: &Path,
+    query: &str,
+    limit: u32,
+) -> Result<(Vec<String>, bool), WorktreeError> {
+    let limit = tree_limit(limit);
+    let listed = git_nul_stdout(
+        Some(worktree_path),
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git ls-files failed: {err}")))?;
+    let needle = query.trim().to_ascii_lowercase();
+    let mut matched = listed
+        .into_iter()
+        .filter(|path| !path.is_empty())
+        .filter(|path| needle.is_empty() || path_name_matches(path, &needle))
+        .collect::<Vec<_>>();
+    matched.sort();
+    matched.dedup();
+    let truncated = matched.len() > limit;
+    matched.truncate(limit);
+    Ok((matched, truncated))
+}
+
+fn tree_limit(limit: u32) -> usize {
+    let requested = if limit == 0 {
+        DEFAULT_TREE_LIMIT
+    } else {
+        limit.min(MAX_TREE_LIMIT)
+    };
+    usize::try_from(requested).unwrap_or(DEFAULT_TREE_LIMIT as usize)
+}
+
+fn path_name_matches(path: &str, needle: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    name.contains(needle) || path.to_ascii_lowercase().contains(needle)
 }
 
 /// Validate a path as a non-bare git repository and return its canonical toplevel.
@@ -521,6 +576,42 @@ async fn git_stdout(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Resul
     Ok(git(cwd, args, limit).await?.stdout)
 }
 
+async fn git_nul_stdout(
+    cwd: Option<&Path>,
+    args: &[&str],
+    limit: Duration,
+) -> Result<Vec<String>, String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let child = command
+        .spawn()
+        .map_err(|err| format!("failed to spawn git: {err}"))?;
+    let output = timeout(limit, child.wait_with_output())
+        .await
+        .map_err(|_| format!("git {} timed out", args.join(" ")))?
+        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        return Err(if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +758,46 @@ mod tests {
             "collision must not auto-suffix: {err}"
         );
         assert!(!second.exists());
+    }
+
+    #[tokio::test]
+    async fn tree_listing_is_bounded_respects_ignore_and_never_returns_contents() {
+        let (_dir, repo) = init_repo();
+        std::fs::write(repo.join(".gitignore"), "secret.bin\nignored/\n").unwrap();
+        std::fs::write(repo.join("src.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(repo.join("secret.bin"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+        std::fs::create_dir_all(repo.join("ignored")).unwrap();
+        std::fs::write(repo.join("ignored/hidden.rs"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+        std::fs::write(repo.join("notes.md"), "UNIQUE_PAYLOAD_xyz\n").unwrap();
+        run(&repo, &["git", "add", ".gitignore", "src.rs"]);
+        run(&repo, &["git", "commit", "-m", "more files"]);
+
+        let (paths, truncated) = list_tree_paths(&repo, "", 50).await.unwrap();
+        assert!(!truncated);
+        assert!(paths.iter().any(|path| path == "README.md"));
+        assert!(paths.iter().any(|path| path == "src.rs"));
+        assert!(paths.iter().any(|path| path == "notes.md"));
+        assert!(paths.iter().any(|path| path == ".gitignore"));
+        assert!(!paths.iter().any(|path| path.contains("secret")));
+        assert!(!paths.iter().any(|path| path.contains("ignored")));
+        let rendered = paths.join("\n");
+        assert!(
+            !rendered.contains("UNIQUE_PAYLOAD_xyz"),
+            "tree listing leaked file contents: {rendered}"
+        );
+
+        let (matched, _) = list_tree_paths(&repo, "read", 50).await.unwrap();
+        assert_eq!(matched, vec!["README.md".to_owned()]);
+
+        for index in 0..250 {
+            std::fs::write(repo.join(format!("bulk-{index:03}.txt")), "x\n").unwrap();
+        }
+        let (capped, truncated) = list_tree_paths(&repo, "bulk-", 50).await.unwrap();
+        assert_eq!(capped.len(), 50);
+        assert!(truncated);
+        let (hard_capped, hard_truncated) = list_tree_paths(&repo, "bulk-", 500).await.unwrap();
+        assert_eq!(hard_capped.len(), 200);
+        assert!(hard_truncated);
     }
 
     #[test]

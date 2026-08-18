@@ -91,6 +91,7 @@ async fn doctor(state: &AppState) -> Result<HarnessDoctorReport, ServerError> {
                 version: probe.version,
                 tier: kind.tier(),
                 caps,
+                commands: probe.commands,
                 authenticated: probe.authenticated,
                 remediation,
                 stderr: probe.stderr,
