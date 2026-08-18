@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "../api/client";
 import type {
@@ -28,8 +28,12 @@ const NO_CATALOG_MODELS: ModelInfo[] = [];
  *
  * The harness dropdown defaults to the first ready engine; the mode list and
  * default follow the selected engine's own capability flags, so start always
- * posts a mode that engine can honor. Unsupervised Auto says so before the
- * session exists (decision 0038).
+ * posts a mode that engine can honor, and an unsupervised one says so before
+ * the session exists (decisions 0038, 0039).
+ *
+ * Cmd+Enter starts from anywhere on this surface, matching the new-workspace
+ * dialog. The draft lives in the composer, so the shortcut goes through the
+ * composer's own send button: one submit path, one set of disabled rules.
  */
 export function StartSessionPrompt({
   harnesses,
@@ -58,6 +62,7 @@ export function StartSessionPrompt({
   const [picked, setPicked] = useState<HarnessKind | null>(null);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
+  const root = useRef<HTMLDivElement>(null);
   const ensureHarnessModels = useCodeCatalogStore((state) => state.ensureHarnessModels);
   const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
   const selected =
@@ -106,7 +111,19 @@ export function StartSessionPrompt({
   }, [catalogModels, client, defaultModelKey, ensureHarnessModels, selectedKind]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      ref={root}
+      className="flex min-h-0 flex-1 flex-col"
+      onKeyDownCapture={(event) => {
+        if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+        const send = root.current?.querySelector<HTMLButtonElement>(
+          'button[aria-label="Send message"]',
+        );
+        if (!send || send.disabled) return;
+        event.preventDefault();
+        send.click();
+      }}
+    >
       <div className="flex flex-col gap-3 px-4 py-6">
         <p className="text-sm">Start a session on this workspace.</p>
         <HarnessPicker

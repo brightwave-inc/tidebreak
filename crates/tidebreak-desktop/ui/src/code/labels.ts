@@ -26,14 +26,6 @@ export const HARNESS_LABELS: Record<HarnessKind, string> = {
   grok: "Grok CLI",
 };
 
-/** One-line product gloss for the picker. Not how the adapter works. */
-export const HARNESS_SUBTITLES: Record<HarnessKind, string> = {
-  claude_code: "Anthropic's coding agent",
-  codex: "OpenAI's coding agent",
-  opencode: "Open-source coding agent",
-  grok: "xAI's coding agent",
-};
-
 export const HARNESS_TIER_LABELS: Record<HarnessTier, string> = {
   reference: "Reference",
   secondary: "Secondary",
@@ -127,14 +119,16 @@ export function autoIsUnsupervised(caps: ModeCaps): boolean {
 }
 
 /**
- * Create default: Ask when the engine can honor it. Otherwise the most
- * autonomous non-bypass posture it actually has. Allow is always opt-in
- * (decision 0033).
+ * Create default: the most autonomous posture the engine honors, walking
+ * Allow → Auto → Ask → Plan (decision 0039, amended 2026-08-18). Approving
+ * every step of a fresh session cost more than it caught, so create starts
+ * where the work runs. The mode is never silent: whichever surface offers it
+ * states the posture next to the control (decisions 0033, 0038).
  */
 export function defaultCreatePermissionMode(caps: ModeCaps): CodePermissionMode {
-  if (caps.structured_approvals === "supported") return "ask";
+  if (caps.allow_mode === "supported") return "allow";
   if (caps.auto_mode === "supported") return "auto";
-  if (caps.plan_mode === "supported") return "plan";
+  if (caps.structured_approvals === "supported") return "ask";
   return "plan";
 }
 
