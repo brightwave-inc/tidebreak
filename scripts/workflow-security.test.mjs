@@ -1496,7 +1496,7 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   assert.equal(cachedPaths(buildCacheRestore), cachedPaths(prepareCacheSave));
   assert.match(
     buildCacheRestore,
-    /key: windows-release-prepared-v2-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
+    /key: windows-release-prepared-v1-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
   );
   assert.doesNotMatch(buildCacheRestore, /restore-keys:/);
 
