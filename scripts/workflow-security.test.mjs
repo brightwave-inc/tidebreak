@@ -1440,6 +1440,9 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
     assert.match(job, /CMAKE_C_COMPILER=/);
     assert.match(job, /CMAKE_CXX_COMPILER=/);
     assert.match(job, /CMAKE_ASM_COMPILER=/);
+    assert.match(job, /echo "CC=\$clang_cl"/);
+    assert.match(job, /echo "CXX=\$clang_cl"/);
+    assert.match(job, /CXXFLAGS=\/EHsc/);
     assert.match(job, /clang-cl/);
     assert.match(job, /command -v ninja/);
   }
