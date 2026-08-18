@@ -39,6 +39,13 @@ Tidebreak, uses the architecture-specific official `tar.gz`, verifies its
 published SHA-256 digest before unpacking, and records the same marker-gated
 install under `tools/node/<version>/`.
 
+The marker format, current-platform digest, and exact-directory resolver are a
+shared execution contract rather than desktop-private logic. The desktop still
+owns provisioning, but a headless server using the same Tidebreak data
+directory may reuse that one verified install. Headless never scans sibling
+version directories, trusts a marker for another artifact, downloads Node on
+its own, or falls back to a system interpreter.
+
 Pinned harness installation and execution on macOS and Linux always prepend
 that verified managed Node `bin` directory to the captured child environment.
 Version probes, authentication probes, model listing, and live sessions all use
@@ -92,6 +99,11 @@ The managed Node installer becomes a desktop capability independent of native
 local code execution. Future changes must not re-couple its platform support to
 the local sandbox gate.
 
+Headless code mode remains a server/CLI surface under decision 7. It can reuse
+an already provisioned managed Node runtime from its data directory, but the
+Node installer stays in the closed native-only set; a fresh headless profile
+reports the missing prerequisite rather than silently using ambient `PATH`.
+
 Revisit the Windows exclusion when native tests prove repository registration,
 worktree creation, setup and quick actions, harness probe/launch, interruption,
 checkpointing, and restart recovery on Windows.
@@ -105,6 +117,9 @@ checkpointing, and restart recovery on Windows.
 - Harness tests require managed Node to be first on `PATH` for pinned probes,
   reject a pinned harness without a verified Node root, and pass that captured
   environment into the existing live-session launch paths.
+- A headless-runtime test requires an existing marker-gated Node root and
+  pinned harness to resolve without a desktop broker, while mismatched markers
+  remain invisible.
 - Linux workspace CI compiles and tests the installer and harness paths.
 - Documentation states Linux code-mode support while continuing to name
   Windows code mode and the native execution/office/computer boundaries as

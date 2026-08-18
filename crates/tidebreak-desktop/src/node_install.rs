@@ -55,12 +55,16 @@ use std::sync::{LazyLock, Mutex};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+use tidebreak_code_execution::managed_node::{
+    current_managed_node_pin, managed_node_install_marker, managed_node_marker_path,
+    managed_node_root as verified_managed_node_root, managed_node_version_dir,
+    MANAGED_NODE_VERSION,
+};
 
 /// The exact Node version this build installs and trusts, matching the
 /// container image's `node:20-bookworm-slim`.
-pub(crate) const NODE_VERSION: &str = "20.20.2";
+pub(crate) const NODE_VERSION: &str = MANAGED_NODE_VERSION;
 
 /// The unpacked runtime is about 154 MB and the tarball about 40 MB; refuse to
 /// start on a disk with less headroom than that plus slack.
@@ -81,7 +85,6 @@ struct PinnedArtifact {
     // the pinned shape (`PINNED = None`) without an installer to consume it.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     url: &'static str,
-    sha256: &'static str,
     /// The single directory the official tarball unpacks into, which the
     /// install moves into place as the version directory.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
@@ -91,28 +94,24 @@ struct PinnedArtifact {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz",
-    sha256: "466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6",
     archive_root: "node-v20.20.2-darwin-arm64",
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-x64.tar.gz",
-    sha256: "8be6f5e4bb128c82774f8a0b8d7a1cc1365a7977d9657cece0ca647b3fe04e61",
     archive_root: "node-v20.20.2-darwin-x64",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-arm64.tar.gz",
-    sha256: "47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d",
     archive_root: "node-v20.20.2-linux-arm64",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 static PINNED: Option<PinnedArtifact> = Some(PinnedArtifact {
     url: "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz",
-    sha256: "19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b",
     archive_root: "node-v20.20.2-linux-x64",
 });
 
@@ -130,7 +129,7 @@ static PINNED: Option<PinnedArtifact> = None;
 
 /// Whether this platform can install its own Node runtime.
 fn supported() -> bool {
-    PINNED.is_some()
+    PINNED.is_some() && current_managed_node_pin().is_some()
 }
 
 /// The install failure most recently hit this app run, if any. While set,
@@ -145,7 +144,7 @@ fn last_failure() -> Option<String> {
 }
 
 fn managed_version_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("tools").join("node").join(NODE_VERSION)
+    managed_node_version_dir(data_dir)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -154,45 +153,18 @@ fn staging_dir(data_dir: &Path) -> PathBuf {
 }
 
 fn marker_path(version_dir: &Path) -> PathBuf {
-    version_dir.join("installed.json")
+    managed_node_marker_path(version_dir)
 }
 
 fn managed_binary(version_dir: &Path) -> PathBuf {
     version_dir.join("bin").join("node")
 }
 
-fn managed_npm(version_dir: &Path) -> PathBuf {
-    version_dir.join("bin").join("npm")
-}
-
-/// What `installed.json` records: which artifact the directory was verified
-/// against. Written only after the digest check and the unpack both succeeded.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InstallMarker {
-    version: String,
-    tarball_sha256: String,
-}
-
 /// The managed Node runtime's root directory, if a verified install of the
 /// pinned artifact is present. This is the cheap at-rest check: marker matches
 /// the pin, and both `bin/node` and `bin/npm` exist.
 pub(crate) fn managed_node_root(data_dir: &Path) -> Option<PathBuf> {
-    let pinned = PINNED.as_ref()?;
-    managed_node_root_expecting(data_dir, pinned.sha256)
-}
-
-/// Seam for [`managed_node_root`]: the same resolution against an explicit
-/// expected digest, so the marker gate is testable off-macOS.
-fn managed_node_root_expecting(data_dir: &Path, expected_sha256: &str) -> Option<PathBuf> {
-    let version_dir = managed_version_dir(data_dir);
-    let marker = std::fs::read(marker_path(&version_dir)).ok()?;
-    let marker: InstallMarker = serde_json::from_slice(&marker).ok()?;
-    if marker.version != NODE_VERSION || marker.tarball_sha256 != expected_sha256 {
-        return None;
-    }
-    (managed_binary(&version_dir).is_file() && managed_npm(&version_dir).is_file())
-        .then_some(version_dir)
+    verified_managed_node_root(data_dir)
 }
 
 struct InstallState {
@@ -361,6 +333,8 @@ async fn install_into(
     staging: &Path,
     pinned: &PinnedArtifact,
 ) -> Result<(), String> {
+    let managed_pin = current_managed_node_pin()
+        .ok_or_else(|| "Automatic install is not supported on this platform".to_owned())?;
     crate::office_install::ensure_free_disk(
         staging,
         REQUIRED_FREE_BYTES,
@@ -379,7 +353,7 @@ async fn install_into(
             .map_err(|error| format!("Could not verify the download: {error}"))?
             .map_err(|error| format!("Could not verify the download: {error}"))?
     };
-    if digest != pinned.sha256 {
+    if digest != managed_pin.tarball_sha256 {
         let _ = tokio::fs::remove_file(&tarball).await;
         return Err(
             "The downloaded Node did not match its published checksum, so it was discarded. \
@@ -431,11 +405,8 @@ async fn install_into(
 
     // The marker lands last, so a crash anywhere above leaves an install that
     // resolution ignores and the next attempt replaces.
-    let marker = serde_json::to_vec_pretty(&InstallMarker {
-        version: NODE_VERSION.to_owned(),
-        tarball_sha256: pinned.sha256.to_owned(),
-    })
-    .map_err(|error| format!("Could not record the install: {error}"))?;
+    let marker = managed_node_install_marker(managed_pin)
+        .map_err(|error| format!("Could not record the install: {error}"))?;
     let marker_file = marker_path(&version_dir);
     let partial = marker_file.with_extension("json.partial");
     tokio::fs::write(&partial, marker)
@@ -542,15 +513,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_pin_matches_the_supported_desktop_hosts() {
-        assert_eq!(
-            supported(),
-            cfg!(any(target_os = "macos", target_os = "linux"))
-                && cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
-        );
-    }
-
-    #[test]
     fn managed_download_refuses_bytes_past_its_ceiling() {
         assert_eq!(
             next_downloaded_size(MAX_ARCHIVE_BYTES - 1, 1),
@@ -563,45 +525,6 @@ mod tests {
         assert_eq!(
             next_downloaded_size(u64::MAX, 1).unwrap_err(),
             DOWNLOAD_TOO_LARGE
-        );
-    }
-
-    /// At-rest integrity: the managed runtime only resolves behind a marker
-    /// naming the pinned version and digest — no marker, or a marker for a
-    /// different artifact, and the tree is invisible to resolution, so nothing
-    /// is ever exposed to the sandbox on the strength of a directory name.
-    #[test]
-    fn managed_runtime_resolves_only_with_a_matching_marker() {
-        let expected = "466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6";
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let version_dir = managed_version_dir(data_dir.path());
-        let binary = managed_binary(&version_dir);
-        std::fs::create_dir_all(binary.parent().expect("parent")).expect("dirs");
-        std::fs::write(&binary, b"#!/bin/sh\n").expect("binary");
-        std::fs::write(managed_npm(&version_dir), b"#!/bin/sh\n").expect("npm");
-
-        // Tree present, no marker: an interrupted install, not trusted.
-        assert_eq!(managed_node_root_expecting(data_dir.path(), expected), None);
-
-        let write_marker = |digest: &str| {
-            std::fs::write(
-                marker_path(&version_dir),
-                serde_json::to_vec(&InstallMarker {
-                    version: NODE_VERSION.to_owned(),
-                    tarball_sha256: digest.to_owned(),
-                })
-                .expect("marker json"),
-            )
-            .expect("write marker");
-        };
-
-        write_marker(&"0".repeat(64));
-        assert_eq!(managed_node_root_expecting(data_dir.path(), expected), None);
-
-        write_marker(expected);
-        assert_eq!(
-            managed_node_root_expecting(data_dir.path(), expected),
-            Some(version_dir)
         );
     }
 

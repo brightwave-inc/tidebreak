@@ -287,7 +287,7 @@ impl CodeRuntime {
                     .managed_root(tidebreak_code_execution::HostDep::Node)
                     .await
             }
-            None => None,
+            None => tidebreak_code_execution::managed_node::managed_node_root(&self.data_dir),
         };
         let probe = adapter.probe(&host).await;
         self.probes
@@ -326,16 +326,22 @@ impl CodeRuntime {
 
     #[cfg_attr(test, allow(dead_code))]
     async fn managed_node_root(&self, retry: bool) -> Result<PathBuf, String> {
-        let broker = self.host_tool_broker.as_deref().ok_or_else(|| {
-            "this host does not provide a verified managed Node runtime".to_owned()
-        })?;
-        wait_for_managed_node(
-            broker,
-            retry,
-            MANAGED_NODE_WAIT_TIMEOUT,
-            MANAGED_NODE_STARTUP_GRACE,
-        )
-        .await
+        match self.host_tool_broker.as_deref() {
+            Some(broker) => {
+                wait_for_managed_node(
+                    broker,
+                    retry,
+                    MANAGED_NODE_WAIT_TIMEOUT,
+                    MANAGED_NODE_STARTUP_GRACE,
+                )
+                .await
+            }
+            None => tidebreak_code_execution::managed_node::managed_node_root(&self.data_dir)
+                .ok_or_else(|| {
+                    "the verified managed Node runtime is not installed in this Tidebreak data directory"
+                        .to_owned()
+                }),
+        }
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -1674,5 +1680,83 @@ mod managed_node_wait_tests {
         assert_eq!(root, PathBuf::from("/verified/node"));
         assert_eq!(broker.retry_calls.load(Ordering::Relaxed), 1);
         assert!(broker.polls.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))]
+    #[tokio::test]
+    async fn headless_runtime_reuses_a_verified_node_for_an_existing_pinned_harness() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tidebreak_code_execution::managed_node::{
+            current_managed_node_pin, managed_node_install_marker, managed_node_marker_path,
+            managed_node_version_dir,
+        };
+
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let node_pin = current_managed_node_pin().expect("supported test platform");
+        let node_root = managed_node_version_dir(data_dir.path());
+        let node_bin = node_root.join("bin");
+        std::fs::create_dir_all(&node_bin).expect("node bin");
+        for name in ["node", "npm"] {
+            let path = node_bin.join(name);
+            std::fs::write(&path, b"#!/bin/sh\n").expect("node entrypoint");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("node entrypoint mode");
+        }
+        std::fs::write(
+            managed_node_marker_path(&node_root),
+            managed_node_install_marker(node_pin).expect("node marker"),
+        )
+        .expect("write node marker");
+
+        let harness = HarnessKind::ClaudeCode;
+        let harness_pin = tidebreak_harness::pin_for(harness).expect("harness pin");
+        let harness_dir = tidebreak_harness::pin::install_dir(data_dir.path(), harness_pin);
+        let harness_binary = harness_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(harness_pin.bin);
+        std::fs::create_dir_all(harness_binary.parent().expect("harness parent"))
+            .expect("harness bin");
+        std::fs::write(&harness_binary, b"#!/usr/bin/env node\n").expect("harness binary");
+        std::fs::set_permissions(&harness_binary, std::fs::Permissions::from_mode(0o755))
+            .expect("harness mode");
+        std::fs::write(
+            harness_dir.join("installed.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "package": harness_pin.package,
+                "version": harness_pin.version,
+            }))
+            .expect("harness marker"),
+        )
+        .expect("write harness marker");
+
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            data_dir.path().join("headless-code.db").display()
+        ))
+        .await
+        .expect("db");
+        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None);
+
+        assert_eq!(
+            runtime.managed_node_root(false).await.expect("node root"),
+            node_root
+        );
+        assert_eq!(
+            runtime
+                .ensure_pinned_harness(harness, false)
+                .await
+                .expect("existing harness"),
+            harness_binary
+        );
     }
 }
