@@ -1682,33 +1682,70 @@ impl SandboxContainerRunner {
                 .max(Duration::from_millis(1));
             let mut heartbeat = tokio::time::interval(heartbeat_interval);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first interval tick is immediate. Consume it so attach does
+            // not issue a redundant write, then keep at most one durable
+            // renewal in flight. A heartbeat that is awaited inline can sit on
+            // the shared claim lock while model-step accounting needs another
+            // poll of that same lock, and the connection drain never runs.
             heartbeat.tick().await;
             let deadline = self.deadline_sleep(run);
             tokio::pin!(deadline);
+            let mut completed = None;
+            let mut durable_heartbeat: Option<Pin<Box<dyn Future<Output = Result<bool>> + Send>>> =
+                None;
 
             loop {
-                tokio::select! {
+                if durable_heartbeat.is_none() {
+                    if let Some(end) = completed.take() {
+                        break end;
+                    }
+                }
+
+                let drive_pending = completed.is_none();
+                let heartbeat_idle = durable_heartbeat.is_none();
+                let poll_durable_heartbeat = async {
+                    match durable_heartbeat.as_mut() {
+                        Some(future) => future.as_mut().await,
+                        None => std::future::pending::<Result<bool>>().await,
+                    }
+                };
+                let event = tokio::select! {
                     biased;
-                    () = cancel.cancelled() => break DriveEnd::LeaseLost,
-                    end = &mut drive => break end,
-                    () = &mut deadline => break DriveEnd::DeadlineExceeded,
-                    _ = heartbeat.tick() => {
-                        if !Self::renew_or_validate_execution(
-                            Arc::clone(&self.store),
-                            run_id,
-                            lease_token,
-                            chrono_duration(self.config.lease)?,
-                        )
-                        .await?
-                        {
-                            // The lease is gone (cancelled, or reaped): stop driving
-                            // rather than keep a container working for a run this
-                            // host no longer owns. Teardown still runs.
-                            break DriveEnd::LeaseLost;
-                        }
+                    () = cancel.cancelled() => DrivePoll::Cancelled,
+                    result = poll_durable_heartbeat => DrivePoll::HeartbeatCompleted(result),
+                    () = &mut deadline => DrivePoll::DeadlineExceeded,
+                    end = &mut drive, if drive_pending => DrivePoll::DriveCompleted(end),
+                    _ = heartbeat.tick(), if heartbeat_idle => DrivePoll::HeartbeatTick,
+                };
+                match event {
+                    DrivePoll::Cancelled => break DriveEnd::LeaseLost,
+                    DrivePoll::DeadlineExceeded => break DriveEnd::DeadlineExceeded,
+                    DrivePoll::DriveCompleted(end) => completed = Some(end),
+                    DrivePoll::HeartbeatTick => {
+                        let lease_duration = chrono_duration(self.config.lease)?;
+                        let store = Arc::clone(&self.store);
+                        durable_heartbeat = Some(Box::pin(async move {
+                            Self::renew_or_validate_execution(
+                                store,
+                                run_id,
+                                lease_token,
+                                lease_duration,
+                            )
+                            .await
+                        }));
+                    }
+                    DrivePoll::HeartbeatCompleted(Ok(true)) => {
+                        durable_heartbeat = None;
                         #[cfg(test)]
                         self.heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
                     }
+                    DrivePoll::HeartbeatCompleted(Ok(false)) => {
+                        // The lease is gone (cancelled, or reaped): stop driving
+                        // rather than keep a container working for a run this
+                        // host no longer owns. Teardown still runs.
+                        break DriveEnd::LeaseLost;
+                    }
+                    DrivePoll::HeartbeatCompleted(Err(error)) => return Err(error),
                 }
             }
         };
@@ -2607,6 +2644,17 @@ enum PreAttachPoll<T> {
     DeadlineExceeded,
     FenceTick,
     FenceCompleted(Result<bool>),
+}
+
+/// One poll result from the attached-drive heartbeat loop. The connection
+/// drain and the durable lease renewal stay distinct so a heartbeat write
+/// cannot starve the in-flight reverse-RPC that still needs to be polled.
+enum DrivePoll<T> {
+    Cancelled,
+    DeadlineExceeded,
+    DriveCompleted(T),
+    HeartbeatTick,
+    HeartbeatCompleted(Result<bool>),
 }
 
 /// The result of draining one connection to the container.
