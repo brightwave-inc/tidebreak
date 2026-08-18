@@ -55,7 +55,7 @@ export function ToolOutputPreview({
           aria-label={label}
           className={
             bare
-              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-[13.5px] break-words whitespace-pre-wrap [overflow-anchor:none]"
               : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
           }
         >
