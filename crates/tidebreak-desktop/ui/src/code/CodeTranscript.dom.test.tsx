@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
@@ -121,6 +122,39 @@ describe("CodeTranscript", () => {
     expect(
       screen.getByText("Send a message to start a turn."),
     ).toBeInTheDocument();
+  });
+
+  it("clamps a running tool's output and offers a copy control", async () => {
+    const preview = Array.from(
+      { length: 12 },
+      (_, index) => `line ${index + 1}`,
+    ).join("\n");
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-long",
+            turnId: "t1",
+            callId: "c1",
+            name: "Bash",
+            detail: { kind: "command", cmd: "seq 12", cwd: "/tmp" },
+            status: "running",
+            preview,
+          },
+        ]}
+      />,
+    );
+
+    const body = screen.getByLabelText("Output");
+    expect(body.textContent).toContain("line 8");
+    expect(body.textContent).not.toContain("line 9");
+    expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show 4 more lines" }),
+    );
+    expect(screen.getByLabelText("Output").textContent).toContain("line 12");
   });
 
   it("shows the engine working only where nothing else says so", () => {
