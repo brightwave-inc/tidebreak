@@ -80,6 +80,10 @@ const listCodeRepos = vi.fn(async () => [
 ]);
 const listCodeWorkspaces = vi.fn(async () => [] as unknown[]);
 const getHarnessDoctor = vi.fn(async () => ({ harnesses: [] }));
+const listCodeHarnessModels = vi.fn(async () => ({
+  kind: "claude_code" as const,
+  models: [],
+}));
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listInbox = vi.fn(async () => [] as unknown[]);
@@ -131,6 +135,7 @@ vi.mock("./api", () => ({
     listCodeRepos = listCodeRepos;
     listCodeWorkspaces = listCodeWorkspaces;
     getHarnessDoctor = getHarnessDoctor;
+    listCodeHarnessModels = listCodeHarnessModels;
     openCodeUpdates = vi.fn(() => ({
       close() {},
       addEventListener() {},
@@ -293,6 +298,7 @@ beforeEach(() => {
   });
   listCodeRepos.mockClear();
   listCodeWorkspaces.mockClear();
+  listCodeHarnessModels.mockClear();
   // Code mode is opt-in and its catalog outlives a render, so a test that
   // turned it on must not decide the next one's routes.
   useExperimentalFlags.setState({ loaded: false, codeModeEnabled: false });

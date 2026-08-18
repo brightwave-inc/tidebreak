@@ -309,11 +309,7 @@ fn parse_cli_models(
             .strip_prefix("default model:")
             .or_else(|| lower.strip_prefix("current model:"))
         {
-            if let Some(id) = rest
-                .split_whitespace()
-                .next()
-                .and_then(|token| normalize_model_id(token))
-            {
+            if let Some(id) = rest.split_whitespace().next().and_then(normalize_model_id) {
                 push_listed(&mut models, id, true);
             }
             continue;
@@ -322,9 +318,7 @@ fn parse_cli_models(
             || lower.contains("(default)")
             || trimmed.contains('*')
             || trimmed.contains('✓');
-        let token = trimmed
-            .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '•' | '✓' | '►'))
-            .trim();
+        let token = trimmed.trim_start_matches(['-', '*', '•', '✓', '►']).trim();
         let Some(id) = token
             .split(|ch: char| ch.is_whitespace() || ch == '(' || ch == ',')
             .next()
