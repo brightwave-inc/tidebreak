@@ -70,7 +70,15 @@ export function ToolCardShell({
             aria-hidden="true"
           />
           {icon}
-          <span className={cn("truncate", titleClassName)}>{title}</span>
+          {/* A truncated command is unreadable, and the card's body may not
+              repeat it. The native tooltip gives the whole line back to anyone
+              who hovers, for the titles that are plain text to begin with. */}
+          <span
+            className={cn("truncate", titleClassName)}
+            title={typeof title === "string" ? title : undefined}
+          >
+            {title}
+          </span>
         </span>
         {/* One end cluster: a fragment would become sibling flex children,
             so justify-between would split them and they would not share a

@@ -9,11 +9,8 @@ import {
 } from "react";
 import type { ApiClient, Chat } from "./api";
 import type { RendererTurnUsage } from "./generated/wire";
-import {
-  followScrollBehavior,
-  isNearBottom,
-  scrollToLatest,
-} from "./ChatScroll";
+import { followScrollBehavior } from "./ChatScroll";
+import { useTranscriptFollow } from "./useTranscriptFollow";
 import { useChatSessionStore } from "./ChatSessionStore";
 import {
   useComposerAttachments,
@@ -290,170 +287,37 @@ export function ChatView({
     [navigationSignature],
   );
 
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
   /** The composer's slot, which a pending question or plan card takes over. */
   const promptSlotRef = useRef<HTMLDivElement | null>(null);
-  const followsLatestRef = useRef(true);
-  const isProgrammaticRef = useRef(false);
-  const isSmoothScrollingRef = useRef(false);
-  const smoothScrollRequestedRef = useRef(false);
   const visibleContinuationCallIdsRef = useRef<Set<string>>(new Set());
-  const scrollObserverRef = useRef<ResizeObserver | null>(null);
-  const contentObserverRef = useRef<ResizeObserver | null>(null);
-  const [scrolledAway, setScrolledAway] = useState(false);
-  const [fadeClass, setFadeClass] = useState<string | null>(null);
+  const {
+    scrollRef: attachScrollRef,
+    contentRef: attachContentRef,
+    onScroll: handleScroll,
+    scrolledAway,
+    fadeClass,
+    scrollToBottom,
+    armFollow,
+    disarmFollow,
+    isFollowing,
+    scrollElement,
+    viewportRef,
+    beginProgrammaticScroll,
+    endProgrammaticScroll,
+    requestSmoothFollow,
+  } = useTranscriptFollow({ visible: transcriptVisible });
   // True once the reader has sent in this mounted session. Gates the turn pin so
   // a freshly loaded history reads normally, then the just-sent turn is held tall
   // enough to land near the top of the viewport.
   const [pinLastTurn, setPinLastTurn] = useState(false);
 
-  // Reflect where the scroll sits onto the edge-fade masks: fade the top once
-  // there is content above, the bottom while there is content below.
-  const updateEdges = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    const fromTop = scroll.scrollTop > 0;
-    const fromBottom =
-      scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 1;
-    setFadeClass(
-      fromTop && fromBottom
-        ? "is-faded-both"
-        : fromTop
-          ? "is-faded-top"
-          : fromBottom
-            ? "is-faded-bottom"
-            : null,
-    );
-  }, []);
-
-  const instantScrollToBottom = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    isProgrammaticRef.current = true;
-    setScrolledAway(false);
-    scrollToLatest(scroll, "auto");
-    requestAnimationFrame(() => {
-      isProgrammaticRef.current = false;
-    });
-  }, []);
-
-  const smoothScrollToBottom = useCallback(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    isSmoothScrollingRef.current = true;
-    isProgrammaticRef.current = true;
-    setScrolledAway(false);
-    scrollToLatest(scroll, followScrollBehavior(false));
-
-    const done = () => {
-      isSmoothScrollingRef.current = false;
-      isProgrammaticRef.current = false;
-      // Content may have grown while the animation was targeting an older
-      // bottom. Catch up once, without starting another animation.
-      if (followsLatestRef.current) instantScrollToBottom();
-    };
-    let timeout: ReturnType<typeof setTimeout>;
-    const onScrollEnd = () => {
-      clearTimeout(timeout);
-      done();
-    };
-    scroll.addEventListener("scrollend", onScrollEnd, { once: true });
-    timeout = setTimeout(() => {
-      scroll.removeEventListener("scrollend", onScrollEnd);
-      done();
-    }, 800);
-  }, [instantScrollToBottom]);
-
-  // Jump to the latest message. Marked programmatic so the resulting scroll
-  // events don't read as the reader deliberately scrolling away.
-  const scrollToBottom = useCallback(
-    (behavior: ScrollBehavior) => {
-      if (behavior === "smooth") smoothScrollToBottom();
-      else instantScrollToBottom();
-    },
-    [instantScrollToBottom, smoothScrollToBottom],
-  );
-
-  const enableFollow = useCallback(() => {
-    followsLatestRef.current = true;
-    instantScrollToBottom();
-  }, [instantScrollToBottom]);
-
-  const handleScroll = useCallback(() => {
-    updateEdges();
-    if (isProgrammaticRef.current) return;
-    const scroll = scrollRef.current;
-    if (!scroll) return;
-    const away = !isNearBottom(scroll);
-    setScrolledAway(away);
-    // Drifting away disarms follow; re-arming is deliberate (the button, or a
-    // send), never a side effect of scrolling back toward the bottom.
-    if (away && followsLatestRef.current) followsLatestRef.current = false;
-  }, [updateEdges]);
-
-  // Track the scroll viewport height in a CSS variable so a pinned turn can
-  // reserve roughly a screenful, and keep the edge fades honest across resizes.
-  const attachScrollRef = useCallback(
-    (element: HTMLDivElement | null) => {
-      scrollObserverRef.current?.disconnect();
-      scrollRef.current = element;
-      setScrollElement(element);
-      if (!element) return;
-      const observer = new ResizeObserver(() => {
-        element.style.setProperty(
-          "--transcript-viewport",
-          `${element.clientHeight}px`,
-        );
-        updateEdges();
-      });
-      observer.observe(element);
-      scrollObserverRef.current = observer;
-    },
-    [updateEdges],
-  );
-
-  // Follow asynchronous layout growth (image loads, markdown reflow) that no
-  // React state change announces, so a following reader stays pinned to the end.
-  const attachContentRef = useCallback(
-    (element: HTMLDivElement | null) => {
-      contentObserverRef.current?.disconnect();
-      if (!element) return;
-      const observer = new ResizeObserver(() => {
-        if (!transcriptVisible) return;
-        if (smoothScrollRequestedRef.current) {
-          smoothScrollRequestedRef.current = false;
-          scrollToBottom(followScrollBehavior(false));
-        } else if (
-          followsLatestRef.current &&
-          !isSmoothScrollingRef.current
-        ) {
-          scrollToBottom("auto");
-        }
-        const scroll = scrollRef.current;
-        if (scroll) setScrolledAway(!isNearBottom(scroll));
-        updateEdges();
-      });
-      observer.observe(element);
-      contentObserverRef.current = observer;
-    },
-    [transcriptVisible, scrollToBottom, updateEdges],
-  );
-
   // A conversation starts live at its tail. Streaming growth itself is handled
-  // only by the content ResizeObserver above; reacting to every message-array
-  // replacement as well makes token updates repeatedly restart scrolling and
-  // can fight a reader who is trying to move upward.
+  // only by the content ResizeObserver in the follow hook; reacting to every
+  // message-array replacement as well makes token updates repeatedly restart
+  // scrolling and can fight a reader who is trying to move upward.
   useEffect(() => {
-    enableFollow();
-  }, [chat.id, enableFollow]);
-
-  // The transcript can remain mounted while a neighboring panel takes the
-  // space. Restore a following reader to the tail when it becomes visible.
-  useEffect(() => {
-    if (transcriptVisible && followsLatestRef.current) scrollToBottom("auto");
-    updateEdges();
-  }, [transcriptVisible, scrollToBottom, updateEdges]);
+    armFollow();
+  }, [chat.id, armFollow]);
 
   useEffect(() => {
     const next = new Set([
@@ -466,11 +330,12 @@ export function ChatView({
     );
     visibleContinuationCallIdsRef.current = next;
     if (!gainedRequest) return;
-    if (followsLatestRef.current) scrollToBottom(followScrollBehavior(false));
+    if (isFollowing()) scrollToBottom(followScrollBehavior(false));
   }, [
     folderAccess.requests,
     outputWritebacks.requests,
     userQuestions.requests,
+    isFollowing,
     scrollToBottom,
   ]);
 
@@ -498,12 +363,11 @@ export function ChatView({
     };
     const attempt = () => {
       if (settled) return;
-      if (revealPendingCall(scrollRef.current, focusCallId)) {
+      if (revealPendingCall(viewportRef.current, focusCallId)) {
         // Arriving at a specific card means the reader is no longer following
         // the end of the transcript; letting follow stay armed would scroll them
         // straight back off it.
-        followsLatestRef.current = false;
-        setScrolledAway(true);
+        disarmFollow();
         clear();
         return;
       }
@@ -519,7 +383,14 @@ export function ChatView({
       window.clearInterval(timer);
       window.clearTimeout(deadline);
     };
-  }, [focusCallId, transcriptVisible, chat.id, navigate]);
+  }, [
+    focusCallId,
+    transcriptVisible,
+    chat.id,
+    disarmFollow,
+    navigate,
+    viewportRef,
+  ]);
 
   // The router's hash is already occupied by hash history, so a rail jump is
   // represented by `?at=`. Keeping it in the URL makes an anchored reload land
@@ -535,9 +406,8 @@ export function ChatView({
         (element) => element.dataset.transcriptAnchor === anchoredMessageId,
       );
       if (!target) return;
-      followsLatestRef.current = false;
-      setScrolledAway(true);
-      isProgrammaticRef.current = true;
+      disarmFollow();
+      beginProgrammaticScroll();
       const containerRect = scrollElement.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
       scrollElement.scrollTo({
@@ -547,12 +417,18 @@ export function ChatView({
         ),
         behavior: "smooth",
       });
-      window.setTimeout(() => {
-        isProgrammaticRef.current = false;
-      }, 800);
+      window.setTimeout(endProgrammaticScroll, 800);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [anchoredMessageId, messages, scrollElement, transcriptVisible]);
+  }, [
+    anchoredMessageId,
+    beginProgrammaticScroll,
+    disarmFollow,
+    endProgrammaticScroll,
+    messages,
+    scrollElement,
+    transcriptVisible,
+  ]);
 
   const jumpToMessage = useCallback(
     (anchorId: string) => {
@@ -581,9 +457,8 @@ export function ChatView({
         replace: true,
       });
     }
-    followsLatestRef.current = true;
-    scrollToBottom(followScrollBehavior(false));
-  }, [anchoredMessageId, chat.id, navigate, scrollToBottom]);
+    armFollow(followScrollBehavior(false));
+  }, [anchoredMessageId, armFollow, chat.id, navigate]);
 
   const handleSend = useCallback(async () => {
     setPinLastTurn(true);
@@ -598,10 +473,17 @@ export function ChatView({
         replace: true,
       });
     }
-    enableFollow();
-    smoothScrollRequestedRef.current = true;
+    armFollow();
+    requestSmoothFollow();
     await onSend();
-  }, [anchoredMessageId, chat.id, enableFollow, navigate, onSend]);
+  }, [
+    anchoredMessageId,
+    armFollow,
+    chat.id,
+    navigate,
+    onSend,
+    requestSmoothFollow,
+  ]);
 
   return (
     <section className="chat-pane">
