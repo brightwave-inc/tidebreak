@@ -65,8 +65,10 @@ describe("CodeTranscript", () => {
     render(<CodeTranscript items={items} />);
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
     expect(
-      screen.getByRole("status", { name: "Bash succeeded" }),
+      screen.getByRole("status", { name: "Command run succeeded" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Command run")).toBeInTheDocument();
+    expect(screen.getByText("ls")).toBeInTheDocument();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
 
@@ -124,9 +126,9 @@ describe("CodeTranscript", () => {
     ).toBeInTheDocument();
   });
 
-  it("clamps a running tool's output and offers a copy control", async () => {
+  it("expands a failed tool and clamps long output", async () => {
     const preview = Array.from(
-      { length: 12 },
+      { length: 13 },
       (_, index) => `line ${index + 1}`,
     ).join("\n");
     render(
@@ -138,8 +140,8 @@ describe("CodeTranscript", () => {
             turnId: "t1",
             callId: "c1",
             name: "Bash",
-            detail: { kind: "command", cmd: "seq 12", cwd: "/tmp" },
-            status: "running",
+            detail: { kind: "command", cmd: "seq 13", cwd: "/tmp" },
+            status: "failed",
             preview,
           },
         ]}
@@ -147,14 +149,14 @@ describe("CodeTranscript", () => {
     );
 
     const body = screen.getByLabelText("Output");
-    expect(body.textContent).toContain("line 8");
-    expect(body.textContent).not.toContain("line 9");
+    expect(body.textContent).toContain("line 12");
+    expect(body.textContent).not.toContain("line 13");
     expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Show 4 more lines" }),
+      screen.getByRole("button", { name: "· · · 1 more line" }),
     );
-    expect(screen.getByLabelText("Output").textContent).toContain("line 12");
+    expect(screen.getByLabelText("Output").textContent).toContain("line 13");
   });
 
   it("shows the engine working only where nothing else says so", () => {

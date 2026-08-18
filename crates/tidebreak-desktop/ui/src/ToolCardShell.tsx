@@ -61,10 +61,10 @@ export function ToolCardShell({
         aria-controls={bodyId}
         onClick={() => setExpanded((current) => !current)}
       >
-        <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px] font-medium">
+        <span className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs font-medium">
           <ChevronDown
             className={cn(
-              "size-3.5 shrink-0 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
+              "size-3.5 shrink-0 transition-transform",
               !expanded && "-rotate-90",
             )}
             aria-hidden="true"
@@ -74,10 +74,7 @@ export function ToolCardShell({
               repeat it. The native tooltip gives the whole line back to anyone
               who hovers, for the titles that are plain text to begin with. */}
           <span
-            className={cn(
-              typeof title === "string" ? "truncate" : "min-w-0",
-              titleClassName,
-            )}
+            className={cn("truncate", titleClassName)}
             title={typeof title === "string" ? title : undefined}
           >
             {title}
@@ -89,7 +86,7 @@ export function ToolCardShell({
         <span className="flex shrink-0 items-stretch gap-1">{badge}</span>
       </button>
       {expanded && (
-        <div id={bodyId} className="border-t [overflow-anchor:none]">
+        <div id={bodyId} className="border-t">
           {children}
         </div>
       )}

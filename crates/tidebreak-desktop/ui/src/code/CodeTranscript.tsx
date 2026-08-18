@@ -1,15 +1,24 @@
-import { FileCode, FileSearch, Search, SquareTerminal, Wrench } from "lucide-react";
-import { useState, type RefCallback } from "react";
+import {
+  Check,
+  ChevronDown,
+  CircleSlash,
+  FileCode,
+  FileSearch,
+  Loader2,
+  Search,
+  SquareTerminal,
+  Wrench,
+  X,
+} from "lucide-react";
+import { useId, useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
-import { Badge } from "@/components/ui/badge";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
 import { AssistantWorkingIndicator } from "@/AssistantWorkingIndicator";
 import { MessageFooter } from "@/MessageFooter";
 import { isolatedCard } from "@/PendingCard";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
-import { ToolCardShell } from "@/ToolCardShell";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
@@ -19,7 +28,7 @@ import { TurnReviewCard } from "./TurnReviewCard";
 
 /**
  * The code-session transcript: the reader's prompts, markdown for assistant
- * text, tool-card chrome for engine work, the approvals a turn is parked on,
+ * text, inline tool lines for engine work, the approvals a turn is parked on,
  * and what each turn came to.
  *
  * The frame is chat's — `.messages` around a `.messages-column` — because the
@@ -122,7 +131,7 @@ export function CodeTranscript({
  * Whether the engine owes the reader a visible working state.
  *
  * Anything with its own live presentation speaks for itself: streaming prose, a
- * running tool card, an approval waiting on a decision. The indicator covers
+ * running tool line, an approval waiting on a decision. The indicator covers
  * the gaps between them — and comes back under a partial response whose stream
  * has gone quiet, so a slow engine reads differently from a hung one.
  */
@@ -271,6 +280,11 @@ function TranscriptItem({
   }
 }
 
+/**
+ * One engine action as a boxless line. The verb names what ran; the muted
+ * mono subject is the command or path; the right slot is the outcome glyph.
+ * Failed and denied open so the output is the next thing you read.
+ */
 export function CodeToolCard({
   name,
   detail,
@@ -282,42 +296,51 @@ export function CodeToolCard({
   status: "running" | "succeeded" | "failed" | "denied";
   preview: string;
 }) {
-  const badge =
-    status === "running" ? (
-      <Badge variant="info" size="sm">
-        Running
-      </Badge>
-    ) : status === "failed" ? (
-      <Badge variant="critical" size="sm">
-        Failed
-      </Badge>
-    ) : status === "denied" ? (
-      <Badge variant="warning" size="sm">
-        Denied
-      </Badge>
-    ) : (
-      <Badge variant="success" size="sm">
-        Done
-      </Badge>
-    );
+  const defaultExpanded = status === "failed" || status === "denied";
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const bodyId = useId();
+  const verb = toolVerb(detail, status);
+  const subject = toolSubject(detail, name);
+  const hasOutput = preview.trim().length > 0;
+
   return (
-    <ToolCardShell
-      icon={toolIcon(detail)}
-      title={
-        <MiddleTruncate
-          text={toolTitle(detail, name)}
-          className={detail.kind === "command" ? "font-mono" : undefined}
-        />
-      }
-      badge={badge}
-      defaultExpanded={status === "running"}
-      label={`${name} ${status}`}
+    <div
+      className="max-w-prose [overflow-anchor:none]"
+      role="status"
+      aria-label={`${verb} ${status}`}
     >
-      <div className="text-muted-foreground space-y-1 px-2.5 pb-2 [overflow-anchor:none]">
-        <p className="text-[11px]">{toolDetailLine(detail)}</p>
-        {preview && <ToolOutputPreview text={preview} />}
-      </div>
-    </ToolCardShell>
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 py-0.5 text-left text-[13px]"
+        aria-expanded={expanded}
+        aria-controls={hasOutput ? bodyId : undefined}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="text-muted-foreground shrink-0 [&>svg]:size-3.5">
+          {toolIcon(detail)}
+        </span>
+        <span className="shrink-0 font-semibold">{verb}</span>
+        <MiddleTruncate
+          text={subject}
+          className="text-muted-foreground min-w-0 font-mono"
+        />
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          <StatusGlyph status={status} />
+          <ChevronDown
+            className={cn(
+              "text-muted-foreground size-3.5 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
+              !expanded && "-rotate-90",
+            )}
+            aria-hidden="true"
+          />
+        </span>
+      </button>
+      {expanded && hasOutput && (
+        <div id={bodyId} className="pl-6">
+          <ToolOutputPreview text={preview} collapsedLines={12} bare />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -365,7 +388,39 @@ function toolIcon(detail: ToolDetail) {
   }
 }
 
-function toolTitle(detail: ToolDetail, name: string): string {
+function toolVerb(
+  detail: ToolDetail,
+  status: "running" | "succeeded" | "failed" | "denied",
+): string {
+  if (status === "running") {
+    switch (detail.kind) {
+      case "command":
+        return "Command running";
+      case "file_read":
+        return "Reading file";
+      case "file_edit":
+        return "Editing file";
+      case "search":
+        return "Searching";
+      case "other":
+        return "Tool running";
+    }
+  }
+  switch (detail.kind) {
+    case "command":
+      return "Command run";
+    case "file_read":
+      return "File read";
+    case "file_edit":
+      return "File edited";
+    case "search":
+      return "Search run";
+    case "other":
+      return "Tool run";
+  }
+}
+
+function toolSubject(detail: ToolDetail, name: string): string {
   switch (detail.kind) {
     case "command":
       return detail.cmd;
@@ -376,6 +431,37 @@ function toolTitle(detail: ToolDetail, name: string): string {
       return detail.query;
     case "other":
       return detail.summary || name;
+  }
+}
+
+function StatusGlyph({
+  status,
+}: {
+  status: "running" | "succeeded" | "failed" | "denied";
+}) {
+  switch (status) {
+    case "running":
+      return (
+        <Loader2
+          className="text-info-foreground size-3.5 animate-spin motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+      );
+    case "succeeded":
+      return (
+        <Check className="text-success-foreground size-3.5" aria-hidden="true" />
+      );
+    case "failed":
+      return (
+        <X className="text-critical-foreground size-3.5" aria-hidden="true" />
+      );
+    case "denied":
+      return (
+        <CircleSlash
+          className="text-warning-foreground size-3.5"
+          aria-hidden="true"
+        />
+      );
   }
 }
 
@@ -403,20 +489,7 @@ function MiddleTruncate({
   );
 }
 
-function toolDetailLine(detail: ToolDetail): string {
-  switch (detail.kind) {
-    case "command":
-      return detail.cwd ? `cwd ${detail.cwd}` : "Command";
-    case "file_read":
-      return "File read";
-    case "file_edit":
-      return "File edit";
-    case "search":
-      return "Search";
-    case "other":
-      return detail.summary;
-  }
-}
+
 
 const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
   added: "A",
