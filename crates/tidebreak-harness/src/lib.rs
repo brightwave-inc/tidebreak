@@ -32,7 +32,7 @@ pub mod probe;
 mod text;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
-pub use child::ChildPid;
+pub use child::{spawn_process_tree, ChildPid, ProcessTreeChild};
 pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };

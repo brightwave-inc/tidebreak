@@ -1,5 +1,4 @@
-//! Interactive-login-shell binary resolution, version detection, and
-//! environment capture.
+//! Host binary resolution, version detection, and environment capture.
 //!
 //! GUI processes on macOS do not inherit the user's shell PATH or profile
 //! environment. Resolution therefore asks `$SHELL -ilc '…'` — login *and*
@@ -7,16 +6,22 @@
 //! config commonly live — and accepts only an absolute, executable result.
 //! The same probe captures the shell's resolved environment so children
 //! run under that snapshot, not the GUI process env.
+//!
+//! A native Windows GUI process already receives the user's environment.
+//! Windows therefore captures that process environment directly, merges test
+//! or caller overrides case-insensitively, and resolves through `PATH` plus
+//! `PATHEXT` without running a shell profile script.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tidebreak_code_execution::managed_node::{managed_node_executable, managed_node_path_dir};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::is_absolute_executable;
+use crate::{is_absolute_executable, spawn_process_tree};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_STDERR_BYTES: usize = 4_096;
@@ -24,7 +29,7 @@ const MAX_STDERR_BYTES: usize = 4_096;
 /// Host environment used for discovery. Tests inject a shim shell and PATH.
 #[derive(Debug, Clone)]
 pub struct HostEnv {
-    /// Login shell. Defaults to `$SHELL`, then `/bin/sh`.
+    /// Login shell on Unix. Unused on Windows.
     pub shell: PathBuf,
     /// Extra environment for the probe child (typically a test PATH).
     pub env: Vec<(OsString, OsString)>,
@@ -32,8 +37,8 @@ pub struct HostEnv {
     pub clear_env: bool,
     /// App data directory. When set, probe prefers a pinned install under it.
     pub data_dir: Option<PathBuf>,
-    /// Host-verified managed Node root. Pinned npm harnesses need its `bin`
-    /// directory first on `PATH`; their entrypoints use `#!/usr/bin/env node`.
+    /// Host-verified managed Node root. Pinned npm harnesses need its runtime
+    /// directory first on `PATH`; their entrypoints resolve `node`/`node.exe`.
     pub managed_node_root: Option<PathBuf>,
 }
 
@@ -47,9 +52,12 @@ impl HostEnv {
     /// The current process's login shell.
     #[must_use]
     pub fn from_process() -> Self {
+        #[cfg(unix)]
         let shell = std::env::var_os("SHELL")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        #[cfg(windows)]
+        let shell = PathBuf::new();
         Self {
             shell,
             env: Vec::new(),
@@ -112,7 +120,7 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
                 let node = host
                     .managed_node_root
                     .as_deref()
-                    .map(|root| root.join("bin/node"));
+                    .map(managed_node_executable);
                 if !node.as_deref().is_some_and(crate::is_absolute_executable) {
                     return Err(ProbeError::NotFound(name.to_owned()));
                 }
@@ -124,41 +132,102 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
             return Err(ProbeError::NotFound(name.to_owned()));
         }
     }
-    let token = sentinel_token();
-    let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
-    let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
-    let end = format!("TIDEBREAK_PROBE_END_{token}");
-    let script = format!(
-        "printf '%s\\n' '{begin}'; command -v {name} || true; printf '%s\\n' '{env_mark}'; \
-         if env -0 >/dev/null 2>&1; then env -0; else env; fi; printf '\\n%s\\n' '{end}'"
-    );
-    let output = run_interactive_login_shell(host, &script).await?;
-    let parsed =
-        parse_sentinel_output(&output.stdout, &begin, &env_mark, &end).ok_or_else(|| {
-            if output.stdout.trim().is_empty() && !output.status_ok {
-                ProbeError::NotFound(name.to_owned())
-            } else {
-                ProbeError::Shell("probe sentinels missing from shell output".into())
-            }
-        })?;
-    if parsed.path.is_empty() {
-        return Err(ProbeError::NotFound(name.to_owned()));
+    #[cfg(windows)]
+    {
+        probe_windows_process_env(host, name)
     }
-    let path = PathBuf::from(&parsed.path);
-    if !path.is_absolute() {
-        return Err(ProbeError::RelativePath {
-            name: name.to_owned(),
-            path: parsed.path,
-        });
+    #[cfg(not(windows))]
+    {
+        let token = sentinel_token();
+        let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
+        let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
+        let end = format!("TIDEBREAK_PROBE_END_{token}");
+        let script = format!(
+            "printf '%s\\n' '{begin}'; command -v {name} || true; printf '%s\\n' '{env_mark}'; \
+             if env -0 >/dev/null 2>&1; then env -0; else env; fi; printf '\\n%s\\n' '{end}'"
+        );
+        let output = run_interactive_login_shell(host, &script).await?;
+        let parsed =
+            parse_sentinel_output(&output.stdout, &begin, &env_mark, &end).ok_or_else(|| {
+                if output.stdout.trim().is_empty() && !output.status_ok {
+                    ProbeError::NotFound(name.to_owned())
+                } else {
+                    ProbeError::Shell("probe sentinels missing from shell output".into())
+                }
+            })?;
+        if parsed.path.is_empty() {
+            return Err(ProbeError::NotFound(name.to_owned()));
+        }
+        let path = PathBuf::from(&parsed.path);
+        if !path.is_absolute() {
+            return Err(ProbeError::RelativePath {
+                name: name.to_owned(),
+                path: parsed.path,
+            });
+        }
+        if !is_absolute_executable(&path) {
+            return Err(ProbeError::NotExecutable(path));
+        }
+        Ok(ProbeCapture {
+            binary: path,
+            env: parsed.env,
+            stderr: output.stderr,
+        })
     }
-    if !is_absolute_executable(&path) {
-        return Err(ProbeError::NotExecutable(path));
-    }
+}
+
+#[cfg(windows)]
+fn probe_windows_process_env(host: &HostEnv, name: &str) -> Result<ProbeCapture, ProbeError> {
+    let env = windows_process_env(host);
+    let path =
+        resolve_windows_command(&env, name).ok_or_else(|| ProbeError::NotFound(name.to_owned()))?;
     Ok(ProbeCapture {
         binary: path,
-        env: parsed.env,
-        stderr: output.stderr,
+        env,
+        stderr: String::new(),
     })
+}
+
+#[cfg(windows)]
+fn resolve_windows_command(env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
+    let path = env_value(env, "PATH")?;
+    let extensions = env_value(env, "PATHEXT")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| {
+                    if extension.starts_with('.') {
+                        extension.to_owned()
+                    } else {
+                        format!(".{extension}")
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| [".COM", ".EXE", ".BAT", ".CMD"].map(str::to_owned).to_vec());
+    let explicit_extension = Path::new(name).extension().is_some();
+    for dir in std::env::split_paths(path) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        if explicit_extension {
+            let candidate = dir.join(name);
+            if is_absolute_executable(&candidate) {
+                return Some(candidate);
+            }
+            continue;
+        }
+        for extension in &extensions {
+            let candidate = dir.join(format!("{name}{extension}"));
+            if is_absolute_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn kind_for_command(name: &str) -> Option<tidebreak_core::HarnessKind> {
@@ -196,16 +265,15 @@ fn prepend_managed_node_path(
     let Some(root) = managed_node_root else {
         return env;
     };
-    let bin = root.join("bin");
-    let prior = env
-        .iter()
-        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value.clone())
+    let runtime_dir = managed_node_path_dir(root);
+    let prior = env_value(&env, std::ffi::OsStr::new("PATH"))
+        .cloned()
         .unwrap_or_default();
-    env.retain(|(key, _)| !key.to_string_lossy().eq_ignore_ascii_case("PATH"));
-    let mut paths = vec![bin.clone()];
+    env.retain(|(key, _)| !env_key_eq(key, std::ffi::OsStr::new("PATH"), true));
+    let mut paths = vec![runtime_dir.clone()];
     paths.extend(std::env::split_paths(&prior));
-    let path = std::env::join_paths(paths).unwrap_or_else(|_| bin.into_os_string());
+    let path =
+        std::env::join_paths(paths).unwrap_or_else(|_| runtime_dir.as_os_str().to_os_string());
     env.push((OsString::from("PATH"), path));
     env
 }
@@ -215,18 +283,35 @@ fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
 }
 
 async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
-    let token = sentinel_token();
-    let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
-    let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
-    let end = format!("TIDEBREAK_PROBE_END_{token}");
-    let script = format!(
-        "printf '%s\\n' '{begin}'; printf '%s\\n' '{env_mark}'; \
-         if env -0 >/dev/null 2>&1; then env -0; else env; fi; printf '\\n%s\\n' '{end}'"
-    );
-    let output = run_interactive_login_shell(host, &script).await?;
-    let parsed = parse_sentinel_output(&output.stdout, &begin, &env_mark, &end)
-        .ok_or_else(|| ProbeError::Shell("probe sentinels missing from shell output".into()))?;
-    Ok(parsed.env)
+    #[cfg(windows)]
+    {
+        Ok(windows_process_env(host))
+    }
+    #[cfg(not(windows))]
+    {
+        let token = sentinel_token();
+        let begin = format!("TIDEBREAK_PROBE_BEGIN_{token}");
+        let env_mark = format!("TIDEBREAK_PROBE_ENV_{token}");
+        let end = format!("TIDEBREAK_PROBE_END_{token}");
+        let script = format!(
+            "printf '%s\\n' '{begin}'; printf '%s\\n' '{env_mark}'; \
+             if env -0 >/dev/null 2>&1; then env -0; else env; fi; printf '\\n%s\\n' '{end}'"
+        );
+        let output = run_interactive_login_shell(host, &script).await?;
+        let parsed = parse_sentinel_output(&output.stdout, &begin, &env_mark, &end)
+            .ok_or_else(|| ProbeError::Shell("probe sentinels missing from shell output".into()))?;
+        Ok(parsed.env)
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_env(host: &HostEnv) -> Vec<(OsString, OsString)> {
+    let base = if host.clear_env {
+        Vec::new()
+    } else {
+        std::env::vars_os().collect()
+    };
+    filter_child_env(merge_environment(base, host.env.iter().cloned(), true))
 }
 
 /// Drop Tidebreak-prefixed variables from a captured shell snapshot.
@@ -237,14 +322,54 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    vars.into_iter()
-        .map(|(key, value)| (key.into(), value.into()))
-        .filter(|(key, _)| {
-            !key.to_string_lossy()
-                .to_ascii_uppercase()
-                .starts_with("TIDEBREAK_")
-        })
-        .collect()
+    let filtered = vars.into_iter().filter_map(|(key, value)| {
+        let key = key.into();
+        let name = key.to_string_lossy();
+        if name.is_empty()
+            || name.contains('=')
+            || name.to_ascii_uppercase().starts_with("TIDEBREAK_")
+        {
+            return None;
+        }
+        Some((key, value.into()))
+    });
+    merge_environment(Vec::new(), filtered, cfg!(windows))
+}
+
+fn merge_environment<I>(
+    mut base: Vec<(OsString, OsString)>,
+    overrides: I,
+    case_insensitive: bool,
+) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    for (key, value) in overrides {
+        if let Some(index) = base
+            .iter()
+            .position(|(existing, _)| env_key_eq(existing, &key, case_insensitive))
+        {
+            base.remove(index);
+        }
+        base.push((key, value));
+    }
+    base
+}
+
+fn env_key_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn env_value<'a>(env: &'a [(OsString, OsString)], key: &std::ffi::OsStr) -> Option<&'a OsString> {
+    env.iter()
+        .rev()
+        .find(|(candidate, _)| env_key_eq(candidate, key, cfg!(windows)))
+        .map(|(_, value)| value)
 }
 
 fn apply_captured_env(command: &mut Command, env: &[(std::ffi::OsString, std::ffi::OsString)]) {
@@ -265,10 +390,11 @@ pub async fn observe_version(
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     apply_captured_env(&mut command, env);
-    let output = timeout(PROBE_TIMEOUT, command.output())
+    let child =
+        spawn_process_tree(&mut command).map_err(|err| ProbeError::Shell(err.to_string()))?;
+    let output = timeout(PROBE_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| ProbeError::Shell("version probe timed out".into()))?
         .map_err(|err| ProbeError::Shell(err.to_string()))?;
@@ -307,10 +433,12 @@ pub async fn list_cli_models(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     apply_captured_env(&mut command, env);
-    let Ok(Ok(output)) = timeout(PROBE_TIMEOUT, command.output()).await else {
+    let Ok(child) = spawn_process_tree(&mut command) else {
+        return Vec::new();
+    };
+    let Ok(Ok(output)) = timeout(PROBE_TIMEOUT, child.wait_with_output()).await else {
         return Vec::new();
     };
     parse_cli_models(&String::from_utf8_lossy(&output.stdout), env)
@@ -335,7 +463,7 @@ pub fn infer_listed_default(
     ];
     let Some(current) = env.iter().find_map(|(key, value)| {
         let name = key.to_string_lossy();
-        if !KEYS.contains(&name.as_ref()) {
+        if !KEYS.iter().any(|key| name.eq_ignore_ascii_case(key)) {
             return None;
         }
         let id = value.to_string_lossy().trim().to_owned();
@@ -615,15 +743,16 @@ async fn run_interactive_login_shell(
         .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     if host.clear_env {
         command.env_clear();
     }
     for (key, value) in &host.env {
         command.env(key, value);
     }
-    let output = timeout(PROBE_TIMEOUT, command.output())
+    let child =
+        spawn_process_tree(&mut command).map_err(|err| ProbeError::Shell(err.to_string()))?;
+    let output = timeout(PROBE_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| ProbeError::Shell("login shell timed out".into()))?
         .map_err(|err| ProbeError::Shell(err.to_string()))?;
@@ -637,7 +766,7 @@ async fn run_interactive_login_shell(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -992,5 +1121,80 @@ eval "$cmd"
             probe_shell(&host, "claude").await,
             Err(ProbeError::NotFound(name)) if name == "claude"
         ));
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn case_insensitive_environment_merge_keeps_the_last_spelling_and_value() {
+        let merged = merge_environment(
+            vec![
+                (OsString::from("Path"), OsString::from("old")),
+                (OsString::from("KEEP"), OsString::from("yes")),
+            ],
+            [(OsString::from("PATH"), OsString::from("managed"))],
+            true,
+        );
+        assert_eq!(
+            merged,
+            vec![
+                (OsString::from("KEEP"), OsString::from("yes")),
+                (OsString::from("PATH"), OsString::from("managed")),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_rejects_case_varied_tidebreak_and_invalid_environment_keys() {
+        let filtered = filter_child_env([
+            ("tidebreak_secret", "nope"),
+            ("GOOD", "yes"),
+            ("BAD=KEY", "nope"),
+        ]);
+        assert_eq!(filtered, [(OsString::from("GOOD"), OsString::from("yes"))]);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolves_cmd_shims_from_case_varied_path_and_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("claude.cmd");
+        std::fs::write(&shim, "@echo 2.1.234\r\n").unwrap();
+        let host = HostEnv {
+            shell: PathBuf::new(),
+            env: vec![
+                (OsString::from("Path"), dir.path().as_os_str().to_owned()),
+                (OsString::from("pathext"), OsString::from(".CMD;.EXE")),
+            ],
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+        };
+
+        let capture = probe_shell(&host, "claude").await.unwrap();
+        assert_eq!(capture.binary, shim);
+        assert_eq!(
+            capture
+                .env
+                .iter()
+                .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn from_process_captures_windows_environment_without_a_shell() {
+        let host = HostEnv::from_process();
+        assert!(host.shell.as_os_str().is_empty());
+        let captured = capture_shell_env(&host).await.unwrap();
+        assert!(env_value(&captured, std::ffi::OsStr::new("PATH")).is_some());
     }
 }

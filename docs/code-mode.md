@@ -347,11 +347,11 @@ live in a review sidebar).
 ## What v1 excludes
 
 Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
-bundled or pinned harness binaries; checkpoint restore (the refs land in
-v1; the restore surface does not); multiple sessions per workspace;
+checkpoint restore (the refs land in v1; the restore surface does not);
+multiple sessions per workspace;
 an in-app code editor; chat–code convergence (the single-surface end
 state: one conversation concept with an optional workspace binding,
 engines behind the adapter contract, no user-facing mode choice); remote
 session execution (the same harness in a managed sandbox feeding the same
-journal); a supervision-first mobile client over the updates channel;
-a per-repo worktree-location override; Windows support for code mode.
+journal); a supervision-first mobile client over the updates channel; and a
+per-repo worktree-location override.

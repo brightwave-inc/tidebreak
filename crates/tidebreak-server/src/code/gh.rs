@@ -13,6 +13,8 @@ use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction, WorkspaceId};
 
+use super::setup_script::spawn_workspace_script;
+
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1113,18 +1115,7 @@ async fn run_action(worktree: &Path, action: &QuickAction) -> ActionOutcome {
             timed_out: false,
         };
     }
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
-    let mut command = Command::new(shell);
-    command
-        .arg("-lc")
-        .arg(script)
-        .current_dir(worktree)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let child = match command.spawn() {
+    let child = match spawn_workspace_script(worktree, script) {
         Ok(child) => child,
         Err(err) => {
             return ActionOutcome {

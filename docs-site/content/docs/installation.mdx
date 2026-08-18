@@ -64,14 +64,14 @@ sha256sum -c Tidebreak-linux-x86_64.deb.sha256
 ```
 
 Windows and Linux packages run the desktop chat, files, connected-folder,
-provider, and remote-sandbox surfaces. Linux also supports code mode with the
-same digest-verified managed Node runtime and pinned coding harnesses as macOS.
-Windows code mode remains unavailable. Native local execution, managed
-LibreOffice installation, and computer use remain unavailable on both Windows
-and Linux. Release builds check the signed updater feed in the background and
-ask before restarting into a newer package. Linux updates preserve the
-installed format: AppImage installs receive AppImage updates and Debian
-installs receive `.deb` updates.
+provider, remote-sandbox, and code-mode surfaces. Code mode uses the same
+digest-verified managed Node runtime and pinned coding harnesses as macOS,
+with PowerShell commands on Windows and POSIX shell commands on Linux. Native
+local execution, managed LibreOffice installation, and computer use remain
+unavailable on both Windows and Linux. Release builds check the signed updater
+feed in the background and ask before restarting into a newer package. Linux
+updates preserve the installed format: AppImage installs receive AppImage
+updates and Debian installs receive `.deb` updates.
 
 ## Build from source
 

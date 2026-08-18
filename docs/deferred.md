@@ -215,9 +215,6 @@ purpose:
   existence would sap the pressure to keep adapters honest, and it forfeits
   approvals, resume, and durable history. Reconsider only if a harness's
   machine-readable surface proves genuinely unusable over time.
-- **Windows harness pins.** macOS and Linux are the supported install paths;
-  Windows remains coupled to the broader native code-mode work
-  ([record 44](decisions/0044-install-pinned-harnesses-on-linux.md)).
 - **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
   and power turn-scoped diffs; the surface that restores a workspace to an
   earlier checkpoint waits until review flows have settled.
@@ -265,9 +262,6 @@ purpose:
   fires off sessions and supervises them — approve, deny with feedback,
   steer, review completion — is a thin client of a reachable deployment and
   waits on the self-host member-client path above.
-- **Code mode on Windows.** Environment capture, setup and quick-action shell
-  semantics, npm command shims and process-tree cancellation, worktree path
-  validation, and native lifecycle tests all need Windows-specific work.
 
 ## What this means for planning
 

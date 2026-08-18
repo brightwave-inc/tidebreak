@@ -118,13 +118,16 @@ async fn observe_login(
         .args(["models"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     command.env_clear();
     for (key, value) in crate::filter_child_env(env.iter().cloned()) {
         command.env(key, value);
     }
-    let output = timeout(AUTH_TIMEOUT, command.output()).await.ok()?.ok()?;
+    let child = crate::spawn_process_tree(&mut command).ok()?;
+    let output = timeout(AUTH_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     login_status_from_models(&stdout)
 }

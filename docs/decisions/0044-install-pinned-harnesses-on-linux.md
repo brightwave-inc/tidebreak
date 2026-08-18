@@ -1,6 +1,6 @@
 # 44. Install pinned coding harnesses on Linux
 
-- Status: Proposed
+- Status: Superseded by [decision 45](0045-run-code-mode-on-windows.md)
 - Date: 2026-08-18
 - Owners: code mode and desktop
 - Related: [decision 41](0041-pinned-harness-binaries.md),
