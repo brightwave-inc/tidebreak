@@ -48,54 +48,15 @@ export function parsePanelSegment(segment: string): PanelContent | null {
     case "agent":
       // A run id is the whole address; there is no id-less run panel.
       return id ? { type: "agent", runId: id } : null;
-    case "files":
-      return parseFilesTarget(id);
-    case "diff":
-      return parseDiffTarget(id);
     case "terminal":
       return id ? { type: "terminal", terminalId: id } : { type: "terminal" };
     default:
       // `apps` and `plugins` were panel segments before the libraries became
-      // routes of their own; those links fall back to the conversation alone.
+      // routes of their own, and `files`/`diff` before those surfaces moved
+      // into the workspace inspector; those links fall back to the
+      // conversation alone.
       return null;
   }
-}
-
-function parseFilesTarget(id: string): PanelContent | null {
-  if (!id) return { type: "files" };
-  if (id.includes(".")) return null;
-  return { type: "files", turnId: id };
-}
-
-function parseDiffTarget(id: string): PanelContent | null {
-  if (!id) return { type: "diff" };
-  const parts = id.split(".");
-  let turnId: string | undefined;
-  let file: string | undefined;
-  let index = 0;
-  while (index < parts.length) {
-    const token = parts[index];
-    if (token === "t" && parts[index + 1]) {
-      turnId = parts[index + 1];
-      index += 2;
-      continue;
-    }
-    if (token === "f" && parts[index + 1]) {
-      try {
-        file = decodeURIComponent(parts.slice(index + 1).join("."));
-      } catch {
-        return null;
-      }
-      if (!file) return null;
-      break;
-    }
-    return null;
-  }
-  return {
-    type: "diff",
-    ...(turnId ? { turnId } : {}),
-    ...(file ? { file } : {}),
-  };
 }
 
 function parseDocumentTarget(id: string): PanelContent | null {
@@ -127,14 +88,6 @@ export function encodePanelSegment(panel: PanelContent): string {
       return "agents";
     case "agent":
       return `agent.${panel.runId}`;
-    case "files":
-      return panel.turnId ? `files.${panel.turnId}` : "files";
-    case "diff": {
-      const parts = ["diff"];
-      if (panel.turnId) parts.push("t", panel.turnId);
-      if (panel.file) parts.push("f", encodeURIComponent(panel.file));
-      return parts.join(".");
-    }
     case "terminal":
       return panel.terminalId ? `terminal.${panel.terminalId}` : "terminal";
   }

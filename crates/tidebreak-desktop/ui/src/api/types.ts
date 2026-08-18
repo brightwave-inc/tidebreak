@@ -132,6 +132,11 @@ import {
   type PullRequestDigest as WirePullRequestDigest,
   type PullRequestCheck as WirePullRequestCheck,
   type PullRequestCheckBucket as WirePullRequestCheckBucket,
+  type PullRequestComment as WirePullRequestComment,
+  type PullRequestCommentKind as WirePullRequestCommentKind,
+  type CodePrCommentsSnapshot as WireCodePrCommentsSnapshot,
+  type CodePrMergeMethod as WireCodePrMergeMethod,
+  type MergeCodePrBody as WireMergeCodePrBody,
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
@@ -1020,6 +1025,13 @@ export type CodeActionSnapshot = WireCodeActionSnapshot;
 export type PullRequestDigest = WirePullRequestDigest;
 export type PullRequestCheck = WirePullRequestCheck;
 export type PullRequestCheckBucket = WirePullRequestCheckBucket;
+export type PullRequestComment = WirePullRequestComment;
+export type PullRequestCommentKind = WirePullRequestCommentKind;
+/** The PR conversation, read live from the host and never persisted. */
+export type CodePrCommentsSnapshot = WireCodePrCommentsSnapshot;
+export type CodePrMergeMethod = WireCodePrMergeMethod;
+/** Body of POST /code/workspaces/{id}/pr/merge. */
+export type MergeCodePrBody = WireMergeCodePrBody;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
 export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;

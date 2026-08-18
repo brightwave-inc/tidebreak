@@ -53,7 +53,7 @@ async fn stream_updates(mut socket: WebSocket, state: AppState) {
             },
             update = live.recv() => match update {
                 Ok(CodeLiveUpdate::Digest(digest)) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::digest(digest))
+                    if send_notice(&mut socket, &CodeUpdateNotice::digest(*digest))
                         .await
                         .is_err()
                     {

@@ -20,6 +20,7 @@ import {
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspacePr,
+  parseCodePrComments,
 } from "./parsers";
 
 const SESSION = {
@@ -223,11 +224,27 @@ describe("parseCodeWorkspacePr", () => {
       url: "https://github.com/example/demo/pull/12",
       state: "open",
       checks_summary: "1 passing, 0 pending, 0 failing",
+      draft: false,
+      merged: false,
+      review_decision: "changes_requested",
+      mergeable: "mergeable",
+      merge_state_status: "blocked",
+      head_branch: "tidebreak/first-change",
+      base_branch: "main",
+      auto_merge_enabled: true,
     },
   };
 
   it("accepts GET /code/workspaces/{id}/pr", () => {
     expect(parseCodeWorkspacePr(pr)).toEqual(pr);
+  });
+
+  it("accepts a digest without the merge-status fields", () => {
+    const sparse = {
+      ...pr,
+      pr: { number: 12, state: "open" },
+    };
+    expect(parseCodeWorkspacePr(sparse)).toEqual(sparse);
   });
 
   it("accepts the gh-absent remediation state", () => {
@@ -245,6 +262,60 @@ describe("parseCodeWorkspacePr", () => {
 
   it("rejects a missing boolean", () => {
     expect(parseCodeWorkspacePr({ ...pr, dirty: "yes" })).toBeNull();
+  });
+
+  it("rejects a mistyped merge-status field", () => {
+    expect(
+      parseCodeWorkspacePr({ ...pr, pr: { ...pr.pr, draft: "yes" } }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodePrComments", () => {
+  it("accepts GET /code/workspaces/{id}/pr/comments", () => {
+    const comments = {
+      number: 12,
+      comments: [
+        {
+          kind: "issue",
+          author: "alice",
+          created_at: "2026-08-16T10:00:00Z",
+          body: "looks close",
+        },
+        {
+          kind: "review",
+          author: "bob",
+          created_at: "2026-08-16T11:00:00Z",
+          body: "please split this",
+          review_state: "changes_requested",
+        },
+        {
+          kind: "inline",
+          author: "bob",
+          created_at: "2026-08-16T12:00:00Z",
+          body: "rename this",
+          path: "src/lib.rs",
+          line: 42,
+        },
+      ],
+    };
+    expect(parseCodePrComments(comments)).toEqual(comments);
+    expect(parseCodePrComments({ number: 12, comments: [] })).toEqual({
+      number: 12,
+      comments: [],
+    });
+  });
+
+  it("rejects an unknown kind or a mistyped line", () => {
+    const one = (comment: object) => ({ number: 12, comments: [comment] });
+    expect(
+      parseCodePrComments(one({ kind: "thread", body: "hi" })),
+    ).toBeNull();
+    expect(
+      parseCodePrComments(
+        one({ kind: "inline", body: "hi", line: "forty-two" }),
+      ),
+    ).toBeNull();
   });
 });
 

@@ -8,7 +8,9 @@ import type {
   HarnessKind,
   HarnessTier,
   ModelInfo,
+  ProviderKind,
 } from "../api/types";
+import { familyForModelId, vendorForModelId } from "../modelFamilies";
 
 /**
  * Display names for the code-mode vocabulary.
@@ -155,22 +157,58 @@ export type CodeModelOption = {
   id: string;
   label: string;
   source: string;
+  /** The vendor the id is branded as, for icons and grouping. */
+  vendor?: ProviderKind | null;
   default?: boolean;
 };
 
-/** Gateway models the picker may offer when this profile is on model-gateway. */
+/**
+ * The vendors a harness can actually drive, or `null` for any. This confines
+ * a mixed catalog (a gateway's) to what the engine accepts: Claude Code only
+ * takes Claude models, Codex only OpenAI's, Grok only xAI's; opencode is
+ * vendor-neutral.
+ */
+export const HARNESS_VENDORS: Record<
+  HarnessKind,
+  readonly ProviderKind[] | null
+> = {
+  claude_code: ["anthropic"],
+  codex: ["openai"],
+  grok: ["xai"],
+  opencode: null,
+};
+
+/** The vendor a picker row is branded as: curated match first, then the id. */
+export function codeModelVendor(option: {
+  id: string;
+  vendor?: ProviderKind | null;
+}): ProviderKind | null {
+  return option.vendor ?? vendorForModelId(option.id);
+}
+
+/**
+ * Gateway models the picker may offer when this profile is on model-gateway,
+ * confined to the vendors the harness can drive.
+ */
 export function gatewayCodeModels(
   models: readonly ModelInfo[],
   kind: HarnessKind,
   defaultKey?: string | null,
 ): CodeModelOption[] {
   const source = `${HARNESS_LABELS[kind]} · model-gateway`;
+  const allowed = HARNESS_VENDORS[kind];
   return models
     .filter((model) => model.provider === "model_gateway" && model.available)
+    .filter((model) => {
+      if (!allowed) return true;
+      const vendor = model.vendor ?? vendorForModelId(model.id);
+      return vendor !== null && allowed.includes(vendor);
+    })
     .map((model) => ({
       id: model.id,
       label: model.display_name,
       source,
+      vendor: model.vendor ?? vendorForModelId(model.id),
       default: defaultKey === model.key || defaultKey === model.id,
     }));
 }
@@ -184,8 +222,91 @@ export function harnessCodeModels(
     id: option.id,
     label: prettyCodeModelLabel(option.label || option.id),
     source,
+    vendor: vendorForModelId(option.id),
     default: option.default,
   }));
+}
+
+/** One rail section of the code-mode picker: a vendor and its rows. */
+export type CodeModelGroup = {
+  id: string;
+  label: string;
+  iconProvider: ProviderKind;
+  iconModelId?: string;
+  options: CodeModelOption[];
+};
+
+/** Vendors in the rail's fixed order, matching the chat picker's. */
+const CODE_VENDOR_ORDER: readonly ProviderKind[] = [
+  "openai",
+  "anthropic",
+  "xai",
+  "gemini",
+];
+
+const VENDOR_LABELS: Partial<Record<ProviderKind, string>> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  xai: "xAI",
+  gemini: "Google Gemini",
+};
+
+/**
+ * Group picker rows by vendor the way the chat picker groups a catalog:
+ * first-party vendors in a fixed order, then open-model families, then
+ * anything unrecognizable under "Other". One group per vendor present.
+ */
+export function groupCodeModelOptions(
+  options: readonly CodeModelOption[],
+): CodeModelGroup[] {
+  const byId = new Map<string, CodeModelGroup>();
+  const add = (
+    badge: Omit<CodeModelGroup, "options">,
+    option: CodeModelOption,
+  ) => {
+    const existing = byId.get(badge.id);
+    if (existing) existing.options.push(option);
+    else byId.set(badge.id, { ...badge, options: [option] });
+  };
+  for (const option of options) {
+    const family = familyForModelId(option.id);
+    if (family) {
+      add(
+        {
+          id: family.match,
+          label: family.label,
+          iconProvider: "model_gateway",
+          iconModelId: family.match,
+        },
+        option,
+      );
+      continue;
+    }
+    const vendor = codeModelVendor(option);
+    if (vendor) {
+      add(
+        {
+          id: vendor,
+          label: VENDOR_LABELS[vendor] ?? vendor,
+          iconProvider: vendor,
+        },
+        option,
+      );
+      continue;
+    }
+    add(
+      { id: "other", label: "Other", iconProvider: "openai_compatible" },
+      option,
+    );
+  }
+
+  const rank = (group: CodeModelGroup): number => {
+    const vendor = CODE_VENDOR_ORDER.indexOf(group.id as ProviderKind);
+    if (vendor !== -1) return vendor;
+    if (group.id === "other") return Number.MAX_SAFE_INTEGER;
+    return CODE_VENDOR_ORDER.length;
+  };
+  return [...byId.values()].sort((a, b) => rank(a) - rank(b));
 }
 
 export function prettyCodeModelLabel(id: string): string {

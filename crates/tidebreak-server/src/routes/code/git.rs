@@ -10,10 +10,11 @@ use crate::state::AppState;
 
 use super::require_code;
 use super::types::{
-    CodeActionSnapshot, CodeCommitSnapshot, CodePushSnapshot, CodeWorkspacePrSnapshot,
-    CommitWorkspaceBody, CreatePullRequestBody,
+    CodeActionSnapshot, CodeCommitSnapshot, CodePrCommentsSnapshot, CodePrMergeMethod,
+    CodePushSnapshot, CodeWorkspacePrSnapshot, CommitWorkspaceBody, CreatePullRequestBody,
+    MergeCodePrBody,
 };
-use crate::code::gh::{ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
+use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
 use tidebreak_core::WorkspaceId;
 
 pub async fn commit_workspace(
@@ -52,6 +53,43 @@ pub async fn get_workspace_pr(
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
     Ok(Json(pr_snapshot(
         require_code(&state)?.workspace_pr(id).await?,
+    )))
+}
+
+pub async fn refresh_workspace_pr(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
+    Ok(Json(pr_snapshot(
+        require_code(&state)?.refresh_workspace_pr(id).await?,
+    )))
+}
+
+pub async fn get_workspace_pr_comments(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodePrCommentsSnapshot>, ServerError> {
+    let comments = require_code(&state)?.workspace_pr_comments(id).await?;
+    Ok(Json(CodePrCommentsSnapshot {
+        number: comments.number,
+        comments: comments.comments,
+    }))
+}
+
+pub async fn merge_workspace_pr(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+    Json(body): Json<MergeCodePrBody>,
+) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
+    let method = match body.method {
+        CodePrMergeMethod::Squash => MergeMethod::Squash,
+        CodePrMergeMethod::Merge => MergeMethod::Merge,
+        CodePrMergeMethod::Rebase => MergeMethod::Rebase,
+    };
+    Ok(Json(pr_snapshot(
+        require_code(&state)?
+            .merge_workspace_pr(id, method, body.auto)
+            .await?,
     )))
 }
 

@@ -46,8 +46,9 @@ pub(crate) struct CloneProgress {
 /// One unsequenced notice on the install-wide updates channel.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CodeLiveUpdate {
-    /// Cheap per-session digest, computed from rows.
-    Digest(SessionDigest),
+    /// Cheap per-session digest, computed from rows. Boxed: the PR digest
+    /// makes it much larger than the clone-progress variant.
+    Digest(Box<SessionDigest>),
     /// Clone job progress. Not restated on connect.
     CloneProgress(CloneProgress),
 }

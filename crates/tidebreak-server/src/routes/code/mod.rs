@@ -14,7 +14,8 @@ mod workspaces;
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use git::{
-    commit_workspace, create_pull_request, get_workspace_pr, push_workspace, run_workspace_action,
+    commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,
+    merge_workspace_pr, push_workspace, refresh_workspace_pr, run_workspace_action,
 };
 pub(crate) use harnesses::{list_harness_models, list_harnesses, refresh_harnesses};
 pub(crate) use repos::{
@@ -33,11 +34,12 @@ pub(crate) use terminals::{
 #[allow(unused_imports)]
 pub(crate) use types::{
     CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot, CodeRepoSnapshot,
-    CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
-    CodeTerminalSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessDoctorReport,
-    HarnessModelList, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodePrCommentsSnapshot,
+    CodePushSnapshot, CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
+    CodeUpdateNotice, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
+    CodeWorkspaceSnapshot, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    SequencedCodeEventFrame,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use workspaces::{

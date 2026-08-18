@@ -1,4 +1,4 @@
-import { Bot, FileCode, FileText, Files, FolderOpen, Package, Shield, SquareTerminal, X } from "lucide-react";
+import { Bot, FileText, FolderOpen, Package, Shield, SquareTerminal, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "./panelTypes";
@@ -25,10 +25,6 @@ function panelTabFallbackLabel(panel: PanelContent): string {
       return "Agents";
     case "agent":
       return "Agent";
-    case "files":
-      return "Files";
-    case "diff":
-      return "Diff";
     case "terminal":
       return "Terminal";
   }
@@ -48,10 +44,6 @@ function PanelTabIcon({ panel }: { panel: PanelContent }) {
     case "agents":
     case "agent":
       return <Bot className={className} />;
-    case "files":
-      return <Files className={className} />;
-    case "diff":
-      return <FileCode className={className} />;
     case "terminal":
       return <SquareTerminal className={className} />;
   }

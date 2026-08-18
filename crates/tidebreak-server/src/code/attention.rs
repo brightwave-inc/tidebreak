@@ -253,7 +253,7 @@ pub(crate) async fn note_activity(
 
 pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &CodeSession) {
     match build_digest(db, session).await {
-        Ok(digest) => bus.publish_update(CodeLiveUpdate::Digest(digest)),
+        Ok(digest) => bus.publish_update(CodeLiveUpdate::Digest(Box::new(digest))),
         Err(err) => warn!(
             session = %session.id,
             error = %err,

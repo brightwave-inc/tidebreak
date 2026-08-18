@@ -427,6 +427,12 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeCommitSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodePushSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspacePrSnapshot>(&cfg, &mut out);
+        // Its own endpoint root: the PR conversation is fetched per request
+        // rather than embedded in the digest.
+        generate::collect_from::<crate::routes::code::CodePrCommentsSnapshot>(&cfg, &mut out);
+        // The merge request body, so the renderer sends exactly the accepted
+        // method vocabulary.
+        generate::collect_from::<crate::routes::code::MergeCodePrBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeActionSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeCloneJobSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeCloneDefaults>(&cfg, &mut out);

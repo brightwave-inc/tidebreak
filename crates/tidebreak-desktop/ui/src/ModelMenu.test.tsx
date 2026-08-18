@@ -6,7 +6,7 @@ import {
   ModelMenu,
   ModelToolCapabilityChip,
   notConnectedProviders,
-  pickerProviderForSelection,
+  pickerGroupForSelection,
   pickerRailEntries,
   reasoningEffortOptions,
   visibleModelGroups,
@@ -203,6 +203,42 @@ describe("visibleModelGroups", () => {
       HAIKU.key,
     ]);
   });
+
+  it("splits a gateway catalog into vendor groups", () => {
+    const viaGateway = (key: ModelInfo["key"], id: string, vendor: ModelInfo["vendor"]) => ({
+      ...MODELS[0],
+      key,
+      id,
+      provider: "model_gateway" as const,
+      vendor,
+    });
+    const groups = visibleModelGroups(
+      [
+        viaGateway("model_gateway::deepseek-v4", "deepseek-v4", null),
+        viaGateway("model_gateway::claude-sonnet-4", "claude-sonnet-4", "anthropic"),
+        viaGateway("model_gateway::gpt-5", "gpt-5", "openai"),
+        viaGateway("model_gateway::glm-5.2", "glm-5.2", null),
+        viaGateway("model_gateway::mystery-model", "mystery-model", null),
+      ],
+      null,
+    );
+    expect(groups.map((group) => [group.id, group.label])).toEqual([
+      ["model_gateway/openai", "OpenAI"],
+      ["model_gateway/anthropic", "Anthropic"],
+      ["model_gateway/deepseek", "DeepSeek"],
+      ["model_gateway/glm", "Z.ai"],
+      ["model_gateway", "Model Gateway"],
+    ]);
+    expect(
+      groups.map((group) => group.models.map((model) => model.id)),
+    ).toEqual([
+      ["gpt-5"],
+      ["claude-sonnet-4"],
+      ["deepseek-v4"],
+      ["glm-5.2"],
+      ["mystery-model"],
+    ]);
+  });
 });
 
 describe("matchingModels", () => {
@@ -315,29 +351,81 @@ describe("pickerRailEntries", () => {
       ["openrouter", false],
     ]);
   });
+
+  it("gives each gateway vendor group its own rail tab", () => {
+    const viaGateway = (key: ModelInfo["key"], id: string, vendor: ModelInfo["vendor"]) => ({
+      ...MODELS[0],
+      key,
+      id,
+      provider: "model_gateway" as const,
+      vendor,
+    });
+    const rail = pickerRailEntries(
+      [
+        viaGateway("model_gateway::claude-sonnet-4", "claude-sonnet-4", "anthropic"),
+        viaGateway("model_gateway::gpt-5", "gpt-5", "openai"),
+        viaGateway("model_gateway::deepseek-v4", "deepseek-v4", null),
+      ],
+      [],
+      null,
+    );
+    expect(rail.map((entry) => [entry.id, entry.connected])).toEqual([
+      ["model_gateway/openai", true],
+      ["model_gateway/anthropic", true],
+      ["model_gateway/deepseek", true],
+    ]);
+  });
+
+  it("does not offer setup for a provider a gateway group already serves", () => {
+    const directClaude: ModelInfo = {
+      ...MODELS[0],
+      available: false,
+    };
+    const gatewayClaude: ModelInfo = {
+      ...MODELS[0],
+      key: "model_gateway::claude-sonnet-4",
+      provider: "model_gateway",
+      vendor: "anthropic",
+    };
+    const rail = pickerRailEntries([directClaude, gatewayClaude], [], null);
+    expect(rail.map((entry) => entry.id)).toEqual(["model_gateway/anthropic"]);
+  });
 });
 
-describe("pickerProviderForSelection", () => {
-  const groups = [
-    { provider: "openai" as const },
-    { provider: "anthropic" as const },
-  ];
+describe("pickerGroupForSelection", () => {
+  const groups = [{ id: "openai" }, { id: "anthropic" }];
 
-  it("opens on the selected model's provider", () => {
+  it("opens on the selected model's group", () => {
+    expect(pickerGroupForSelection(groups, MODELS[0])).toBe("anthropic");
+  });
+
+  it("opens on a gateway model's vendor group", () => {
+    const gatewayClaude: ModelInfo = {
+      ...MODELS[0],
+      key: "model_gateway::claude-sonnet-4",
+      provider: "model_gateway",
+      vendor: "anthropic",
+    };
     expect(
-      pickerProviderForSelection(groups, { provider: "anthropic" }),
-    ).toBe("anthropic");
+      pickerGroupForSelection(
+        [{ id: "model_gateway/anthropic" }, { id: "model_gateway/openai" }],
+        gatewayClaude,
+      ),
+    ).toBe("model_gateway/anthropic");
   });
 
   it("falls back to the first visible group", () => {
-    expect(pickerProviderForSelection(groups, null)).toBe("openai");
+    expect(pickerGroupForSelection(groups, null)).toBe("openai");
     expect(
-      pickerProviderForSelection(groups, { provider: "gemini" }),
+      pickerGroupForSelection(groups, {
+        ...MODELS[0],
+        provider: "gemini",
+      }),
     ).toBe("openai");
   });
 
   it("is null when nothing is listed", () => {
-    expect(pickerProviderForSelection([], { provider: "openai" })).toBeNull();
+    expect(pickerGroupForSelection([], MODELS[0])).toBeNull();
   });
 });
 

@@ -1,35 +1,53 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Check,
   CircleDashed,
   ExternalLink,
-  FileCode,
   Files,
+  GitBranch,
+  GitMerge,
   GitPullRequest,
+  MessageSquare,
+  RefreshCw,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
-import type { ApiClient } from "../api/client";
+import { HttpError, type ApiClient } from "../api/client";
 import type {
+  CodePrMergeMethod,
   CodeWorkspaceSnapshot,
   PullRequestCheck,
+  PullRequestComment,
   PullRequestDigest,
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
 import { PrCard } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
-type InspectorTab = "files" | "diff" | "pr";
+type InspectorTab = "files" | "source" | "pr";
 
 /**
- * Right workspace rail: Files, Diff, and PR as icon tabs.
+ * Right workspace rail: Files, Source control, and Pull request as icon tabs.
  *
- * Files is the changed-file list. Diff is the worktree patch, and that
- * is where commit and push live. PR stays empty until a pull request exists.
+ * Files is the changed-file list. Source control is the worktree patch plus
+ * commit, push, and PR creation. Pull request carries the PR's own life:
+ * status, checks, and review comments once one exists.
  */
 export function CodeInspector({
   client,
@@ -50,7 +68,7 @@ export function CodeInspector({
 
   function openFile(next: string) {
     setFile(next);
-    setTab("diff");
+    setTab("source");
   }
 
   return (
@@ -68,11 +86,11 @@ export function CodeInspector({
           <Files className="size-3.5" />
         </TabButton>
         <TabButton
-          label="Diff"
-          current={tab === "diff"}
-          onClick={() => setTab("diff")}
+          label="Source control"
+          current={tab === "source"}
+          onClick={() => setTab("source")}
         >
-          <FileCode className="size-3.5" />
+          <GitBranch className="size-3.5" />
         </TabButton>
         <TabButton
           label="Pull request"
@@ -80,7 +98,10 @@ export function CodeInspector({
           onClick={() => setTab("pr")}
         >
           <GitPullRequest
-            className={cn("size-3.5", prIconClass(pr?.state))}
+            className={cn(
+              "size-3.5",
+              pr ? PR_ICON_TONE_CLASSES[prTone(pr)] : undefined,
+            )}
           />
         </TabButton>
       </header>
@@ -94,16 +115,10 @@ export function CodeInspector({
             onOpenFile={openFile}
           />
         )}
-        {tab === "diff" && (
+        {tab === "source" && (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <DiffPanel
-              client={client}
-              workspaceId={workspaceId}
-              file={file}
-              contentRevision={contentRevision}
-            />
             {active && (
-              <div className="border-t px-3 py-3">
+              <div className="border-b px-3 py-3">
                 <PrCard
                   client={client}
                   workspaceId={workspaceId}
@@ -112,10 +127,21 @@ export function CodeInspector({
                 />
               </div>
             )}
+            <DiffPanel
+              client={client}
+              workspaceId={workspaceId}
+              file={file}
+              contentRevision={contentRevision}
+            />
           </div>
         )}
         {tab === "pr" && (
-          <PrTab pr={pr} branch={workspace?.branch_name} />
+          <PrTab
+            client={client}
+            workspaceId={workspaceId}
+            pr={pr}
+            branch={workspace?.branch_name}
+          />
         )}
       </div>
     </aside>
@@ -150,34 +176,118 @@ function TabButton({
   );
 }
 
+/**
+ * The pull request's own life: status, checks, review comments, and the two
+ * user-initiated ways to land it. The digest arrives over the updates socket,
+ * so actions only have to hit the server — the fresh state restates itself.
+ */
 function PrTab({
+  client,
+  workspaceId,
   pr,
   branch,
 }: {
+  client: ApiClient;
+  workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
 }) {
+  const { confirm, dialog } = useConfirm();
+  const [refreshing, setRefreshing] = useState(false);
+  const [merging, setMerging] = useState<"merge" | "auto" | null>(null);
+  const [method, setMethod] = useState<CodePrMergeMethod>("squash");
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  const [comments, setComments] = useState<PullRequestComment[] | null>(null);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const prNumber = pr?.number;
+
+  const loadComments = useCallback(async () => {
+    if (prNumber === undefined) return;
+    try {
+      const snapshot = await client.getCodePrComments(workspaceId);
+      setComments(snapshot.comments);
+      setCommentsError(null);
+    } catch (err) {
+      setCommentsError(
+        friendlyErrorMessage(err, "Could not load review comments"),
+      );
+    }
+  }, [client, prNumber, workspaceId]);
+
+  useEffect(() => {
+    setComments(null);
+    setCommentsError(null);
+    if (prNumber === undefined) return;
+    void loadComments();
+  }, [loadComments, prNumber]);
+
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      await client.refreshCodeWorkspacePr(workspaceId);
+      await loadComments();
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not refresh the pull request"));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function merge(auto: boolean) {
+    if (!pr) return;
+    if (!auto) {
+      const ok = await confirm({
+        title: `Merge #${pr.number}?`,
+        description: `The pull request is ${method === "squash" ? "squash-merged" : method === "rebase" ? "rebased and merged" : "merged"} into ${pr.base_branch ?? "its base branch"} on GitHub.`,
+        confirmLabel: "Merge",
+      });
+      if (!ok) return;
+    }
+    setMerging(auto ? "auto" : "merge");
+    setMergeError(null);
+    try {
+      await client.mergeCodePr(workspaceId, { method, auto });
+      toast.success(auto ? "Auto-merge enabled" : "Merged");
+    } catch (err) {
+      if (err instanceof HttpError && err.kind === "pr_not_mergeable") {
+        setMergeError(err.message);
+      } else {
+        toast.error(friendlyErrorMessage(err, "Could not merge"));
+      }
+    } finally {
+      setMerging(null);
+    }
+  }
+
   if (!pr) {
     return (
       <div className="text-muted-foreground flex flex-col gap-2 px-4 py-8 text-sm">
         <p className="text-foreground font-medium">No pull request yet</p>
         <p className="text-xs leading-relaxed">
-          This tab stays quiet until one exists. Commit and push live with the
-          diff, not here. When a PR is opened, status, checks, and review
-          comments land in this column.
+          This tab stays quiet until one exists. Commit, push, and Create PR
+          live in Source control. When a PR is opened, its status, checks, and
+          review comments land in this column.
         </p>
       </div>
     );
   }
 
+  const tone = prTone(pr);
   const counts = checkCounts(pr);
+  const open = tone === "open" || tone === "draft";
+  const branchLine =
+    pr.head_branch && pr.base_branch
+      ? `${pr.head_branch} → ${pr.base_branch}`
+      : (branch ?? null);
+
   return (
-    <div className="flex flex-col gap-4 overflow-y-auto px-3 py-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-3">
+      {dialog}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <GitPullRequest
-              className={cn("size-4 shrink-0", prIconClass(pr.state))}
+              className={cn("size-4 shrink-0", PR_ICON_TONE_CLASSES[tone])}
             />
             {pr.url ? (
               <a
@@ -198,14 +308,200 @@ function PrTab({
           </div>
           <p className="text-muted-foreground mt-1 truncate text-xs">
             #{pr.number}
-            {branch ? ` · ${branch}` : ""}
+            {branchLine ? ` · ${branchLine}` : ""}
           </p>
         </div>
-        <Badge variant={prStateVariant(pr.state)} size="sm">
-          {pr.state}
-        </Badge>
+        <div className="flex shrink-0 items-center gap-1">
+          <Badge variant={prStateVariant(tone)} size="sm">
+            {prToneLabel(pr)}
+          </Badge>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Refresh pull request"
+            disabled={refreshing}
+            onClick={() => void refresh()}
+          >
+            {refreshing ? <Spinner aria-hidden /> : <RefreshCw />}
+          </Button>
+        </div>
       </div>
+
+      <div className="flex flex-wrap items-center gap-1">
+        <ReviewDecisionBadge decision={pr.review_decision} />
+        {pr.auto_merge_enabled && (
+          <Badge variant="info" size="sm">
+            Auto-merge on
+          </Badge>
+        )}
+      </div>
+
       <CheckList checks={pr.checks ?? []} counts={counts} />
+
+      {open && (
+        <div className="flex flex-col gap-2 border-t pt-3">
+          <div className="flex items-center gap-2">
+            <GitMerge className="text-muted-foreground size-3.5 shrink-0" />
+            <Select
+              value={method}
+              onValueChange={(next) => setMethod(next as CodePrMergeMethod)}
+              disabled={merging !== null}
+            >
+              <SelectTrigger
+                className="h-7 flex-1 text-xs"
+                aria-label="Merge method"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="squash">Squash and merge</SelectItem>
+                <SelectItem value="merge">Merge commit</SelectItem>
+                <SelectItem value="rebase">Rebase and merge</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={merging !== null || tone === "draft"}
+              onClick={() => void merge(false)}
+            >
+              {merging === "merge" ? <Spinner aria-hidden /> : null}
+              Merge
+            </Button>
+            {!pr.auto_merge_enabled && (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={merging !== null || tone === "draft"}
+                onClick={() => void merge(true)}
+              >
+                {merging === "auto" ? <Spinner aria-hidden /> : null}
+                Enable auto-merge
+              </Button>
+            )}
+          </div>
+          {tone === "draft" && (
+            <p className="text-muted-foreground text-xs">
+              Mark the pull request ready for review on GitHub to merge it.
+            </p>
+          )}
+          {mergeError && (
+            <p className="text-critical text-xs" role="alert">
+              {mergeError}
+            </p>
+          )}
+        </div>
+      )}
+
+      <CommentsSection
+        comments={comments}
+        error={commentsError}
+        onRetry={() => void loadComments()}
+      />
+    </div>
+  );
+}
+
+function ReviewDecisionBadge({ decision }: { decision?: string }) {
+  if (!decision) return null;
+  if (decision === "approved") {
+    return (
+      <Badge variant="success" size="sm">
+        Approved
+      </Badge>
+    );
+  }
+  if (decision === "changes_requested") {
+    return (
+      <Badge variant="critical" size="sm">
+        Changes requested
+      </Badge>
+    );
+  }
+  if (decision === "review_required") {
+    return (
+      <Badge variant="outline" size="sm">
+        Review required
+      </Badge>
+    );
+  }
+  return null;
+}
+
+/** Review conversation, newest last, in the order the server sorted it. */
+function CommentsSection({
+  comments,
+  error,
+  onRetry,
+}: {
+  comments: PullRequestComment[] | null;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 border-t pt-3">
+      <div className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium">
+        <MessageSquare className="size-3.5" />
+        Comments
+        {comments && comments.length > 0 && <span>({comments.length})</span>}
+      </div>
+      {error && (
+        <div className="flex flex-col items-start gap-1">
+          <p className="text-critical text-xs">{error}</p>
+          <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {!error && comments === null && (
+        <p className="text-muted-foreground text-xs">Loading…</p>
+      )}
+      {!error && comments && comments.length === 0 && (
+        <p className="text-muted-foreground text-xs">No comments yet.</p>
+      )}
+      {!error &&
+        comments?.map((comment, index) => (
+          <CommentRow key={index} comment={comment} />
+        ))}
+    </div>
+  );
+}
+
+function CommentRow({ comment }: { comment: PullRequestComment }) {
+  const when = comment.created_at
+    ? new Date(comment.created_at).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null;
+  return (
+    <div className="border-border flex flex-col gap-1 rounded-md border px-2 py-1.5">
+      <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px]">
+        <span className="text-foreground shrink-0 font-medium">
+          {comment.author ?? "Unknown"}
+        </span>
+        {comment.kind === "review" && comment.review_state && (
+          <span className="shrink-0 capitalize">
+            {comment.review_state.replaceAll("_", " ")}
+          </span>
+        )}
+        {comment.kind === "inline" && comment.path && (
+          <span className="truncate font-mono">
+            {comment.path}
+            {comment.line !== undefined ? `:${comment.line}` : ""}
+          </span>
+        )}
+        {when && <span className="ml-auto shrink-0">{when}</span>}
+      </div>
+      <p className="text-xs leading-relaxed whitespace-pre-wrap">
+        {comment.body}
+      </p>
     </div>
   );
 }
@@ -332,18 +628,11 @@ function checkCounts(pr: PullRequestDigest): {
   return { passing, pending, failing };
 }
 
-function prIconClass(state?: string): string {
-  const token = state?.toLowerCase();
-  if (token === "open") return "text-success";
-  if (token === "merged") return "text-info";
-  if (token === "closed") return "text-critical";
-  return "text-muted-foreground";
-}
-
-function prStateVariant(state: string): "success" | "critical" | "info" | "outline" {
-  const token = state.toLowerCase();
-  if (token === "open") return "success";
-  if (token === "merged") return "info";
-  if (token === "closed") return "critical";
+function prStateVariant(
+  tone: ReturnType<typeof prTone>,
+): "success" | "critical" | "info" | "outline" {
+  if (tone === "open") return "success";
+  if (tone === "merged") return "info";
+  if (tone === "closed") return "critical";
   return "outline";
 }
