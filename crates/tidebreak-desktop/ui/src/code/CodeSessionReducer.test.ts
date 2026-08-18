@@ -170,6 +170,8 @@ describe("turn lifecycle", () => {
       callId: "c1",
       status: "succeeded",
       preview: "ok",
+      startedAt: LATER,
+      durationMs: 0,
     });
     const boundary = state.items[3];
     expect(boundary).toMatchObject({

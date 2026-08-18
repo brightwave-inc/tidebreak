@@ -10,7 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useId, useState, type RefCallback } from "react";
+import { useEffect, useId, useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
@@ -24,7 +24,7 @@ import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
-import { TurnReviewCard } from "./TurnReviewCard";
+import { formatTurnDuration, TurnReviewCard } from "./TurnReviewCard";
 
 /**
  * The code-session transcript: the reader's prompts, markdown for assistant
@@ -247,6 +247,8 @@ function TranscriptItem({
           detail={item.detail}
           status={item.status}
           preview={item.preview}
+          startedAt={item.startedAt}
+          durationMs={item.durationMs}
         />
       );
     case "notice":
@@ -281,27 +283,44 @@ function TranscriptItem({
 }
 
 /**
- * One engine action as a boxless line. The verb names what ran; the muted
- * mono subject is the command or path; the right slot is the outcome glyph.
- * Failed and denied open so the output is the next thing you read.
+ * One engine action as a boxless line. The verb is a constant; the muted mono
+ * subject is the command or path; the right slot is meta, one status glyph,
+ * and a quiet chevron. Failed and denied open. Success stays closed. A running
+ * call streams the last lines of output without growing the row.
  */
 export function CodeToolCard({
   name,
   detail,
   status,
   preview,
+  startedAt = null,
+  durationMs = null,
 }: {
   name: string;
   detail: ToolDetail;
   status: "running" | "succeeded" | "failed" | "denied";
   preview: string;
+  startedAt?: string | null;
+  durationMs?: number | null;
 }) {
-  const defaultExpanded = status === "failed" || status === "denied";
-  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [expanded, setExpanded] = useState(
+    status === "failed" || status === "denied",
+  );
   const bodyId = useId();
   const verb = toolVerb(detail, status);
   const subject = toolSubject(detail, name);
   const hasOutput = preview.trim().length > 0;
+  const elapsed = useElapsedLabel(startedAt, status === "running");
+  const duration = formatTurnDuration(durationMs);
+  const exitCode = parseExitCode(preview);
+
+  useEffect(() => {
+    if (status === "succeeded") setExpanded(false);
+    if (status === "failed" || status === "denied") setExpanded(true);
+  }, [status]);
+
+  const showTail = status === "running" && hasOutput;
+  const showExpanded = expanded && status !== "running" && hasOutput;
 
   return (
     <div
@@ -312,7 +331,7 @@ export function CodeToolCard({
       <button
         type="button"
         className="flex w-full items-center gap-2 py-0.5 text-left text-[13px]"
-        aria-expanded={expanded}
+        aria-expanded={expanded || showTail}
         aria-controls={hasOutput ? bodyId : undefined}
         onClick={() => setExpanded((current) => !current)}
       >
@@ -324,19 +343,28 @@ export function CodeToolCard({
           text={subject}
           className="text-muted-foreground min-w-0 font-mono"
         />
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+          {status === "running" ? elapsed : duration}
+          {status !== "running" && exitCode !== null && (
+            <span>exit {exitCode}</span>
+          )}
           <StatusGlyph status={status} />
           <ChevronDown
             className={cn(
-              "text-muted-foreground size-3.5 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
-              !expanded && "-rotate-90",
+              "text-muted-foreground/50 size-3.5 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
+              !(expanded || showTail) && "-rotate-90",
             )}
             aria-hidden="true"
           />
         </span>
       </button>
-      {expanded && hasOutput && (
-        <div id={bodyId} className="pl-6">
+      {showTail && (
+        <div id={bodyId}>
+          <StreamingTail text={preview} />
+        </div>
+      )}
+      {showExpanded && (
+        <div id={bodyId}>
           <ToolOutputPreview text={preview} collapsedLines={12} bare />
         </div>
       )}
@@ -392,32 +420,52 @@ function toolVerb(
   detail: ToolDetail,
   status: "running" | "succeeded" | "failed" | "denied",
 ): string {
-  if (status === "running") {
-    switch (detail.kind) {
-      case "command":
-        return "Command running";
-      case "file_read":
-        return "Reading file";
-      case "file_edit":
-        return "Editing file";
-      case "search":
-        return "Searching";
-      case "other":
-        return "Tool running";
-    }
-  }
+  if (detail.kind === "command" && status === "denied") return "Command denied";
   switch (detail.kind) {
     case "command":
+    case "other":
       return "Command run";
     case "file_read":
       return "File read";
     case "file_edit":
       return "File edited";
     case "search":
-      return "Search run";
-    case "other":
-      return "Tool run";
+      return "Search";
   }
+}
+
+/** Last twelve lines, height-capped so a streaming tail does not grow the row. */
+function StreamingTail({ text }: { text: string }) {
+  const lines = text.replace(/\n+$/, "").split("\n");
+  const tail = lines.slice(-12).join("\n");
+  return (
+    <pre
+      aria-label="Output"
+      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+    >
+      {tail}
+    </pre>
+  );
+}
+
+function useElapsedLabel(startedAt: string | null, active: boolean): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [active, startedAt]);
+  if (!startedAt) return null;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return null;
+  return formatTurnDuration(Math.max(0, now - start));
+}
+
+function parseExitCode(preview: string): number | null {
+  const match = preview.match(/(?:^|\n)\s*exit(?:ed)?(?:\s+code)?[:\s]+(-?\d+)\s*$/im);
+  if (!match) return null;
+  const code = Number(match[1]);
+  return Number.isFinite(code) ? code : null;
 }
 
 function toolSubject(detail: ToolDetail, name: string): string {
