@@ -479,7 +479,7 @@ mod windows_tests {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                script,
+                script.as_str(),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
