@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot } from "../api/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { formatMessageTimestamp } from "@/MessageFooter";
+import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "@/ScrollableContainer";
 
 /**
@@ -26,6 +27,7 @@ export function CodeApprovalCard({
 }) {
   const [denying, setDenying] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const [payloadOpen, setPayloadOpen] = useState(false);
   const decided = approval.state !== "pending";
 
   useEffect(() => {
@@ -39,29 +41,35 @@ export function CodeApprovalCard({
       aria-busy={deciding}
       data-testid="code-approval-card"
     >
-      <h3 className="font-medium break-words">{approvalTitle(approval)}</h3>
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="text-[13px] font-medium break-words">
+          {approvalTitle(approval)}
+        </h3>
+        <ApprovalState approval={approval} />
+      </div>
       <ApprovalKindBody approval={approval} />
       <ApprovalTimes
         requestedAt={approval.requested_at}
         decidedAt={approval.decided_at}
       />
-      {approval.state === "denied" && (
-        <p className="text-warning-foreground text-sm break-words">
-          Denied
-          {approval.feedback ? `: ${approval.feedback}` : ""}
-        </p>
+      {approval.state === "denied" && approval.feedback && (
+        <p className="text-[13px] break-words">{approval.feedback}</p>
       )}
-      {approval.state === "approved" && (
-        <p className="text-success-foreground text-sm">Approved</p>
-      )}
-      <details>
-        <summary className="text-muted-foreground hover:text-foreground cursor-pointer select-none text-xs">
+      <div>
+        <button
+          type="button"
+          className="text-muted-foreground hover:text-foreground text-[11px]"
+          aria-expanded={payloadOpen}
+          onClick={() => setPayloadOpen((current) => !current)}
+        >
           Harness payload
-        </summary>
-        <ScrollableContainer className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 text-xs break-words whitespace-pre-wrap">
-          <pre className="font-mono">{prettyRaw(approval.harness_raw_json)}</pre>
-        </ScrollableContainer>
-      </details>
+        </button>
+        <Reveal open={payloadOpen}>
+          <ScrollableContainer className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 text-[11px] break-words whitespace-pre-wrap">
+            <pre className="font-mono">{prettyRaw(approval.harness_raw_json)}</pre>
+          </ScrollableContainer>
+        </Reveal>
+      </div>
       {!decided && !denying && (
         <div className="flex flex-wrap gap-2">
           <Button
@@ -116,7 +124,7 @@ export function CodeApprovalCard({
         </div>
       )}
       {error && (
-        <p className="text-destructive text-xs break-words" role="alert">
+        <p className="text-critical-foreground text-[11px] break-words" role="alert">
           {error}
         </p>
       )}
@@ -124,16 +132,30 @@ export function CodeApprovalCard({
   );
 }
 
+function ApprovalState({ approval }: { approval: CodeApprovalSnapshot }) {
+  if (approval.state === "approved") {
+    return (
+      <p className="text-success-foreground shrink-0 text-[11px]">Approved</p>
+    );
+  }
+  if (approval.state === "denied") {
+    return (
+      <p className="text-warning-foreground shrink-0 text-[11px]">Denied</p>
+    );
+  }
+  return null;
+}
+
 function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
   switch (approval.kind.type) {
     case "command":
       return (
         <div className="flex flex-col gap-1">
-          <pre className="bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 font-mono text-xs break-words whitespace-pre-wrap">
+          <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-[13px] break-words whitespace-pre-wrap">
             {approval.kind.cmd || "Command"}
           </pre>
           {approval.kind.cwd && (
-            <p className="text-muted-foreground text-xs break-words">
+            <p className="text-muted-foreground font-mono text-[11px] break-words">
               cwd {approval.kind.cwd}
             </p>
           )}
@@ -141,18 +163,20 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
       );
     case "file_write":
       return approval.kind.paths.length > 0 ? (
-        <ul className="text-muted-foreground space-y-0.5 font-mono text-xs break-words">
+        <ul className="space-y-0.5">
           {approval.kind.paths.map((path) => (
-            <li key={path}>{path}</li>
+            <li key={path}>
+              <MiddleTruncate text={path} className="font-mono text-[11px]" />
+            </li>
           ))}
         </ul>
       ) : (
-        <p className="text-muted-foreground text-sm">File write</p>
+        <p className="text-muted-foreground text-[13px]">File write</p>
       );
     case "network":
     case "other":
       return (
-        <p className="text-muted-foreground text-sm break-words">
+        <p className="text-muted-foreground text-[13px] break-words">
           {approval.kind.summary}
         </p>
       );
@@ -172,7 +196,7 @@ function ApprovalTimes({
     : null;
   if (!requested && !decided) return null;
   return (
-    <p className="text-muted-foreground text-xs">
+    <p className="text-muted-foreground text-[11px]">
       {requested && (
         <WithTooltip label={requested.full}>
           <time dateTime={requestedAt}>{requested.short}</time>
@@ -185,6 +209,44 @@ function ApprovalTimes({
         </WithTooltip>
       )}
     </p>
+  );
+}
+
+function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "grid [overflow-anchor:none] transition-[grid-template-rows] duration-[140ms] ease-out motion-reduce:transition-none",
+        open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+      )}
+      aria-hidden={!open}
+      inert={!open ? true : undefined}
+    >
+      <div className="overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+function MiddleTruncate({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
+  const tail = Math.min(28, Math.max(12, Math.ceil(text.length / 3)));
+  if (text.length <= 40) {
+    return (
+      <span className={cn("block truncate", className)} title={text}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <span className={cn("flex min-w-0", className)} title={text}>
+      <span className="truncate">{text.slice(0, -tail)}</span>
+      <span className="shrink-0">{text.slice(-tail)}</span>
+    </span>
   );
 }
 

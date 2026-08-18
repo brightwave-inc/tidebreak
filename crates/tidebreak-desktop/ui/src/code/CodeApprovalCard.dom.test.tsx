@@ -47,22 +47,21 @@ describe("CodeApprovalCard", () => {
       document.querySelector('time[datetime="2026-08-15T12:00:00.000Z"]'),
     ).not.toBeNull();
 
-    const disclosure = screen.getByText("Harness payload").closest("details");
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(screen.queryByText(/"tool_name": "Bash"/)).not.toBeVisible();
+    const toggle = screen.getByRole("button", { name: "Harness payload" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
 
-    fireEvent.click(screen.getByText("Harness payload"));
-    expect(disclosure).toHaveAttribute("open");
-    expect(screen.getByText(/"tool_name": "Bash"/)).toBeVisible();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/"tool_name": "Bash"/)).toBeInTheDocument();
   });
 
   it("lists the paths a file write would touch", () => {
     render(<CodeApprovalCard approval={pendingWrite} onDecide={vi.fn()} />);
     expect(screen.getByText("Write this file?")).toBeInTheDocument();
-    expect(screen.getByText("/workspace/probe.txt").tagName).toBe("LI");
-    expect(screen.getByText("Harness payload").closest("details")).not.toHaveAttribute(
-      "open",
-    );
+    expect(screen.getByText("/workspace/probe.txt")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Harness payload" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 
   it("opens a feedback field on deny and submits it", () => {
@@ -113,10 +112,9 @@ describe("CodeApprovalCard", () => {
         onDecide={vi.fn()}
       />,
     );
-    const caption = screen.getByText(/Denied/);
-    expect(caption).toHaveClass("text-warning-foreground");
-    expect(caption).toHaveTextContent(
-      "Denied: no — use the fixtures directory instead",
-    );
+    expect(screen.getByText("Denied")).toHaveClass("text-warning-foreground");
+    expect(
+      screen.getByText("no — use the fixtures directory instead"),
+    ).toBeInTheDocument();
   });
 });
