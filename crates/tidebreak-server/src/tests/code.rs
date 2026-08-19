@@ -1609,6 +1609,95 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     assert_eq!(recovered, vec![current + 1, current + 2]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let replay_after_seq = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        0,
+    )
+    .await
+    .unwrap()
+    .last()
+    .map_or(0, |event| event.seq);
+
+    let first_delta_seq = tidebreak_core::db::code::append_event(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        1,
+        &tidebreak_core::CodeEvent::AssistantDelta { text: "hel".into() },
+    )
+    .await
+    .unwrap();
+    let second_delta_seq = tidebreak_core::db::code::append_event(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        1,
+        &tidebreak_core::CodeEvent::AssistantDelta { text: "lo".into() },
+    )
+    .await
+    .unwrap();
+
+    let mut replay_request =
+        format!("ws://{addr}/code/sessions/{session_id}/events?after={replay_after_seq}")
+            .into_client_request()
+            .unwrap();
+    replay_request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut replay_socket, _) = connect_async(replay_request).await.unwrap();
+
+    let mut replayed = Vec::new();
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), replay_socket.next())
+            .await
+            .expect("durable replay timed out")
+            .expect("replay socket closed")
+            .unwrap();
+        let WsMessage::Text(text) = frame else {
+            continue;
+        };
+        replayed.push(serde_json::from_str::<serde_json::Value>(text.as_str()).unwrap());
+    }
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|frame| frame["seq"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![first_delta_seq, second_delta_seq]
+    );
+    assert_eq!(replayed[0]["event"]["text"], "hel");
+    assert_eq!(replayed[1]["event"]["text"], "lo");
+    assert_eq!(replayed[0]["replayed"], true);
+    assert_eq!(replayed[1]["replayed"], true);
+}
+
 #[tokio::test]
 async fn superseded_worker_cannot_append_to_the_journal() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
