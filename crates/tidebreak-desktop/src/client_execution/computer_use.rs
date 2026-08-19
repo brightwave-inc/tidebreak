@@ -484,6 +484,9 @@ pub(crate) async fn stop_computer_use_control(
     app: AppHandle,
     state: State<'_, HostAccess>,
 ) -> Result<(), String> {
+    state
+        .require_local(crate::host_authority::Authority::ComputerUse)
+        .await?;
     state.computer_use.halt().await;
     emit_state(&app, &state.computer_use);
     Ok(())
@@ -496,6 +499,9 @@ pub(crate) async fn resume_computer_use_control(
     app: AppHandle,
     state: State<'_, HostAccess>,
 ) -> Result<(), String> {
+    state
+        .require_local(crate::host_authority::Authority::ComputerUse)
+        .await?;
     if native_binary_choice(
         &app,
         "Resume computer control?",
