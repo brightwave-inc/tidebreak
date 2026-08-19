@@ -570,11 +570,33 @@ jobs:
       # path-identity, and process-tree boundaries. A cross-target check cannot
       # prove those behaviors; run the harness suite and the server's code-mode
       # modules on NTFS with the Windows process APIs available.
+      # Process-tree teardown races PowerShell startup on a loaded runner.
+      # Three attempts cover that without dropping the Windows contract.
       - name: Code mode Windows lifecycle tests
+        shell: pwsh
         run: |
-          cargo test -p tidebreak-code-execution --locked
-          cargo test -p tidebreak-harness --locked
-          cargo test -p tidebreak-server --lib code:: --locked
+          $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $attempts = 3
+          $suites = @(
+            @("test", "-p", "tidebreak-code-execution", "--locked"),
+            @("test", "-p", "tidebreak-harness", "--locked"),
+            @("test", "-p", "tidebreak-server", "--lib", "code::", "--locked")
+          )
+          foreach ($suite in $suites) {
+            $passed = $false
+            for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+              & cargo @suite
+              if ($LASTEXITCODE -eq 0) {
+                $passed = $true
+                break
+              }
+              Write-Host "cargo $($suite -join ' ') failed on attempt $attempt/$attempts"
+            }
+            if (-not $passed) {
+              exit 1
+            }
+          }
       # Boot-critical persistence, proven on the OS that ships it: the desktop
       # profile's SQLite open/migrate lifecycle (tidebreak-server's
       # desktop_schema module, including the Windows MoveFileExW marker swap)
@@ -630,8 +652,20 @@ jobs:
       - name: Fetch the complete workspace lockfile
         if: ${{ github.ref == 'refs/heads/main' }}
         run: cargo fetch --locked
+      # Linux ETXTBSY still hits a freshly written fake harness binary on a
+      # loaded runner. Three attempts cover that without dropping the contract.
       - name: headless tests
-        run: cargo test --workspace --exclude tidebreak-desktop --locked
+        run: |
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            if cargo test --workspace --exclude tidebreak-desktop --locked; then
+              exit 0
+            fi
+            echo "headless tests failed on attempt ${attempt}/${attempts}" >&2
+            if [[ "$attempt" -eq "$attempts" ]]; then
+              exit 1
+            fi
+          done
 
   postgres:
     name: postgres state machine

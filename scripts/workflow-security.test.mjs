@@ -406,6 +406,8 @@ test("PR lanes are scope-gated, never label-gated", () => {
     testJob,
     /cargo test --workspace --exclude tidebreak-desktop --locked/,
   );
+  assert.match(testJob, /attempts=3/);
+  assert.match(testJob, /headless tests failed on attempt/);
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
   assert.match(changes, /\*\.md\|docs\/\*\|assets\/\*\|\.githooks\/\*/);
@@ -496,6 +498,9 @@ test("native Windows CI is an explicit PR opt-in with a main backstop", () => {
     windows,
     /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
   );
+  assert.match(windows, /\$attempts = 3/);
+  assert.match(windows, /tidebreak-server", "--lib", "code::"/);
+  assert.match(windows, /failed on attempt/);
 });
 
 test("UI tests and production build each gate the UI lane", () => {
