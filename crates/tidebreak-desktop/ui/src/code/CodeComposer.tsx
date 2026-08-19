@@ -126,6 +126,7 @@ export function HarnessModelMenu({
   value,
   onChange,
   disabled,
+  loading = false,
   variant = "composer",
 }: {
   harness: HarnessKind;
@@ -133,6 +134,7 @@ export function HarnessModelMenu({
   value?: string;
   onChange?: (model: string) => void;
   disabled?: boolean;
+  loading?: boolean;
   /** Composer sits above the draft; field fills a form row. */
   variant?: "composer" | "field";
 }) {
@@ -169,16 +171,21 @@ export function HarnessModelMenu({
   const visible = searching ? matches : (activeGroup?.options ?? []);
   const locked = disabled || !onChange;
   if (!current) {
-    if (variant !== "field") return null;
+    if (variant !== "field" && !loading) return null;
+    const label = loading ? "Loading models…" : "Default model";
     return (
       <Button
         type="button"
-        variant="outline"
-        className="h-10 w-full justify-between px-3 font-normal"
+        variant={variant === "field" ? "outline" : "ghost"}
+        className={
+          variant === "field"
+            ? "h-10 w-full justify-between px-3 font-normal"
+            : "h-8 max-w-56 gap-2"
+        }
         disabled
-        aria-label="Model"
+        aria-label={loading ? "Loading models" : "Model: Default"}
       >
-        <span className="text-muted-foreground">Loading models…</span>
+        <span className="text-muted-foreground truncate">{label}</span>
         <ChevronDown className="size-4 opacity-50" />
       </Button>
     );
@@ -425,6 +432,7 @@ export function CodeComposer({
   harness,
   model,
   modelOptions,
+  modelLoading = false,
   sessionId,
   history,
   queued = false,
@@ -447,6 +455,7 @@ export function CodeComposer({
   harness?: HarnessKind;
   model?: string;
   modelOptions?: readonly CodeModelOption[];
+  modelLoading?: boolean;
   sessionId?: string;
   /** Prior user prompts, newest first, for Up/Down recall. */
   history?: readonly string[];
@@ -653,11 +662,12 @@ export function CodeComposer({
         draft={draft}
         history={history}
         modelMenu={
-          harness && modelOptions && modelOptions.length > 0 ? (
+          harness && ((modelOptions?.length ?? 0) > 0 || modelLoading) ? (
             <HarnessModelMenu
               harness={harness}
-              options={modelOptions}
+              options={modelOptions ?? []}
               value={selectedModel || undefined}
+              loading={modelLoading}
               onChange={
                 onModelChange
                   ? (next) => {
