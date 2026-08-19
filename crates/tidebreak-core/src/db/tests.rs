@@ -2927,7 +2927,7 @@ async fn turn_admission_reservation_is_global_exact_and_recoverable() {
     };
     let first_token = uuid::Uuid::new_v4();
     let first_lease = match store
-        .begin_turn_admission(&request, first_token, chrono::Duration::milliseconds(50))
+        .begin_turn_admission(&request, first_token, chrono::Duration::seconds(30))
         .await
         .unwrap()
     {
@@ -2965,7 +2965,20 @@ async fn turn_admission_reservation_is_global_exact_and_recoverable() {
         BeginTurnAdmissionOutcome::IdentityConflict
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    // Expire the reservation explicitly instead of asking a loaded runner to
+    // finish all assertions inside a tiny wall-clock lease.
+    let expired_at =
+        ops::agent_run::database_now(&store.conn).await.unwrap() - chrono::Duration::seconds(1);
+    let mut reservation: entities::turn_admission::ActiveModel =
+        entities::turn_admission::Entity::find_by_id(turn_id.0)
+            .one(&store.conn)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    reservation.lease_expires_at = Set(Some(expired_at));
+    reservation.update(&store.conn).await.unwrap();
+
     let takeover_token = uuid::Uuid::new_v4();
     let takeover_lease = match store
         .begin_turn_admission(&request, takeover_token, chrono::Duration::seconds(1))
