@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/generate-release-search-index.mjs",
     "package:vercel": "node scripts/package-vercel-output.mjs",
     "test:vercel-output": "node --test scripts/vercel-output-config.test.mjs",
     "start": "serve out",

@@ -43,8 +43,9 @@ Useful scripts:
 | `pnpm lint` | ESLint |
 
 `pnpm build` emits the static Fumadocs search index at `/api/search/` alongside
-the exported pages. The Vercel output keeps `/search-index.json` as a legacy
-deployment-health alias to that same file.
+the exported pages. A post-build step also emits `/search-index.json` as a
+small compatibility manifest for the established release artifact and health
+checks; the site itself does not query that legacy file.
 
 `pnpm types:check` type-checks against the route types Next generates under
 `.next/`, so run `pnpm dev` or `pnpm build` at least once in a fresh clone

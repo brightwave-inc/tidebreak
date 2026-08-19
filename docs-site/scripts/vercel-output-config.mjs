@@ -25,10 +25,6 @@ export const VERCEL_OUTPUT_CONFIG = {
       status: 308,
     },
     {
-      src: '^/docs/search-index\\.json$',
-      dest: '/docs/api/search',
-    },
-    {
       src: '/docs/_next/static/.+',
       headers: {
         'cache-control': 'public,max-age=31536000,immutable',

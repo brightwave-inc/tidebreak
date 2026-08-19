@@ -34,15 +34,3 @@ test('the output redirects only the root docs entry points', () => {
     { handle: 'filesystem' },
   );
 });
-
-test('the legacy search-index URL serves the Fumadocs search export', () => {
-  assert.deepEqual(
-    VERCEL_OUTPUT_CONFIG.routes.find(
-      (route) => route.src === '^/docs/search-index\\.json$',
-    ),
-    {
-      src: '^/docs/search-index\\.json$',
-      dest: '/docs/api/search',
-    },
-  );
-});
