@@ -23,7 +23,12 @@
 
   --border: var(--color-zinc-200);
   --input: oklch(0.929 0.013 255.508);
-  --ring: oklch(0.704 0.04 256.788);
+  /* The focus ring has to clear 3:1 against whatever it rings. At 0.704 it
+     cleared 2.6:1 on a white page and 2.9:1 on a hovered row — visible in the
+     dark theme, where the same value sits on a dark ground, and close to
+     invisible in the light one. 0.58 clears 4.3:1 on the page, 4.1:1 on a
+     card, and 3.4:1 on `--muted`. */
+  --ring: oklch(0.58 0.04 256.788);
 
   --primary: var(--color-zinc-900);
   --primary-foreground: var(--color-zinc-100);

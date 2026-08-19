@@ -466,7 +466,13 @@ function TreeRow({
           <span className="size-3 shrink-0" aria-hidden />
         )}
         <Icon className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
-        <span className="min-w-0 truncate" title={node.path}>
+        {/*
+          Mono, like every other path-shaped surface in code mode: the explorer
+          was the one place a file name was set in the UI face, which made the
+          same name look like two different strings in the tree and in the tab
+          it opened.
+        */}
+        <span className="min-w-0 truncate font-mono" title={node.path}>
           {node.name}
         </span>
       </div>

@@ -62,15 +62,15 @@ function DoctorCard({ entry }: { entry: HarnessDoctorEntry }) {
   return (
     <Card className="gap-3 p-4">
       <CardHeader className="justify-between">
-        <CardTitle className="text-base">{HARNESS_LABELS[entry.kind]}</CardTitle>
+        <CardTitle className="text-sm">{HARNESS_LABELS[entry.kind]}</CardTitle>
         <Badge variant={ready ? "success" : "warning"} size="sm">
           {ready ? "Ready" : entry.found ? "Sign in" : "Not found"}
         </Badge>
       </CardHeader>
       <CardContent className="gap-1 text-sm">
         <Row label="Found" value={entry.found ? "yes" : "no"} />
-        {entry.path && <Row label="Path" value={entry.path} />}
-        {entry.version && <Row label="Version" value={entry.version} />}
+        {entry.path && <Row label="Path" value={entry.path} mono />}
+        {entry.version && <Row label="Version" value={entry.version} mono />}
         <Row label="Tier" value={HARNESS_TIER_LABELS[entry.tier]} />
         <Row label="Capabilities" value={capsSummary(entry)} />
         <Row
@@ -97,13 +97,22 @@ function DoctorCard({ entry }: { entry: HarnessDoctorEntry }) {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  /** An install path or a version string: mono, like everywhere else. */
+  mono?: boolean;
+}) {
   return (
     // A harness path or version carries no spaces to break at, so without this
     // a deep install location runs past the card.
     <p className="text-muted-foreground break-words">
       <span className="text-foreground font-medium">{label}: </span>
-      {value}
+      <span className={mono ? "font-mono" : undefined}>{value}</span>
     </p>
   );
 }

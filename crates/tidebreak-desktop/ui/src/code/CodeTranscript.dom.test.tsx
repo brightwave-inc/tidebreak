@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
+import type { CodeApprovalSnapshot } from "../api/types";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 
 afterEach(() => {
@@ -338,5 +339,53 @@ describe("CodeTranscript", () => {
       />,
     );
     expect(screen.queryByText("Working")).toBeNull();
+  });
+
+  it("hangs a parked approval off the tool line it is waiting on", () => {
+    // Nothing on the wire links the two: the card and the still-running line
+    // above it show the same command, and only their adjacency says so. A
+    // decided approval, or one that follows anything else, stands alone.
+    const parked: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "tool",
+        id: "tool-parked",
+        turnId: "t1",
+        callId: "c7",
+        name: "Bash",
+        detail: { kind: "command", cmd: "rm -rf /tmp/scratch", cwd: "/tmp" },
+        status: "running",
+        preview: "",
+        startedAt: "2026-08-15T12:00:00.000Z",
+        durationMs: null,
+      },
+      { kind: "approval", id: "approval:a7", approvalId: "a7", state: "pending" },
+    ];
+    const approval: CodeApprovalSnapshot = {
+      id: "a7",
+      session_id: "s1",
+      turn_id: "t1",
+      kind: { type: "command", cmd: "rm -rf /tmp/scratch", cwd: "/tmp" },
+      harness_raw_json: "{}",
+      state: "pending",
+      requested_at: "2026-08-15T12:00:00.000Z",
+    };
+
+    const { rerender } = render(
+      <CodeTranscript items={parked} approvals={{ a7: approval }} />,
+    );
+    expect(
+      document.querySelector('[data-code-approval-attached="true"]'),
+    ).not.toBeNull();
+
+    rerender(
+      <CodeTranscript
+        items={[items[0], parked[2]!]}
+        approvals={{ a7: approval }}
+      />,
+    );
+    expect(
+      document.querySelector('[data-code-approval-attached="true"]'),
+    ).toBeNull();
   });
 });

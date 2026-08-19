@@ -918,7 +918,7 @@ function CodeSessionPane({
         {connectionState === "reconnecting" && (
           <p
             role="status"
-            className="text-info-foreground-muted pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
+            className="text-info-foreground pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
           >
             Reconnecting to the session…
           </p>

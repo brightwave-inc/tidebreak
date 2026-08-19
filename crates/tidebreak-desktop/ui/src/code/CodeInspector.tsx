@@ -41,6 +41,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { DiffPanel } from "./DiffPanel";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { MiddleTruncate } from "./MiddleTruncate";
 import { PrCard } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
@@ -409,13 +410,14 @@ function PrTab({
               </p>
             )}
           </div>
-          <p
-            className="text-muted-foreground mt-1 truncate font-mono text-xs"
-            title={branchLine ?? undefined}
-          >
-            #{pr.number}
-            {branchLine ? ` · ${branchLine}` : ""}
-          </p>
+          {/*
+            The base branch is the half a reader checks, and it is the half an
+            end-truncate eats first on a long feature-branch name.
+          */}
+          <MiddleTruncate
+            text={branchLine ? `#${pr.number} · ${branchLine}` : `#${pr.number}`}
+            className="text-muted-foreground mt-1 font-mono text-xs"
+          />
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <Badge variant={prStateVariant(tone)} size="sm">
@@ -636,7 +638,9 @@ function CheckList({
           icon={<Check className="size-3.5" />}
           count={counts.passing}
           label="passing"
-          className="text-success"
+          // These three carry a word each, so they take the readable ink rather
+          // than the mark colour the bare glyphs below use.
+          className="text-success-foreground"
         />
         <CheckCount
           icon={<CircleDashed className="size-3.5" />}
@@ -648,7 +652,7 @@ function CheckList({
           icon={<X className="size-3.5" />}
           count={counts.failing}
           label="failing"
-          className="text-critical"
+          className="text-critical-foreground"
         />
       </button>
       {open &&

@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { MiddleTruncate } from "./MiddleTruncate";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 
@@ -82,15 +83,18 @@ export function DiffPanel({
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
         <div className="min-w-0">
           <h2 className="text-sm font-medium">Diff</h2>
-          <p
-            className="text-muted-foreground truncate font-mono text-[11px]"
-            title={scopeCaption}
-          >
-            {scopeCaption}
-          </p>
+          <MiddleTruncate
+            text={scopeCaption}
+            className="text-muted-foreground font-mono text-[11px]"
+          />
         </div>
         <div className="flex items-center gap-2">
-          {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
+          {/* A fixed slot, so a refresh does not nudge the diffstat sideways. */}
+          <span className="grid size-3.5 shrink-0 place-items-center">
+            {refreshing && (
+              <Spinner className="size-3.5" aria-label="Refreshing" />
+            )}
+          </span>
           {payload && <DiffstatBadge stat={payload.stat} />}
         </div>
       </header>
@@ -188,12 +192,10 @@ function FileDiffSection({
               )}
               aria-hidden="true"
             />
-            <span
-              className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs"
-              title={group.path}
-            >
-              {group.path}
-            </span>
+            <MiddleTruncate
+              text={group.path}
+              className="text-muted-foreground min-w-0 flex-1 font-mono text-xs"
+            />
           </button>
         </h3>
         {onOpenFile && (
@@ -214,14 +216,19 @@ function FileDiffSection({
           </button>
         )}
         <span className="shrink-0 font-mono text-[11px] tabular-nums">
-          <span className="text-success">+{insertions}</span>{" "}
-          <span className="text-critical">−{deletions}</span>
+          {/*
+            `--success` and `--critical` are mark colours: they clear 3:1
+            against either background, which an icon needs and a numeral this
+            small does not. The `-foreground` inks clear 9:1 in both themes.
+          */}
+          <span className="text-success-foreground">+{insertions}</span>{" "}
+          <span className="text-critical-foreground">−{deletions}</span>
         </span>
       </header>
       {expanded ? (
         <pre
           id={bodyId}
-          className="overflow-x-auto py-1 font-mono text-xs leading-5"
+          className="overflow-x-auto py-1 font-mono text-[13px] leading-5"
         >
           {group.lines.map((line, index) => (
             <DiffLineRow
@@ -250,11 +257,14 @@ function FileDiffSection({
 
 function DiffLineRow({ line }: { line: DiffLine }) {
   return (
+    // The tint carries "added" or "removed"; the ink carries readability. Tinted
+    // ink on a tinted row is what made added lines a 3.2:1 pale green in the
+    // light theme while reading fine in the dark one.
     <span
       className={cn(
         "flex min-h-4 min-w-max",
-        line.kind === "add" && "text-success bg-success/10",
-        line.kind === "del" && "text-critical bg-critical/10",
+        line.kind === "add" && "text-success-foreground bg-success/10",
+        line.kind === "del" && "text-critical-foreground bg-critical/10",
         (line.kind === "hunk" || line.kind === "meta") && "text-muted-foreground",
       )}
     >

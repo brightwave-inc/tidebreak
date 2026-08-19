@@ -6,6 +6,7 @@ import type { CodeWorkspaceBlob } from "../api/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
+import { MiddleTruncate } from "./MiddleTruncate";
 import { useLiveResource } from "./useLiveContent";
 
 /**
@@ -43,11 +44,23 @@ export function FileViewer({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
-        <p className="min-w-0 truncate font-mono text-xs" title={path}>
-          {path}
-        </p>
-        {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
+      {/*
+        Deliberately the same two-line header as `DiffPanel`: a heading over a
+        mono caption, the same padding, the same fixed spinner slot. The two
+        panels share one center tab strip, so any difference in their header
+        height shows up as the file body jumping when the reader switches tabs.
+      */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="min-w-0">
+          <h2 className="text-sm font-medium">File</h2>
+          <MiddleTruncate
+            text={path}
+            className="text-muted-foreground font-mono text-[11px]"
+          />
+        </div>
+        <span className="grid size-3.5 shrink-0 place-items-center">
+          {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
+        </span>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
       {!data && !error && (
@@ -87,7 +100,11 @@ function BlobBody({ blob }: { blob: CodeWorkspaceBlob }) {
             readOnly: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
+            // The same 13px/20px as the diff body. The two views open the same
+            // file from the same tab strip, so a reader flipping between them
+            // should see the same lines in the same places.
             fontSize: 13,
+            lineHeight: 20,
             wordWrap: "on",
             renderLineHighlight: "none",
             automaticLayout: true,
