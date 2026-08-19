@@ -7,7 +7,11 @@ import { useNativePickerLatch } from "./NativePickerLatch";
 import { usePendingPrompts } from "./PendingPrompts";
 import * as host from "./host";
 
-vi.mock("./host", () => ({
+vi.mock("./host", async (importOriginal) => ({
+  // The refusal mapping is real: a failed decision reads the error to tell a
+  // host-authority refusal from an ordinary failure, and stubbing that out
+  // would test a code path the app never runs.
+  ...(await importOriginal<typeof import("./host")>()),
   hasNativeHost: vi.fn(() => true),
   resolveFolderAccessRequest: vi.fn(),
 }));

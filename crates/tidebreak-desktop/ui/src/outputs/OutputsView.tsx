@@ -26,8 +26,8 @@ import {
   PICKER_HOLDERS,
   useNativePickerLatch,
 } from "@/NativePickerLatch";
-import { friendlyErrorMessage } from "@/lib/utils";
 import { useRefreshSignals } from "@/RefreshSignals";
+import { hostErrorMessage } from "@/remoteMachine";
 import { OutputsTable } from "./OutputsTable";
 
 export type OutputsApis = {
@@ -262,6 +262,11 @@ export function exportFailureMessage(
   }
 }
 
+/**
+ * Saving a file reaches this computer, so a window attached to a remote machine
+ * is refused rather than writing to the wrong host. That refusal gets its own
+ * sentence; everything else falls through to the ordinary failure copy.
+ */
 export function friendlyOutputError(error: unknown, fallback: string): string {
-  return friendlyErrorMessage(error, fallback);
+  return hostErrorMessage(error, fallback);
 }

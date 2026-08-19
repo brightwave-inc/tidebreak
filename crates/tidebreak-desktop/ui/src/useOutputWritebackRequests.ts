@@ -6,6 +6,7 @@ import {
   resolveOutputWritebackRequest,
   type OutputWritebackDecision,
 } from "./host";
+import { hostErrorMessage } from "./remoteMachine";
 import { useOpenConversation } from "./OpenConversation";
 import { usePendingPrompts } from "./PendingPrompts";
 
@@ -53,7 +54,10 @@ export function useOutputWritebackRequests(
       await resolveOutputWritebackRequest(startedChatId, callId, decision);
     } catch (err) {
       if (stillOpen(startedChatId)) {
-        setErrors((current) => ({ ...current, [callId]: String(err) }));
+        setErrors((current) => ({
+          ...current,
+          [callId]: hostErrorMessage(err, "That could not be done."),
+        }));
       }
     } finally {
       if (stillOpen(startedChatId)) {
@@ -75,7 +79,10 @@ export function useOutputWritebackRequests(
       if (stillOpen(startedChatId)) refresh();
     } catch (err) {
       if (stillOpen(startedChatId)) {
-        setErrors((current) => ({ ...current, [callId]: String(err) }));
+        setErrors((current) => ({
+          ...current,
+          [callId]: hostErrorMessage(err, "That could not be done."),
+        }));
       }
     }
   }
