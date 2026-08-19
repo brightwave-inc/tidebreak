@@ -391,7 +391,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onCloseEditor={(index) =>
           setLayout(closeEditorTab(layout, index, "primary"))
         }
-        onCloseAllEditors={() => setLayout(closeAllEditorTabs(layout))}
+        onCloseAllEditors={() =>
+          setLayout(closeAllEditorTabs(layout, "primary"))
+        }
+        onCloseEveryEditor={() => setLayout(closeAllEditorTabs(layout))}
         onCloseOtherEditors={(index) =>
           setLayout(closeOtherEditorTabs(layout, index, "primary"))
         }
@@ -511,7 +514,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onCloseEditor={(index) =>
           setLayout(closeEditorTab(layout, index, "secondary"))
         }
-        onCloseAllEditors={() => setLayout(closeAllEditorTabs(layout))}
+        onCloseAllEditors={() =>
+          setLayout(closeAllEditorTabs(layout, "secondary"))
+        }
         onCloseOtherEditors={(index) =>
           setLayout(closeOtherEditorTabs(layout, index, "secondary"))
         }

@@ -191,6 +191,58 @@ describe("code chrome layout", () => {
     });
   });
 
+  it("scopes close actions to the editor group that owns the menu", () => {
+    const layout = {
+      tabs: [
+        { type: "folders" as const },
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 2,
+      fullscreen: false,
+      editorSplit: {
+        tabs: [
+          { type: "file" as const, path: "README.md" },
+          { type: "diff" as const, path: "README.md" },
+        ],
+        activeIndex: 1,
+        focused: true,
+      },
+    };
+
+    expect(closeAllEditorTabs(layout, "primary")).toEqual({
+      ...layout,
+      tabs: [{ type: "folders" }, { type: "terminal" }],
+      activeIndex: 0,
+      conversationFocused: undefined,
+    });
+    expect(closeAllEditorTabs(layout, "secondary")).toEqual({
+      ...layout,
+      editorSplit: undefined,
+    });
+
+    expect(closeOtherEditorTabs(layout, 0, "primary")).toEqual({
+      ...layout,
+      tabs: [
+        { type: "folders" },
+        { type: "file", path: "src/lib.rs" },
+        { type: "terminal" },
+      ],
+      activeIndex: 1,
+      conversationFocused: false,
+      editorSplit: { ...layout.editorSplit, focused: undefined },
+    });
+    expect(closeOtherEditorTabs(layout, 0, "secondary")).toEqual({
+      ...layout,
+      editorSplit: {
+        tabs: [{ type: "file", path: "README.md" }],
+        activeIndex: 0,
+        focused: true,
+      },
+    });
+  });
+
   it("moves editor tabs into a durable secondary group and back", () => {
     const layout = {
       tabs: [
