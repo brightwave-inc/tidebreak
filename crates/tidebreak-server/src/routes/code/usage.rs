@@ -145,7 +145,7 @@ async fn collect_modelctl(gateway_url: &str) -> Result<Option<CodeSubscriptionUs
 }
 
 async fn run_modelctl(probe: &ProbeCapture, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut command = command_from_probe(&probe);
+    let mut command = command_from_probe(probe);
     command.args(args);
     let output = timeout(COMMAND_TIMEOUT, command.output())
         .await
