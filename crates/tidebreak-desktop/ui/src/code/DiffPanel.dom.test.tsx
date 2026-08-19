@@ -98,6 +98,32 @@ describe("DiffPanel", () => {
       screen.queryByRole("button", { name: "Show diff" }),
     ).not.toBeInTheDocument();
   });
+
+  it("says which scope came back empty", async () => {
+    const client = {
+      getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+        diff: "",
+        truncated: false,
+        stat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+      }),
+    };
+    const { rerender } = render(
+      <DiffPanel
+        client={client}
+        workspaceId="ws-1"
+        turnId="turn-1"
+        turnLabel="Turn 4"
+      />,
+    );
+    expect(
+      await screen.findByText("Turn 4 changed no files."),
+    ).toBeInTheDocument();
+
+    rerender(<DiffPanel client={client} workspaceId="ws-1" />);
+    expect(
+      await screen.findByText("The worktree matches its base branch."),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("groupUnifiedDiff", () => {

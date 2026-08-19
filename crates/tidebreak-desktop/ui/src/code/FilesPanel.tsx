@@ -10,6 +10,7 @@ import {
   ancestorPaths,
   buildFileTree,
   filterPaths,
+  treeIndentPx,
   type FileTreeNode,
 } from "./fileTree";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
@@ -216,11 +217,15 @@ export function FilesPanel({
         </div>
       )}
       {empty ? (
-        <p className="text-muted-foreground px-3 py-6 text-sm">
-          {query.trim() || include.trim() || exclude.trim()
-            ? "No matching files."
-            : "No files."}
-        </p>
+        <FilesEmpty
+          query={query.trim()}
+          filtered={Boolean(include.trim() || exclude.trim())}
+          onClear={() => {
+            setQuery("");
+            setInclude("");
+            setExclude("");
+          }}
+        />
       ) : ready ? (
         <ul
           className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pt-2"
@@ -240,6 +245,56 @@ export function FilesPanel({
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Nothing to list, in the two ways that can happen.
+ *
+ * A rail this narrow has no room for a full empty block, so the treatment is
+ * one quiet line — but a filtered miss says what was searched for and offers
+ * the way out, because "no matching files" beside a box the reader typed in
+ * two minutes ago leaves them guessing which of three filters is the culprit.
+ */
+function FilesEmpty({
+  query,
+  filtered,
+  onClear,
+}: {
+  query: string;
+  filtered: boolean;
+  onClear: () => void;
+}) {
+  if (!query && !filtered) {
+    return (
+      <p className="text-muted-foreground px-3 py-6 text-sm">
+        This worktree has no tracked files yet.
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col items-start gap-1 px-3 py-6">
+      <p className="text-muted-foreground line-clamp-2 min-w-0 max-w-full text-sm">
+        No files match{" "}
+        {query ? (
+          <span className="font-mono break-all">{query}</span>
+        ) : (
+          "these filters"
+        )}
+        .
+      </p>
+      <button
+        type="button"
+        className={cn(
+          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+          FOCUS_RING,
+          HOVER_TINT,
+        )}
+        onClick={onClear}
+      >
+        Clear search and filters
+      </button>
     </div>
   );
 }
@@ -269,7 +324,7 @@ function TreeRow({
       <button
         type="button"
         aria-current={current ? true : undefined}
-        style={{ paddingLeft: 8 + depth * 12 }}
+        style={{ paddingLeft: treeIndentPx(depth) }}
         className={cn(
           "flex w-full cursor-pointer items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
           FOCUS_RING_TIGHT,

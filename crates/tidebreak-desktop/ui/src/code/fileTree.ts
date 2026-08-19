@@ -10,6 +10,22 @@ export type FileTreeNode = {
   children?: FileTreeNode[];
 };
 
+/** Row indent per nesting level, and the depth past which it stops growing. */
+const INDENT_BASE_PX = 8;
+const INDENT_STEP_PX = 12;
+const MAX_INDENT_DEPTH = 8;
+
+/**
+ * Left padding for a tree row at `depth`.
+ *
+ * The indent stops growing at eight levels. The explorer lives in a rail a few
+ * hundred pixels wide, and past that depth each further step trades a readable
+ * file name for a nesting level the rows above already show.
+ */
+export function treeIndentPx(depth: number): number {
+  return INDENT_BASE_PX + Math.min(depth, MAX_INDENT_DEPTH) * INDENT_STEP_PX;
+}
+
 /** Build a directory tree from slash-separated relative paths. */
 export function buildFileTree(paths: readonly string[]): FileTreeNode[] {
   const root: FileTreeNode[] = [];

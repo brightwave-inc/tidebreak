@@ -3,6 +3,13 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { cn } from "@/lib/utils";
 import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -11,6 +18,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { DoctorList } from "./DoctorList";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { isHarnessReady } from "./labels";
+import { middleTruncate } from "./workspaceCards";
 
 /**
  * `/code` home: the doctor when no engine is usable, otherwise repo
@@ -83,50 +91,69 @@ function CodeHomeBody() {
           />
         </section>
       )}
-      {ready && (
-        <>
-          <section className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">Add a repo</h2>
-            <p className="text-muted-foreground text-sm">
+      {ready && repos.length === 0 && loaded && (
+        // Nothing is registered, so the page has exactly one thing to say.
+        // A "Repos" heading over an empty list, under a second heading that
+        // repeats the same instruction, is two sections carrying one message.
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>No repos yet</EmptyTitle>
+            <EmptyDescription>
               Browse a local folder, or clone from a git URL or GitHub.
-            </p>
-            <Button type="button" className="self-start" onClick={() => setAddOpen(true)}>
+            </EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button type="button" onClick={() => setAddOpen(true)}>
               Add repo
             </Button>
-          </section>
-          <section className="flex flex-col gap-3">
+          </EmptyContent>
+        </Empty>
+      )}
+      {ready && repos.length > 0 && (
+        <section className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">Repos</h2>
-            {repos.length === 0 ? (
-              <p className="text-muted-foreground text-sm">None registered yet.</p>
-            ) : (
-              <ul className="flex flex-col gap-1">
-                {repos.map((repo) => (
-                  <li key={repo.id}>
-                    <button
-                      type="button"
-                      className={cn(
-                        "hover:bg-muted w-full cursor-pointer rounded-md px-3 py-2 text-left text-sm",
-                        FOCUS_RING,
-                        HOVER_TINT,
-                      )}
-                      onClick={() =>
-                        void navigate({
-                          to: "/code/r/$repoId",
-                          params: { repoId: repo.id },
-                        })
-                      }
-                    >
-                      <span className="font-medium">{repo.display_name}</span>
-                      <span className="text-muted-foreground ml-2 font-mono text-xs">
-                        {repo.root_path}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setAddOpen(true)}
+            >
+              Add repo
+            </Button>
+          </div>
+          <ul className="flex flex-col gap-1">
+            {repos.map((repo) => (
+              <li key={repo.id}>
+                <button
+                  type="button"
+                  className={cn(
+                    "hover:bg-muted flex w-full cursor-pointer items-baseline gap-2 rounded-md px-3 py-2 text-left text-sm",
+                    FOCUS_RING,
+                    HOVER_TINT,
+                  )}
+                  onClick={() =>
+                    void navigate({
+                      to: "/code/r/$repoId",
+                      params: { repoId: repo.id },
+                    })
+                  }
+                >
+                  <span className="min-w-0 shrink truncate font-medium">
+                    {repo.display_name}
+                  </span>
+                  {/* The tail of a path is what tells two checkouts apart. */}
+                  <span
+                    className="text-muted-foreground min-w-0 truncate font-mono text-xs"
+                    title={repo.root_path}
+                  >
+                    {middleTruncate(repo.root_path, 56)}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       <AddRepoPalette open={addOpen} onOpenChange={setAddOpen} />
     </div>

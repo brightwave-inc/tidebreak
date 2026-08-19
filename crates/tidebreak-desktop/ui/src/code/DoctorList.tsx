@@ -25,6 +25,8 @@ export function DoctorList({
   onRefresh?: () => void;
   refreshing?: boolean;
 }) {
+  const allReady =
+    report.harnesses.length > 0 && report.harnesses.every(isHarnessReady);
   return (
     <div className="flex flex-col gap-3">
       {onRefresh && (
@@ -43,6 +45,14 @@ export function DoctorList({
       {report.harnesses.map((entry) => (
         <DoctorCard key={entry.kind} entry={entry} />
       ))}
+      {allReady && (
+        // Every card here says "Ready", which leaves the reader checking each
+        // one to learn that nothing needs doing. One line states the verdict
+        // the cards add up to, and that the list is the whole list.
+        <p className="text-muted-foreground text-sm">
+          Every engine this build drives is installed and signed in.
+        </p>
+      )}
     </div>
   );
 }
@@ -89,7 +99,9 @@ function DoctorCard({ entry }: { entry: HarnessDoctorEntry }) {
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <p className="text-muted-foreground">
+    // A harness path or version carries no spaces to break at, so without this
+    // a deep install location runs past the card.
+    <p className="text-muted-foreground break-words">
       <span className="text-foreground font-medium">{label}: </span>
       {value}
     </p>

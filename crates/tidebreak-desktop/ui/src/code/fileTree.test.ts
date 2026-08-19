@@ -5,6 +5,7 @@ import {
   buildFileTree,
   filterPaths,
   matchGlob,
+  treeIndentPx,
 } from "./fileTree";
 
 describe("buildFileTree", () => {
@@ -54,5 +55,15 @@ describe("ancestorPaths", () => {
   it("lists parent directories of a file", () => {
     expect(ancestorPaths("src/code/mod.rs")).toEqual(["src", "src/code"]);
     expect(ancestorPaths("README.md")).toEqual([]);
+  });
+});
+
+describe("treeIndentPx", () => {
+  it("stops growing so a deep path still leaves room for the name", () => {
+    expect(treeIndentPx(0)).toBe(8);
+    expect(treeIndentPx(3)).toBe(44);
+    // Twenty levels deep would otherwise indent past the width of the rail.
+    expect(treeIndentPx(20)).toBe(treeIndentPx(8));
+    expect(treeIndentPx(8)).toBeLessThan(120);
   });
 });

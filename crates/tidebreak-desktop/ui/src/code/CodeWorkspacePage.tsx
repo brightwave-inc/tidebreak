@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -356,10 +356,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     <>
       {dialogs}
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h1 className="flex min-w-0 items-center gap-2 text-sm font-medium">
             {title ? (
-              <span className="truncate" title={title}>
+              // The title takes the free space and yields it first: the repo
+              // name and the worktree path are short, fixed facts, and a long
+              // title that squeezed them out would cost the reader the two
+              // things that say which checkout this is.
+              <span className="min-w-0 flex-1 truncate" title={title}>
                 {title}
               </span>
             ) : error ? null : (
@@ -373,7 +377,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             )}
             {repoName && (
               <span
-                className="text-muted-foreground truncate text-xs font-normal"
+                className="text-muted-foreground max-w-32 shrink-0 truncate text-xs font-normal"
                 title={repoName}
               >
                 {repoName}
@@ -384,7 +388,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             )}
           </h1>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {session && (
             <>
               <SessionAttentionBadge
@@ -609,7 +613,7 @@ function WorktreePathChip({ path }: { path: string }) {
         <button
           type="button"
           className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink cursor-pointer truncate rounded-md px-1.5 py-0.5 font-mono text-[11px]",
+            "text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink-0 cursor-pointer truncate rounded-md px-1.5 py-0.5 font-mono text-[11px]",
             FOCUS_RING,
             HOVER_TINT,
           )}
@@ -818,6 +822,34 @@ function CodeSessionPane({
     };
   }, [client, session.id, approvalKey]);
 
+  // This pane re-renders on every streamed delta, so a callback written inline
+  // in the transcript's props would be a new identity each time and would
+  // re-render every row in the transcript with it.
+  const decideApproval = useCallback(
+    async (
+      approvalId: string,
+      decision: "approve" | "deny",
+      feedback?: string,
+    ) => {
+      setDecidingId(approvalId);
+      setApprovalError(undefined);
+      try {
+        const next = await client.decideCodeApproval(approvalId, {
+          decision,
+          feedback,
+        });
+        setApprovals((current) => ({ ...current, [approvalId]: next }));
+      } catch (err) {
+        setApprovalError(
+          friendlyErrorMessage(err, "Could not record that decision"),
+        );
+      } finally {
+        setDecidingId(null);
+      }
+    },
+    [client],
+  );
+
   function send(message: string) {
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
@@ -870,23 +902,7 @@ function CodeSessionPane({
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
-          onDecide={async (approvalId, decision, feedback) => {
-            setDecidingId(approvalId);
-            setApprovalError(undefined);
-            try {
-              const next = await client.decideCodeApproval(approvalId, {
-                decision,
-                feedback,
-              });
-              setApprovals((current) => ({ ...current, [approvalId]: next }));
-            } catch (err) {
-              setApprovalError(
-                friendlyErrorMessage(err, "Could not record that decision"),
-              );
-            } finally {
-              setDecidingId(null);
-            }
-          }}
+          onDecide={decideApproval}
         />
         <button
           type="button"

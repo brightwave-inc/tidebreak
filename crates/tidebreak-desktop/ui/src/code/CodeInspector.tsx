@@ -203,6 +203,7 @@ export function CodeInspector({
             workspaceId={workspaceId}
             pr={pr}
             branch={workspace?.branch_name}
+            onOpenSourceControl={() => setTab("source")}
           />
         </TabsContent>
       </Tabs>
@@ -263,11 +264,14 @@ function PrTab({
   workspaceId,
   pr,
   branch,
+  onOpenSourceControl,
 }: {
   client: ApiClient;
   workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
+  /** Send the reader to the tab that can actually open a pull request. */
+  onOpenSourceControl?: () => void;
 }) {
   const { confirm, dialog } = useConfirm();
   const [refreshing, setRefreshing] = useState(false);
@@ -338,13 +342,28 @@ function PrTab({
 
   if (!pr) {
     return (
-      <div className="text-muted-foreground flex flex-col gap-2 px-4 py-8 text-sm">
-        <p className="text-foreground font-medium">No pull request yet</p>
-        <p className="text-xs leading-relaxed">
-          This tab stays quiet until one exists. Commit, push, and Create PR
-          live in Source control. When a PR is opened, its status, checks, and
-          review comments land in this column.
-        </p>
+      // Commit, push, and Create PR all live one tab away — including the gh
+      // install and sign-in remediation, which the git card states with the
+      // exact commands. Repeating any of that here would be a second copy to
+      // keep true; a way over to it is not.
+      <div className="flex flex-col items-start gap-3 px-4 py-8">
+        <div className="flex flex-col gap-1.5">
+          <p className="text-sm font-medium">No pull request yet</p>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            Once one exists, its status, checks, and review comments land here.
+          </p>
+        </div>
+        {onOpenSourceControl && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onOpenSourceControl}
+          >
+            <GitBranch />
+            Open Source control
+          </Button>
+        )}
       </div>
     );
   }

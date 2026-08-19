@@ -194,6 +194,11 @@ export function TerminalPane({
   const [ended, setEnded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const [stalled, setStalled] = useState(false);
+  /**
+   * False until this renderer has heard from the shell at all — the window
+   * that covers spawning a process and reading its first bytes.
+   */
+  const [attached, setAttached] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -282,6 +287,7 @@ export function TerminalPane({
         );
         if (cancelled) return;
         cursorRef.current = page.cursor;
+        setAttached(true);
         if (page.overflow) setOverflow(true);
         if (page.ended) setEnded(true);
         const text = decodeTerminalBytes(page.bytes);
@@ -364,6 +370,7 @@ export function TerminalPane({
     setStalled(false);
     setEnded(false);
     setOverflow(false);
+    setAttached(false);
     setError(null);
     pendingRef.current = "";
     tidRef.current = null;
@@ -399,12 +406,29 @@ export function TerminalPane({
         </div>
       )}
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
-      <div
-        ref={hostRef}
-        className="min-h-0 flex-1"
-        data-testid="terminal-host"
-        aria-label="Terminal output"
-      />
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={hostRef}
+          className="h-full"
+          data-testid="terminal-host"
+          aria-label="Terminal output"
+        />
+        {!attached && !error && (
+          // Spawning a shell and reading its first bytes takes a moment, and
+          // an empty black rectangle is indistinguishable from one that
+          // failed. The line sits over the host rather than above it so the
+          // terminal does not jump a row when the output lands, and it goes
+          // as soon as the shell answers — a live shell showing nothing is a
+          // cleared screen, not a pending one.
+          <p
+            role="status"
+            data-testid="terminal-starting"
+            className="text-muted-foreground pointer-events-none absolute inset-x-3 top-2 text-xs"
+          >
+            Opening a shell in the worktree…
+          </p>
+        )}
+      </div>
     </div>
   );
 }

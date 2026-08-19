@@ -50,7 +50,8 @@ export function CodeCenterTabs({
       </button>
       {editorTabs.map((panel, index) => {
         const active = !conversationFocused && index === editorActiveIndex;
-        const label = centerTabLabel(panel);
+        const { name, suffix } = centerTabParts(panel);
+        const label = suffix ? `${name} ${suffix}` : name;
         return (
           <div
             key={panelKey(panel)}
@@ -77,8 +78,16 @@ export function CodeCenterTabs({
               ) : (
                 <FileCode className="size-3.5 shrink-0" />
               )}
-              <span className="max-w-40 truncate" title={centerTabTitle(panel)}>
-                {label}
+              <span
+                className="flex min-w-0 items-baseline gap-1"
+                title={centerTabTitle(panel)}
+              >
+                <span className="max-w-40 truncate">{name}</span>
+                {/*
+                  The suffix is what separates this tab from the plain file tab
+                  for the same path, so it never joins the part that truncates.
+                */}
+                {suffix && <span className="shrink-0">{suffix}</span>}
               </span>
             </button>
             <button
@@ -104,16 +113,29 @@ export function CodeCenterTabs({
 function centerTabTitle(panel: PanelContent): string {
   if (panel.type === "file") return panel.path;
   if (panel.type === "diff" && panel.path) return `${panel.path} (diff)`;
-  return centerTabLabel(panel);
+  const { name, suffix } = centerTabParts(panel);
+  return suffix ? `${name} ${suffix}` : name;
 }
 
-function centerTabLabel(panel: PanelContent): string {
+/**
+ * A tab's label, split into the part that may truncate and the part that may
+ * not.
+ */
+function centerTabParts(panel: PanelContent): {
+  name: string;
+  suffix: string | null;
+} {
   if (panel.type === "file") {
-    return panel.path.split("/").pop() || panel.path;
+    return { name: panel.path.split("/").pop() || panel.path, suffix: null };
   }
   if (panel.type === "diff") {
-    if (panel.path) return `${panel.path.split("/").pop() || panel.path} (diff)`;
-    return panel.turnId ? "Turn diff" : "Diff";
+    if (panel.path) {
+      return {
+        name: panel.path.split("/").pop() || panel.path,
+        suffix: "(diff)",
+      };
+    }
+    return { name: panel.turnId ? "Turn diff" : "Diff", suffix: null };
   }
-  return panel.type;
+  return { name: panel.type, suffix: null };
 }
