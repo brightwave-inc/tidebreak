@@ -9,6 +9,9 @@ overrides:
   # monaco-editor 0.56.0 pins 3.4.8. 3.4.14 closes GHSA-55q2-fjhq-7xh7
   # (IN_PLACE hook XSS) and the three earlier DOMPurify advisories on that line.
   dompurify@3.4.8: 3.4.14
+minimumReleaseAgeExclude:
+  # Permit this reviewed security fix without exempting future DOMPurify releases.
+  - dompurify@3.4.14
 allowBuilds:
   canvas: true
   esbuild: true
