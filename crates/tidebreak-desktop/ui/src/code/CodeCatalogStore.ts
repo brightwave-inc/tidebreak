@@ -17,6 +17,11 @@ const HARNESS_KINDS: HarnessKind[] = [
   "grok",
 ];
 
+/** One native model probe per harness, shared by every open picker. */
+const modelRequests = new Map<HarnessKind, Promise<CodeModelOption[]>>();
+/** Sidebar and route bodies mount together; they share one catalog refresh. */
+let catalogRefresh: Promise<void> | null = null;
+
 /**
  * Repos, workspaces, and the last session each workspace opened.
  *
@@ -62,6 +67,34 @@ type CodeCatalogStore = CodeCatalogState & {
   reset: () => void;
 };
 
+function loadHarnessModels(
+  client: Pick<ApiClient, "listCodeHarnessModels">,
+  kind: HarnessKind,
+  get: () => CodeCatalogStore,
+  force: boolean,
+): Promise<CodeModelOption[]> {
+  const cached = get().modelsByHarness[kind];
+  // An empty array is a finished probe: this engine advertised no models.
+  // Treating it as a cache miss makes every picker open run the CLI again.
+  if (!force && cached !== undefined) return Promise.resolve(cached);
+  const pending = modelRequests.get(kind);
+  if (pending) return pending;
+
+  const request = client
+    .listCodeHarnessModels(kind)
+    .then((listed) => {
+      const models = harnessCodeModels(listed.models, kind);
+      get().rememberHarnessModels(kind, models);
+      return models;
+    })
+    .catch(() => [])
+    .finally(() => {
+      if (modelRequests.get(kind) === request) modelRequests.delete(kind);
+    });
+  modelRequests.set(kind, request);
+  return request;
+}
+
 export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   repos: [],
   workspaces: [],
@@ -70,63 +103,53 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   modelsByHarness: {},
   loaded: false,
   error: null,
-  refresh: async (client) => {
-    try {
-      const [repos, workspaces] = await Promise.all([
-        client.listCodeRepos(),
-        client.listCodeWorkspaces(),
-      ]);
-      set({ repos, workspaces, loaded: true, error: null });
-    } catch (error) {
-      set({
-        loaded: true,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    const extras: Promise<void>[] = [
-      client
-        .getHarnessDoctor()
-        .then((doctor) => set({ doctor }))
-        .catch(() => {
-          // Home waits on a settled report. An empty one leaves the loading
-          // empty and shows the install section instead of spinning forever.
-          if (get().doctor === null) {
-            set({ doctor: { harnesses: [] } });
-          }
-        }),
-    ];
-    for (const kind of HARNESS_KINDS) {
-      extras.push(
+  refresh: (client) => {
+    if (catalogRefresh) return catalogRefresh;
+    let request: Promise<void>;
+    request = (async () => {
+      try {
+        const [repos, workspaces] = await Promise.all([
+          client.listCodeRepos(),
+          client.listCodeWorkspaces(),
+        ]);
+        set({ repos, workspaces, loaded: true, error: null });
+      } catch (error) {
+        set({
+          loaded: true,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      const extras: Promise<void>[] = [
         client
-          .listCodeHarnessModels(kind)
-          .then((listed) => {
-            get().rememberHarnessModels(
-              kind,
-              harnessCodeModels(listed.models, kind),
-            );
-          })
-          .catch(() => undefined),
-      );
-    }
-    await Promise.all(extras);
+          .getHarnessDoctor()
+          .then((doctor) => set({ doctor }))
+          .catch(() => {
+            // Home waits on a settled report. An empty one leaves the loading
+            // empty and shows the install section instead of spinning forever.
+            if (get().doctor === null) {
+              set({ doctor: { harnesses: [] } });
+            }
+          }),
+      ];
+      for (const kind of HARNESS_KINDS) {
+        extras.push(
+          loadHarnessModels(client, kind, get, true).then(() => undefined),
+        );
+      }
+      await Promise.all(extras);
+    })().finally(() => {
+      if (catalogRefresh === request) catalogRefresh = null;
+    });
+    catalogRefresh = request;
+    return request;
   },
   refreshDoctor: async (client) => {
     const doctor = await client.refreshHarnessDoctor();
     set({ doctor });
   },
-  ensureHarnessModels: async (client, kind) => {
-    const cached = get().modelsByHarness[kind];
-    if (cached && cached.length > 0) return cached;
-    try {
-      const listed = await client.listCodeHarnessModels(kind);
-      const models = harnessCodeModels(listed.models, kind);
-      get().rememberHarnessModels(kind, models);
-      return models;
-    } catch {
-      return [];
-    }
-  },
+  ensureHarnessModels: (client, kind) =>
+    loadHarnessModels(client, kind, get, false),
   rememberHarnessModels: (kind, models) => {
     set({
       modelsByHarness: { ...get().modelsByHarness, [kind]: models },
@@ -165,6 +188,8 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     set({ workspaces });
   },
   reset: () => {
+    catalogRefresh = null;
+    modelRequests.clear();
     set({
       repos: [],
       workspaces: [],
