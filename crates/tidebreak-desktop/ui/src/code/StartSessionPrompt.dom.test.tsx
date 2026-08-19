@@ -3,11 +3,51 @@ import { cleanup, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ReactNode } from "react";
+import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
+
+function app(): AppContextValue {
+  return {
+    client: {} as never,
+    models: [],
+    defaultModelKey: null,
+    providers: [],
+    refreshCatalog: async () => {},
+    refreshChats: async () => {},
+    status: "",
+    setStatus: () => {},
+    newChat: () => {},
+    deleteChat: () => {},
+    startRename: () => {},
+    commitRename: () => {},
+    cancelRename: () => {},
+    newProject: async () => false,
+    deleteProject: () => {},
+    startProjectRename: () => {},
+    commitProjectRename: () => {},
+    cancelProjectRename: () => {},
+    newChatInProject: () => {},
+    moveChatToProject: () => {},
+    updateState: { status: "idle", version: null, error: null, enabled: false },
+    updateUpToDate: false,
+    checkForUpdate: async () => ({
+      status: "idle",
+      version: null,
+      error: null,
+      enabled: false,
+    }),
+    restartForUpdate: async () => {},
+  };
+}
+
+function wrap(ui: ReactNode) {
+  return <AppContextProvider value={app()}>{ui}</AppContextProvider>;
+}
 
 afterEach(() => {
   cleanup();
@@ -49,13 +89,15 @@ describe("StartSessionPrompt", () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
-      <StartSessionPrompt
-        harnesses={[entry("claude_code", {})]}
-        starting={false}
-        selectedMode={null}
-        onSelectMode={vi.fn()}
-        onStart={onStart}
-      />,
+      wrap(
+        <StartSessionPrompt
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+        />,
+      ),
     );
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
@@ -76,19 +118,21 @@ describe("StartSessionPrompt", () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
-      <StartSessionPrompt
-        harnesses={[
-          entry("claude_code", {
-            structured_approvals: "unsupported",
-            auto_mode: "unsupported",
-            allow_mode: "unsupported",
-          }),
-        ]}
-        starting={false}
-        selectedMode={null}
-        onSelectMode={vi.fn()}
-        onStart={onStart}
-      />,
+      wrap(
+        <StartSessionPrompt
+          harnesses={[
+            entry("claude_code", {
+              structured_approvals: "unsupported",
+              auto_mode: "unsupported",
+              allow_mode: "unsupported",
+            }),
+          ]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+        />,
+      ),
     );
     expect(screen.getByRole("button", { name: "Permissions: Plan" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
@@ -105,20 +149,22 @@ describe("StartSessionPrompt", () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
-      <StartSessionPrompt
-        harnesses={[
-          entry("claude_code", {}),
-          entry("grok", {
-            plan_mode: "unsupported",
-            structured_approvals: "unsupported",
-            allow_mode: "unsupported",
-          }),
-        ]}
-        starting={false}
-        selectedMode="ask"
-        onSelectMode={vi.fn()}
-        onStart={onStart}
-      />,
+      wrap(
+        <StartSessionPrompt
+          harnesses={[
+            entry("claude_code", {}),
+            entry("grok", {
+              plan_mode: "unsupported",
+              structured_approvals: "unsupported",
+              allow_mode: "unsupported",
+            }),
+          ]}
+          starting={false}
+          selectedMode="ask"
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+        />,
+      ),
     );
     expect(screen.queryByText(UNSUPERVISED_AUTO_NOTE)).toBeNull();
     await user.click(screen.getByRole("combobox", { name: "Harness" }));
@@ -143,14 +189,16 @@ describe("StartSessionPrompt", () => {
       })),
     };
     await renderWithRouter(
-      <StartSessionPrompt
-        harnesses={[entry("claude_code", {})]}
-        starting={false}
-        selectedMode={null}
-        onSelectMode={vi.fn()}
-        onStart={onStart}
-        client={client}
-      />,
+      wrap(
+        <StartSessionPrompt
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+          client={client}
+        />,
+      ),
     );
     expect(
       await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
@@ -169,13 +217,15 @@ describe("StartSessionPrompt", () => {
     const user = userEvent.setup();
     const onSelectMode = vi.fn();
     await renderWithRouter(
-      <StartSessionPrompt
-        harnesses={[entry("claude_code", {})]}
-        starting={false}
-        selectedMode="allow"
-        onSelectMode={onSelectMode}
-        onStart={vi.fn()}
-      />,
+      wrap(
+        <StartSessionPrompt
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode="allow"
+          onSelectMode={onSelectMode}
+          onStart={vi.fn()}
+        />,
+      ),
     );
     await user.click(screen.getByRole("button", { name: "Permissions: Allow all" }));
     await user.click(screen.getByRole("menuitem", { name: /Ask/ }));

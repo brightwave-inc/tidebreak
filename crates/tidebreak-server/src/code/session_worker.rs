@@ -197,8 +197,6 @@ impl HarnessEventSink for LiveSink {
 }
 
 pub(crate) fn spawn_session_worker(
-    db: Arc<DbStore>,
-    bus: Arc<CodeEventBus>,
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
@@ -209,8 +207,6 @@ pub(crate) fn spawn_session_worker(
     let pending = Arc::new(std::sync::Mutex::new(None));
     let wake = Arc::new(Notify::new());
     tokio::spawn(run_worker(
-        db,
-        bus,
         session,
         engine,
         sink.clone(),
@@ -248,10 +244,7 @@ pub(crate) fn queue_follow_up(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_worker(
-    db: Arc<DbStore>,
-    bus: Arc<CodeEventBus>,
     mut session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
@@ -262,16 +255,14 @@ async fn run_worker(
 ) {
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
-        let _ = save_session(&db, &session).await;
+        let _ = save_session(&sink.db, &session).await;
     }
 
     loop {
-        if session_was_ended(&db, &mut session).await {
+        if session_was_ended(&sink.db, &mut session).await {
             break;
         }
         drain_queued(
-            &db,
-            &bus,
             &mut session,
             engine.as_ref(),
             &sink,
@@ -290,8 +281,6 @@ async fn run_worker(
                     reply,
                 }) => {
                     let result = drive_turn(
-                        &db,
-                        &bus,
                         &mut session,
                         engine.as_ref(),
                         &sink,
@@ -377,8 +366,6 @@ async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> C
 }
 
 async fn drain_queued(
-    db: &Arc<DbStore>,
-    bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
@@ -391,13 +378,11 @@ async fn drain_queued(
         let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, sink, blobs, commands, follow_up).await;
+        let _ = drive_turn(session, engine, sink, blobs, commands, follow_up).await;
     }
 }
 
 async fn drive_turn(
-    db: &Arc<DbStore>,
-    bus: &Arc<CodeEventBus>,
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
@@ -409,6 +394,8 @@ async fn drive_turn(
         attachments,
     }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
+    let db = &sink.db;
+    let bus = &sink.bus;
     if session.lifecycle == CodeSessionLifecycle::Running {
         return Err(WorkerError::Conflict(
             "a turn is already running on this session".into(),

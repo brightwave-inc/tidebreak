@@ -1394,14 +1394,7 @@ impl CodeRuntime {
             attached.harness_resume_ref = Some(resume);
         }
         super::attention::persist_session(&self.db, &self.bus, &attached).await?;
-        let handle = spawn_session_worker(
-            self.db.clone(),
-            self.bus.clone(),
-            attached.clone(),
-            engine,
-            sink,
-            Some(self.blobs.clone()),
-        );
+        let handle = spawn_session_worker(attached.clone(), engine, sink, Some(self.blobs.clone()));
         self.workers
             .lock()
             .expect("code workers")
