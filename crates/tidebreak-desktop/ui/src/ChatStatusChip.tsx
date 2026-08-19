@@ -145,7 +145,7 @@ export function ChatStatusChip({
         <button
           type="button"
           className="activity-card-collapsed"
-          aria-label="Expand chat activity"
+          aria-label="Expand work activity"
           onClick={() => setCollapsed(false)}
         >
           <ActivityIcon className="size-4" aria-hidden="true" />
@@ -154,7 +154,7 @@ export function ChatStatusChip({
     }
 
     return (
-      <aside className="activity-card" aria-label="Chat activity">
+      <aside className="activity-card" aria-label="Work activity">
         <div className="activity-card-heading">
           <div>
             <p className="activity-card-kicker">Activity</p>
@@ -163,7 +163,7 @@ export function ChatStatusChip({
           <button
             type="button"
             className="activity-card-collapse-button"
-            aria-label="Collapse chat activity"
+            aria-label="Collapse work activity"
             onClick={() => setCollapsed(true)}
           >
             <ChevronUp className="size-4" aria-hidden="true" />
@@ -181,7 +181,7 @@ export function ChatStatusChip({
           type="button"
           className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-border px-2.5 text-xs whitespace-nowrap text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           aria-label={
-            faceLabel === "Activity" ? "Chat activity" : `Chat activity: ${faceLabel}`
+            faceLabel === "Activity" ? "Work activity" : `Work activity: ${faceLabel}`
           }
         >
           {liveRuns.length > 0 && (

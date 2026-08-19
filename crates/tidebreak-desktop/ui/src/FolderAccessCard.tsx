@@ -59,7 +59,7 @@ export function FolderAccessCard({
         <>
           <p className="text-muted-foreground text-sm">
             Folder consent is unavailable in browser-only mode. This desktop
-            cannot resolve a chat owned by the headless server.
+            cannot resolve work owned by the headless server.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={onCancel}>

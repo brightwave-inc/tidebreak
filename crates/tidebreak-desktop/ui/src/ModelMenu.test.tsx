@@ -143,9 +143,9 @@ describe("ModelMenu", () => {
         }}
       />,
     );
-    expect(markup).toContain(">Chat only<");
+    expect(markup).toContain(">Conversation only<");
     expect(markup).toContain(
-      "Chat only. Function tools are unsupported or cannot yet be continued safely in Tidebreak.",
+      "Conversation only. Function tools are unsupported or cannot yet be continued safely in Tidebreak.",
     );
     expect(markup).not.toContain("hosted model does not support");
   });

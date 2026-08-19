@@ -131,13 +131,13 @@ describe("ModelsPanel", () => {
     // The chat row opens on the provider owning its saved (legacy) id, resolved
     // to that provider's canonical model.
     const chatProvider = await screen.findByRole("combobox", {
-      name: "Chat provider",
+      name: "Work provider",
     });
     await waitFor(() => expect(chatProvider).toHaveTextContent("OpenAI"));
     expect(
-      screen.getByRole("combobox", { name: "Chat model" }),
+      screen.getByRole("combobox", { name: "Work model" }),
     ).toHaveTextContent("GPT-4o");
-    await user.click(screen.getByRole("combobox", { name: "Chat model" }));
+    await user.click(screen.getByRole("combobox", { name: "Work model" }));
     expect(
       screen.getByRole("option", {
         name: "GPT No Schema — 128k context",
@@ -177,7 +177,7 @@ describe("ModelsPanel", () => {
     await user.click(utilityModel);
     expect(
       screen.getByRole("option", {
-        name: "Kimi K3 — 1M context — chat only",
+        name: "Kimi K3 — 1M context — conversation only",
       }),
     ).toBeInTheDocument();
     await user.keyboard("{Escape}");
@@ -277,10 +277,10 @@ describe("ModelsPanel under managed policy", () => {
     // No provider step: there is exactly one provider, so each role is a
     // single flat picker.
     const chatModel = await screen.findByRole("combobox", {
-      name: "Chat model",
+      name: "Work model",
     });
     expect(
-      screen.queryByRole("combobox", { name: "Chat provider" }),
+      screen.queryByRole("combobox", { name: "Work provider" }),
     ).toBeNull();
     expect(
       screen.queryByRole("combobox", { name: "Background work provider" }),
@@ -309,7 +309,7 @@ describe("ModelsPanel under managed policy", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("option", {
-        name: "Kimi K3 — 1M context — chat only",
+        name: "Kimi K3 — 1M context — conversation only",
       }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Claude Opus/ })).toBeNull();
@@ -367,7 +367,7 @@ describe("ModelsPanel under managed policy", () => {
     });
     expect(screen.queryByText(/has not synced any models/)).toBeNull();
     expect(
-      screen.getByRole("combobox", { name: "Chat model" }),
+      screen.getByRole("combobox", { name: "Work model" }),
     ).toHaveTextContent("Automatic — Gateway Flagship");
   });
 });

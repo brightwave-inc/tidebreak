@@ -141,7 +141,7 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
       <SettingsSection>
         <SettingsField
           label="Compact when the conversation reaches"
-          hint="Percent of the model's context window. Below this, nothing is summarized. Type /compact in a chat to run it sooner."
+          hint="Percent of the model's context window. Below this, nothing is summarized. Type /compact in work to run it sooner."
         >
           <Input
             type="number"
@@ -167,7 +167,7 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
             <>
               <SettingsField
                 label="Compact down to"
-                hint="Percent of the window the raw conversation is reduced to. The gap between this and the threshold is how long a chat runs before compacting again."
+                hint="Percent of the window the raw conversation is reduced to. The gap between this and the threshold is how long work runs before compacting again."
               >
                 <Input
                   type="number"

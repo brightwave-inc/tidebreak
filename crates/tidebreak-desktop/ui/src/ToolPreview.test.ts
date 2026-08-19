@@ -99,7 +99,7 @@ describe("workspace write previews", () => {
       path: "reports/q3.md",
     });
     expect(write.headline).toBe("reports/q3.md");
-    expect(write.detail).toContain("this chat's workspace");
+    expect(write.detail).toContain("this work's workspace");
   });
 });
 

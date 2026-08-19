@@ -80,7 +80,7 @@ export function agentRunStatusDetail(run: AgentRun): string {
 
   switch (run.status) {
     case "active":
-      return "Ready for this chat";
+      return "Ready for this work";
     case "queued":
       return "Queued to start";
     case "running":

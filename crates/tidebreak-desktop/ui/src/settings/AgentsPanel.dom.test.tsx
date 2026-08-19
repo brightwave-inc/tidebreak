@@ -48,7 +48,7 @@ describe("AgentsPanel", () => {
     } as unknown as ApiClient;
 
     render(<AgentsPanel client={client} />);
-    await screen.findByText("Active background agents per chat");
+    await screen.findByText("Active background agents per work");
     expect(screen.getByRole("radio", { name: "Queue" })).toBeChecked();
     fireEvent.click(screen.getByRole("radio", { name: "Steer" }));
     expect(useUiStore.getState().activeTurnSendMode).toBe("steer");

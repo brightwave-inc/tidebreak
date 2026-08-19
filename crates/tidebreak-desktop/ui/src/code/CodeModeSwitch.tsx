@@ -7,7 +7,7 @@ import { isCodeRoute } from "./routes";
 type Mode = "chat" | "code";
 
 /**
- * Chat / Code switch used at the top of both rails.
+ * Work / Code switch used at the top of both rails.
  *
  * One primitive, two hosts: both rails always show it so Code remains a
  * first-class product surface rather than a setting the reader has to find.
@@ -31,7 +31,7 @@ export function CodeModeSwitch() {
         options={[
           {
             value: "chat",
-            label: "Chat",
+            label: "Work",
             icon: (
               <MessageSquare
                 className={`${value === "chat" ? "text-icon-blue" : ""} size-3.5 shrink-0`}

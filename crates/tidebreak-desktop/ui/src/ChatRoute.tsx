@@ -230,7 +230,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             {
               id: nextId(),
               role: "error",
-              text: `Could not load this chat: ${String(err)}`,
+              text: `Could not load this work: ${String(err)}`,
             },
           ],
         }));
@@ -665,7 +665,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   // still needs a name so it is not silent to a screen reader.
   if (!chat) {
     return (
-      <div className="routed-surface-loading" role="status" aria-label="Loading chat" />
+      <div className="routed-surface-loading" role="status" aria-label="Loading work" />
     );
   }
 

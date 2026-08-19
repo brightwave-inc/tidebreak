@@ -52,7 +52,7 @@ function approvalChoices() {
 }
 
 const ONCE = "1.Yes, allow it once";
-const REMEMBER = "2.Yes, and don't ask again in this chat";
+const REMEMBER = "2.Yes, and don't ask again in this work";
 
 /**
  * A grant made in a project chat reaches every chat in it, so the widest rung
@@ -246,7 +246,7 @@ describe("approval card interactions", () => {
       "3.Yes, and always allow any \u201ccargo test\u201d command",
       // The rungs this ladder previously could not offer.
       "4.Yes, and always allow any \u201ccargo\u201d command",
-      "5.Yes, and don't ask again about commands in this chat",
+      "5.Yes, and don't ask again about commands in this work",
       "6.No, don't allow this",
     ]);
     expect(onDecide).not.toHaveBeenCalled();
@@ -280,7 +280,7 @@ describe("approval card interactions", () => {
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
       "3.Yes, and always allow any \u201ccargo test\u201d command",
-      "4.Yes, and don't ask again about commands in this chat",
+      "4.Yes, and don't ask again about commands in this work",
       "5.No, don't allow this",
     ]);
     expect(screen.queryByText(MORE)).toBeNull();
@@ -294,7 +294,7 @@ describe("approval card interactions", () => {
     ).toEqual([ONCE, REMEMBER_IN_PROJECT, "3.No, don't allow this"]);
     // And says once, in full, what the rows cannot say without becoming
     // three long lines.
-    screen.getByText(/Saved answers apply to every chat in this project/);
+    screen.getByText(/Saved answers apply to all work in this project/);
   });
 
   it("returns the highlight to the narrowest grant when it widens the list", async () => {
@@ -350,7 +350,7 @@ describe("approval card interactions", () => {
     ).toEqual([
       ONCE,
       "2.Yes, and always allow exactly “quarterly filings”",
-      "3.Yes, and don't ask again in this chat",
+      "3.Yes, and don't ask again in this work",
       "4.No, don't allow this",
     ]);
     // The filters are part of what is being consented to, so the card shows
@@ -401,7 +401,7 @@ describe("approval card interactions", () => {
     render(
       card({
         summary:
-          "Allow Tidebreak to run a command that leaves the chat workspace and may reach the network?",
+          "Allow Tidebreak to run a command that leaves this work's workspace and may reach the network?",
         preview: {
           tool: "exec",
           command: "cargo",

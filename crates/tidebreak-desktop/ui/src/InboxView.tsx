@@ -116,7 +116,7 @@ export function InboxView() {
 function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
   const presentation = KIND_PRESENTATION[item.kind];
   const Icon = presentation.icon;
-  const title = item.chatTitle?.trim() || "New chat";
+  const title = item.chatTitle?.trim() || "New work";
   return (
     <button
       type="button"

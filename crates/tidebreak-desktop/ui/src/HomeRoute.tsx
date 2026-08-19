@@ -334,7 +334,7 @@ export function HomeRoute() {
       await navigate({ to: "/c/$chatId", params: { chatId } });
       composerDraftActions.clearDraft(HOME_DRAFT_KEY);
     } catch (err) {
-      setError(`Could not start a chat: ${String(err)}`);
+      setError(`Could not start work: ${String(err)}`);
     } finally {
       chatListActions.setCreatingChat(false);
     }

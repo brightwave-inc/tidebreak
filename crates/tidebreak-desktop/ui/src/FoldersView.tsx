@@ -186,7 +186,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
     const accepted = await confirm({
       title: `Forget ${folder.displayName}?`,
       description:
-        "Withdraws Tidebreak's approval for this folder everywhere, for every chat. If the folder comes back, connect it again from scratch.",
+        "Withdraws Tidebreak's approval for this folder everywhere, for all work. If the folder comes back, connect it again from scratch.",
       confirmLabel: "Forget",
       destructive: true,
     });

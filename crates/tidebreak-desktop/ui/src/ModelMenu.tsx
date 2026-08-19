@@ -69,14 +69,14 @@ export function ModelToolCapabilityChip({ model }: { model: ModelInfo }) {
   if (model.supports_tools) return null;
   return (
     <WithTooltip
-      label="Tidebreak runs this model as chat-only because function tools are unsupported or tool use cannot yet be continued safely"
+      label="Tidebreak runs this model as conversation-only because function tools are unsupported or tool use cannot yet be continued safely"
       side="top"
     >
       <span
         className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-[0.65rem] leading-none"
-        aria-label="Chat only. Function tools are unsupported or cannot yet be continued safely in Tidebreak."
+        aria-label="Conversation only. Function tools are unsupported or cannot yet be continued safely in Tidebreak."
       >
-        Chat only
+        Conversation only
       </span>
     </WithTooltip>
   );

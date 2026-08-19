@@ -277,7 +277,7 @@ export function AppShell() {
         if (!cancelled) chatListActions.setChats(existingChats);
       } catch (err) {
         if (!cancelled) {
-          chatListActions.failChatsLoad(`Could not load chats: ${String(err)}`);
+          chatListActions.failChatsLoad(`Could not load work: ${String(err)}`);
         }
       }
     })();
@@ -293,7 +293,7 @@ export function AppShell() {
       chatListActions.setChats(await client.listChats());
       chatListActions.setChatsError(null);
     } catch (err) {
-      chatListActions.failChatsLoad(`Could not load chats: ${String(err)}`);
+      chatListActions.failChatsLoad(`Could not load work: ${String(err)}`);
     }
   }
 
@@ -453,7 +453,7 @@ export function AppShell() {
         params: { projectId, chatId: created.id },
       });
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not create the chat."));
+      toast.error(friendlyErrorMessage(err, "Could not create the work."));
     } finally {
       creationInFlightRef.current = false;
       chatListActions.setCreatingChat(false);
@@ -479,7 +479,7 @@ export function AppShell() {
           : navigate({ to: "/c/$chatId", params: { chatId: chat.id } }));
       }
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not move the chat."));
+      toast.error(friendlyErrorMessage(err, "Could not move the work."));
     } finally {
       projectMutationRef.current = false;
     }
@@ -506,7 +506,7 @@ export function AppShell() {
       chatListActions.setChatsError(null);
       await navigate({ to: "/c/$chatId", params: { chatId: created.id } });
     } catch (err) {
-      chatListActions.setChatsError(`Could not create a chat: ${String(err)}`);
+      chatListActions.setChatsError(`Could not create work: ${String(err)}`);
     } finally {
       creationInFlightRef.current = false;
       chatListActions.setCreatingChat(false);
@@ -515,7 +515,7 @@ export function AppShell() {
 
   async function onDeleteChat(target: Chat) {
     if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
-    const label = target.title?.trim() || "this chat";
+    const label = target.title?.trim() || "this work";
     // The listed chat carries the folders it had at the last refresh, which
     // predates anything connected since. The server refuses the delete on its
     // own count, so ask it what is attached before promising to detach it.
@@ -523,13 +523,13 @@ export function AppShell() {
     try {
       current = await client.getChat(target.id);
     } catch (err) {
-      chatListActions.setChatsError(`Could not delete chat: ${String(err)}`);
+      chatListActions.setChatsError(`Could not delete work: ${String(err)}`);
       return;
     }
     const confirmed = await confirm({
       title: `Delete ${label}?`,
       description: deletionDescription(current.root_attachments.length),
-      confirmLabel: "Delete chat",
+      confirmLabel: "Delete work",
       destructive: true,
     });
     if (!confirmed) return;
@@ -551,7 +551,7 @@ export function AppShell() {
         // Product delete already committed. Surface the host cleanup failure
         // without undoing the delete — startup reconcile is the backup path.
         chatListActions.setChatsError(
-          `Chat deleted, but host permissions could not be cleared: ${String(err)}`,
+          `Work deleted, but host permissions could not be cleared: ${String(err)}`,
         );
       }
       // Nothing left to send it to.
@@ -569,7 +569,7 @@ export function AppShell() {
       chatListActions.setChats(refreshed);
       await navigate({ to: "/c/$chatId", params: { chatId: next.id } });
     } catch (err) {
-      chatListActions.setChatsError(`Could not delete chat: ${String(err)}`);
+      chatListActions.setChatsError(`Could not delete work: ${String(err)}`);
     } finally {
       deletionInFlightRef.current = false;
       chatListActions.setDeletingChatId(null);
@@ -606,7 +606,7 @@ export function AppShell() {
       chatListActions.replaceChat(updated, true);
       chatListActions.endRename();
     } catch (err) {
-      chatListActions.setChatsError(`Could not rename chat: ${String(err)}`);
+      chatListActions.setChatsError(`Could not rename work: ${String(err)}`);
     } finally {
       chatListActions.setSavingTitle(false);
     }
@@ -616,7 +616,22 @@ export function AppShell() {
     const version = desktopUpdates.state.version;
     const confirmed = await confirm({
       title: "Restart Tidebreak to update?",
-      description: `${version ? `Version ${version}` : "The update"} is ready. Tidebreak will close and reopen. Wait for active work to finish before restarting.`,
+      description: (
+        <>
+          <span>
+            {version ? `Version ${version}` : "The update"} is ready. Tidebreak
+            will close and reopen. Wait for active work to finish before
+            restarting.
+          </span>
+          <span className="border-warning-border bg-warning-background text-warning-foreground mt-3 block rounded-md border px-3 py-2.5">
+            <strong className="block font-medium">Pre-v1 data warning</strong>
+            <span className="mt-0.5 block">
+              Until Tidebreak reaches version 1.0, this update may wipe all
+              Tidebreak data on this device.
+            </span>
+          </span>
+        </>
+      ),
       confirmLabel: "Restart and update",
     });
     if (confirmed) await desktopUpdates.restart();

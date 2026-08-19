@@ -23,7 +23,7 @@ const OPTIONS = [
   {
     mode: "off",
     label: "Offline",
-    description: "Opt in to blocking outbound network access for this chat.",
+    description: "Opt in to blocking outbound network access for this work.",
     icon: ShieldOff,
   },
   {

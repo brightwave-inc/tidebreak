@@ -88,6 +88,13 @@ const listInbox = vi.fn(async () => [] as unknown[]);
 const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
 const hasNativeHost = vi.hoisted(() => vi.fn(() => false));
+const desktopUpdateState = vi.hoisted(() => ({
+  status: "idle" as "idle" | "checking" | "downloading" | "ready",
+  version: null as string | null,
+  error: null as string | null,
+  enabled: true,
+}));
+const restartDesktop = vi.hoisted(() => vi.fn(async () => {}));
 
 /** One waiting question, as the shell's cross-chat read returns it. */
 function parked(chatId: string, callId: string) {
@@ -166,9 +173,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("./updates", () => ({
   useDesktopUpdates: () => ({
-    state: { status: "idle", version: null },
+    state: desktopUpdateState,
     check: vi.fn(),
-    restart: vi.fn(),
+    restart: restartDesktop,
+    upToDate: false,
   }),
 }));
 
@@ -289,6 +297,11 @@ beforeEach(() => {
   listPendingOutputWritebackRequests.mockReset();
   listPendingOutputWritebackRequests.mockResolvedValue([]);
   requestUserAttention.mockClear();
+  desktopUpdateState.status = "idle";
+  desktopUpdateState.version = null;
+  desktopUpdateState.error = null;
+  desktopUpdateState.enabled = true;
+  restartDesktop.mockClear();
   postMessage.mockClear();
   getPolicy.mockClear();
   getPolicy.mockResolvedValue(unmanaged);
@@ -363,18 +376,18 @@ describe("app shell", () => {
 
     // The row itself carries the marker while the list is showing…
     expect(
-      await screen.findByLabelText("New chat needs attention"),
+      await screen.findByLabelText("New work needs attention"),
     ).toBeInTheDocument();
     expect(requestUserAttention).toHaveBeenCalledOnce();
 
     // …and collapsing the list moves the report to the section header, so a
     // folded rail cannot hide that something is waiting. (`expanded` singles
     // out the section toggle from the header breadcrumb, which is also
-    // named "Chats".)
-    await user.click(screen.getByRole("button", { name: "Chats", expanded: true }));
-    expect(screen.queryByLabelText("New chat needs attention")).not.toBeInTheDocument();
+    // named "Work".)
+    await user.click(screen.getByRole("button", { name: "Work", expanded: true }));
+    expect(screen.queryByLabelText("New work needs attention")).not.toBeInTheDocument();
     expect(
-      await screen.findByLabelText("A chat needs attention"),
+      await screen.findByLabelText("Work needs attention"),
     ).toBeInTheDocument();
   });
 
@@ -390,7 +403,7 @@ describe("app shell", () => {
     expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.pathname).toBe("/"));
     expect(
-      await screen.findByText(/Could not load chats/),
+      await screen.findByText(/Could not load work/),
     ).toBeInTheDocument();
 
     listChats.mockResolvedValue(chats);
@@ -399,7 +412,7 @@ describe("app shell", () => {
     expect(
       (await screen.findAllByRole("button", { name: "Roadmap" })).length,
     ).toBeGreaterThan(0);
-    expect(screen.queryByText(/Could not load chats/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Could not load work/)).not.toBeInTheDocument();
   });
 
   it("starts a conversation from the home composer and sends what was written", async () => {
@@ -438,7 +451,7 @@ describe("app shell", () => {
     const { router } = await mountApp();
     await screen.findByText("Welcome to Tidebreak");
 
-    const chatList = screen.getByLabelText("Chats");
+    const chatList = screen.getByLabelText("Work list");
     const [row] = screen
       .getAllByRole("button", { name: "Roadmap" })
       .filter((button) => chatList.contains(button));
@@ -464,7 +477,7 @@ describe("app shell", () => {
 
     // A second place joins the strip and comes forward without closing the
     // first.
-    await user.click(screen.getByRole("button", { name: /^Chat activity/ }));
+    await user.click(screen.getByRole("button", { name: /^Work activity/ }));
     await user.click(await screen.findByRole("button", { name: /Outputs/ }));
 
     expect(await screen.findByTestId("outputs")).toBeInTheDocument();
@@ -530,20 +543,20 @@ describe("app shell", () => {
 
     // The filter lives behind the list's own options — there is no separate
     // page to go find a chat on.
-    await user.click(screen.getByRole("button", { name: "Chat list options" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Filter chats" }));
-    const search = await screen.findByRole("searchbox", { name: "Filter chats" });
+    await user.click(screen.getByRole("button", { name: "Work list options" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Filter work" }));
+    const search = await screen.findByRole("searchbox", { name: "Filter work" });
 
     await user.type(search, "roadmap");
-    const chatList = screen.getByLabelText("Chats");
+    const chatList = screen.getByLabelText("Work list");
     expect(within(chatList).getByRole("button", { name: "Roadmap" })).toBeInTheDocument();
     expect(
-      within(chatList).queryByRole("button", { name: "New chat" }),
+      within(chatList).queryByRole("button", { name: "New work" }),
     ).not.toBeInTheDocument();
 
     await user.clear(search);
     await user.type(search, "nothing matches this");
-    expect(await screen.findByText("No chat title contains that.")).toBeInTheDocument();
+    expect(await screen.findByText("No work title contains that.")).toBeInTheDocument();
   });
 
   it("keeps chat-scoped places with the conversation", async () => {
@@ -551,12 +564,12 @@ describe("app shell", () => {
     await screen.findByText("Welcome to Tidebreak");
     // Not disabled — absent. Home has no conversation for the chip to
     // describe, and the rail itself carries nothing chat-scoped anymore.
-    expect(screen.queryByLabelText("Chat activity")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Work activity")).not.toBeInTheDocument();
     cleanup();
 
     await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    expect(screen.getByLabelText("Chat activity")).toBeInTheDocument();
+    expect(screen.getByLabelText("Work activity")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /Outputs/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /Folders/ })).toBeEnabled();
   });
@@ -568,12 +581,12 @@ describe("app shell", () => {
 
     // The rail is the chat list, with the open chat marked, so leaving for
     // another conversation is one click, not a trip through home.
-    const chatList = await screen.findByLabelText("Chats");
+    const chatList = await screen.findByLabelText("Work list");
     expect(
       within(chatList).getByRole("button", { name: "Roadmap" }),
     ).toHaveAttribute("aria-current", "page");
 
-    await user.click(within(chatList).getByRole("button", { name: "New chat" }));
+    await user.click(within(chatList).getByRole("button", { name: "New work" }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-2"));
   });
@@ -709,6 +722,35 @@ describe("app shell", () => {
     await user.click(screen.getByRole("button", { name: "Back to app" }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+  });
+
+  it("confirms the sidebar restart and repeats the pre-v1 data warning", async () => {
+    desktopUpdateState.status = "ready";
+    desktopUpdateState.version = "0.9.0";
+    const user = userEvent.setup();
+    await mountApp();
+
+    await user.click(
+      await screen.findByRole("button", { name: /Restart to update/ }),
+    );
+
+    expect(
+      await screen.findByRole("alertdialog", {
+        name: "Restart Tidebreak to update?",
+      }),
+    ).toHaveTextContent(
+      "Until Tidebreak reaches version 1.0, this update may wipe all Tidebreak data on this device",
+    );
+    expect(restartDesktop).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(restartDesktop).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /Restart to update/ }));
+    await user.click(
+      await screen.findByRole("button", { name: "Restart and update" }),
+    );
+    await waitFor(() => expect(restartDesktop).toHaveBeenCalledOnce());
   });
 
   it("creates a project from the dialog and opens a chat inside it", async () => {
