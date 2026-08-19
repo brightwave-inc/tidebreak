@@ -484,6 +484,14 @@ export function ModelMenu({
     void onChange(model.key);
   }
 
+  const visibleModels = searching
+    ? searchResults
+    : (activeGroup?.models ?? []);
+  const spotlightKey =
+    (known ?? usableDefault)?.key ??
+    visibleModels.find((model) => model.available)?.key ??
+    null;
+
   function modelRow(model: ModelInfo, showProvider: boolean = false) {
     const selected = isDefault
       ? usableDefault?.key === model.key
@@ -496,6 +504,9 @@ export function ModelMenu({
         // closes on it. Re-selecting the current row still closes naturally.
         onSelect={() => chooseModel(model, selected)}
         className="flex items-center gap-2"
+        data-first-task-target={
+          model.key === spotlightKey ? "model-choice" : undefined
+        }
       >
         <ProviderIcon
           provider={model.vendor ?? model.provider}
@@ -528,7 +539,6 @@ export function ModelMenu({
           className="h-8 max-w-56 gap-2"
           disabled={disabled}
           aria-label={triggerLabel}
-          data-first-task-target="model"
           title={triggerLabel}
         >
           {pillModel ? (

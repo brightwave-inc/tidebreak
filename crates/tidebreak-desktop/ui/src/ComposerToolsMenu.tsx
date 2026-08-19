@@ -103,7 +103,6 @@ export function ComposerToolsMenu({
               variant="ghost"
               size="icon-8"
               aria-label="Tools"
-              data-first-task-target="tools"
               disabled={disabled}
             >
               <Plus size={16} />
@@ -121,6 +120,7 @@ export function ComposerToolsMenu({
             <DropdownMenuItem
               disabled={disabled || attachFiles.attaching}
               onSelect={attachFiles.onAttach}
+              data-first-task-target="attach-files"
             >
               {attachFiles.attaching ? (
                 <LoaderCircle className="size-4 animate-spin" />
@@ -134,6 +134,7 @@ export function ComposerToolsMenu({
             <DropdownMenuItem
               disabled={disabled || attachFolder.working}
               onSelect={attachFolder.onAttach}
+              data-first-task-target="attach-folder"
             >
               {attachFolder.working ? (
                 <LoaderCircle className="size-4 animate-spin" />
@@ -157,6 +158,7 @@ export function ComposerToolsMenu({
           {network && NetworkIcon && (
             <DropdownMenuItem
               disabled={disabled || network.disabled}
+              data-first-task-target="network"
               onSelect={() => {
                 // The walkthrough holds this menu open, so a second overlay
                 // would sit under the spotlight and trap focus.

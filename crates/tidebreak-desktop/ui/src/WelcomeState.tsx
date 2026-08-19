@@ -208,11 +208,12 @@ export function WelcomeState({
       )}
       {onSelectPrompt && libraryPrompts.length > 0 && (
         <div className="welcome-prompts" data-first-task-target="starters">
-          {libraryPrompts.map((prompt) => (
+          {libraryPrompts.map((prompt, index) => (
             <button
               key={prompt.name}
               type="button"
               className={CARD_CLASS}
+              data-first-task-target={index === 0 ? "starter-choice" : undefined}
               onClick={() => insertLibraryPrompt(prompt.name)}
             >
               <Sparkles size={16} className="text-muted-foreground" />
@@ -231,18 +232,22 @@ export function WelcomeState({
       {onSelectPrompt && libraryPrompts.length === 0 && (
         <div className="welcome-prompts" data-first-task-target="starters">
           {STARTER_PROMPTS.map(
-            ({
-              icon: Icon,
-              iconClass,
-              label,
-              description,
-              prompt,
-              enableInternet,
-            }) => (
+            (
+              {
+                icon: Icon,
+                iconClass,
+                label,
+                description,
+                prompt,
+                enableInternet,
+              },
+              index,
+            ) => (
               <button
                 key={label}
                 type="button"
                 className={CARD_CLASS}
+                data-first-task-target={index === 0 ? "starter-choice" : undefined}
                 onClick={() =>
                   onSelectPrompt(
                     prompt,

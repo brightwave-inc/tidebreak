@@ -185,5 +185,8 @@ it("opens when the first-task walkthrough is on the model step", () => {
     />,
   );
 
-  expect(screen.getByRole("menuitem", { name: "Claude Sonnet 4" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Claude Sonnet 4" })).toHaveAttribute(
+    "data-first-task-target",
+    "model-choice",
+  );
 });
