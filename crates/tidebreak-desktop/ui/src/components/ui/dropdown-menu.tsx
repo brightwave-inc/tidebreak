@@ -35,7 +35,10 @@ const dropdownMenuItemVariants = cva(
     variants: {
       variant: {
         default: "focus:bg-accent focus:text-accent-foreground",
-        destructive: "text-destructive focus:bg-critical-background",
+        // Same pairing as the context menu's destructive item, for the same
+        // reason: the focused row must not go to 1.9:1 in the dark theme.
+        destructive:
+          "text-critical focus:bg-critical-background focus:text-critical-foreground",
       },
     },
     defaultVariants: {

@@ -8,6 +8,7 @@ import { formatMessageTimestamp } from "@/MessageFooter";
 import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "@/ScrollableContainer";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { MiddleTruncate } from "./MiddleTruncate";
 
 /**
  * Parked engine approval. The normalized kind leads so the reader can decide;
@@ -246,29 +247,6 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
     >
       <div className="overflow-hidden">{children}</div>
     </div>
-  );
-}
-
-function MiddleTruncate({
-  text,
-  className,
-}: {
-  text: string;
-  className?: string;
-}) {
-  const tail = Math.min(28, Math.max(12, Math.ceil(text.length / 3)));
-  if (text.length <= 40) {
-    return (
-      <span className={cn("block truncate", className)} title={text}>
-        {text}
-      </span>
-    );
-  }
-  return (
-    <span className={cn("flex min-w-0", className)} title={text}>
-      <span className="truncate">{text.slice(0, -tail)}</span>
-      <span className="shrink-0">{text.slice(-tail)}</span>
-    </span>
   );
 }
 

@@ -38,7 +38,13 @@ const contextMenuItemVariants = cva(
     variants: {
       variant: {
         default: "focus:bg-accent focus:text-accent-foreground",
-        destructive: "text-destructive focus:bg-critical-background",
+        // `--destructive` on `--critical-background` is 3.9:1 in the light
+        // theme and 1.9:1 in the dark one — the row goes nearly blank at the
+        // moment the reader lands on the most dangerous item in the menu. The
+        // mark colour reads on the popover, and the ink the critical tint was
+        // built for reads on the tint.
+        destructive:
+          "text-critical focus:bg-critical-background focus:text-critical-foreground",
       },
     },
     defaultVariants: {

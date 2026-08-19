@@ -385,7 +385,7 @@ function WorkspaceCard({
               <span className="truncate">{repoName}</span>
             </span>
             <span
-              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/90"
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
               title={workspace.branch_name}
             >
               {branchShown}

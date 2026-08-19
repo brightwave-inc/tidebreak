@@ -25,6 +25,7 @@ import { UserMessage } from "@/UserMessage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { MiddleTruncate } from "./MiddleTruncate";
 import {
   formatElapsedDuration,
   formatTurnDuration,
@@ -117,7 +118,7 @@ export function CodeTranscript({
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
       <div className="messages-column" ref={contentRef}>
-        {items.map((item) =>
+        {items.map((item, index) =>
           isolatedCard(
             item.id,
             itemSignature(item, decidingId, approvalError),
@@ -127,6 +128,7 @@ export function CodeTranscript({
               approval={
                 item.kind === "approval" ? approvals[item.approvalId] : undefined
               }
+              attached={parksTheCallAbove(items, index)}
               deciding={
                 item.kind === "approval" && decidingId === item.approvalId
               }
@@ -228,11 +230,31 @@ export function shouldShowCodeWorking(
 }
 
 /**
+ * Whether this approval is the one the tool line directly above it is parked
+ * on.
+ *
+ * Nothing on the wire says so — an approval carries no tool-call id — but the
+ * journal only ever parks the call it just started, so an approval that lands
+ * straight after a still-running tool line belongs to it. The pair is then
+ * drawn as one unit, because the card repeats the command the line above
+ * already shows and two separate blocks saying the same thing reads as two
+ * things happening.
+ */
+function parksTheCallAbove(
+  items: readonly CodeTranscriptItem[],
+  index: number,
+): boolean {
+  const item = items[index];
+  if (item?.kind !== "approval") return false;
+  const previous = items[index - 1];
+  return previous?.kind === "tool" && previous.status === "running";
+}
+
+/**
  * The data a row draws on, reduced to what decides whether it can render, so a
  * row that threw on a half-written result is retried when the result lands
  * rather than staying broken for the life of the transcript.
- */
-function itemSignature(
+ */function itemSignature(
   item: CodeTranscriptItem,
   decidingId?: string | null,
   approvalError?: string,
@@ -269,6 +291,7 @@ const TranscriptItem = memo(function TranscriptItem({
   item,
   animateStreaming,
   approval,
+  attached = false,
   deciding,
   approvalError,
   onDecide,
@@ -278,6 +301,8 @@ const TranscriptItem = memo(function TranscriptItem({
   item: CodeTranscriptItem;
   animateStreaming: boolean;
   approval?: CodeApprovalSnapshot;
+  /** This approval parks the tool line directly above it. */
+  attached?: boolean;
   deciding?: boolean;
   approvalError?: string;
   onDecide?: (
@@ -361,6 +386,14 @@ const TranscriptItem = memo(function TranscriptItem({
         <div
           data-code-approval-id={item.approvalId}
           data-code-approval-state={item.state}
+          data-code-approval-attached={attached || undefined}
+          className={cn(
+            // A rail dropped from the tool line's own icon column, closing the
+            // column gap above it. The card is the same command in full, so it
+            // has to read as that line's continuation rather than as the next
+            // thing the engine did.
+            attached && "border-border -mt-2 ml-[7px] border-l pt-2 pl-4",
+          )}
         >
           {card}
         </div>
@@ -634,32 +667,6 @@ function StatusGlyph({
   }
 }
 
-/** Keep the tail of a command or path when the header runs out of room. */
-function MiddleTruncate({
-  text,
-  className,
-}: {
-  text: string;
-  className?: string;
-}) {
-  const tail = Math.min(28, Math.max(12, Math.ceil(text.length / 3)));
-  if (text.length <= 40) {
-    return (
-      <span className={cn("block truncate", className)} title={text}>
-        {text}
-      </span>
-    );
-  }
-  return (
-    <span className={cn("flex min-w-0", className)} title={text}>
-      <span className="truncate">{text.slice(0, -tail)}</span>
-      <span className="shrink-0">{text.slice(-tail)}</span>
-    </span>
-  );
-}
-
-
-
 const FILE_KIND_LETTER: Record<FileChangeKind, string> = {
   added: "A",
   modified: "M",
@@ -719,10 +726,15 @@ function FileActivityRow({
         }}
       >
         {count} {noun} changed ·{" "}
-        <span className="text-success-foreground-muted tabular-nums">
+        {/*
+          The full `-foreground` ink, not the 75% `-muted` one: at 75% over a
+          white page these numerals land near 3:1, which reads as greyed-out
+          rather than green in the light theme while looking fine in the dark.
+        */}
+        <span className="text-success-foreground tabular-nums">
           +{insertions}
         </span>{" "}
-        <span className="text-critical-foreground-muted tabular-nums">
+        <span className="text-critical-foreground tabular-nums">
           −{deletions}
         </span>
       </button>
@@ -743,10 +755,10 @@ function FileActivityRow({
               <span
                 className={cn(
                   "w-3 shrink-0 font-mono",
-                  file.kind === "added" && "text-success-foreground-muted",
-                  file.kind === "modified" && "text-info-foreground-muted",
-                  file.kind === "deleted" && "text-critical-foreground-muted",
-                  file.kind === "renamed" && "text-warning-foreground-muted",
+                  file.kind === "added" && "text-success-foreground",
+                  file.kind === "modified" && "text-info-foreground",
+                  file.kind === "deleted" && "text-critical-foreground",
+                  file.kind === "renamed" && "text-warning-foreground",
                 )}
                 aria-hidden
               >

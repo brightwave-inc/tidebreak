@@ -135,7 +135,7 @@ describe("CodeSidebar", () => {
     fireEvent.contextMenu(card);
     const archive = await screen.findByRole("menuitem", { name: "Archive" });
     expect(archive).toBeInTheDocument();
-    expect(archive.className).toContain("text-destructive");
+    expect(archive.className).toContain("text-critical");
 
     fireEvent.keyDown(archive, { key: "Escape" });
     await waitFor(() => expect(card).toHaveFocus());
