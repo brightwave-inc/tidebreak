@@ -146,9 +146,7 @@ export function HomeRoute() {
   const [walkthroughAvailable, setWalkthroughAvailable] = useState(
     shouldOfferFirstTaskWalkthrough,
   );
-  const [walkthroughOpen, setWalkthroughOpen] = useState(
-    shouldOfferFirstTaskWalkthrough,
-  );
+  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
   const newChat = useNewChatSettings();
   // What the pickers show and the created chat will get: this visit's picks
   // over the server's sticky defaults. Only the explicit picks are sent; the
