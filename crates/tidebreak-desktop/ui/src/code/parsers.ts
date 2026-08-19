@@ -43,6 +43,7 @@ import type {
   CodeUpdateNotice,
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
+  CodeSubscriptionUsage,
   PullRequestDigest,
   PullRequestComment,
   PullRequestCommentKind,
@@ -146,6 +147,94 @@ const ATTENTION_SOURCES = new Set<AttentionSource>([
   "lifecycle",
   "user",
 ]);
+const USAGE_SOURCES = new Set<CodeSubscriptionUsage["source"]>([
+  "model_gateway",
+  "direct",
+  "unavailable",
+]);
+
+export function parseCodeSubscriptionUsage(
+  value: unknown,
+): CodeSubscriptionUsage | null {
+  if (
+    !isRecord(value) ||
+    !isMember(value.source, USAGE_SOURCES) ||
+    !Array.isArray(value.providers) ||
+    !Array.isArray(value.diagnostics) ||
+    !value.diagnostics.every((item) => typeof item === "string")
+  ) {
+    return null;
+  }
+  const providers: CodeSubscriptionUsage["providers"] = [];
+  for (const provider of value.providers) {
+    if (
+      !isRecord(provider) ||
+      !nonEmpty(provider.id) ||
+      !nonEmpty(provider.label) ||
+      !Array.isArray(provider.accounts)
+    ) {
+      return null;
+    }
+    const accounts = [];
+    for (const account of provider.accounts) {
+      if (
+        !isRecord(account) ||
+        !nonEmpty(account.id) ||
+        !nonEmpty(account.label) ||
+        typeof account.is_own !== "boolean" ||
+        typeof account.state !== "string" ||
+        (account.updated_at_unix_seconds !== undefined &&
+          !isFiniteNumber(account.updated_at_unix_seconds)) ||
+        !Array.isArray(account.windows)
+      ) {
+        return null;
+      }
+      const windows = [];
+      for (const window of account.windows) {
+        if (
+          !isRecord(window) ||
+          !nonEmpty(window.key) ||
+          !nonEmpty(window.label) ||
+          !isFiniteNumber(window.used_percent) ||
+          (window.resets_at_unix_seconds !== undefined &&
+            !isFiniteNumber(window.resets_at_unix_seconds)) ||
+          !optionalString(window.status) ||
+          !optionalString(window.model_scope)
+        ) {
+          return null;
+        }
+        windows.push({
+          key: window.key,
+          label: window.label,
+          used_percent: window.used_percent,
+          ...(window.resets_at_unix_seconds !== undefined
+            ? { resets_at_unix_seconds: window.resets_at_unix_seconds }
+            : {}),
+          ...(window.status !== undefined ? { status: window.status } : {}),
+          ...(window.model_scope !== undefined
+            ? { model_scope: window.model_scope }
+            : {}),
+        });
+      }
+      accounts.push({
+        id: account.id,
+        label: account.label,
+        is_own: account.is_own,
+        state: account.state,
+        windows,
+        ...(account.updated_at_unix_seconds !== undefined
+          ? { updated_at_unix_seconds: account.updated_at_unix_seconds }
+          : {}),
+      });
+    }
+    providers.push({ id: provider.id, label: provider.label, accounts });
+  }
+  return {
+    source: value.source,
+    providers,
+    diagnostics: [...value.diagnostics],
+  };
+}
 
 export function parseCodeCloneJob(value: unknown): CodeCloneJobSnapshot | null {
   if (

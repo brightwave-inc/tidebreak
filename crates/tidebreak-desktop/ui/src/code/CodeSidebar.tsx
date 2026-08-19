@@ -31,6 +31,7 @@ import { AttentionBadge } from "./AttentionBadge";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeModeSwitch } from "./CodeModeSwitch";
+import { CodeSubscriptionUsage } from "./CodeSubscriptionUsage";
 import { useCodeUiStore } from "./CodeUiStore";
 import { connectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { HARNESS_ICONS } from "./HarnessPicker";
@@ -109,7 +110,7 @@ export function CodeSidebar() {
   const sortLabel = WORKSPACE_SORT_MODE_LABELS[sortMode];
 
   return (
-    <SidebarFrame>
+    <SidebarFrame footer={<CodeSubscriptionUsage />}>
       <CodeModeSwitch />
 
       <div className="flex items-center justify-between px-2">

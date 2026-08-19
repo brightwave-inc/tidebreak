@@ -1048,6 +1048,37 @@ export type CodeUpdateNotice = WireCodeUpdateNotice;
 export type CodeCloneDefaults = WireCodeCloneDefaults;
 export type CodeCloneJobSnapshot = WireCodeCloneJobSnapshot;
 
+/** Subscription quota windows exposed by Model Gateway or a direct harness. */
+export type CodeSubscriptionUsage = {
+  source: "model_gateway" | "direct" | "unavailable";
+  providers: CodeSubscriptionUsageProvider[];
+  diagnostics: string[];
+};
+
+export type CodeSubscriptionUsageProvider = {
+  id: string;
+  label: string;
+  accounts: CodeSubscriptionUsageAccount[];
+};
+
+export type CodeSubscriptionUsageAccount = {
+  id: string;
+  label: string;
+  is_own: boolean;
+  state: string;
+  updated_at_unix_seconds?: number;
+  windows: CodeSubscriptionUsageWindow[];
+};
+
+export type CodeSubscriptionUsageWindow = {
+  key: string;
+  label: string;
+  used_percent: number;
+  resets_at_unix_seconds?: number;
+  status?: string;
+  model_scope?: string;
+};
+
 /** Journaled engine event and the sequenced WebSocket frame that carries it. */
 export type CodeApprovalSnapshot = WireCodeApprovalSnapshot;
 export type CodeApprovalState = WireCodeApprovalState;

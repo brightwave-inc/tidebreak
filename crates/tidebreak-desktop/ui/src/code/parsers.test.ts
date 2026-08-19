@@ -11,6 +11,7 @@ import {
   parseCodePush,
   parseCodeSession,
   parseCodeSessionList,
+  parseCodeSubscriptionUsage,
   parseCodeUpdateNotice,
   parseCodeTerminal,
   parseCodeTerminalList,
@@ -37,6 +38,79 @@ const SESSION = {
   unrecognized_event_count: 0,
   created_at: "2026-08-15T12:00:00.000Z",
 };
+
+describe("parseCodeSubscriptionUsage", () => {
+  it("accepts normalized personal and shared provider windows", () => {
+    const usage = {
+      source: "model_gateway",
+      diagnostics: [],
+      providers: [
+        {
+          id: "anthropic",
+          label: "Anthropic Direct",
+          accounts: [
+            {
+              id: "personal",
+              label: "Personal",
+              is_own: true,
+              state: "available",
+              updated_at_unix_seconds: 1_776_000_000,
+              windows: [
+                {
+                  key: "weekly",
+                  label: "Weekly (7d)",
+                  used_percent: 58,
+                  resets_at_unix_seconds: 1_776_086_400,
+                  status: "allowed",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(parseCodeSubscriptionUsage(usage)).toEqual(usage);
+  });
+
+  it("rejects malformed usage percentages and sources", () => {
+    const unavailable = {
+      source: "unavailable",
+      providers: [],
+      diagnostics: ["No machine-readable usage source was found."],
+    };
+    expect(parseCodeSubscriptionUsage(unavailable)).toEqual(unavailable);
+    expect(
+      parseCodeSubscriptionUsage({ ...unavailable, source: "shell_scrape" }),
+    ).toBeNull();
+    expect(
+      parseCodeSubscriptionUsage({
+        source: "direct",
+        diagnostics: [],
+        providers: [
+          {
+            id: "openai",
+            label: "Codex",
+            accounts: [
+              {
+                id: "codex",
+                label: "Codex Pro",
+                is_own: true,
+                state: "available",
+                windows: [
+                  {
+                    key: "session",
+                    label: "Session (5h)",
+                    used_percent: "58",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("parseCodeSessionList", () => {
   it("accepts GET /code/workspaces/{id}/sessions", () => {

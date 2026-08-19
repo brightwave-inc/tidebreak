@@ -14,6 +14,7 @@ mod sessions;
 mod terminals;
 pub(crate) mod types;
 mod updates;
+mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
@@ -49,6 +50,7 @@ pub(crate) use types::{
     SequencedCodeEventFrame,
 };
 pub(crate) use updates::code_updates;
+pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_blob, get_workspace_diff,
     list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace, search_workspace,

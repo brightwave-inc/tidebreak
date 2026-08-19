@@ -43,6 +43,34 @@ const client = {
     },
   ]),
   getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+  getCodeSubscriptionUsage: vi.fn(async () => ({
+    source: "model_gateway" as const,
+    diagnostics: [],
+    providers: [
+      {
+        id: "anthropic",
+        label: "Anthropic Direct",
+        accounts: [
+          {
+            id: "personal",
+            label: "Personal",
+            is_own: true,
+            state: "available",
+            updated_at_unix_seconds: Math.floor(Date.now() / 1000),
+            windows: [
+              {
+                key: "7d-fable",
+                label: "Weekly (Fable)",
+                used_percent: 91,
+                resets_at_unix_seconds: Math.floor(Date.now() / 1000) + 3600,
+                status: "allowed_warning",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  })),
   listCodeHarnessModels: vi.fn(async () => ({
     kind: "claude_code" as const,
     models: [],
@@ -118,6 +146,30 @@ describe("CodeSidebar", () => {
       screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New workspace" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", {
+        name: "Subscription usage, highest window 91% used",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the subscription details from the fixed rail footer", async () => {
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Subscription usage, highest window 91% used",
+      }),
+    );
+    expect(await screen.findByText("Subscription usage")).toBeInTheDocument();
+    expect(screen.getByText("Model Gateway")).toBeInTheDocument();
+    expect(screen.getByText("Weekly (Fable)")).toBeInTheDocument();
+    expect(screen.getByText("91% used")).toBeInTheDocument();
   });
 
   it("opens the workspace context menu from the keyboard and gives focus back", async () => {
