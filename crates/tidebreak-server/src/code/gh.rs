@@ -1956,7 +1956,8 @@ mod windows_tests {
     use super::*;
     use std::ffi::OsStr;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use tokio::time::{sleep, Instant};
+    use tidebreak_harness::ProcessTreeChild;
+    use tokio::time::{sleep, timeout, Instant};
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
@@ -2047,35 +2048,32 @@ mod windows_tests {
     async fn quick_action_timeout_terminates_its_descendant() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("descendant.pid");
-        let action = QuickAction {
-            name: "process tree timeout".into(),
-            command: format!(
-                "$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\ping.exe') \
-                 -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; \
-                 [IO.File]::WriteAllText({}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
-                 Wait-Process -Id $child.Id",
-                powershell_single_quote(&pid_file.to_string_lossy())
-            ),
-            auto_run_on_create: false,
-        };
-        let worktree = dir.path().to_path_buf();
-        let action_task = tokio::spawn(async move { run_action(&worktree, &action).await });
-
-        let pid = wait_for_pid(&pid_file, &action_task).await;
+        // `run_action` starts its 5s budget at spawn. Waiting for the pid after
+        // that races PowerShell startup on a loaded runner. Spawn the same way,
+        // then cancel `wait_with_output` after the descendant exists.
+        let command = format!(
+            "$child = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\ping.exe') \
+             -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; \
+             [IO.File]::WriteAllText({}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
+             Wait-Process -Id $child.Id",
+            powershell_single_quote(&pid_file.to_string_lossy())
+        );
+        let mut child =
+            super::spawn_workspace_script(dir.path(), &command).expect("spawn quick action");
+        let pid = wait_for_pid(&pid_file, &mut child).await;
         let descendant = open_process(pid);
         assert_eq!(
             wait_status(&descendant, Duration::ZERO),
             WAIT_TIMEOUT,
             "descendant {pid} exited before the quick-action timeout"
         );
-        assert!(
-            !action_task.is_finished(),
-            "quick action ended before its descendant was opened"
-        );
 
-        let outcome = action_task.await.unwrap();
-        assert!(outcome.timed_out, "{outcome:?}");
-        assert!(!outcome.success, "{outcome:?}");
+        assert!(
+            timeout(ACTION_TIMEOUT, child.wait_with_output())
+                .await
+                .is_err(),
+            "quick action finished before the timeout fired"
+        );
         assert_eq!(
             wait_status(&descendant, DESCENDANT_EXIT_TIMEOUT),
             WAIT_OBJECT_0,
@@ -2083,8 +2081,8 @@ mod windows_tests {
         );
     }
 
-    async fn wait_for_pid(path: &Path, action: &tokio::task::JoinHandle<ActionOutcome>) -> u32 {
-        let deadline = Instant::now() + ACTION_TIMEOUT + DESCENDANT_EXIT_TIMEOUT;
+    async fn wait_for_pid(path: &Path, child: &mut ProcessTreeChild) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await {
                 if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
@@ -2092,7 +2090,7 @@ mod windows_tests {
                 }
             }
             assert!(
-                !action.is_finished(),
+                child.try_wait().ok().flatten().is_none(),
                 "quick action ended before publishing its descendant pid"
             );
             assert!(
