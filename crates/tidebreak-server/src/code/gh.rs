@@ -958,9 +958,7 @@ async fn load_head_consistent_pr_digest(
     worktree: &Path,
     binary: &Path,
 ) -> Option<PullRequestDigest> {
-    let Some(mut snapshot) = load_pr_view_snapshot(worktree, binary).await else {
-        return None;
-    };
+    let mut snapshot = load_pr_view_snapshot(worktree, binary).await?;
 
     for _ in 0..PR_DIGEST_HEAD_ATTEMPTS {
         let number = snapshot.digest.number;
@@ -1050,8 +1048,7 @@ fn in_merge_queue_from_timeline_events(events: &str) -> bool {
     events
         .lines()
         .map(str::trim)
-        .filter(|event| matches!(*event, "added_to_merge_queue" | "removed_from_merge_queue"))
-        .next_back()
+        .rfind(|event| matches!(*event, "added_to_merge_queue" | "removed_from_merge_queue"))
         == Some("added_to_merge_queue")
 }
 
