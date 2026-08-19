@@ -36,6 +36,7 @@ const NO_CATALOG_MODELS: ModelInfo[] = [];
  * composer's own send button: one submit path, one set of disabled rules.
  */
 export function StartSessionPrompt({
+  workspaceId,
   harnesses,
   starting,
   selectedMode,
@@ -45,6 +46,7 @@ export function StartSessionPrompt({
   catalogModels = NO_CATALOG_MODELS,
   defaultModelKey = null,
 }: {
+  workspaceId: string;
   harnesses: HarnessDoctorEntry[];
   starting: boolean;
   selectedMode: CodePermissionMode | null;
@@ -162,6 +164,7 @@ export function StartSessionPrompt({
           model={model}
           modelOptions={modelOptions}
           modelLoading={modelLoading}
+          promptScope={workspaceId}
           onModelChange={setModel}
           onModeChange={onSelectMode}
           onSend={async (message) => {

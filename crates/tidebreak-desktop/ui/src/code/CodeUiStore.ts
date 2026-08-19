@@ -25,6 +25,12 @@ export type InspectorScope = {
   label: string;
 };
 
+export type PendingComposerPrompt = {
+  scope: string;
+  text: string;
+  submit: boolean;
+};
+
 function readStoredCreateDefaults(): CodeCreateDefaults | null {
   try {
     const raw = window.localStorage.getItem(LAST_CREATE_KEY);
@@ -169,12 +175,16 @@ export type CodeUiStore = {
   rememberCreate: (defaults: CodeCreateDefaults) => void;
   setTerminalDrawerHeight: (workspaceId: string, height: number) => void;
   /**
-   * Prompt waiting for the code composer. The inspector bar writes; the
-   * composer takes and clears so a remount cannot insert twice.
+   * Prompt waiting for the code composer. It can either fill the draft or run
+   * immediately; the composer takes and clears it so a remount cannot repeat
+   * the action.
    */
-  pendingComposerPrompt: string | null;
-  offerComposerPrompt: (prompt: string) => void;
-  takeComposerPrompt: () => string | null;
+  pendingComposerPrompt: PendingComposerPrompt | null;
+  composerActionScope: string | null;
+  offerComposerPrompt: (scope: string, prompt: string) => void;
+  runComposerPrompt: (scope: string, prompt: string) => boolean;
+  takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
+  finishComposerAction: (scope: string) => void;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
@@ -187,13 +197,34 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   lastCreate: readStoredCreateDefaults(),
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
   pendingComposerPrompt: null,
-  offerComposerPrompt: (prompt) => set({ pendingComposerPrompt: prompt }),
-  takeComposerPrompt: (): string | null => {
+  composerActionScope: null,
+  offerComposerPrompt: (scope, prompt) =>
+    set({ pendingComposerPrompt: { scope, text: prompt, submit: false } }),
+  runComposerPrompt: (scope, prompt) => {
+    if (get().composerActionScope !== null) return false;
+    set({
+      pendingComposerPrompt: { scope, text: prompt, submit: true },
+      composerActionScope: scope,
+    });
+    return true;
+  },
+  takeComposerPrompt: (scope): PendingComposerPrompt | null => {
     const prompt = get().pendingComposerPrompt;
-    if (!prompt) return null;
+    if (!prompt || prompt.scope !== scope) return null;
     set({ pendingComposerPrompt: null });
     return prompt;
   },
+  finishComposerAction: (scope) =>
+    set((state) => {
+      if (state.composerActionScope !== scope) return state;
+      return {
+        composerActionScope: null,
+        pendingComposerPrompt:
+          state.pendingComposerPrompt?.scope === scope
+            ? null
+            : state.pendingComposerPrompt,
+      };
+    }),
   startNewWorkspace: (repoId) => {
     const { repos } = useCodeCatalogStore.getState();
     if (repos.length === 0) {

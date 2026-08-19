@@ -64,7 +64,10 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   useUiStore.setState({ activeTurnSendMode: "queue" });
-  useCodeUiStore.setState({ pendingComposerPrompt: null });
+  useCodeUiStore.setState({
+    pendingComposerPrompt: null,
+    composerActionScope: null,
+  });
   useComposerDrafts.setState({ attachments: {} });
 });
 
@@ -75,7 +78,9 @@ const QUEUED = {
 
 describe("CodeComposer", () => {
   it("inserts a pending inspector prompt into the draft", async () => {
-    useCodeUiStore.getState().offerComposerPrompt("Merge pull request #41.");
+    useCodeUiStore
+      .getState()
+      .offerComposerPrompt("code", "Merge pull request #41.");
     renderComposer(
       <CodeComposer
         running={false}
@@ -89,6 +94,108 @@ describe("CodeComposer", () => {
       "Merge pull request #41.",
     );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
+  it("submits a one-click workspace action without replacing the draft", async () => {
+    const onSend = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "Keep my draft" } });
+
+    useCodeUiStore
+      .getState()
+      .runComposerPrompt("code", "Fix CI for pull request #41.");
+
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("Fix CI for pull request #41."),
+    );
+    expect(box).toHaveValue("Keep my draft");
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
+  it("keeps a one-click action in the draft when the composer cannot run", async () => {
+    const onSend = vi.fn();
+    useCodeUiStore
+      .getState()
+      .runComposerPrompt("code", "Resolve conflicts for pull request #41.");
+    renderComposer(
+      <CodeComposer
+        disabled
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "Resolve conflicts for pull request #41.",
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("does not consume an action intended for another workspace", async () => {
+    const onSend = vi.fn();
+    useCodeUiStore
+      .getState()
+      .runComposerPrompt("workspace-a", "Merge pull request #41.");
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        promptScope="workspace-b"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(useCodeUiStore.getState().pendingComposerPrompt?.scope).toBe(
+      "workspace-a",
+    );
+  });
+
+  it("locks repeated one-click actions until the first submission settles", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onSend = vi.fn(() => pending);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        promptScope="workspace-a"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      useCodeUiStore
+        .getState()
+        .runComposerPrompt("workspace-a", "Fix CI for pull request #41."),
+    ).toBe(true);
+    expect(
+      useCodeUiStore
+        .getState()
+        .runComposerPrompt("workspace-a", "Fix CI for pull request #41."),
+    ).toBe(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    expect(useCodeUiStore.getState().composerActionScope).toBe("workspace-a");
+
+    release();
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().composerActionScope).toBeNull(),
+    );
   });
 
   it("states the session's mode in the composer", () => {

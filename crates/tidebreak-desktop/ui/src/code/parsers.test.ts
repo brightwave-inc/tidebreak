@@ -128,7 +128,9 @@ describe("parseCodeSessionList", () => {
 
   it("rejects a non-array or a row the session parser would drop", () => {
     expect(parseCodeSessionList({ sessions: [SESSION] })).toBeNull();
-    expect(parseCodeSessionList([SESSION, { ...SESSION, lifecycle: "paused" }])).toBeNull();
+    expect(
+      parseCodeSessionList([SESSION, { ...SESSION, lifecycle: "paused" }]),
+    ).toBeNull();
   });
 });
 
@@ -204,9 +206,7 @@ describe("parseCodeWorkspaceTree", () => {
 describe("parseCodeWorkspaceSearch", () => {
   it("accepts bounded line matches and rejects malformed rows", () => {
     const result = {
-      matches: [
-        { path: "src/lib.rs", line_number: 12, line: "fn crisp() {}" },
-      ],
+      matches: [{ path: "src/lib.rs", line_number: 12, line: "fn crisp() {}" }],
       truncated: false,
     };
     expect(parseCodeWorkspaceSearch(result)).toEqual(result);
@@ -239,7 +239,9 @@ describe("parseCodeWorkspaceFiles", () => {
   });
 
   it("rejects a missing stat or a bad kind", () => {
-    expect(parseCodeWorkspaceFiles({ ...files, stat: { files: 1 } })).toBeNull();
+    expect(
+      parseCodeWorkspaceFiles({ ...files, stat: { files: 1 } }),
+    ).toBeNull();
     expect(
       parseCodeWorkspaceFiles({
         ...files,
@@ -342,7 +344,8 @@ describe("parseCodeWorkspacePr", () => {
     unpushed: true,
     ahead: 2,
     has_upstream: false,
-    suggested_commit_message: "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
+    suggested_commit_message:
+      "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
     gh_found: true,
     gh_authenticated: true,
     remediation: "",
@@ -363,6 +366,7 @@ describe("parseCodeWorkspacePr", () => {
       head_branch: "tidebreak/first-change",
       base_branch: "main",
       auto_merge_enabled: true,
+      in_merge_queue: true,
     },
   };
 
@@ -384,7 +388,8 @@ describe("parseCodeWorkspacePr", () => {
       unpushed: false,
       ahead: 0,
       has_upstream: false,
-      suggested_commit_message: "Update workspace\n\n0 files changed, 0 insertions(+), 0 deletions(-)",
+      suggested_commit_message:
+        "Update workspace\n\n0 files changed, 0 insertions(+), 0 deletions(-)",
       gh_found: false,
       remediation: "gh is not installed. Install the GitHub CLI.",
     };
@@ -398,6 +403,67 @@ describe("parseCodeWorkspacePr", () => {
   it("rejects a mistyped merge-status field", () => {
     expect(
       parseCodeWorkspacePr({ ...pr, pr: { ...pr.pr, draft: "yes" } }),
+    ).toBeNull();
+  });
+});
+
+describe("pull request state in live updates", () => {
+  const richPr = {
+    number: 12,
+    url: "https://github.com/example/demo/pull/12",
+    state: "open",
+    title: "Keep the exact host state",
+    checks_summary: "1 passing, 1 pending, 0 failing, 0 skipped",
+    checks: [
+      { name: "ci / rust", bucket: "pass" },
+      {
+        name: "ci / ui",
+        bucket: "pending",
+        detail: "running",
+        url: "https://github.com/example/demo/actions/runs/1",
+      },
+    ],
+    draft: true,
+    merged: false,
+    review_decision: "changes_requested",
+    mergeable: "conflicting",
+    merge_state_status: "behind",
+    head_branch: "tidebreak/exact-pr-state",
+    base_branch: "main",
+    auto_merge_enabled: true,
+    in_merge_queue: true,
+  };
+
+  const digest = {
+    workspace: "ws-1",
+    session: "sess-1",
+    lifecycle: "idle",
+    attention: { state: { type: "working" }, source: "lifecycle" },
+    title: "Fix login",
+    turn_count: 3,
+    pr_state: richPr,
+  };
+
+  it("preserves the complete PR digest in a digest notice", () => {
+    expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({
+      type: "digest",
+      ...digest,
+    });
+  });
+
+  it("preserves the complete PR digest in a snapshot notice", () => {
+    expect(
+      parseCodeUpdateNotice({ type: "snapshot", sessions: [digest] }),
+    ).toEqual({ type: "snapshot", sessions: [digest] });
+  });
+
+  it("rejects malformed rich PR fields instead of silently dropping them", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...digest,
+        pr_state: { ...richPr, in_merge_queue: "yes" },
+      }),
     ).toBeNull();
   });
 });
@@ -439,9 +505,7 @@ describe("parseCodePrComments", () => {
 
   it("rejects an unknown kind or a mistyped line", () => {
     const one = (comment: object) => ({ number: 12, comments: [comment] });
-    expect(
-      parseCodePrComments(one({ kind: "thread", body: "hi" })),
-    ).toBeNull();
+    expect(parseCodePrComments(one({ kind: "thread", body: "hi" }))).toBeNull();
     expect(
       parseCodePrComments(
         one({ kind: "inline", body: "hi", line: "forty-two" }),
@@ -464,7 +528,9 @@ describe("parseCodeCommit", () => {
 
 describe("parseCodePush", () => {
   it("accepts POST /code/workspaces/{id}/git/push", () => {
-    expect(parseCodePush({ branch: "tidebreak/first", remote: "origin" })).toEqual({
+    expect(
+      parseCodePush({ branch: "tidebreak/first", remote: "origin" }),
+    ).toEqual({
       branch: "tidebreak/first",
       remote: "origin",
     });
@@ -510,7 +576,11 @@ describe("parseCodeEvent", () => {
 
 describe("liveCodeSession", () => {
   it("prefers the newest non-ended session", () => {
-    const ended = parseCodeSession({ ...SESSION, id: "old", lifecycle: "ended" });
+    const ended = parseCodeSession({
+      ...SESSION,
+      id: "old",
+      lifecycle: "ended",
+    });
     const live = parseCodeSession(SESSION);
     expect(ended && live).toBeTruthy();
     expect(liveCodeSession([ended!, live!])?.id).toBe("sess-1");

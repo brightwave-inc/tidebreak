@@ -1,18 +1,27 @@
 import type { PullRequestDigest } from "../api/types";
 import { prTone } from "./workspaceCards";
 
-export type PrBarAction =
+export type PrWorkflowAction =
   | "watch_and_fix"
+  | "mark_ready"
   | "merge"
   | "fix_errors"
+  | "address_feedback"
+  | "update_branch"
   | "resolve_conflicts";
 
-export type PrBarTone =
+export type PrWorkflowState =
+  | "checking"
   | "ready"
   | "pending"
   | "failing"
   | "conflict"
+  | "behind"
+  | "blocked"
+  | "changes_requested"
   | "draft"
+  | "queued"
+  | "auto_merge"
   | "merged"
   | "closed";
 
@@ -24,12 +33,8 @@ export type PrCheckCounts = {
   total: number;
 };
 
-export type PrBarModel = {
-  number: number;
-  url?: string | null;
-  status: string;
-  tone: PrBarTone;
-  actions: PrBarAction[];
+export type PrWorkflowStatus = {
+  state: PrWorkflowState;
   checks: PrCheckCounts;
 };
 
@@ -63,101 +68,130 @@ export function prHasConflicts(pr: PullRequestDigest): boolean {
   return mergeable === "conflicting" || mergeState === "dirty";
 }
 
-/**
- * What the inspector bar shows for a live PR: one status phrase, the check
- * count, and the actions that insert a prompt.
- */
-export function prBarModel(pr: PullRequestDigest): PrBarModel {
-  const checks = prCheckCounts(pr);
-  const tone = barTone(pr, checks);
-  return {
-    number: pr.number,
-    url: pr.url,
-    status: barStatus(tone, checks),
-    tone,
-    actions: barActions(tone),
-    checks,
-  };
+/** Only an explicit host-timeline signal counts as merge-queue membership. */
+export function prIsQueued(pr: PullRequestDigest): boolean {
+  return pr.in_merge_queue === true;
 }
 
-export function prBarPrompt(
-  action: PrBarAction,
+export function prIsBehind(pr: PullRequestDigest): boolean {
+  return pr.merge_state_status?.trim().toLowerCase() === "behind";
+}
+
+export function prIsBlocked(pr: PullRequestDigest): boolean {
+  const mergeState = pr.merge_state_status?.trim().toLowerCase();
+  const review = pr.review_decision?.trim().toLowerCase();
+  return (
+    mergeState === "blocked" ||
+    mergeState === "unstable" ||
+    review === "review_required"
+  );
+}
+
+export function prHasChangesRequested(pr: PullRequestDigest): boolean {
+  return pr.review_decision?.trim().toLowerCase() === "changes_requested";
+}
+
+/** Classify a live pull request without choosing surface-specific actions. */
+export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
+  const checks = prCheckCounts(pr);
+  return { state: workflowState(pr, checks), checks };
+}
+
+export function prWorkflowPrompt(
+  action: PrWorkflowAction,
   pr: PullRequestDigest,
 ): string {
   const number = `#${pr.number}`;
   const base = pr.base_branch?.trim() || "the base branch";
+  const context = prWorkflowPromptContext(pr);
+  let instruction: string;
   switch (action) {
     case "watch_and_fix":
-      return `Watch pull request ${number} until it is mergeable. This watch runs in the current task, so stay on this workspace and branch. On every cycle, associate checks with the current head SHA and inspect required checks, actionable review feedback, draft status, mergeability, and whether the branch is behind ${base}. Wait efficiently while work is pending. When a check fails, a reviewer requests a concrete change, conflicts appear, or the branch must be updated, diagnose it, make the smallest safe fix, fetch and rebase onto ${base} when needed, resolve conflicts, run focused validation, commit if needed, push, and keep watching against the new head SHA. If the pull request is a draft, mark it ready for review before enabling auto-merge when that action is authorized; otherwise report the required authorization as the blocker. Enable auto-merge once required checks and automated reviews are green. Do not stop merely because checks are pending. Stop only when the pull request is merged or when a required human approval, missing permission, external outage, or product decision blocks progress; in that case report the exact blocker.`;
+      instruction = `Watch pull request ${number} until it is mergeable. This watch runs in the current task, so stay on this workspace and branch. On every cycle, associate checks with the current head SHA and inspect required checks, actionable review feedback, draft status, mergeability, and whether the branch is behind ${base}. Wait efficiently while work is pending. When a check fails, a reviewer requests a concrete change, conflicts appear, or the branch must be updated, diagnose it, make the smallest safe fix, fetch and rebase onto ${base} when needed, resolve conflicts, run focused validation, commit if needed, push, and keep watching against the new head SHA. If the pull request is a draft, mark it ready for review before enabling auto-merge when that action is authorized; otherwise report the required authorization as the blocker. Enable auto-merge once required checks and automated reviews are green. Do not stop merely because checks are pending. Stop only when the pull request is merged or when a required human approval, missing permission, external outage, or product decision blocks progress; in that case report the exact blocker.`;
+      break;
+    case "mark_ready":
+      instruction = `Mark pull request ${number} ready for review. First confirm the current head is pushed and the pull request is still a draft. Do not merge it. Report the result.`;
+      break;
     case "merge":
-      return `Merge pull request ${number} into ${base}. Use this workspace's existing merge path. Do not change the branch unless the merge requires it. Report the result.`;
+      instruction = `Merge pull request ${number} into ${base}. Re-check the current head SHA, required checks, reviews, conflicts, and queue requirements immediately before merging. Use the repository's preferred merge or merge-queue path. Do not change the branch unless the merge requires it. Report the result.`;
+      break;
     case "fix_errors":
-      return `Pull request ${number} has failing checks. Inspect the failing CI, fix the cause in this workspace, and push. Do not merge.`;
+      instruction = `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
+      break;
+    case "address_feedback":
+      instruction = `Pull request ${number} has requested changes. Inspect the latest unresolved review feedback, implement each actionable request in this workspace, run focused validation, commit, push, and reply where context is useful. Do not merge.`;
+      break;
+    case "update_branch":
+      instruction = `Update pull request ${number} from ${base}. Fetch the latest base branch, rebase this workspace branch onto it, resolve any conflicts, run focused validation, and push the updated head. Do not merge.`;
+      break;
     case "resolve_conflicts":
-      return `Pull request ${number} has merge conflicts with ${base}. Rebase or merge ${base}, resolve every conflict in this workspace, and push. Do not merge the pull request.`;
+      instruction = `Pull request ${number} has merge conflicts with ${base}. Fetch and rebase onto ${base}, resolve every conflict in this workspace, run focused validation, commit if needed, and push the updated head. Do not merge the pull request.`;
+      break;
   }
+  return `${instruction}\n\n${context}`;
 }
 
-export function prBarActionLabel(action: PrBarAction): string {
-  switch (action) {
-    case "watch_and_fix":
-      return "Watch and fix";
-    case "merge":
-      return "Merge";
-    case "fix_errors":
-      return "Fix errors";
-    case "resolve_conflicts":
-      return "Resolve conflicts";
+function prWorkflowPromptContext(pr: PullRequestDigest): string {
+  const title = pr.title?.trim();
+  const url = pr.url?.trim();
+  const head = pr.head_branch?.trim() || "current workspace branch";
+  const base = pr.base_branch?.trim() || "base branch";
+  const checks = prCheckCounts(pr);
+  const state = [
+    pr.draft ? "draft" : pr.state.trim() || "open",
+    pr.mergeable ? `mergeable: ${pr.mergeable}` : null,
+    pr.merge_state_status ? `merge state: ${pr.merge_state_status}` : null,
+    pr.review_decision ? `review: ${pr.review_decision}` : null,
+    pr.auto_merge_enabled ? "auto-merge: on" : null,
+    pr.in_merge_queue ? "merge queue: queued" : null,
+  ].filter((value): value is string => Boolean(value));
+  const lines = [
+    `Pull request: #${pr.number}${title ? ` - ${title}` : ""}`,
+    ...(url ? [`URL: ${url}`] : []),
+    `Branch: ${head} -> ${base}`,
+    `GitHub state: ${state.join(", ")}`,
+    ...(checks.total > 0
+      ? [
+          `Checks: ${checks.passing} passing, ${checks.pending} pending, ${checks.failing} failing, ${checks.skipped} skipped`,
+        ]
+      : []),
+  ];
+  const activeChecks =
+    pr.checks?.filter(
+      (check) => check.bucket === "fail" || check.bucket === "pending",
+    ) ?? [];
+  if (activeChecks.length > 0) {
+    lines.push(
+      "Relevant checks:",
+      ...activeChecks.map((check) => {
+        const detail = check.detail?.trim();
+        const checkUrl = check.url?.trim();
+        return `- ${check.name} (${check.bucket === "fail" ? "failed" : "pending"})${detail ? `: ${detail}` : ""}${checkUrl ? `\n  ${checkUrl}` : ""}`;
+      }),
+    );
   }
+  return lines.join("\n");
 }
 
-function barTone(pr: PullRequestDigest, checks: PrCheckCounts): PrBarTone {
+function workflowState(
+  pr: PullRequestDigest,
+  checks: PrCheckCounts,
+): PrWorkflowState {
   const chip = prTone(pr);
   if (chip === "merged") return "merged";
   if (chip === "closed") return "closed";
-  if (prHasConflicts(pr)) return "conflict";
-  if (checks.failing > 0) return "failing";
   if (chip === "draft") return "draft";
+  if (prHasConflicts(pr)) return "conflict";
+  if (prHasChangesRequested(pr)) return "changes_requested";
+  if (checks.failing > 0) return "failing";
+  if (prIsQueued(pr)) return "queued";
+  if (prIsBehind(pr)) return "behind";
+  if (prIsBlocked(pr)) return "blocked";
+  if (pr.auto_merge_enabled) return "auto_merge";
   if (checks.pending > 0) return "pending";
-  return "ready";
-}
-
-function barStatus(tone: PrBarTone, checks: PrCheckCounts): string {
-  switch (tone) {
-    case "ready":
-      return "Ready to merge";
-    case "pending":
-      return checks.pending === 1
-        ? "1 check pending"
-        : `${checks.pending} checks pending`;
-    case "failing":
-      return checks.failing === 1
-        ? "1 check failing"
-        : `${checks.failing} checks failing`;
-    case "conflict":
-      return "Conflicts";
-    case "draft":
-      return "Draft";
-    case "merged":
-      return "Merged";
-    case "closed":
-      return "Closed";
-  }
-}
-
-function barActions(tone: PrBarTone): PrBarAction[] {
-  if (tone === "merged" || tone === "closed") return [];
-  const contextual =
-    tone === "conflict"
-      ? "resolve_conflicts"
-      : tone === "failing"
-        ? "fix_errors"
-        : "merge";
-  return [
-    "watch_and_fix",
-    contextual,
-    ...(["merge", "fix_errors", "resolve_conflicts"] as const).filter(
-      (action) => action !== contextual,
-    ),
-  ];
+  const mergeable = pr.mergeable?.trim().toLowerCase();
+  const mergeState = pr.merge_state_status?.trim().toLowerCase();
+  return mergeable === "mergeable" && mergeState === "clean"
+    ? "ready"
+    : "checking";
 }

@@ -21,6 +21,7 @@ import {
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type {
   CodeSessionSnapshot,
+  CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "@/api/types";
@@ -96,7 +97,11 @@ const REPO = {
   display_name: "app",
   default_base_ref: "main",
   branch_prefix: "tidebreak",
-  quick_actions: [] as { name: string; command: string; auto_run_on_create: boolean }[],
+  quick_actions: [] as {
+    name: string;
+    command: string;
+    auto_run_on_create: boolean;
+  }[],
   created_at: "2026-08-15T00:00:00.000Z",
 };
 
@@ -183,12 +188,34 @@ function makeClient() {
       stderr: "failed",
       timed_out: false,
     })),
-    getCodeWorkspacePr: vi.fn(async () => ({
+    getCodeWorkspacePr: vi.fn(
+      async (): Promise<CodeWorkspacePrSnapshot> => ({
+        dirty: false,
+        unpushed: false,
+        ahead: 0,
+        has_upstream: false,
+        suggested_commit_message: "",
+        gh_found: true,
+        gh_authenticated: true,
+        remediation: "",
+      }),
+    ),
+    commitCodeWorkspace: vi.fn(async () => ({
+      sha: "abc123",
+      message: "Fix login",
+      stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
+    })),
+    pushCodeWorkspace: vi.fn(async () => ({
+      branch: WORKSPACE.branch_name,
+      remote: "origin",
+    })),
+    createCodePullRequest: vi.fn(async () => ({
       dirty: false,
       unpushed: false,
-      ahead: 0,
-      has_upstream: false,
+      ahead: 1,
+      has_upstream: true,
       suggested_commit_message: "",
+      pr: PR,
       gh_found: true,
       gh_authenticated: true,
       remediation: "",
@@ -226,6 +253,15 @@ function makeClient() {
       content: "fn main() {}",
       truncated: false,
       binary: false,
+    })),
+    submitCodeTurn: vi.fn(async (_sessionId: string, message: string) => ({
+      kind: "ran" as const,
+      turn: {
+        ...TURN,
+        id: `turn-${message.length}`,
+        ordinal: 2,
+        user_input: message,
+      },
     })),
     getCodeWorkspaceDiff: vi.fn(async () => ({
       diff: "",
@@ -364,7 +400,10 @@ afterEach(() => {
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({ reviewSidebarOpen: true, inspectorScope: null });
-  useCodeUiStore.setState({ pendingComposerPrompt: null });
+  useCodeUiStore.setState({
+    pendingComposerPrompt: null,
+    composerActionScope: null,
+  });
 });
 
 describe("CodeWorkspacePage", () => {
@@ -502,10 +541,15 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     expect(await screen.findByRole("menu")).toHaveTextContent("app");
-    await user.click(await screen.findByRole("menuitem", { name: "Run: lint" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Run: lint" }),
+    );
 
     await waitFor(() =>
-      expect(client.runCodeWorkspaceAction).toHaveBeenCalledWith("ws-1", "lint"),
+      expect(client.runCodeWorkspaceAction).toHaveBeenCalledWith(
+        "ws-1",
+        "lint",
+      ),
     );
     expect(toast.error).toHaveBeenCalledWith(
       "lint exited 1",
@@ -515,32 +559,121 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
-  it("puts compact PR status and quick commands in the workspace header", async () => {
+  it("puts compact PR status and quick commands inside the header utilities", async () => {
     const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
     client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 1,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: PR,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
     const user = userEvent.setup();
     await mountWorkspace(client);
 
-    const bar = await screen.findByTestId("pr-action-bar");
-    expect(bar).toHaveAttribute("data-variant", "header");
-    expect(bar.closest("header")).not.toBeNull();
-    expect(bar).toHaveTextContent("#41");
-    expect(bar).toHaveTextContent("Draft");
-    expect(bar).toHaveTextContent("2 checks");
+    const control = await screen.findByTestId("workspace-workflow-control");
+    const utilities = screen.getByTestId("workspace-header-utilities");
+    expect(control.closest("header")).not.toBeNull();
+    expect(control.parentElement).toBe(utilities);
+    expect(utilities.firstElementChild).toBe(control);
+    expect(control).toHaveTextContent("#41");
+    expect(control).toHaveTextContent("Draft");
+    expect(within(control).getByRole("button", { name: "Mark ready" }))
+      .toBeInTheDocument();
 
     await user.click(
-      within(bar).getByRole("button", { name: "More pull request actions" }),
+      within(control).getByRole("button", {
+        name: "Workspace status: #41 · Draft",
+      }),
     );
-    await user.click(await screen.findByRole("menuitem", { name: "Merge" }));
-    expect(
-      (screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
-        .value,
-    ).toMatch(/Merge pull request #41/);
+    const popover = await screen.findByTestId("workspace-workflow-popover");
+    expect(popover).toHaveTextContent("tidebreak/fix-login");
+    expect(popover).toHaveTextContent("1 passing · 1 pending");
+
+    await user.click(
+      within(control).getByRole("button", { name: "Mark ready" }),
+    );
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        "sess-1",
+        expect.stringMatching(/Mark pull request #41 ready for review/),
+        undefined,
+        undefined,
+      ),
+    );
+    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toMatch(
+      /Pull request: #41 - Fix login flow/,
+    );
+    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toMatch(
+      /Branch: tidebreak\/fix-login -> main/,
+    );
+
+    await user.click(
+      within(control).getByRole("button", { name: "More workspace actions" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Watch and fix" }),
+    );
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenLastCalledWith(
+        "sess-1",
+        expect.stringMatching(/Watch pull request #41/),
+        undefined,
+        undefined,
+      ),
+    );
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     const menu = await screen.findByRole("menu");
     expect(menu).toHaveTextContent("app");
     expect(menu).toHaveTextContent(WORKSPACE.worktree_path);
+  });
+
+  it("opens Source control for local changes without crowding the composer", async () => {
+    const client = makeClient();
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: true,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "improve login flow",
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const control = await screen.findByTestId("workspace-workflow-control");
+    await waitFor(() =>
+      expect(control).toHaveTextContent("Uncommitted changes"),
+    );
+    await user.click(
+      within(control).getByRole("button", { name: "Review & commit" }),
+    );
+
+    expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      (screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
+        .value,
+    ).toBe("");
+
+    await user.click(screen.getByRole("tab", { name: "Files" }));
+    await user.click(screen.getByRole("button", { name: "Review sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Review sidebar" }));
+    expect(screen.getByRole("tab", { name: "Files" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("leaves the archived workspace for its repo", async () => {
@@ -588,11 +721,15 @@ describe("CodeWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "Terminal" }));
 
     expect(await screen.findByTestId("terminal-drawer")).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Terminal/i }),
+    ).not.toBeInTheDocument();
     expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
 
     await user.click(screen.getByRole("tab", { name: "Pull request" }));
-    expect(within(inspector).getByText("No pull request yet")).toBeInTheDocument();
+    expect(
+      within(inspector).getByText("No pull request yet"),
+    ).toBeInTheDocument();
   });
 
   it("does not promote a stale files catalog into the conversation strip", async () => {
@@ -608,7 +745,9 @@ describe("CodeWorkspacePage", () => {
     expect(
       screen.queryByRole("tablist", { name: "Open panels" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /Terminal/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Terminal/i }),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
     expect(router.state.location.search).toMatchObject({
       tabs: "files,terminal",

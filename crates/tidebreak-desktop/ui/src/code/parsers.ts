@@ -108,7 +108,12 @@ const HARNESS_TIERS = new Set<HarnessTier>([
   "best_effort",
 ]);
 const CAP_LEVELS = new Set<CapLevel>(["supported", "unsupported", "unknown"]);
-const PERMISSION_MODES = new Set<CodePermissionMode>(["plan", "ask", "auto", "allow"]);
+const PERMISSION_MODES = new Set<CodePermissionMode>([
+  "plan",
+  "ask",
+  "auto",
+  "allow",
+]);
 const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "created",
   "idle",
@@ -403,7 +408,9 @@ export function parseCodeWorkspace(
     base_ref: value.base_ref,
     status: value.status,
     created_at: value.created_at,
-    ...(value.archived_at !== undefined ? { archived_at: value.archived_at } : {}),
+    ...(value.archived_at !== undefined
+      ? { archived_at: value.archived_at }
+      : {}),
   };
   if (value.pr !== undefined) {
     const pr = parsePullRequestDigest(value.pr);
@@ -437,6 +444,7 @@ export function parsePullRequestDigest(
       "head_branch",
       "base_branch",
       "auto_merge_enabled",
+      "in_merge_queue",
     ]) ||
     !isFiniteNumber(value.number) ||
     !nonEmpty(value.state) ||
@@ -450,7 +458,8 @@ export function parsePullRequestDigest(
     !optionalStringField(value.base_branch) ||
     !optionalBooleanField(value.draft) ||
     !optionalBooleanField(value.merged) ||
-    !optionalBooleanField(value.auto_merge_enabled)
+    !optionalBooleanField(value.auto_merge_enabled) ||
+    !optionalBooleanField(value.in_merge_queue)
   ) {
     return null;
   }
@@ -465,7 +474,9 @@ export function parsePullRequestDigest(
     ...(checks && checks.length > 0 ? { checks } : {}),
     ...(typeof value.draft === "boolean" ? { draft: value.draft } : {}),
     ...(typeof value.merged === "boolean" ? { merged: value.merged } : {}),
-    ...(value.review_decision ? { review_decision: value.review_decision } : {}),
+    ...(value.review_decision
+      ? { review_decision: value.review_decision }
+      : {}),
     ...(value.mergeable ? { mergeable: value.mergeable } : {}),
     ...(value.merge_state_status
       ? { merge_state_status: value.merge_state_status }
@@ -474,6 +485,9 @@ export function parsePullRequestDigest(
     ...(value.base_branch ? { base_branch: value.base_branch } : {}),
     ...(typeof value.auto_merge_enabled === "boolean"
       ? { auto_merge_enabled: value.auto_merge_enabled }
+      : {}),
+    ...(typeof value.in_merge_queue === "boolean"
+      ? { in_merge_queue: value.in_merge_queue }
       : {}),
   };
 }
@@ -781,8 +795,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   }
   const attachments = parseCodeTurnAttachments(value.attachments);
   if (!attachments) return null;
-  const usage =
-    value.usage === undefined ? undefined : parseUsage(value.usage);
+  const usage = value.usage === undefined ? undefined : parseUsage(value.usage);
   if (value.usage !== undefined && !usage) return null;
   const diffstat =
     value.diffstat === undefined ? undefined : parseDiffstat(value.diffstat);
@@ -804,9 +817,12 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   };
 }
 
-const IMAGE_MEDIA_TYPES = new Set<
-  import("../generated/wire").ImageMediaType
->(["png", "jpeg", "webp", "gif"]);
+const IMAGE_MEDIA_TYPES = new Set<import("../generated/wire").ImageMediaType>([
+  "png",
+  "jpeg",
+  "webp",
+  "gif",
+]);
 
 function parseCodeTurnAttachments(
   value: unknown,
@@ -851,7 +867,11 @@ export type CodeTurnSubmission =
 export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireQueuedCodeTurn>(value, ["session_id", "message", "position"]) ||
+    !onlyKeys<WireQueuedCodeTurn>(value, [
+      "session_id",
+      "message",
+      "position",
+    ]) ||
     !nonEmpty(value.session_id) ||
     typeof value.message !== "string" ||
     !isFiniteNumber(value.position)
@@ -1161,7 +1181,10 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
 
 export function parseHarnessModelList(
   value: unknown,
-): { kind: HarnessKind; models: { id: string; label: string; default: boolean }[] } | null {
+): {
+  kind: HarnessKind;
+  models: { id: string; label: string; default: boolean }[];
+} | null {
   if (
     !isRecord(value) ||
     !isMember(value.kind, HARNESS_KINDS) ||
@@ -1328,7 +1351,11 @@ export function parseSequencedCodeEvent(
 ): SequencedCodeEventFrame | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireSequencedCodeEventFrame>(value, ["seq", "event", "replayed"]) ||
+    !onlyKeys<WireSequencedCodeEventFrame>(value, [
+      "seq",
+      "event",
+      "replayed",
+    ]) ||
     !isFiniteNumber(value.seq) ||
     (value.replayed !== undefined && typeof value.replayed !== "boolean")
   ) {
@@ -1370,7 +1397,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         type: "session_started",
         harness_kind: value.harness_kind,
         harness_version: value.harness_version,
-        ...(value.resume_ref !== undefined ? { resume_ref: value.resume_ref } : {}),
+        ...(value.resume_ref !== undefined
+          ? { resume_ref: value.resume_ref }
+          : {}),
       };
     case "turn_started":
       if (
@@ -1549,11 +1578,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       };
     case "attention_changed": {
       if (
-        !onlyKeys<Extract<WireCodeEvent, { type: "attention_changed" }>>(value, [
-          "type",
-          "state",
-          "source",
-        ]) ||
+        !onlyKeys<Extract<WireCodeEvent, { type: "attention_changed" }>>(
+          value,
+          ["type", "state", "source"],
+        ) ||
         !isMember(value.source, ATTENTION_SOURCES)
       ) {
         return null;
@@ -1743,7 +1771,9 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-export function parseCodeSessionDigest(value: unknown): CodeSessionDigest | null {
+export function parseCodeSessionDigest(
+  value: unknown,
+): CodeSessionDigest | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeSessionDigest>(value, [
@@ -1884,24 +1914,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
 }
 
 function parsePrState(value: unknown): PullRequestDigest | null {
-  if (
-    !isRecord(value) ||
-    !isFiniteNumber(value.number) ||
-    typeof value.state !== "string"
-  ) {
-    return null;
-  }
-  const checks = parsePullRequestChecks(value.checks);
-  return {
-    number: value.number,
-    state: value.state,
-    ...(typeof value.url === "string" ? { url: value.url } : {}),
-    ...(typeof value.title === "string" ? { title: value.title } : {}),
-    ...(typeof value.checks_summary === "string"
-      ? { checks_summary: value.checks_summary }
-      : {}),
-    ...(checks && checks.length > 0 ? { checks } : {}),
-  };
+  return parsePullRequestDigest(value);
 }
 
 export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {

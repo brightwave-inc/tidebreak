@@ -2866,7 +2866,7 @@ base_branch?: string,
 /**
  * True when auto-merge is enabled on the host.
  */
-auto_merge_enabled?: boolean, };
+auto_merge_enabled?: boolean, in_merge_queue?: boolean, };
 
 /**
  * A follow-up parked while the session is already running a turn.

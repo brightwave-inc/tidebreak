@@ -44,6 +44,16 @@ import {
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
 
+function appendComposerPrompt(current: string, prompt: string): string {
+  const existing = current.trimEnd();
+  const offered = prompt.trim();
+  if (!existing) return offered;
+  if (existing === offered || existing.endsWith(`\n\n${offered}`)) {
+    return current;
+  }
+  return `${existing}\n\n${offered}`;
+}
+
 export function PermissionModePicker({
   value,
   availableModes = MODES,
@@ -433,6 +443,7 @@ export function CodeComposer({
   model,
   modelOptions,
   modelLoading = false,
+  promptScope,
   sessionId,
   history,
   queued = false,
@@ -456,6 +467,8 @@ export function CodeComposer({
   model?: string;
   modelOptions?: readonly CodeModelOption[];
   modelLoading?: boolean;
+  /** Workspace identity used to route header actions to the matching composer. */
+  promptScope?: string;
   sessionId?: string;
   /** Prior user prompts, newest first, for Up/Down recall. */
   history?: readonly string[];
@@ -495,6 +508,7 @@ export function CodeComposer({
   onInterrupt: () => Promise<void> | void;
 }) {
   const { client } = useApp();
+  const composerPromptScope = promptScope ?? sessionId ?? "code";
   const [draft, setDraft] = useState("");
   const [selectedModel, setSelectedModel] = useState(model ?? "");
   const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(
@@ -556,16 +570,22 @@ export function CodeComposer({
   const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
 
   useEffect(() => {
-    if (!pendingPrompt) return;
-    const text = useCodeUiStore.getState().takeComposerPrompt();
-    if (!text) return;
-    setDraft(text);
+    if (!pendingPrompt || pendingPrompt.scope !== composerPromptScope) return;
+    const request = useCodeUiStore
+      .getState()
+      .takeComposerPrompt(composerPromptScope);
+    if (!request) return;
+    if (request.submit) {
+      void submitOfferedPrompt(request.text);
+      return;
+    }
+    setDraft((current) => appendComposerPrompt(current, request.text));
     window.requestAnimationFrame(() => {
       document
         .querySelector<HTMLTextAreaElement>("[data-composer-input]")
         ?.focus();
     });
-  }, [pendingPrompt]);
+  }, [composerPromptScope, pendingPrompt]);
 
   useEffect(() => {
     if (model) setSelectedModel(model);
@@ -621,6 +641,45 @@ export function CodeComposer({
               : "Could not send that turn",
       });
       setDraft((current) => (current.length === 0 ? message : current));
+    }
+  }
+
+  async function submitOfferedPrompt(text: string) {
+    const message = text.trim();
+    if (!message) return;
+    if (disabled) {
+      setDraft((current) => appendComposerPrompt(current, message));
+      useCodeUiStore.getState().finishComposerAction(composerPromptScope);
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+          ?.focus();
+      });
+      return;
+    }
+    setNotice(null);
+    try {
+      const outcome = await onSend(message);
+      if (outcome && outcome.kind === "queued") {
+        setFollowUpQueued(true);
+      }
+    } catch (err) {
+      setNotice({
+        text:
+          err instanceof HttpError && err.kind === "queue_full"
+            ? "A follow-up is already queued. Wait for it to run, or interrupt this turn."
+            : err instanceof Error
+              ? err.message
+              : "Could not send that turn",
+      });
+      setDraft((current) => appendComposerPrompt(current, message));
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+          ?.focus();
+      });
+    } finally {
+      useCodeUiStore.getState().finishComposerAction(composerPromptScope);
     }
   }
 

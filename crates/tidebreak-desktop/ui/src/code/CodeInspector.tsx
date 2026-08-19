@@ -43,11 +43,13 @@ import { DiffOverview } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
-import { PrCard } from "./PrCard";
+import { prWorkflowStatus, type PrWorkflowState } from "./prActions";
+import { PrCard, PrCardWithResource } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
-type InspectorTab = "files" | "source" | "pr";
+export type InspectorTab = "files" | "source" | "pr";
 
 const TAB_TRIGGER_CLASS =
   "text-muted-foreground hover:bg-transparent hover:text-foreground grid size-8 place-items-center rounded-lg px-0 py-0";
@@ -68,6 +70,9 @@ export function CodeInspector({
   workspaceId,
   workspace,
   contentRevision,
+  prResource,
+  requestedTab,
+  onRequestedTabHandled,
   onOpenFile,
   onOpenDiff,
 }: {
@@ -75,11 +80,18 @@ export function CodeInspector({
   workspaceId: string;
   workspace: CodeWorkspaceSnapshot | null;
   contentRevision: number;
+  prResource?: CodeWorkspacePrResource;
+  requestedTab?: { tab: InspectorTab; revision: number } | null;
+  onRequestedTabHandled?: (revision: number) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onOpenDiff?: (path: string) => void;
 }) {
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
-  const pr = digest?.pr_state ?? workspace?.pr;
+  const pr = prResource
+    ? prResource.data === null
+      ? (digest?.pr_state ?? workspace?.pr)
+      : prResource.data.pr
+    : (digest?.pr_state ?? workspace?.pr);
   const scope = useCodeUiStore((state) => state.inspectorScope);
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
@@ -92,6 +104,12 @@ export function CodeInspector({
     setTab("source");
     setFile(undefined);
   }, [scope]);
+
+  useEffect(() => {
+    if (!requestedTab) return;
+    setTab(requestedTab.tab);
+    onRequestedTabHandled?.(requestedTab.revision);
+  }, [onRequestedTabHandled, requestedTab]);
 
   function openFile(next: string, line?: number) {
     if (onOpenFile) {
@@ -124,7 +142,11 @@ export function CodeInspector({
       >
         <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
           <TabsList className="h-auto justify-start gap-0.5 bg-transparent p-0">
-            <InspectorTabTrigger value="files" label="Files" selected={tab === "files"}>
+            <InspectorTabTrigger
+              value="files"
+              label="Files"
+              selected={tab === "files"}
+            >
               <Files className="size-3.5" />
             </InspectorTabTrigger>
             <InspectorTabTrigger
@@ -134,7 +156,11 @@ export function CodeInspector({
             >
               <GitBranch className="size-3.5" />
             </InspectorTabTrigger>
-            <InspectorTabTrigger value="pr" label="Pull request" selected={tab === "pr"}>
+            <InspectorTabTrigger
+              value="pr"
+              label="Pull request"
+              selected={tab === "pr"}
+            >
               <GitPullRequest
                 className={cn(
                   "size-3.5",
@@ -178,12 +204,21 @@ export function CodeInspector({
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {active && (
               <div className="border-b px-3 py-3">
-                <PrCard
-                  client={client}
-                  workspaceId={workspaceId}
-                  contentRevision={contentRevision}
-                  framed={false}
-                />
+                {prResource ? (
+                  <PrCardWithResource
+                    client={client}
+                    workspaceId={workspaceId}
+                    framed={false}
+                    resource={prResource}
+                  />
+                ) : (
+                  <PrCard
+                    client={client}
+                    workspaceId={workspaceId}
+                    contentRevision={contentRevision}
+                    framed={false}
+                  />
+                )}
               </div>
             )}
             <DiffOverview
@@ -206,6 +241,7 @@ export function CodeInspector({
             workspaceId={workspaceId}
             pr={pr}
             branch={workspace?.branch_name}
+            prResource={prResource}
             onOpenSourceControl={() => setTab("source")}
           />
         </TabsContent>
@@ -231,7 +267,10 @@ function InspectorTabTrigger({
         <TabsTrigger
           value={value}
           aria-label={label}
-          className={cn(TAB_TRIGGER_CLASS, selected && TAB_TRIGGER_SELECTED_CLASS)}
+          className={cn(
+            TAB_TRIGGER_CLASS,
+            selected && TAB_TRIGGER_SELECTED_CLASS,
+          )}
         >
           {children}
         </TabsTrigger>
@@ -267,23 +306,37 @@ function PrTab({
   workspaceId,
   pr,
   branch,
+  prResource,
   onOpenSourceControl,
 }: {
   client: ApiClient;
   workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
+  prResource?: CodeWorkspacePrResource;
   /** Send the reader to the tab that can actually open a pull request. */
   onOpenSourceControl?: () => void;
 }) {
   const { confirm, dialog } = useConfirm();
-  const [refreshing, setRefreshing] = useState(false);
-  const [merging, setMerging] = useState<"merge" | "auto" | null>(null);
+  const [localRefreshing, setLocalRefreshing] = useState(false);
+  const [localMerging, setLocalMerging] = useState<
+    "merge" | "auto_merge" | null
+  >(null);
   const [method, setMethod] = useState<CodePrMergeMethod>("squash");
   const [mergeError, setMergeError] = useState<string | null>(null);
   const [comments, setComments] = useState<PullRequestComment[] | null>(null);
   const [commentsError, setCommentsError] = useState<string | null>(null);
   const prNumber = pr?.number;
+  const sharedMerging =
+    prResource?.busy === "merge" || prResource?.busy === "auto_merge"
+      ? prResource.busy
+      : null;
+  const merging = sharedMerging ?? localMerging;
+  const refreshing = prResource?.busy === "refresh" || localRefreshing;
+  const mutationBusy =
+    (prResource
+      ? prResource.busy !== null || prResource.refreshing
+      : false) || localMerging !== null;
 
   const loadComments = useCallback(async () => {
     if (prNumber === undefined) return;
@@ -306,19 +359,26 @@ function PrTab({
   }, [loadComments, prNumber]);
 
   async function refresh() {
-    setRefreshing(true);
+    if (!prResource) setLocalRefreshing(true);
     try {
-      await client.refreshCodeWorkspacePr(workspaceId);
+      const next = prResource
+        ? await prResource.refreshFromHost()
+        : await client.refreshCodeWorkspacePr(workspaceId);
+      if (!next) return;
       await loadComments();
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not refresh the pull request"));
+      toast.error(
+        friendlyErrorMessage(err, "Could not refresh the pull request"),
+      );
     } finally {
-      setRefreshing(false);
+      if (!prResource) setLocalRefreshing(false);
     }
   }
 
   async function merge(auto: boolean) {
     if (!pr) return;
+    const controls = prMergeControls(prWorkflowStatus(pr).state);
+    if (auto ? !controls.canEnableAutoMerge : !controls.canMerge) return;
     if (!auto) {
       const ok = await confirm({
         title: `Merge #${pr.number}?`,
@@ -327,10 +387,17 @@ function PrTab({
       });
       if (!ok) return;
     }
-    setMerging(auto ? "auto" : "merge");
+    const mutation = auto ? "auto_merge" : "merge";
+    if (!prResource) setLocalMerging(mutation);
     setMergeError(null);
     try {
-      await client.mergeCodePr(workspaceId, { method, auto });
+      const next = prResource
+        ? await prResource.runMutation(mutation, () =>
+            client.mergeCodePr(workspaceId, { method, auto }),
+          )
+        : await client.mergeCodePr(workspaceId, { method, auto });
+      if (!next) return;
+      prResource?.adopt(next);
       toast.success(auto ? "Auto-merge enabled" : "Merged");
     } catch (err) {
       if (err instanceof HttpError && err.kind === "pr_not_mergeable") {
@@ -339,7 +406,7 @@ function PrTab({
         toast.error(friendlyErrorMessage(err, "Could not merge"));
       }
     } finally {
-      setMerging(null);
+      if (!prResource) setLocalMerging(null);
     }
   }
 
@@ -372,6 +439,8 @@ function PrTab({
   }
 
   const tone = prTone(pr);
+  const workflow = prWorkflowStatus(pr);
+  const mergeControls = prMergeControls(workflow.state);
   const counts = checkCounts(pr);
   const open = tone === "open" || tone === "draft";
   const branchLine =
@@ -417,7 +486,9 @@ function PrTab({
             end-truncate eats first on a long feature-branch name.
           */}
           <MiddleTruncate
-            text={branchLine ? `#${pr.number} · ${branchLine}` : `#${pr.number}`}
+            text={
+              branchLine ? `#${pr.number} · ${branchLine}` : `#${pr.number}`
+            }
             className="text-muted-foreground mt-1 font-mono text-xs"
           />
         </div>
@@ -430,7 +501,12 @@ function PrTab({
             variant="ghost"
             size="icon-xs"
             aria-label="Refresh pull request"
-            disabled={refreshing}
+            disabled={
+              refreshing ||
+              (prResource
+                ? prResource.busy !== null || prResource.refreshing
+                : false)
+            }
             onClick={() => void refresh()}
           >
             {refreshing ? <Spinner aria-hidden /> : <RefreshCw />}
@@ -456,7 +532,7 @@ function PrTab({
             <Select
               value={method}
               onValueChange={(next) => setMethod(next as CodePrMergeMethod)}
-              disabled={merging !== null}
+              disabled={mutationBusy}
             >
               <SelectTrigger
                 className="h-7 flex-1 text-xs"
@@ -475,7 +551,7 @@ function PrTab({
             <Button
               type="button"
               size="sm"
-              disabled={merging !== null || tone === "draft"}
+              disabled={mutationBusy || !mergeControls.canMerge}
               onClick={() => void merge(false)}
             >
               {merging === "merge" ? <Spinner aria-hidden /> : null}
@@ -486,17 +562,17 @@ function PrTab({
                 type="button"
                 size="sm"
                 variant="secondary"
-                disabled={merging !== null || tone === "draft"}
+                disabled={mutationBusy || !mergeControls.canEnableAutoMerge}
                 onClick={() => void merge(true)}
               >
-                {merging === "auto" ? <Spinner aria-hidden /> : null}
+                {merging === "auto_merge" ? <Spinner aria-hidden /> : null}
                 Enable auto-merge
               </Button>
             )}
           </div>
-          {tone === "draft" && (
+          {mergeControls.explanation && (
             <p className="text-muted-foreground text-xs">
-              Mark the pull request ready for review on GitHub to merge it.
+              {mergeControls.explanation}
             </p>
           )}
           {mergeError && (
@@ -514,6 +590,88 @@ function PrTab({
       />
     </div>
   );
+}
+
+function prMergeControls(state: PrWorkflowState): {
+  canMerge: boolean;
+  canEnableAutoMerge: boolean;
+  explanation: string | null;
+} {
+  switch (state) {
+    case "ready":
+      return { canMerge: true, canEnableAutoMerge: true, explanation: null };
+    case "checking":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "GitHub is still determining mergeability. Merge stays unavailable until the pull request is explicitly ready.",
+      };
+    case "pending":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Wait for the pending checks before merging directly.",
+      };
+    case "failing":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Fix the failing checks before merging directly.",
+      };
+    case "conflict":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "Resolve the merge conflicts before merging directly.",
+      };
+    case "behind":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Update the branch from its base before merging directly.",
+      };
+    case "blocked":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "A review or repository requirement is still blocking a direct merge.",
+      };
+    case "changes_requested":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Address the requested changes before merging directly.",
+      };
+    case "draft":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Mark the pull request ready for review on GitHub before merging it.",
+      };
+    case "queued":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "This pull request is already waiting in the merge queue.",
+      };
+    case "auto_merge":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Auto-merge is already enabled and will merge after the remaining requirements pass.",
+      };
+    case "merged":
+    case "closed":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: null,
+      };
+  }
 }
 
 function ReviewDecisionBadge({ decision }: { decision?: string }) {
@@ -621,7 +779,12 @@ function CheckList({
   counts,
 }: {
   checks: PullRequestCheck[];
-  counts: { passing: number; pending: number; failing: number; skipped: number };
+  counts: {
+    passing: number;
+    pending: number;
+    failing: number;
+    skipped: number;
+  };
 }) {
   const [open, setOpen] = useState(checks.length > 0);
   return (
@@ -722,7 +885,9 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
   );
   if (!check.url) {
     return (
-      <div className="-mx-1 flex items-center gap-2 px-1 py-1 text-xs">{body}</div>
+      <div className="-mx-1 flex items-center gap-2 px-1 py-1 text-xs">
+        {body}
+      </div>
     );
   }
   return (
