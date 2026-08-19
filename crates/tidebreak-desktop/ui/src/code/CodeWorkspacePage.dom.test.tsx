@@ -526,7 +526,10 @@ describe("CodeWorkspacePage", () => {
     expect(bar).toHaveTextContent("Draft");
     expect(bar).toHaveTextContent("2 checks");
 
-    await user.click(within(bar).getByRole("button", { name: "Merge" }));
+    await user.click(
+      within(bar).getByRole("button", { name: "More pull request actions" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Merge" }));
     expect(
       (screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
         .value,
