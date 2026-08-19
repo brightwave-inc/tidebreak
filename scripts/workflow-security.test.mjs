@@ -455,9 +455,10 @@ test("PR lanes are scope-gated, never label-gated", () => {
     ["test", "Install headless system deps"],
   ]) {
     const job = workflowJob(ci, name);
+    const escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const deps = job.match(
       new RegExp(
-        `- name: ${step.replace(/[()]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- (?:name:|uses:))`,
+        `- name: ${escapedStep}[\\s\\S]*?(?=\\n\\s+- (?:name:|uses:))`,
       ),
     )?.[0];
     assert.ok(deps, `missing ${name} apt step`);
