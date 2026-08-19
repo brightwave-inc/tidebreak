@@ -16,37 +16,36 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* --- Tidebreak palette (oklch, light mode) --- */
+  /* --- Gateway design system (oklch, light mode) --- */
   --background: oklch(1 0 0);
-  --foreground: oklch(0 0 0);
-  --page-background: oklch(98.2% 0 0);
+  --foreground: oklch(0.145 0 0);
+  --foreground-subtle: oklch(0.62 0 0);
+  --page-background: oklch(0.985 0 0);
 
-  --border: var(--color-zinc-200);
-  --input: oklch(0.929 0.013 255.508);
-  /* The focus ring has to clear 3:1 against whatever it rings. At 0.704 it
-     cleared 2.6:1 on a white page and 2.9:1 on a hovered row — visible in the
-     dark theme, where the same value sits on a dark ground, and close to
-     invisible in the light one. 0.58 clears 4.3:1 on the page, 4.1:1 on a
-     card, and 3.4:1 on `--muted`. */
-  --ring: oklch(0.58 0.04 256.788);
+  --border: oklch(0.922 0 0);
+  --border-subtle: oklch(0.945 0 0);
+  --input: oklch(0.922 0 0);
+  /* Darker than the prototype's neutral ring so focus remains clear against
+     both the white canvas and a hovered muted row. */
+  --ring: oklch(0.52 0 0);
 
-  --primary: var(--color-zinc-900);
-  --primary-foreground: var(--color-zinc-100);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
 
-  --secondary: oklch(0.924 0.001 0);
-  --secondary-foreground: var(--color-zinc-600);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
 
-  --muted: oklch(0.924 0.001 0);
-  --muted-foreground: var(--color-zinc-500);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
 
-  --accent: oklch(0.924 0.001 0);
-  --accent-foreground: var(--color-zinc-900);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
 
-  --card: var(--color-neutral-50);
-  --card-foreground: var(--color-neutral-900);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
 
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2912 0.0215 94.24);
+  --popover-foreground: oklch(0.145 0 0);
 
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.984 0.003 247.858);
@@ -73,28 +72,27 @@
   --info-background: oklch(0.951 0.026 236.824);
   --info-border: oklch(0.391 0.09 240.876);
 
-  /* Brand highlight — the band a source phrase carries and the chip beside it. */
-  --brand-accent: oklch(0.87 0.2 102);
-  --citation-mark: var(--color-neutral-300);
+  /* Citations retain a visible highlight without introducing a second accent. */
+  --brand-accent: oklch(0.9 0 0);
+  --citation-mark: oklch(0.87 0 0);
   --citation-mark-active-ink: var(--foreground);
 
-  /* Categorical icon ink. The cool core follows the marketing site's indigo
-     and ice-blue palette; the warmer accents stay quieter so the system feels
-     branded rather than rainbow. Color lives on the glyph, never a tile. */
-  --icon-blue: oklch(0.555 0.232 263);
-  --icon-cyan: oklch(0.56 0.14 230);
-  --icon-violet: oklch(0.53 0.19 285);
-  --icon-amber: oklch(0.61 0.12 84);
-  --icon-rose: oklch(0.57 0.14 28);
-  --icon-green: oklch(0.53 0.12 162);
+  /* The Gateway system is deliberately monochrome. Semantic colors remain
+     reserved for success, warning, critical, and info states. */
+  --icon-blue: var(--foreground);
+  --icon-cyan: var(--foreground);
+  --icon-violet: var(--foreground);
+  --icon-amber: var(--foreground);
+  --icon-rose: var(--foreground);
+  --icon-green: var(--foreground);
 
   --radius: 0.5rem;
+  --control-height: 2rem;
+  --control-height-sm: 1.75rem;
 
-  /* The app chrome is the page background; every content region is a card
-     floating on it, inset on three sides and flush against the sidebar. These
-     drive both the inset and the layout maths that has to subtract it. */
-  --container-margin: 0.5rem;
-  --container-border: 1px;
+  /* Content and chrome meet on a hairline instead of an inset card. */
+  --container-margin: 0;
+  --container-border: 0;
 
   /* Sidebar rail: reader-resizable; JS sets --sidebar-expanded-width on the shell. */
   --sidebar-expanded-min: 200px;
@@ -104,16 +102,16 @@
      gap before the history buttons. */
   --mac-traffic-light-inset: 84px;
 
-  --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.06);
-  --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.07);
-  --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.07);
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.04);
+  --shadow: 0 2px 5px oklch(0 0 0 / 0.055);
+  --shadow-lg: 0 8px 24px oklch(0 0 0 / 0.08);
 
   /* Legacy aliases consumed by existing component CSS */
   --bg-elevated: var(--background);
   --ink: var(--foreground);
   --line: var(--border);
-  --sans: "Inter", "Segoe UI", system-ui, sans-serif;
-  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --sans: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, monospace;
   --code-ink: oklch(0.47 0.13 55);
   --code-block-bg: oklch(0.19 0.01 285);
   --code-block-ink: oklch(0.94 0.008 95);
@@ -123,42 +121,44 @@
   font-family: var(--sans);
   font-size: 14px;
   line-height: 1.45;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
   color: var(--ink);
   background: var(--page-background);
 }
 
 .dark {
-  /* --- Tidebreak palette (oklch, dark mode) --- */
-  /* Cool near-neutral grays (hue ~262, chroma <= 0.01) keep low-lightness
-     surfaces from reading brown. Elevation is carried by the lightness ramp:
-     page chrome 0.12 < popover 0.14 < card 0.16 < content surface 0.21. */
+  /* --- Gateway design system (oklch, dark mode) --- */
   color-scheme: dark;
 
-  --background: oklch(0.21 0.008 262);
-  --foreground: oklch(0.95 0 0);
-  --page-background: oklch(0.12 0.005 262);
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --foreground-subtle: oklch(0.6 0 0);
+  --page-background: oklch(0.205 0 0);
 
-  --border: oklch(0.31 0.009 262);
-  --input: oklch(0.4 0.01 262);
-  --ring: oklch(0.65 0.04 256.788);
+  --border: oklch(1 0 0 / 10%);
+  --border-subtle: oklch(1 0 0 / 6%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.68 0 0);
 
-  --primary: oklch(0.95 0 0);
-  --primary-foreground: oklch(0.12 0.005 262);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
 
-  --secondary: oklch(0.27 0.009 262);
-  --secondary-foreground: oklch(0.75 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
 
-  --muted: oklch(0.27 0.009 262);
-  --muted-foreground: oklch(0.68 0.006 262);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
 
-  --accent: oklch(0.27 0.009 262);
-  --accent-foreground: var(--color-zinc-100);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
 
-  --card: oklch(0.16 0.006 262);
-  --card-foreground: var(--color-neutral-200);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
 
-  --popover: oklch(0.14 0.006 262);
-  --popover-foreground: oklch(0.92 0.003 262);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
 
   --destructive: oklch(0.55 0.21 27.325);
   --destructive-foreground: oklch(0.95 0.005 247.858);
@@ -185,22 +185,20 @@
   --info-background: oklch(0.391 0.09 240.876);
   --info-border: oklch(0.746 0.16 232.661);
 
-  /* The band keeps its brand chroma on a dark page; only the chip and the glyph
-     it sits on have to swap so the mark stays legible either way. */
-  --brand-accent: oklch(0.87 0.2 102);
-  --citation-mark: var(--color-neutral-700);
+  --brand-accent: oklch(0.32 0 0);
+  --citation-mark: oklch(0.34 0 0);
   --citation-mark-active-ink: var(--background);
 
-  --icon-blue: oklch(0.75 0.17 263);
-  --icon-cyan: oklch(0.76 0.12 230);
-  --icon-violet: oklch(0.74 0.15 285);
-  --icon-amber: oklch(0.79 0.11 84);
-  --icon-rose: oklch(0.73 0.13 28);
-  --icon-green: oklch(0.74 0.11 162);
+  --icon-blue: var(--foreground);
+  --icon-cyan: var(--foreground);
+  --icon-violet: var(--foreground);
+  --icon-amber: var(--foreground);
+  --icon-rose: var(--foreground);
+  --icon-green: var(--foreground);
 
-  --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.24);
-  --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.28);
-  --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.32);
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.24);
+  --shadow: 0 2px 6px oklch(0 0 0 / 0.28);
+  --shadow-lg: 0 10px 28px oklch(0 0 0 / 0.34);
 
   --code-ink: oklch(0.82 0.12 62);
   --code-block-bg: oklch(0.14 0.005 285);
@@ -211,10 +209,12 @@
 @theme inline {
   --color-page-background: var(--page-background);
   --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-foreground-subtle: var(--foreground-subtle);
 
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
@@ -272,6 +272,9 @@
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
+
+  --spacing-control: var(--control-height);
+  --spacing-control-sm: var(--control-height-sm);
 
   --text-2xs: 10px;
 
@@ -346,14 +349,13 @@ body {
    unlayered/in `base` on purpose. */
 @layer components {
 
-/* Every content region of the app is this: a bordered card on the page
-   background, inset on three sides and flush left against the sidebar, so the
-   sidebar reads as chrome and the card reads as the thing you are working in. */
+/* Every content region shares one flat application canvas with a hairline at
+   the sidebar boundary. This mirrors the Gateway console's frame and keeps
+   elevation available for menus, dialogs, and transient surfaces. */
 .content-container {
   margin: var(--container-margin);
-  margin-left: 0;
   border: var(--container-border) solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: 0;
   background: var(--color-background);
 }
 
@@ -362,6 +364,11 @@ body {
 .app-shell {
   height: 100%;
   display: flex;
+  background: var(--page-background);
+}
+
+[data-sidebar="expanded"] {
+  color: var(--foreground);
   background: var(--page-background);
 }
 
@@ -474,9 +481,10 @@ body {
 
 .welcome-copy h2 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.375rem;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
 }
 
 .welcome-copy p {
@@ -589,9 +597,9 @@ body {
 .message-user {
   width: fit-content;
   max-width: 100%;
-  border-radius: 12px;
+  border-radius: var(--radius);
   padding: 0.625rem 0.75rem;
-  background: color-mix(in oklch, var(--muted) 60%, transparent);
+  background: var(--muted);
   color: var(--ink);
 }
 
@@ -1319,26 +1327,23 @@ body {
   }
 }
 
-/* The composer floats as a glass bar rather than a boxed form. The
-   transcript fade underneath is painted by `.message-view`; this only
-   styles the bar itself. */
+/* The composer is the main persistent control, but it uses the same crisp
+   surface language as the Gateway inputs instead of a glass pill. */
 .chat-composer {
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 1.375rem;
-  background: color-mix(in srgb, var(--background) 78%, transparent);
-  box-shadow: var(--shadow-lg);
-  -webkit-backdrop-filter: blur(16px) saturate(1.12);
-  backdrop-filter: blur(16px) saturate(1.12);
+  border: 1px solid var(--input);
+  border-radius: 0.75rem;
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
 }
 
 .chat-composer:focus-within {
-  border-color: color-mix(in srgb, var(--ring) 70%, var(--border));
-  box-shadow: var(--shadow-lg);
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 18%, transparent);
 }
 
 .chat-composer.is-dragging {
   border-color: var(--primary);
-  box-shadow: var(--shadow-lg);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 14%, transparent);
 }
 
 /* ---------- Model menu (composer) ---------- */
@@ -1663,6 +1668,8 @@ body {
   gap: 0.5rem;
   padding-left: 1rem;
   padding-right: 1rem;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--page-background);
 }
 

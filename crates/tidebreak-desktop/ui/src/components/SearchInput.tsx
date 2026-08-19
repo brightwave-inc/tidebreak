@@ -7,12 +7,12 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const variants = cva(
-  "flex items-center rounded-md border border-border bg-background ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:outline-hidden",
+  "flex items-center rounded-lg border border-input bg-transparent transition-colors outline-none focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/25",
   {
     variants: {
       size: {
         sm: "min-h-8 gap-1.5 pr-1 pl-2 text-xs [&_svg]:size-3.5 [&_svg]:shrink-0",
-        default: "min-h-10 gap-2 pr-2 pl-3 text-sm [&_svg]:size-4 [&_svg]:shrink-0",
+        default: "min-h-control gap-2 pr-1.5 pl-2.5 text-sm [&_svg]:size-4 [&_svg]:shrink-0",
       },
     },
     defaultVariants: { size: "default" },
