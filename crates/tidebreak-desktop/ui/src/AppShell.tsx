@@ -132,9 +132,9 @@ export function AppShell() {
   const desktopUpdates = useDesktopUpdates();
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
+  const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
   // The expanded rail width is published by the shell, not the rail itself, so
-  // the value survives a collapse — the expand strip and the titlebar both
-  // depend on it.
+  // the titlebar can size to it while the rail is mounted.
   useSyncSidebarWidthCssVar();
   // Read at keydown rather than subscribed to: which mode a shortcut fires in
   // is the route's answer, and the shell has no other reason to re-render on
@@ -696,7 +696,7 @@ export function AppShell() {
         <div className={`app-shell${nativeTitlebar ? " with-titlebar" : ""}`}>
           {confirmDialog}
           <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
-          {nativeTitlebar && (
+          {nativeTitlebar && !sidebarCollapsed && (
             <Titlebar
               macOverlay={macOverlayTitlebar}
               navigation={desktopNavigation}
