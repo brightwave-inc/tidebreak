@@ -62,6 +62,7 @@ export function CodeCenterTabs({
   onSelectEditor,
   onCloseEditor,
   onCloseAllEditors,
+  onCloseEveryEditor,
   onCloseOtherEditors,
   onCloseEditorsToRight,
   onCopyPath,
@@ -81,6 +82,8 @@ export function CodeCenterTabs({
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;
   onCloseAllEditors: () => void;
+  /** Global close used by the persistent Main agent tab. */
+  onCloseEveryEditor?: () => void;
   onCloseOtherEditors: (index: number) => void;
   onCloseEditorsToRight: (index: number) => void;
   onCopyPath: (path: string) => void;
@@ -165,7 +168,7 @@ export function CodeCenterTabs({
             <ContextMenuItem
               className="gap-3 py-2"
               disabled={editorTabs.length === 0}
-              onSelect={onCloseAllEditors}
+              onSelect={onCloseEveryEditor ?? onCloseAllEditors}
             >
               <ListX />
               Close other tabs

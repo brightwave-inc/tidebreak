@@ -66,6 +66,33 @@ export function isEditorTab(tab: PanelContent): boolean {
 
 export type CodeEditorRegion = "primary" | "secondary";
 
+/**
+ * Close the tab the Code workspace is actually showing.
+ *
+ * Editor tabs live outside the legacy side-panel strip, and the right split
+ * keeps its own focus marker. Shell shortcuts must follow those two facts or
+ * Cmd/Ctrl+W falls through to the native window-close behavior while a file
+ * tab is visibly selected. `null` means the persistent conversation (or no
+ * workspace tab at all) owns focus and there is nothing closable here.
+ */
+export function closeFocusedCodeTab(layout: LayoutState): LayoutState | null {
+  const chrome = splitCodeChromeLayout(layout);
+  if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
+    return closeEditorTab(
+      layout,
+      chrome.splitEditors.activeIndex,
+      "secondary",
+    );
+  }
+  if (!chrome.editors.conversationFocused && chrome.editors.tabs.length > 0) {
+    return closeEditorTab(layout, chrome.editors.activeIndex, "primary");
+  }
+  if (chrome.panels.tabs.length > 0) {
+    return closeCodeChromeTab(layout, chrome.panels.activeIndex);
+  }
+  return null;
+}
+
 /** Show the conversation while keeping file and diff tabs open. */
 export function focusConversation(layout: LayoutState): LayoutState {
   return {
@@ -143,12 +170,36 @@ export function closeEditorTab(
   return next;
 }
 
-/** Close every file and diff tab, returning the center to the conversation. */
-export function closeAllEditorTabs(layout: LayoutState): LayoutState {
+/**
+ * Close every file and diff tab in one editor group. With no region, close
+ * both groups and return the center to the conversation (the Main agent menu).
+ */
+export function closeAllEditorTabs(
+  layout: LayoutState,
+  region?: CodeEditorRegion,
+): LayoutState {
+  if (region === "secondary") {
+    return layout.editorSplit ? { ...layout, editorSplit: undefined } : layout;
+  }
+
   const tabs = layout.tabs.filter((tab) => !isEditorTab(tab));
-  if (tabs.length === layout.tabs.length && !layout.editorSplit) return layout;
+  const closeSplit = region === undefined;
+  if (
+    tabs.length === layout.tabs.length &&
+    (!closeSplit || !layout.editorSplit)
+  ) {
+    return layout;
+  }
   if (tabs.length === 0) {
-    return { ...EMPTY_LAYOUT, editorSplit: undefined };
+    return closeSplit || !layout.editorSplit
+      ? { ...EMPTY_LAYOUT, editorSplit: undefined }
+      : {
+          ...layout,
+          tabs: [],
+          activeIndex: 0,
+          fullscreen: false,
+          conversationFocused: undefined,
+        };
   }
 
   const active = layout.tabs[layout.activeIndex];
@@ -160,7 +211,7 @@ export function closeAllEditorTabs(layout: LayoutState): LayoutState {
     tabs,
     activeIndex,
     conversationFocused: undefined,
-    editorSplit: undefined,
+    editorSplit: closeSplit ? undefined : layout.editorSplit,
   };
 }
 
@@ -173,18 +224,14 @@ export function closeOtherEditorTabs(
   if (region === "secondary") {
     const target = layout.editorSplit?.tabs[editorIndex];
     if (!target) return layout;
-    const tabs = layout.tabs.filter((tab) => !isEditorTab(tab));
     return {
       ...layout,
-      tabs,
-      activeIndex: Math.min(layout.activeIndex, Math.max(0, tabs.length - 1)),
-      conversationFocused: undefined,
       editorSplit: { tabs: [target], activeIndex: 0, focused: true },
     };
   }
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
-  if (!target || (editors.length <= 1 && !layout.editorSplit)) return layout;
+  if (!target || editors.length <= 1) return layout;
   const targetKey = panelKey(target);
   const tabs = layout.tabs.filter(
     (tab) => !isEditorTab(tab) || panelKey(tab) === targetKey,
@@ -194,7 +241,9 @@ export function closeOtherEditorTabs(
     tabs,
     activeIndex: tabs.findIndex((tab) => panelKey(tab) === targetKey),
     conversationFocused: false,
-    editorSplit: undefined,
+    editorSplit: layout.editorSplit
+      ? { ...layout.editorSplit, focused: undefined }
+      : undefined,
   };
 }
 
