@@ -165,7 +165,9 @@ async fn create_write_read_and_two_cursors() {
     let list: Vec<serde_json::Value> = listed.json().await.unwrap();
     assert_eq!(list.len(), 1);
 
-    let payload = b"echo TERM_TWO_READERS_ok\r";
+    // End the producer after the marker so the cursor snapshot below cannot
+    // race trailing PTY output (for example, the shell's next prompt).
+    let payload = b"echo TERM_TWO_READERS_ok; exit\r";
     let written = client
         .post(format!(
             "http://{addr}/code/workspaces/{workspace_id}/terminals/{tid}/write"
@@ -180,6 +182,7 @@ async fn create_write_read_and_two_cursors() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut body = Vec::new();
     let mut cursor = 0u64;
+    let mut ended = false;
     while tokio::time::Instant::now() < deadline {
         let read = client
             .get(format!(
@@ -193,10 +196,11 @@ async fn create_write_read_and_two_cursors() {
         let page: serde_json::Value = read.json().await.unwrap();
         body.extend(decode_b64(page["bytes"].as_str().unwrap()));
         cursor = page["cursor"].as_u64().unwrap();
-        if body
+        ended = page["ended"].as_bool() == Some(true);
+        let marker_seen = body
             .windows(b"TERM_TWO_READERS_ok".len())
-            .any(|w| w == b"TERM_TWO_READERS_ok")
-        {
+            .any(|w| w == b"TERM_TWO_READERS_ok");
+        if marker_seen && ended {
             break;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -207,6 +211,7 @@ async fn create_write_read_and_two_cursors() {
         "shell did not echo the written command: {:?}",
         String::from_utf8_lossy(&body)
     );
+    assert!(ended, "shell did not exit after the marker");
 
     let late = client
         .get(format!(
