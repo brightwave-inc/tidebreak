@@ -6,7 +6,7 @@ use axum::response::Response;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::db::code::list_events;
-use tidebreak_core::{CodeSessionId, OwnerId};
+use tidebreak_core::{CodeEvent, CodeSessionId, OwnerId, SequencedCodeEvent};
 
 use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::ScopedCode;
@@ -115,7 +115,7 @@ async fn replay_after(
     let events = list_events(store, owner, session, *last_seq)
         .await
         .map_err(|_| ())?;
-    for event in events {
+    for event in compact_replay_events(events) {
         *last_seq = event.seq;
         send_frame(
             socket,
@@ -131,6 +131,42 @@ async fn replay_after(
     Ok(())
 }
 
+/// Collapse adjacent renderer-equivalent text deltas before they cross the
+/// WebSocket boundary. The durable journal and live stream remain lossless;
+/// replay retains the final sequence cursor for every compacted run.
+fn compact_replay_events(events: Vec<SequencedCodeEvent>) -> Vec<SequencedCodeEvent> {
+    let mut compacted = Vec::<SequencedCodeEvent>::with_capacity(events.len());
+    for event in events {
+        if let Some(previous) = compacted.last_mut() {
+            let consecutive = previous.seq.saturating_add(1) == event.seq;
+            let merged = if consecutive {
+                match (&mut previous.event, &event.event) {
+                    (
+                        CodeEvent::AssistantDelta { text: previous },
+                        CodeEvent::AssistantDelta { text: next },
+                    )
+                    | (
+                        CodeEvent::ReasoningDelta { text: previous },
+                        CodeEvent::ReasoningDelta { text: next },
+                    ) => {
+                        previous.push_str(next);
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if merged {
+                previous.seq = event.seq;
+                continue;
+            }
+        }
+        compacted.push(event);
+    }
+    compacted
+}
+
 async fn send_frame(
     socket: &mut WebSocket,
     frame: &SequencedCodeEventFrame,
@@ -139,4 +175,71 @@ async fn send_frame(
         return Ok(());
     };
     socket.send(Message::Text(json.into())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_compaction_preserves_text_boundaries_and_final_sequences() {
+        let compacted = compact_replay_events(vec![
+            SequencedCodeEvent {
+                seq: 1,
+                event: CodeEvent::AssistantDelta { text: "hel".into() },
+            },
+            SequencedCodeEvent {
+                seq: 2,
+                event: CodeEvent::AssistantDelta { text: "lo".into() },
+            },
+            SequencedCodeEvent {
+                seq: 3,
+                event: CodeEvent::ReasoningDelta {
+                    text: "think".into(),
+                },
+            },
+            SequencedCodeEvent {
+                seq: 4,
+                event: CodeEvent::ReasoningDelta { text: "ing".into() },
+            },
+            SequencedCodeEvent {
+                seq: 5,
+                event: CodeEvent::TurnInterrupted,
+            },
+            SequencedCodeEvent {
+                seq: 7,
+                event: CodeEvent::AssistantDelta {
+                    text: "again".into(),
+                },
+            },
+        ]);
+
+        assert_eq!(
+            compacted,
+            vec![
+                SequencedCodeEvent {
+                    seq: 2,
+                    event: CodeEvent::AssistantDelta {
+                        text: "hello".into(),
+                    },
+                },
+                SequencedCodeEvent {
+                    seq: 4,
+                    event: CodeEvent::ReasoningDelta {
+                        text: "thinking".into(),
+                    },
+                },
+                SequencedCodeEvent {
+                    seq: 5,
+                    event: CodeEvent::TurnInterrupted,
+                },
+                SequencedCodeEvent {
+                    seq: 7,
+                    event: CodeEvent::AssistantDelta {
+                        text: "again".into(),
+                    },
+                },
+            ]
+        );
+    }
 }

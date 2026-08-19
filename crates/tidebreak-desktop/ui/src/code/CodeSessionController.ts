@@ -65,6 +65,13 @@ export class CodeSessionController {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private replayFrames: SequencedCodeEventFrame[] = [];
+  private replayDelta:
+    | {
+        type: "assistant_delta" | "reasoning_delta";
+        seq: number;
+        chunks: string[];
+      }
+    | null = null;
   private replayFlush: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: CodeSessionControllerOptions) {}
@@ -93,6 +100,7 @@ export class CodeSessionController {
     this.disposed = true;
     this.cancelReplayFlush();
     this.replayFrames = [];
+    this.replayDelta = null;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -111,29 +119,29 @@ export class CodeSessionController {
    * once.
    */
   private queueReplay(frame: SequencedCodeEventFrame): void {
-    const previous = this.replayFrames[this.replayFrames.length - 1];
+    // Keep text fragments as chunks until the run ends. Repeatedly appending
+    // to one growing JS string makes a character-at-a-time replay quadratic.
     if (
-      previous?.replayed === true &&
-      previous.seq + 1 === frame.seq &&
-      (previous.event.type === "assistant_delta" ||
-        previous.event.type === "reasoning_delta") &&
-      frame.event.type === previous.event.type
+      frame.event.type === "assistant_delta" ||
+      frame.event.type === "reasoning_delta"
     ) {
-      // Some engines emit reasoning one character at a time. A saved Grok
-      // turn can therefore contain tens of thousands of adjacent delta rows.
-      // Replaying each row preserves no extra presentation state: the reducer
-      // appends the same text to the same open bubble. Fold the run in place,
-      // retaining the newest sequence cursor so reconnect still resumes after
-      // every durable row represented by this compact frame.
-      this.replayFrames[this.replayFrames.length - 1] = {
-        ...frame,
-        replayed: true,
-        event: {
+      const previous = this.replayDelta;
+      if (
+        previous?.type === frame.event.type &&
+        previous.seq + 1 === frame.seq
+      ) {
+        previous.seq = frame.seq;
+        previous.chunks.push(frame.event.text);
+      } else {
+        this.flushReplayDelta();
+        this.replayDelta = {
           type: frame.event.type,
-          text: previous.event.text + frame.event.text,
-        },
-      };
+          seq: frame.seq,
+          chunks: [frame.event.text],
+        };
+      }
     } else {
+      this.flushReplayDelta();
       this.replayFrames.push(frame);
     }
     // The protocol marks replay frames but has no separate end marker. Treat a
@@ -153,8 +161,20 @@ export class CodeSessionController {
     this.replayFlush = null;
   }
 
+  private flushReplayDelta(): void {
+    const delta = this.replayDelta;
+    if (!delta) return;
+    this.replayFrames.push({
+      seq: delta.seq,
+      replayed: true,
+      event: { type: delta.type, text: delta.chunks.join("") },
+    });
+    this.replayDelta = null;
+  }
+
   private takeReplay(): SequencedCodeEventFrame[] {
     this.cancelReplayFlush();
+    this.flushReplayDelta();
     const frames = this.replayFrames;
     this.replayFrames = [];
     return frames;
