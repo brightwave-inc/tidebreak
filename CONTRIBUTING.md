@@ -63,7 +63,7 @@ So the runner signs with the first of these it finds:
 1. `$TIDEBREAK_DEV_SIGNING_IDENTITY`, if set — set it empty to opt out
 2. an **Apple Development** identity
 3. a **Developer ID Application** identity
-4. an `tidebreak-dev` certificate already in a searchable keychain
+4. a `tidebreak-dev` certificate already in a searchable keychain
 5. a local-only `tidebreak-dev` identity it creates in a dedicated keychain
    under `~/Library/Application Support/Tidebreak/dev-signing`
 
