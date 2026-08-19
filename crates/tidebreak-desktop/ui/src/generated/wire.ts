@@ -936,7 +936,17 @@ outcome: ToolOutcome,
 /**
  * Bounded preview of the result.
  */
-preview: string, } | { "type": "file_changed", 
+preview: string, 
+/**
+ * Classification rebuilt from the call's complete arguments.
+ *
+ * Engines open a tool call before its arguments finish streaming, so
+ * the detail on [`CodeEvent::ToolStarted`] can name nothing. This is
+ * the correction: adapters that see the final arguments fill it in,
+ * and renderers merge it into the started call. It is `None` when
+ * the engine's completion payload carries no arguments.
+ */
+detail?: ToolDetail, } | { "type": "file_changed", 
 /**
  * Path relative to the worktree, when the engine reports one.
  */

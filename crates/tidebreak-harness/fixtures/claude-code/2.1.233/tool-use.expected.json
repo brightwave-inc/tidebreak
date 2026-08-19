@@ -30,7 +30,11 @@
     "type": "tool_completed",
     "call_id": "toolu_019ykdV8Jr64h8Yd3HUjbsUF",
     "outcome": "succeeded",
-    "preview": "1\tdemo\n2\t\n3\tA tiny fixture repository.\n4\t"
+    "preview": "1\tdemo\n2\t\n3\tA tiny fixture repository.\n4\t",
+    "detail": {
+      "kind": "file_read",
+      "path": "/workspace/README.md"
+    }
   },
   {
     "type": "assistant_delta",

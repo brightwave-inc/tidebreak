@@ -51,6 +51,41 @@ pub enum ToolDetail {
     },
 }
 
+impl ToolDetail {
+    /// The subject a transcript line names: the command, path, or query.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        match self {
+            Self::Command { cmd, .. } => cmd,
+            Self::FileEdit { path } | Self::FileRead { path } => path,
+            Self::Search { query } => query,
+            Self::Other { summary } => summary,
+        }
+    }
+
+    /// How much this detail says about the call, for the correction channel.
+    ///
+    /// An engine can open a tool call before its arguments finish streaming,
+    /// so the detail on [`CodeEvent::ToolStarted`] may name nothing. A later
+    /// detail built from the complete arguments rides
+    /// [`CodeEvent::ToolCompleted`] and replaces the first one only when it
+    /// scores higher, so a correction never downgrades a line that already
+    /// names its subject.
+    ///
+    /// Zero is a detail with no subject, one is a bare tool name, and two is
+    /// a real command, path, or query.
+    #[must_use]
+    pub fn specificity(&self) -> u8 {
+        if self.subject().trim().is_empty() {
+            0
+        } else if matches!(self, Self::Other { .. }) {
+            1
+        } else {
+            2
+        }
+    }
+}
+
 /// How a tool call finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -212,6 +247,16 @@ pub enum CodeEvent {
         outcome: ToolOutcome,
         /// Bounded preview of the result.
         preview: String,
+        /// Classification rebuilt from the call's complete arguments.
+        ///
+        /// Engines open a tool call before its arguments finish streaming, so
+        /// the detail on [`CodeEvent::ToolStarted`] can name nothing. This is
+        /// the correction: adapters that see the final arguments fill it in,
+        /// and renderers merge it into the started call. It is `None` when
+        /// the engine's completion payload carries no arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        detail: Option<ToolDetail>,
     },
     /// A file changed. The diff body is loaded from a bounded GET route.
     FileChanged {
@@ -357,6 +402,9 @@ mod tests {
                 call_id: "toolu_1".into(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "demo".into(),
+                detail: Some(ToolDetail::FileRead {
+                    path: "README.md".into(),
+                }),
             },
             CodeEvent::FileChanged {
                 path: "src/lib.rs".into(),

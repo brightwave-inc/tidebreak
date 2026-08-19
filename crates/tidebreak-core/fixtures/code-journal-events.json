@@ -34,7 +34,11 @@
     "type": "tool_completed",
     "call_id": "toolu_1",
     "outcome": "succeeded",
-    "preview": "demo"
+    "preview": "demo",
+    "detail": {
+      "kind": "file_read",
+      "path": "README.md"
+    }
   },
   {
     "type": "file_changed",

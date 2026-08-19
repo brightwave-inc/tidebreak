@@ -101,7 +101,12 @@
     "type": "tool_completed",
     "call_id": "call_00_XqOXPl42gfJx0xSVsgUu1333",
     "outcome": "succeeded",
-    "preview": "/Users/redacted/.zshenv:.:1: no such file or directory: /tmp/redacted-opencode-home/home/.cargo/env\nhi\n"
+    "preview": "/Users/redacted/.zshenv:.:1: no such file or directory: /tmp/redacted-opencode-home/home/.cargo/env\nhi\n",
+    "detail": {
+      "kind": "command",
+      "cmd": "echo hi",
+      "cwd": ""
+    }
   },
   {
     "type": "assistant_delta",

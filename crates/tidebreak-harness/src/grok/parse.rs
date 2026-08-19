@@ -209,6 +209,10 @@ impl GrokStreamParser {
             call_id,
             outcome,
             preview,
+            // `tool_call` already carries the whole `rawInput`, so the started
+            // call names its subject. `tool_call_update` repeats no arguments
+            // at all, so there is nothing to correct it with.
+            detail: None,
         }]
     }
 

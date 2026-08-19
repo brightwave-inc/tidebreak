@@ -1287,13 +1287,14 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         detail,
       };
     }
-    case "tool_completed":
+    case "tool_completed": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "tool_completed" }>>(value, [
           "type",
           "call_id",
           "outcome",
           "preview",
+          "detail",
         ]) ||
         !nonEmpty(value.call_id) ||
         !isMember(value.outcome, TOOL_OUTCOMES) ||
@@ -1301,12 +1302,23 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       ) {
         return null;
       }
+      // The server omits `detail` when the engine's completion payload
+      // carried no arguments. A present-but-malformed one is a wire
+      // disagreement, so it rejects the event rather than dropping a field.
+      let detail: ToolDetail | undefined;
+      if (value.detail !== undefined && value.detail !== null) {
+        const parsed = parseToolDetail(value.detail);
+        if (!parsed) return null;
+        detail = parsed;
+      }
       return {
         type: "tool_completed",
         call_id: value.call_id,
         outcome: value.outcome,
         preview: value.preview,
+        ...(detail ? { detail } : {}),
       };
+    }
     case "turn_completed": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "turn_completed" }>>(value, [

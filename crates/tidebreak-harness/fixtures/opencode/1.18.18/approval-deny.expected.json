@@ -106,7 +106,12 @@
     "type": "tool_completed",
     "call_id": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
     "outcome": "denied",
-    "preview": "The user rejected permission to use this specific tool call with the following feedback: use the fixtures directory instead"
+    "preview": "The user rejected permission to use this specific tool call with the following feedback: use the fixtures directory instead",
+    "detail": {
+      "kind": "command",
+      "cmd": "echo hi",
+      "cwd": ""
+    }
   },
   {
     "type": "assistant_delta",
@@ -233,7 +238,11 @@
     "type": "tool_completed",
     "call_id": "call_00_viY1Lx1AXCvyGzESMURk7927",
     "outcome": "succeeded",
-    "preview": "No files found"
+    "preview": "No files found",
+    "detail": {
+      "kind": "search",
+      "query": "**/fixtures/**"
+    }
   },
   {
     "type": "assistant_delta",

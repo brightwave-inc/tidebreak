@@ -5,7 +5,7 @@
 //! and are logged (size-capped). They are never fatal and never dropped
 //! silently.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use serde_json::Value;
 use tidebreak_core::{
@@ -24,7 +24,10 @@ pub struct ClaudeStreamParser {
     unrecognized: u64,
     resume_ref: Option<String>,
     version: Option<String>,
-    started_tools: HashSet<String>,
+    /// call id → best detail emitted or recorded for that call so far.
+    started_tools: HashMap<String, ToolDetail>,
+    /// call id → detail to correct the started call with, once it resolves.
+    late_details: HashMap<String, ToolDetail>,
     emitted_session: bool,
 }
 
@@ -262,6 +265,7 @@ impl ClaudeStreamParser {
                     let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
                     let preview = tool_result_preview(&block);
                     if !call_id.is_empty() {
+                        let detail = self.late_details.remove(&call_id);
                         events.push(HarnessEvent::ToolCompleted {
                             call_id,
                             outcome: if is_error {
@@ -270,6 +274,7 @@ impl ClaudeStreamParser {
                                 ToolOutcome::Succeeded
                             },
                             preview,
+                            detail,
                         });
                     }
                 }
@@ -327,7 +332,7 @@ impl ClaudeStreamParser {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        if call_id.is_empty() || !self.started_tools.insert(call_id.clone()) {
+        if call_id.is_empty() {
             return Vec::new();
         }
         let name = block
@@ -336,10 +341,24 @@ impl ClaudeStreamParser {
             .unwrap_or("unknown")
             .to_owned();
         let input = block.get("input").cloned().unwrap_or(Value::Null);
+        let detail = tool_detail(&name, &input);
+        // `content_block_start` opens the call with `input: {}` and the
+        // arguments stream in after it, so the first view of a call names
+        // nothing. The `assistant` message repeats the same block with the
+        // assembled input; that later view is the correction, and it rides
+        // the call's `ToolCompleted`.
+        if let Some(started) = self.started_tools.get(&call_id) {
+            if detail.specificity() > started.specificity() {
+                self.started_tools.insert(call_id.clone(), detail.clone());
+                self.late_details.insert(call_id, detail);
+            }
+            return Vec::new();
+        }
+        self.started_tools.insert(call_id.clone(), detail.clone());
         vec![HarnessEvent::ToolStarted {
             call_id,
-            name: name.clone(),
-            detail: tool_detail(&name, &input),
+            name,
+            detail,
         }]
     }
 

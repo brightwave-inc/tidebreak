@@ -37,7 +37,12 @@
     "type": "tool_completed",
     "call_id": "exec-877a44a5-3d8b-4dbf-b89c-1a4131e2dade",
     "outcome": "denied",
-    "preview": ""
+    "preview": "",
+    "detail": {
+      "kind": "command",
+      "cmd": "/bin/zsh -lc \"python3 -c 'print(42)'\"",
+      "cwd": "/workspace"
+    }
   },
   {
     "type": "assistant_delta",

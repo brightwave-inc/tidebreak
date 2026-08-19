@@ -7,6 +7,7 @@ import {
   parseCodeCloneDefaults,
   parseCodeCloneJob,
   parseCodeCommit,
+  parseCodeEvent,
   parseCodePush,
   parseCodeSession,
   parseCodeSessionList,
@@ -384,6 +385,29 @@ describe("parseCodeAction", () => {
       timed_out: false,
     };
     expect(parseCodeAction(action)).toEqual(action);
+  });
+});
+
+describe("parseCodeEvent", () => {
+  it("takes tool_completed with or without the late-argument detail", () => {
+    const completed = {
+      type: "tool_completed",
+      call_id: "toolu_1",
+      outcome: "succeeded",
+      preview: "ok",
+    };
+    // The correction is optional: adapters that never see the final
+    // arguments omit it, and dropping the whole event over the new key
+    // would stop every tool line from resolving.
+    expect(parseCodeEvent(completed)).toEqual(completed);
+    const corrected = {
+      ...completed,
+      detail: { kind: "command", cmd: "cargo test", cwd: "/workspace" },
+    };
+    expect(parseCodeEvent(corrected)).toEqual(corrected);
+    expect(
+      parseCodeEvent({ ...completed, detail: { kind: "command", cmd: 7 } }),
+    ).toBeNull();
   });
 });
 

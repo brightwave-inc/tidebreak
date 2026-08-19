@@ -920,10 +920,12 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             call_id,
             outcome,
             preview,
+            detail,
         } => CodeEvent::ToolCompleted {
             call_id,
             outcome,
             preview,
+            detail,
         },
         HarnessEvent::FileChanged {
             path,

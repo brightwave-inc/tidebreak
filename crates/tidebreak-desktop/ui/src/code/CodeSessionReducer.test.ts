@@ -198,6 +198,87 @@ describe("turn lifecycle", () => {
   });
 });
 
+describe("late tool arguments", () => {
+  function toolItem(state: CodeSessionState) {
+    return state.items.find((item) => item.kind === "tool");
+  }
+
+  it("names the subject an empty started detail could not", () => {
+    // Engines open a call before its arguments finish streaming, so the
+    // started detail can be empty and the line falls back to the tool name.
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "tool_started",
+        call_id: "c1",
+        name: "Bash",
+        detail: { kind: "command", cmd: "", cwd: "" },
+      },
+      {
+        type: "tool_completed",
+        call_id: "c1",
+        outcome: "succeeded",
+        preview: "ok",
+        detail: {
+          kind: "command",
+          cmd: "cargo test -p tidebreak-server",
+          cwd: "/workspace",
+        },
+      },
+    ]);
+    expect(toolItem(state)).toMatchObject({
+      detail: {
+        kind: "command",
+        cmd: "cargo test -p tidebreak-server",
+        cwd: "/workspace",
+      },
+    });
+  });
+
+  it("keeps a populated detail rather than taking a weaker correction", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "tool_started",
+        call_id: "c1",
+        name: "Bash",
+        detail: { kind: "command", cmd: "cargo test", cwd: "/workspace" },
+      },
+      {
+        type: "tool_completed",
+        call_id: "c1",
+        outcome: "succeeded",
+        preview: "ok",
+        detail: { kind: "other", summary: "Bash" },
+      },
+    ]);
+    expect(toolItem(state)).toMatchObject({
+      detail: { kind: "command", cmd: "cargo test", cwd: "/workspace" },
+    });
+  });
+
+  it("leaves the started detail alone when no correction rides the completion", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "tool_started",
+        call_id: "c1",
+        name: "read_file",
+        detail: { kind: "file_read", path: "README.md" },
+      },
+      {
+        type: "tool_completed",
+        call_id: "c1",
+        outcome: "succeeded",
+        preview: "demo",
+      },
+    ]);
+    expect(toolItem(state)).toMatchObject({
+      detail: { kind: "file_read", path: "README.md" },
+    });
+  });
+});
+
 const SNAPSHOT_TURN = {
   id: "t1",
   session_id: "sess-1",

@@ -197,13 +197,22 @@ mod tests {
     #[test]
     fn fixture_replay_tool_use() {
         let (events, _) = replay("tool-use");
+        // `content_block_start` opens the call with `input: {}`, so the
+        // started detail names nothing. The complete arguments arrive on the
+        // `assistant` message and ride the completion as a correction —
+        // without it the transcript line falls back to "Read".
         assert!(events.iter().any(|event| matches!(
             event,
-            HarnessEvent::ToolStarted { name, .. } if name == "Read"
+            HarnessEvent::ToolStarted { name, detail, .. }
+                if name == "Read" && detail.specificity() == 0
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HarnessEvent::ToolCompleted { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                detail: Some(tidebreak_core::ToolDetail::FileRead { path }),
+                ..
+            } if path == "/workspace/README.md"
+        )));
     }
 
     #[test]
