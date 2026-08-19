@@ -22,6 +22,39 @@
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "exec-877a44a5-3d8b-4dbf-b89c-1a4131e2dade"
+    },
+    "raw": {
+      "availableDecisions": [
+        "accept",
+        {
+          "acceptWithExecpolicyAmendment": {
+            "execpolicy_amendment": [
+              "python3",
+              "-c",
+              "print(42)"
+            ]
+          }
+        },
+        "cancel"
+      ],
+      "command": "/bin/zsh -lc \"python3 -c 'print(42)'\"",
+      "commandActions": [
+        {
+          "command": "python3 -c 'print(42)'",
+          "type": "unknown"
+        }
+      ],
+      "cwd": "/workspace",
+      "environmentId": "local",
+      "itemId": "exec-877a44a5-3d8b-4dbf-b89c-1a4131e2dade",
+      "proposedExecpolicyAmendment": [
+        "python3",
+        "-c",
+        "print(42)"
+      ],
+      "startedAtMs": 1786820104582,
+      "threadId": "01a006c6-f970-7c32-87f2-1511e1be0f44",
+      "turnId": "01a006c6-f993-75d2-8630-20f032b06e9a"
     }
   },
   {

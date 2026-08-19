@@ -90,6 +90,24 @@
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "per_006f28b45001X8Mo5OoIrM4xyl"
+    },
+    "raw": {
+      "always": [
+        "echo *"
+      ],
+      "id": "per_006f28b45001X8Mo5OoIrM4xyl",
+      "metadata": {
+        "command": "echo hi"
+      },
+      "patterns": [
+        "echo hi"
+      ],
+      "permission": "bash",
+      "sessionID": "ses_ff90d7992ffe7TX0YtIWyo6Nyl",
+      "tool": {
+        "callID": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
+        "messageID": "msg_006f28674001BxouJjPPe4lD7X"
+      }
     }
   },
   {
@@ -314,6 +332,24 @@
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "per_006f2966b001Edi4ogHcyFv2aT"
+    },
+    "raw": {
+      "always": [
+        "ls *"
+      ],
+      "id": "per_006f2966b001Edi4ogHcyFv2aT",
+      "metadata": {
+        "command": "ls -la"
+      },
+      "patterns": [
+        "ls -la"
+      ],
+      "permission": "bash",
+      "sessionID": "ses_ff90d7992ffe7TX0YtIWyo6Nyl",
+      "tool": {
+        "callID": "call_00_pTqLHUb6Tp5CWsKjACRA5197",
+        "messageID": "msg_006f291c6001FWSz6DRzZDHn24"
+      }
     }
   }
 ]

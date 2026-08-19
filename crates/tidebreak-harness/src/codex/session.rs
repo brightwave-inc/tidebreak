@@ -356,6 +356,14 @@ impl CodexSession {
                         .expect("codex approvals")
                         .insert(harness_ref.call_id.clone(), id.clone());
                 }
+                if self.spec.permission_mode == CodePermissionMode::Allow {
+                    // Allow is the engine's unsupervised posture. A request
+                    // that still arrives must not park a card.
+                    let _ = self
+                        .decide(harness_ref.clone(), ApprovalDecision::Approve)
+                        .await;
+                    continue;
+                }
             }
             self.spec.sink.emit(event.clone()).await;
         }

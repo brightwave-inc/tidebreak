@@ -121,7 +121,14 @@ pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>)
             "permission": [
                 {"permission": "bash", "pattern": "*", "action": "allow"},
                 {"permission": "edit", "pattern": "*", "action": "allow"},
-                {"permission": "read", "pattern": "*", "action": "allow"}
+                {"permission": "read", "pattern": "*", "action": "allow"},
+                {"permission": "grep", "pattern": "*", "action": "allow"},
+                {"permission": "glob", "pattern": "*", "action": "allow"},
+                {"permission": "list", "pattern": "*", "action": "allow"},
+                {"permission": "external_directory", "pattern": "*", "action": "allow"},
+                {"permission": "websearch", "pattern": "*", "action": "allow"},
+                {"permission": "webfetch", "pattern": "*", "action": "allow"},
+                {"permission": "task", "pattern": "*", "action": "allow"}
             ]
         }),
     };
@@ -419,6 +426,16 @@ impl OpencodeSession {
             } = event
             {
                 *self.resume_ref.lock().expect("opencode resume") = Some(resume.clone());
+            }
+            if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
+                if self.spec.permission_mode == CodePermissionMode::Allow {
+                    // Allow already grants every known rule. A request that
+                    // still arrives must not park a card.
+                    let _ = self
+                        .decide(harness_ref.clone(), ApprovalDecision::Approve)
+                        .await;
+                    continue;
+                }
             }
             self.spec.sink.emit(event.clone()).await;
         }
@@ -720,6 +737,9 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "allow" }));
+        assert!(rules.iter().any(|rule| {
+            rule["permission"] == "external_directory" && rule["action"] == "allow"
+        }));
     }
 
     #[test]

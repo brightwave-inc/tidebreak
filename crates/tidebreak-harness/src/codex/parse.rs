@@ -281,7 +281,7 @@ impl CodexStreamParser {
         }
         vec![HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef { call_id },
-            raw: serde_json::Value::Null,
+            raw: params.clone(),
         }]
     }
 

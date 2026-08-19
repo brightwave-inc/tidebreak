@@ -431,7 +431,7 @@ impl OpencodeStreamParser {
         }
         vec![HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef { call_id },
-            raw: serde_json::Value::Null,
+            raw: props.clone(),
         }]
     }
 

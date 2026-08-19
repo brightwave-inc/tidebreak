@@ -200,7 +200,7 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
     case "other":
       return (
         <p className="text-muted-foreground text-[13.5px] break-words">
-          {approval.kind.summary}
+          {otherSummary(approval.kind.summary)}
         </p>
       );
   }
@@ -261,6 +261,14 @@ function approvalTitle(approval: CodeApprovalSnapshot): string {
     default:
       return "Allow this?";
   }
+}
+
+function otherSummary(summary: string): string {
+  const trimmed = summary.trim();
+  if (!trimmed || trimmed.toLowerCase() === "unknown") {
+    return "The engine needs approval";
+  }
+  return trimmed;
 }
 
 /** Past this, the payload is a file, not something a reader scrolls. */

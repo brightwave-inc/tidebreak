@@ -86,6 +86,24 @@
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "per_006f236d0001lbewEtHOBSrhMp"
+    },
+    "raw": {
+      "always": [
+        "echo *"
+      ],
+      "id": "per_006f236d0001lbewEtHOBSrhMp",
+      "metadata": {
+        "command": "echo hi"
+      },
+      "patterns": [
+        "echo hi"
+      ],
+      "permission": "bash",
+      "sessionID": "ses_ff90dce38ffexSlvYI7KNTXa2o",
+      "tool": {
+        "callID": "call_00_XqOXPl42gfJx0xSVsgUu1333",
+        "messageID": "msg_006f231cd001xuQ6DLad4Eibab"
+      }
     }
   },
   {
