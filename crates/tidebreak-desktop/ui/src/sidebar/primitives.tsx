@@ -1,7 +1,6 @@
 import {
   forwardRef,
   useCallback,
-  useEffect,
   useRef,
   useState,
   type ComponentProps,
@@ -26,25 +25,6 @@ import {
  * never disappears with the rail. Expanded width is reader-chosen and
  * remembered.
  */
-
-/**
- * Publish the expanded rail width onto the shell so the overlay titlebar can
- * size itself to the rail. Cleared on collapse: the titlebar unmounts with the
- * rail, and the fallback 280px would otherwise paint leftover chrome.
- */
-export function useSyncSidebarWidthCssVar() {
-  const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);
-  const collapsed = useUiStore((state) => state.sidebarCollapsed);
-  useEffect(() => {
-    const shell = document.querySelector<HTMLElement>(".app-shell");
-    if (!shell) return;
-    if (collapsed) {
-      shell.style.removeProperty("--sidebar-expanded-width");
-      return;
-    }
-    shell.style.setProperty("--sidebar-expanded-width", `${sidebarWidthPx}px`);
-  }, [sidebarWidthPx, collapsed]);
-}
 
 /**
  * Drag handle on the rail's trailing edge. Double-click restores the default

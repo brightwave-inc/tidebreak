@@ -593,6 +593,20 @@ describe("app shell", () => {
     expect(window.localStorage.getItem("tidebreak.sidebar-collapsed")).toBe("true");
   });
 
+  it("publishes the restored sidebar width when the shell appears after boot", async () => {
+    hasNativeHost.mockReturnValue(true);
+    useUiStore.setState({ sidebarWidth: 216 });
+
+    await mountApp();
+    await screen.findByText("Welcome to Tidebreak");
+
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    expect(shell?.style.getPropertyValue("--sidebar-expanded-width")).toBe("216px");
+    expect(document.querySelector<HTMLElement>("[data-sidebar]")?.style.width).toBe(
+      "216px",
+    );
+  });
+
   it("unmounts the titlebar with the rail, and Cmd/Ctrl+B brings both back", async () => {
     // The leftover chrome only exists on the native host: the titlebar is
     // `position: absolute; width: var(--sidebar-expanded-width)`, and that
