@@ -7,28 +7,88 @@
   "srcDir": "src",
   "tsconfig": "tsconfig.json",
   "cssEntry": ".ds-compiled.css",
-  "extraEntries": ["sonner"],
+  "extraEntries": [
+    "sonner"
+  ],
   "readmeHeader": ".design-sync/conventions.md",
   "overrides": {
-    "Dialog": { "cardMode": "single", "viewport": "720x480", "primaryStory": "RenameWorkspace" },
-    "AlertDialog": { "cardMode": "single", "viewport": "720x480", "primaryStory": "DiscardChanges" },
-    "DropdownMenu": { "cardMode": "single", "viewport": "480x420", "primaryStory": "WorkspaceMenu" },
-    "Select": { "cardMode": "single", "viewport": "480x420" },
-    "Popover": { "cardMode": "single", "viewport": "480x360", "primaryStory": "ChatActivity" },
-    "Tooltip": { "cardMode": "single", "viewport": "480x240" },
-    "Toaster": { "cardMode": "single", "viewport": "640x360", "primaryStory": "TurnFinished" },
-    "Table": { "cardMode": "column" },
-    "ResizablePanelGroup": { "cardMode": "column" },
-    "AttentionCard": { "cardMode": "column" },
-    "DomainFavicon": { "cardMode": "column" },
-    "PanelPrimaryHeader": { "cardMode": "column" },
-    "Progress": { "cardMode": "column" },
-    "ScrollArea": { "cardMode": "column" },
-    "ScrollableContainer": { "cardMode": "column" },
-    "Skeleton": { "cardMode": "column" },
-    "Tabs": { "cardMode": "column" },
-    "ToolActivityGroup": { "cardMode": "column" },
-    "ToolIcon": { "cardMode": "column" }
+    "Dialog": {
+      "cardMode": "single",
+      "viewport": "720x480",
+      "primaryStory": "RenameWorkspace"
+    },
+    "AlertDialog": {
+      "cardMode": "single",
+      "viewport": "720x480",
+      "primaryStory": "DiscardChanges"
+    },
+    "DropdownMenu": {
+      "cardMode": "single",
+      "viewport": "480x420",
+      "primaryStory": "WorkspaceMenu"
+    },
+    "Select": {
+      "cardMode": "single",
+      "viewport": "480x420"
+    },
+    "Popover": {
+      "cardMode": "single",
+      "viewport": "480x360",
+      "primaryStory": "ChatActivity"
+    },
+    "Tooltip": {
+      "cardMode": "single",
+      "viewport": "480x240"
+    },
+    "Toaster": {
+      "cardMode": "single",
+      "viewport": "640x360",
+      "primaryStory": "TurnFinished"
+    },
+    "Table": {
+      "cardMode": "column"
+    },
+    "ResizablePanelGroup": {
+      "cardMode": "column"
+    },
+    "AttentionCard": {
+      "cardMode": "column"
+    },
+    "DomainFavicon": {
+      "cardMode": "column"
+    },
+    "PanelPrimaryHeader": {
+      "cardMode": "column"
+    },
+    "Progress": {
+      "cardMode": "column"
+    },
+    "ScrollArea": {
+      "cardMode": "column"
+    },
+    "ScrollableContainer": {
+      "cardMode": "column"
+    },
+    "Skeleton": {
+      "cardMode": "column"
+    },
+    "Tabs": {
+      "cardMode": "column"
+    },
+    "ToolActivityGroup": {
+      "cardMode": "column"
+    },
+    "ToolIcon": {
+      "cardMode": "column"
+    },
+    "ContextMenu": {
+      "cardMode": "single",
+      "viewport": "480x420",
+      "primaryStory": "WorkspaceMenu"
+    },
+    "MiddleTruncate": {
+      "cardMode": "column"
+    }
   },
   "componentSrcMap": {
     "AlertDialog": "src/components/ui/alert-dialog.tsx",
@@ -87,6 +147,12 @@
     "HarnessPicker": "src/code/HarnessPicker.tsx",
     "DoctorList": "src/code/DoctorList.tsx",
     "CodeToolCard": "src/code/CodeTranscript.tsx",
-    "HarnessNotice": "src/code/CodeTranscript.tsx"
+    "HarnessNotice": "src/code/CodeTranscript.tsx",
+    "SegmentedControl": "src/components/ui/segmented.tsx",
+    "ContextMenu": "src/components/ui/context-menu.tsx",
+    "ToolOutputPreview": "src/ToolOutputPreview.tsx",
+    "UserMessage": "src/UserMessage.tsx",
+    "TranscriptSkeleton": "src/TranscriptSkeleton.tsx",
+    "MiddleTruncate": "src/code/MiddleTruncate.tsx"
   }
 }
