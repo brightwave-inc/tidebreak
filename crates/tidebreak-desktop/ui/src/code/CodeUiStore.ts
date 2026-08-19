@@ -177,7 +177,7 @@ export type CodeUiStore = {
   takeComposerPrompt: () => string | null;
 };
 
-export const useCodeUiStore = create<CodeUiStore>()((set) => ({
+export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   newWorkspaceOpen: false,
   newWorkspaceRepoId: undefined,
   addRepoOpen: false,
@@ -188,8 +188,8 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
   pendingComposerPrompt: null,
   offerComposerPrompt: (prompt) => set({ pendingComposerPrompt: prompt }),
-  takeComposerPrompt: () => {
-    const prompt = useCodeUiStore.getState().pendingComposerPrompt;
+  takeComposerPrompt: (): string | null => {
+    const prompt = get().pendingComposerPrompt;
     if (!prompt) return null;
     set({ pendingComposerPrompt: null });
     return prompt;
