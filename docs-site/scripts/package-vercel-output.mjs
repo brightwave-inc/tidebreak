@@ -14,7 +14,7 @@ const staticDirectory = path.join(outputDirectory, 'static', 'docs');
 for (const requiredFile of [
   'index.html',
   'quickstart/index.html',
-  'search-index.json',
+  'api/search',
   'sitemap.xml',
 ]) {
   const requiredPath = path.join(exportDirectory, requiredFile);

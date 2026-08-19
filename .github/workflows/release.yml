@@ -196,12 +196,12 @@ jobs:
           pnpm --dir docs-site types:check
           pnpm --dir docs-site test:vercel-output
           test -f docs-site/out/index.html
-          test -f docs-site/out/search-index.json
+          test -f docs-site/out/api/search
           test -f docs-site/out/sitemap.xml
           pnpm --dir docs-site package:vercel
           test -f .vercel/output/static/docs/index.html
           test -f .vercel/output/static/docs/quickstart/index.html
-          test -f .vercel/output/static/docs/search-index.json
+          test -f .vercel/output/static/docs/api/search
           test -f .vercel/output/static/docs/sitemap.xml
           (
             cd .vercel/output
@@ -346,7 +346,7 @@ jobs:
             --output /dev/null \
             "$DEPLOYMENT_URL/docs/"
           request /docs/quickstart/ "$RUNNER_TEMP/docs-quickstart.html"
-          request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
+          request /docs/api/search "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
 
           grep -Fq 'https://www.tidebreak.io/docs/' "$RUNNER_TEMP/docs-index.html"
@@ -365,7 +365,11 @@ jobs:
           grep -Fqi 'cross-origin-resource-policy: same-origin' "$RUNNER_TEMP/docs-headers"
           grep -Fqi 'x-content-type-options: nosniff' "$RUNNER_TEMP/docs-headers"
           grep -Fqi 'x-frame-options: DENY' "$RUNNER_TEMP/docs-headers"
-          jq -e 'type == "array" and length > 0' \
+          jq -e '
+            type == "object"
+            and .type == "advanced"
+            and (.internalDocumentIDStore.internalIdToId | length > 0)
+          ' \
             "$RUNNER_TEMP/docs-search-index.json" >/dev/null
           grep -Fq '<urlset' "$RUNNER_TEMP/docs-sitemap.xml"
       - name: Promote the verified deployment

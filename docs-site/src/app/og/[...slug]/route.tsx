@@ -1,4 +1,4 @@
-import { getPage, getPageImage, getAllPages } from '@/lib/content';
+import { getPageImage, source } from '@/lib/source';
 import { ImageResponse } from 'next/og';
 
 export const revalidate = false;
@@ -18,11 +18,11 @@ export async function GET(
 ) {
   const { slug } = await params;
   const pageSlug = slug.slice(0, -1);
-  const page = getPage(pageSlug.length === 0 ? undefined : pageSlug);
+  const page = source.getPage(pageSlug.length === 0 ? undefined : pageSlug);
   // Static export only renders the params below, so a miss here means the
   // scaffold has no content yet — fall back to a bare site card.
-  const title = page?.title ?? 'Tidebreak Docs';
-  const description = page?.description ?? '';
+  const title = page?.data.title ?? 'Tidebreak Docs';
+  const description = page?.data.description ?? '';
 
   return new ImageResponse(
     (
@@ -138,12 +138,7 @@ export async function GET(
 }
 
 export function generateStaticParams() {
-  const pages = getAllPages();
-  // `output: export` requires at least one param, so the empty-content
-  // scaffold still emits the bare site card.
-  if (pages.length === 0) return [{ slug: ['image.png'] }];
-
-  return pages.map((page) => ({
+  return source.getPages().map((page) => ({
     slug: getPageImage(page).segments,
   }));
 }

@@ -1,4 +1,4 @@
-import { getPage, getPageRawMarkdown, getAllPages } from '@/lib/content';
+import { getPageMarkdown, source } from '@/lib/source';
 
 export const revalidate = false;
 
@@ -9,20 +9,15 @@ export async function GET(
   const { slug } = await params;
   const lookupSlug =
     slug?.length === 1 && slug[0] === 'index' ? undefined : slug;
-  const page = getPage(lookupSlug);
+  const page = source.getPage(lookupSlug);
 
-  return new Response(page ? getPageRawMarkdown(page) : '', {
+  return new Response(page ? await getPageMarkdown(page) : '', {
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
   });
 }
 
 export function generateStaticParams() {
-  const pages = getAllPages();
-  // `output: export` requires at least one param even before any content
-  // exists; the stub route then serves an empty document.
-  if (pages.length === 0) return [{ slug: ['index'] }];
-
-  return pages.map((page) => ({
+  return source.getPages().map((page) => ({
     slug: page.slugs.length > 0 ? page.slugs : ['index'],
   }));
 }

@@ -1,7 +1,7 @@
 # Tidebreak Docs
 
-The user documentation for Tidebreak. It is a Next.js App Router site with MDX
-content, built as a static export and published at
+The user documentation for Tidebreak. It is a Fumadocs site on the Next.js App
+Router, built as a static export and published at
 <https://www.tidebreak.io/docs/>.
 
 ## Documentation boundaries
@@ -27,7 +27,8 @@ pnpm dev
 ```
 
 The site is served at <http://localhost:3000/>. Prose lives in
-`content/docs/*.mdx`; the sidebar order and section headings come from
+`content/docs/*.mdx`; Fumadocs compiles the content, builds the table of
+contents and search data, and reads sidebar order and section headings from
 `content/docs/meta.json`. A page only appears in the sidebar if it is listed
 there.
 
@@ -41,8 +42,8 @@ Useful scripts:
 | `pnpm types:check` | `tsc --noEmit` |
 | `pnpm lint` | ESLint |
 
-`pnpm dev` and `pnpm build` both regenerate `public/search-index.json` from
-`content/docs/` first. That file is generated output and is not committed.
+`pnpm build` emits the static Fumadocs search index at `/api/search/` alongside
+the exported pages.
 
 `pnpm types:check` type-checks against the route types Next generates under
 `.next/`, so run `pnpm dev` or `pnpm build` at least once in a fresh clone
@@ -53,10 +54,10 @@ before it will pass.
 | Path | What lives there |
 | --- | --- |
 | `content/docs/` | MDX pages and `meta.json` (sidebar order) |
-| `src/app/` | Routes, root layout, `global.css` design tokens |
-| `src/components/` | Header, sidebar, search, TOC, MDX components |
-| `src/lib/content.ts` | Reads and parses the MDX content tree |
-| `scripts/generate-search-index.mjs` | Builds the client-side search index |
+| `src/app/` | Routes, Fumadocs layouts, and `global.css` design tokens |
+| `src/components/` | Tidebreak branding and the Fumadocs provider |
+| `src/lib/source.ts` | Fumadocs content collection and source loader |
+| `src/lib/layout.shared.tsx` | Shared navigation and external links |
 
 ## Serving under a subpath
 
@@ -80,7 +81,7 @@ site.
 
 ## Design tokens
 
-`src/app/global.css` carries the Tidebreak palette, kept in step with the
-desktop app's `crates/tidebreak-desktop/ui/src/styles.css`. Dark mode uses cool
-near-neutral grays and carries elevation on the lightness ramp alone: page
-chrome `0.12` < popover `0.14` < card `0.16` < content surface `0.21`.
+`src/app/global.css` maps Fumadocs' surface tokens onto the marketing site's
+Geist typography, cool neutral ramp, restrained brand blue, and light/dark
+surface system. Keep those tokens aligned with
+`tidebreak-site/src/styles/globals.css` when the public brand changes.
