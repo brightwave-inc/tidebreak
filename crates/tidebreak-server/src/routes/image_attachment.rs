@@ -306,7 +306,7 @@ fn read_header_dimensions(
 /// The header is required rather than optional: a caller that never states a
 /// type can never be caught contradicting one, and the point of this check is
 /// to catch the contradiction.
-fn require_declared_type_matches(
+pub(crate) fn require_declared_type_matches(
     headers: &HeaderMap,
     sniffed: ImageMediaType,
 ) -> Result<(), ServerError> {

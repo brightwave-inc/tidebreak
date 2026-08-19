@@ -12,8 +12,8 @@ use tokio::sync::oneshot;
 use tidebreak_core::db::code::{
     delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
     get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
-    list_repos, list_sessions, list_sessions_for_workspace, list_turns, list_workspaces,
-    save_approval, save_repo, save_session, save_workspace,
+    list_events, list_repos, list_sessions, list_sessions_for_workspace, list_turns,
+    list_workspaces, save_approval, save_repo, save_session, save_workspace,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -1126,6 +1126,23 @@ impl CodeRuntime {
         Ok(list_turns(&self.db, session_id).await?)
     }
 
+    pub(crate) async fn session_debug(
+        &self,
+        session_id: CodeSessionId,
+    ) -> Result<
+        (
+            CodeSession,
+            Vec<CodeTurn>,
+            Vec<tidebreak_core::SequencedCodeEvent>,
+        ),
+        ServerError,
+    > {
+        let session = self.get_session(session_id).await?;
+        let turns = list_turns(&self.db, session_id).await?;
+        let events = list_events(&self.db, session_id, 0).await?;
+        Ok((session, turns, events))
+    }
+
     pub(crate) async fn workspace_tree(
         &self,
         workspace_id: WorkspaceId,
@@ -1383,6 +1400,7 @@ impl CodeRuntime {
             attached.clone(),
             engine,
             sink,
+            Some(self.blobs.clone()),
         );
         self.workers
             .lock()

@@ -271,7 +271,11 @@ impl OpencodeStreamParser {
     }
 
     fn emit_turn_completed(&mut self) -> Vec<HarnessEvent> {
-        if self.turn_terminal {
+        // OpenCode repeats `session.idle` while it is actually idle. A new
+        // prompt resets `turn_terminal` and would otherwise close the next
+        // turn before `busy` — the local journal showed 21ms empty turns
+        // carrying the previous turn's usage.
+        if self.turn_terminal || !self.turn_open {
             return Vec::new();
         }
         self.turn_terminal = true;
@@ -657,5 +661,27 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("ses_abc"));
+    }
+
+    #[test]
+    fn idle_before_busy_does_not_close_the_next_turn() {
+        let input = r#"
+{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session/ses_abc/prompt_async","body":{}}}
+{"dir":"in","msg":{"kind":"sse","event":{"type":"session.idle","properties":{"sessionID":"ses_abc"}}}}
+{"dir":"in","msg":{"kind":"sse","event":{"type":"session.status","properties":{"status":{"type":"idle"}}}}}
+{"dir":"in","msg":{"kind":"sse","event":{"type":"session.status","properties":{"status":{"type":"busy"}}}}}
+{"dir":"in","msg":{"kind":"sse","event":{"type":"session.idle","properties":{"sessionID":"ses_abc"}}}}
+"#;
+        let out = OpencodeStreamParser::parse_ndjson(input);
+        let kinds: Vec<_> = out
+            .events
+            .iter()
+            .map(|event| match event {
+                HarnessEvent::TurnStarted => "started",
+                HarnessEvent::TurnCompleted { .. } => "completed",
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["started", "completed"]);
     }
 }

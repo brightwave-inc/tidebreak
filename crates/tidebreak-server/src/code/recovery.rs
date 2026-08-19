@@ -507,6 +507,7 @@ mod tests {
             session,
             engine,
             sink,
+            None,
         );
         let (reply, _turn) = tokio::sync::oneshot::channel();
         handle

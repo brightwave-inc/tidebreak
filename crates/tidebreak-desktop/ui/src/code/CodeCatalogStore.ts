@@ -89,8 +89,11 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
         .getHarnessDoctor()
         .then((doctor) => set({ doctor }))
         .catch(() => {
-          // The rail does not need the doctor. A missing report just delays
-          // start-session until the next refresh.
+          // Home waits on a settled report. An empty one leaves the loading
+          // empty and shows the install section instead of spinning forever.
+          if (get().doctor === null) {
+            set({ doctor: { harnesses: [] } });
+          }
         }),
     ];
     for (const kind of HARNESS_KINDS) {

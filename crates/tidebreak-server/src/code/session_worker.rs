@@ -26,13 +26,14 @@ use tidebreak_core::db::code::{
     next_turn_ordinal, save_session, save_turn, CodeJournalError,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, BoundedError, CodeApproval, CodeApprovalId, CodeApprovalKind,
-    CodeApprovalState, CodeEvent, CodeSession, CodeSessionId, CodeSessionLifecycle, CodeTurn,
-    CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel,
+    Attention, AttentionSource, BlobStore, BoundedError, CodeApproval, CodeApprovalId,
+    CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, DbStore, FenceReason,
+    HarnessNoticeLevel,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
-    HarnessSession, TurnInput, TurnOutcome,
+    HarnessSession, TurnImage, TurnInput, TurnOutcome,
 };
 
 use super::bus::CodeEventBus;
@@ -201,6 +202,7 @@ pub(crate) fn spawn_session_worker(
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
+    blobs: Option<Arc<dyn BlobStore>>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
@@ -214,6 +216,7 @@ pub(crate) fn spawn_session_worker(
         sink.clone(),
         pending.clone(),
         wake.clone(),
+        blobs,
         rx,
     ));
     WorkerHandle {
@@ -254,6 +257,7 @@ async fn run_worker(
     sink: Arc<LiveSink>,
     pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
     wake: Arc<Notify>,
+    blobs: Option<Arc<dyn BlobStore>>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
     if let Some(pid) = engine.child_pid() {
@@ -272,6 +276,7 @@ async fn run_worker(
             engine.as_ref(),
             &sink,
             &pending,
+            blobs.as_deref(),
             &mut commands,
         )
         .await;
@@ -290,6 +295,7 @@ async fn run_worker(
                         &mut session,
                         engine.as_ref(),
                         &sink,
+                        blobs.as_deref(),
                         &mut commands,
                         QueuedFollowUp {
                             message,
@@ -377,6 +383,7 @@ async fn drain_queued(
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     pending: &Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
+    blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
@@ -384,7 +391,7 @@ async fn drain_queued(
         let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(db, bus, session, engine, sink, commands, follow_up).await;
+        let _ = drive_turn(db, bus, session, engine, sink, blobs, commands, follow_up).await;
     }
 }
 
@@ -394,6 +401,7 @@ async fn drive_turn(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
+    blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     QueuedFollowUp {
         message,
@@ -414,6 +422,7 @@ async fn drive_turn(
     if session.lifecycle == CodeSessionLifecycle::Ended {
         return Err(WorkerError::Conflict("session has ended".into()));
     }
+    let images = hydrate_turn_images(blobs, &attachments).await?;
     if let Some(model) = model.clone() {
         session.model = Some(model);
     }
@@ -467,6 +476,7 @@ async fn drive_turn(
     let run = engine.run_turn(TurnInput {
         text: message,
         model: model.or_else(|| session.model.clone()),
+        images,
     });
     tokio::pin!(run);
     // Adapters that spawn one child per turn have no pid to report until the
@@ -665,6 +675,35 @@ async fn drive_turn(
     session.lifecycle = CodeSessionLifecycle::Idle;
     let _ = super::attention::persist_session(db, bus, session).await;
     Ok(turn)
+}
+
+async fn hydrate_turn_images(
+    blobs: Option<&dyn BlobStore>,
+    attachments: &[tidebreak_core::CodeTurnAttachment],
+) -> Result<Vec<TurnImage>, WorkerError> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(blobs) = blobs else {
+        return Err(WorkerError::Failed(
+            "image attachments require blob storage".into(),
+        ));
+    };
+    let mut images = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let bytes = blobs
+            .get(attachment.blob_id)
+            .await
+            .map_err(|err| WorkerError::Failed(format!("blob read: {err}")))?
+            .ok_or_else(|| {
+                WorkerError::Failed(format!("attachment blob {} is missing", attachment.blob_id))
+            })?;
+        images.push(TurnImage {
+            media_type: attachment.media_type.as_str().to_owned(),
+            bytes,
+        });
+    }
+    Ok(images)
 }
 
 async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {

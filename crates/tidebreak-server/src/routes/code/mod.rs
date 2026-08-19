@@ -24,8 +24,9 @@ pub(crate) use repos::{
 };
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
-    create_session, interrupt_session, list_session_turns, list_workspace_sessions, reap_session,
-    set_attention, steer_session, submit_turn,
+    create_session, get_session_debug, get_session_image, interrupt_session, list_session_turns,
+    list_workspace_sessions, publish_session_image, reap_session, set_attention, steer_session,
+    submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
@@ -35,7 +36,7 @@ pub(crate) use terminals::{
 pub(crate) use types::{
     CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCloneDefaults,
     CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodePrCommentsSnapshot,
-    CodePushSnapshot, CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot,
+    CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
     CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
     CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, CodeWorkspaceTree, HarnessDoctorReport,

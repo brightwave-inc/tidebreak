@@ -7,15 +7,11 @@ import type {
   PermissionMode,
   ReasoningEffort,
 } from "../api/types";
+import { useApp } from "@/AppContext";
 import { HttpError } from "../api/client";
 import { Composer } from "../Composer";
-import {
-  IMAGE_MEDIA_TYPES,
-  imageAttachmentName,
-  imageAttachmentRejection,
-  type ImageAttachment,
-  withoutAttachment,
-} from "../ImageAttachments";
+import { IMAGE_MEDIA_TYPES } from "../ImageAttachments";
+import { useImageAttachments } from "../useImageAttachments";
 import { reasoningEffortOptions } from "../ModelMenu";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import {
@@ -35,6 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import type { RendererTurnUsage } from "../generated/wire";
 import type { CodeTurnSubmission } from "./parsers";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
@@ -434,8 +431,10 @@ export function CodeComposer({
   lastTurnBeganId,
   onModelChange,
   onModeChange,
+  contextUsage,
   slashCommands,
   searchPaths,
+  imageInput = false,
   onSend,
   onSteer,
   onInterrupt,
@@ -460,6 +459,12 @@ export function CodeComposer({
   lastTurnBeganId?: string | null;
   onModelChange?: (model: string) => void;
   onModeChange?: (mode: CodePermissionMode) => void;
+  /** Same meter as chat: last turn's usage in the send cluster. */
+  contextUsage?: {
+    usage: RendererTurnUsage | null;
+    contextWindow: number | undefined;
+    modelName: string | undefined;
+  };
   /**
    * Engine-discovered slash commands. Empty or absent hides the `/` popup;
    * free-typed `/` text still submits verbatim.
@@ -467,7 +472,12 @@ export function CodeComposer({
   slashCommands?: readonly { name: string; description: string }[];
   /** Name-matched workspace paths for `@` completion. */
   searchPaths?: (query: string) => Promise<readonly string[]>;
-  onSend: (message: string) => Promise<CodeTurnSubmission | void> | void;
+  /** The doctor said this engine consumes images on its input path. */
+  imageInput?: boolean;
+  onSend: (
+    message: string,
+    attachments?: readonly { blob_id: string; media_type: string }[],
+  ) => Promise<CodeTurnSubmission | void> | void;
   /**
    * Redirect the in-flight turn. Absent when the harness cannot steer, so a
    * mid-turn send stays on the queue path.
@@ -475,6 +485,7 @@ export function CodeComposer({
   onSteer?: (message: string) => Promise<void>;
   onInterrupt: () => Promise<void> | void;
 }) {
+  const { client } = useApp();
   const [draft, setDraft] = useState("");
   const [selectedModel, setSelectedModel] = useState(model ?? "");
   const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(
@@ -485,11 +496,13 @@ export function CodeComposer({
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
-  const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [imageError, setImageError] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const imagesRef = useRef(images);
-  imagesRef.current = images;
+  const images = useImageAttachments(
+    client,
+    sessionId ?? "code-composer",
+    sessionId ? async () => sessionId : undefined,
+    "code",
+  );
   const canSteer = onSteer !== undefined;
   const showQueued = queued || followUpQueued;
   const [pathItems, setPathItems] = useState<string[]>([]);
@@ -559,51 +572,33 @@ export function CodeComposer({
     setFollowUpQueued(false);
   }, [lastTurnBeganId]);
 
-  useEffect(() => {
-    return () => {
-      for (const image of imagesRef.current) {
-        revokePreview(image.previewUrl);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    setImages((current) => {
-      for (const image of current) revokePreview(image.previewUrl);
-      return [];
-    });
-    setImageError(null);
-  }, [sessionId]);
-
-  function attachImageFiles(files: readonly File[]) {
-    const rejection = imageAttachmentRejection(imagesRef.current, files);
-    if (rejection) {
-      setImageError(rejection);
-      return;
-    }
-    setImageError(null);
-    const now = new Date();
-    setImages((current) => [
-      ...current,
-      ...files.map((file) => localImageAttachment(file, now)),
-    ]);
-  }
-
-  function removeImage(id: string) {
-    setImages((current) => {
-      const found = current.find((image) => image.id === id);
-      if (found) revokePreview(found.previewUrl);
-      return withoutAttachment(current, id);
-    });
-  }
-
   async function submit() {
     const message = draft.trim();
     if (!message || disabled) return;
+    const pending = images.attachments.filter(
+      (item) => item.status === "queued" || item.status === "uploading",
+    );
+    if (pending.length > 0) {
+      setNotice({ text: "Wait for images to finish attaching." });
+      return;
+    }
+    if (images.attachments.some((item) => item.status === "failed")) {
+      setNotice({ text: "Remove or retry the images that failed to attach." });
+      return;
+    }
+    const attachments = images.attachments.flatMap((item) =>
+      item.attachmentId
+        ? [{ blob_id: item.attachmentId, media_type: item.mediaType ?? "image/png" }]
+        : [],
+    );
     setDraft("");
     setNotice(null);
     try {
-      const outcome = await onSend(message);
+      const outcome =
+        attachments.length > 0
+          ? await onSend(message, attachments)
+          : await onSend(message);
+      images.clear();
       if (outcome && outcome.kind === "queued") {
         setFollowUpQueued(true);
       }
@@ -690,22 +685,31 @@ export function CodeComposer({
             scopeKey={sessionId ?? "code-create"}
           />
         }
+        contextUsage={contextUsage}
         pathMentions={pathMentions}
         slash={slash}
-        images={{
-          items: images,
-          error: imageError,
-          unsupportedModel: null,
-          onAttachFiles: attachImageFiles,
-          onRemove: removeImage,
-          onRetry: () => undefined,
-        }}
-        files={{
-          items: [],
-          attaching: false,
-          onAttach: () => imageInputRef.current?.click(),
-          onRemove: () => undefined,
-        }}
+        images={
+          imageInput
+            ? {
+                items: images.attachments,
+                error: images.error,
+                unsupportedModel: null,
+                onAttachFiles: images.attachFiles,
+                onRemove: images.remove,
+                onRetry: images.retry,
+              }
+            : undefined
+        }
+        files={
+          imageInput
+            ? {
+                items: [],
+                attaching: false,
+                onAttach: () => imageInputRef.current?.click(),
+                onRemove: () => undefined,
+              }
+            : undefined
+        }
         onDraftChange={(value) => {
           setSteerError(null);
           setSteerStatus(null);
@@ -722,27 +726,20 @@ export function CodeComposer({
         steerPending={canSteer ? steerPending : false}
         steerStatus={canSteer ? steerStatus : null}
       />
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept={IMAGE_MEDIA_TYPES.join(",")}
-        multiple
-        className="hidden"
-        aria-label="Attach images"
-        onChange={(event) => {
-          const files = [...(event.target.files ?? [])];
-          event.target.value = "";
-          attachImageFiles(files);
-        }}
-      />
-      {images.length > 0 && (
-        <p
-          role="status"
-          className="text-muted-foreground mx-auto max-w-3xl pt-1 text-[11px]"
-        >
-          Code turns cannot carry images yet. Attached images stay in the
-          composer.
-        </p>
+      {imageInput && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept={IMAGE_MEDIA_TYPES.join(",")}
+          multiple
+          className="hidden"
+          aria-label="Attach images"
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])];
+            event.target.value = "";
+            images.attachFiles(files);
+          }}
+        />
       )}
       {notice && (
         <p
@@ -754,37 +751,4 @@ export function CodeComposer({
       )}
     </div>
   );
-}
-
-function previewFor(file: File): string | null {
-  return typeof URL.createObjectURL === "function"
-    ? URL.createObjectURL(file)
-    : null;
-}
-
-function revokePreview(url: string | null): void {
-  if (url && typeof URL.revokeObjectURL === "function") {
-    URL.revokeObjectURL(url);
-  }
-}
-
-/**
- * A chip the composer can show without publishing. The code-turn body is
- * `{ message, model? }` and rejects unknown fields, so these bytes never
- * leave the renderer.
- */
-function localImageAttachment(file: File, at: Date): ImageAttachment {
-  return {
-    id: crypto.randomUUID(),
-    name: imageAttachmentName(file, at),
-    byteLen: file.size,
-    uploadedBytes: file.size,
-    status: "ready",
-    previewUrl: previewFor(file),
-    attachmentId: null,
-    mediaType: file.type,
-    width: null,
-    height: null,
-    error: null,
-  };
 }

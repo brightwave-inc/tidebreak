@@ -121,7 +121,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             reasoning_levels: CapLevel::Unknown,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
-            image_input: CapLevel::Unknown,
+            image_input: CapLevel::Supported,
             slash_commands: CapLevel::Unknown,
         }
     }
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
-        assert_eq!(caps.image_input, CapLevel::Unknown);
+        assert_eq!(caps.image_input, CapLevel::Supported);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
     }
 

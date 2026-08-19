@@ -154,7 +154,7 @@ describe("CodeTranscript", () => {
     const seam = screen.getByRole("group", { name: "Turn finished" });
     expect(within(seam).getByText("· 2m 14s")).toBeInTheDocument();
     expect(within(seam).getByText(/2 files \+42 −7/)).toBeInTheDocument();
-    expect(within(seam).getByText("12k in / 3k out")).toBeInTheDocument();
+    expect(within(seam).queryByText(/in \//)).not.toBeInTheDocument();
   });
 
   it("says why a failed turn failed", () => {

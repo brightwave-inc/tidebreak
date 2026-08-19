@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 
 import type { ApiClient } from "./api";
-import { publishChatImage } from "./attachments";
+import { publishChatImage, publishCodeImage } from "./attachments";
 import { useComposerDrafts } from "./ComposerDrafts";
 import { hasNativeHost } from "./host";
 import {
@@ -129,6 +129,7 @@ export function useImageAttachments(
   client: ApiClient,
   draftKey: string,
   publishTarget?: () => Promise<string>,
+  scope: "chat" | "code" = "chat",
 ): ImageAttachmentControls {
   const attachments = useComposerDrafts(
     (state) => state.attachments[draftKey]?.images ?? NO_IMAGES,
@@ -164,13 +165,20 @@ export function useImageAttachments(
         onProgress: (uploadedBytes) =>
           update((current) => withUploadProgress(current, id, uploadedBytes)),
         signal,
+        path:
+          scope === "code"
+            ? (id) => `/code/sessions/${encodeURIComponent(id)}/attachments/images`
+            : undefined,
       });
     }
     // One IPC call with no cancellation seam, so a removal mid-flight is
     // honoured on the way out instead of interrupting it. The bytes are
     // published by then, but nothing references them, so the server's orphan
     // sweep reclaims them.
-    const published = await publishChatImage(chatId, file);
+    const published =
+      scope === "code"
+        ? await publishCodeImage(chatId, file)
+        : await publishChatImage(chatId, file);
     if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
     return published;
   }
@@ -208,7 +216,10 @@ export function useImageAttachments(
     const queued = files.map((file) => {
       const id = crypto.randomUUID();
       backing.files.set(id, file);
-      const previewUrl = URL.createObjectURL(file);
+      const previewUrl =
+        typeof URL.createObjectURL === "function"
+          ? URL.createObjectURL(file)
+          : null;
       backing.previews.set(id, previewUrl);
       return queuedImageAttachment(id, {
         name: imageAttachmentName(file, now),

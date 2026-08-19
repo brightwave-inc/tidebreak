@@ -32,6 +32,7 @@ export type CodeTranscriptItem =
       text: string;
       /** When the server accepted the turn, for the message footer's time. */
       createdAt: string;
+      attachments?: import("../generated/wire").CodeTurnAttachment[];
     }
   | {
       kind: "assistant";
@@ -210,6 +211,7 @@ export function applyAcceptedTurn(
     // Every accepted turn carries its own start, live or replayed, so the
     // prompt's timestamp never depends on when this client happened to see it.
     createdAt: turn.started_at,
+    attachments: turn.attachments ?? [],
   };
   const hasUser = state.items.some(
     (item) => item.kind === "user" && item.turnId === turn.id,
@@ -252,10 +254,13 @@ export function hydrateCodeTurns(
       };
     }
   }
+  const lastUsage =
+    [...turns].reverse().find((turn) => turn.usage)?.usage ?? next.lastUsage;
   const open = [...turns].reverse().find((turn) => turn.status === "running");
   if (open) {
     return {
       ...next,
+      lastUsage,
       busy: true,
       activeTurnId: open.id,
       turnStartedAt: open.started_at,
@@ -263,7 +268,7 @@ export function hydrateCodeTurns(
     };
   }
   if (turns.length > 0) {
-    return { ...next, lifecycle: next.lifecycle ?? "idle" };
+    return { ...next, lastUsage, lifecycle: next.lifecycle ?? "idle" };
   }
   return next;
 }
@@ -369,8 +374,11 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          items: [
-            ...finalizeStreaming(state.items, "assistant"),
+          assistantBuffer: "",
+          reasoningBuffer: "",
+          items: insertBeforeTurnBoundary(
+            finalizeStreaming(state.items, "assistant"),
+            state.activeTurnId,
             {
               kind: "tool",
               id: deps.nextId(),
@@ -383,7 +391,7 @@ export function reduceCodeSessionEvent(
               startedAt: framed.replayed ? null : deps.now(),
               durationMs: null,
             },
-          ],
+          ),
         },
         effects,
       };
@@ -421,15 +429,12 @@ export function reduceCodeSessionEvent(
           ...state,
           items: existing
             ? state.items
-            : [
-                ...state.items,
-                {
-                  kind: "approval",
-                  id: `approval:${approvalId}`,
-                  approvalId,
-                  state: "pending",
-                },
-              ],
+            : insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+                kind: "approval",
+                id: `approval:${approvalId}`,
+                approvalId,
+                state: "pending",
+              }),
         },
         effects,
       };
@@ -456,15 +461,12 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          items: [
-            ...state.items,
-            {
-              kind: "notice",
-              id: deps.nextId(),
-              level: event.level,
-              message: event.message,
-            },
-          ],
+          items: insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+            kind: "notice",
+            id: deps.nextId(),
+            level: event.level,
+            message: event.message,
+          }),
         },
         effects,
       };
@@ -485,15 +487,12 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          items: [
-            ...state.items,
-            {
-              kind: "steer",
-              id: deps.nextId(),
-              turnId: state.activeTurnId,
-              text: event.text,
-            },
-          ],
+          items: insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+            kind: "steer",
+            id: deps.nextId(),
+            turnId: state.activeTurnId,
+            text: event.text,
+          }),
         },
         effects,
       };
@@ -588,13 +587,84 @@ function upsertStreaming(
   nextId: () => string,
 ): CodeTranscriptItem[] {
   const last = items[items.length - 1];
-  if (last && last.kind === kind && last.streaming) {
+  if (
+    last &&
+    last.kind === kind &&
+    last.streaming &&
+    last.turnId === turnId
+  ) {
     return [...items.slice(0, -1), { ...last, text }];
   }
-  return [
-    ...items,
-    { kind, id: nextId(), turnId, text, streaming: true },
-  ];
+  const existing = lastIndexOfKindForTurn(items, kind, turnId);
+  if (existing !== -1) {
+    const prev = items[existing];
+    if (prev.kind !== kind) {
+      return insertBeforeTurnBoundary(items, turnId, {
+        kind,
+        id: nextId(),
+        turnId,
+        text,
+        streaming: true,
+      });
+    }
+    if (text === prev.text || prev.text.startsWith(text)) {
+      return items;
+    }
+    if (text.startsWith(prev.text)) {
+      const suffix = text.slice(prev.text.length);
+      if (suffix.trim() === "") return items;
+      const next = items[existing + 1];
+      if (!next || next.kind === "turn_boundary") {
+        return items.map((item, index) =>
+          index === existing ? { ...prev, text, streaming: true } : item,
+        );
+      }
+      return insertBeforeTurnBoundary(items, turnId, {
+        kind,
+        id: nextId(),
+        turnId,
+        text: suffix,
+        streaming: true,
+      });
+    }
+  }
+  if (text.trim() === "") return items;
+  return insertBeforeTurnBoundary(items, turnId, {
+    kind,
+    id: nextId(),
+    turnId,
+    text,
+    streaming: true,
+  });
+}
+
+function lastIndexOfKindForTurn(
+  items: readonly CodeTranscriptItem[],
+  kind: "assistant" | "reasoning",
+  turnId: string | null,
+): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === kind && item.turnId === turnId) return index;
+  }
+  return -1;
+}
+
+function insertBeforeTurnBoundary(
+  items: CodeTranscriptItem[],
+  turnId: string | null,
+  item: CodeTranscriptItem,
+): CodeTranscriptItem[] {
+  if (turnId) {
+    const boundary = items.findIndex(
+      (candidate) =>
+        candidate.kind === "turn_boundary" && candidate.turnId === turnId,
+    );
+    if (boundary !== -1) {
+      return [...items.slice(0, boundary), item, ...items.slice(boundary)];
+    }
+  }
+  return [...items, item];
 }
 
 function finalizeStreaming(
@@ -685,15 +755,12 @@ function upsertFileActivity(
     (item) => item.kind === "file_activity" && item.turnId === turnId,
   );
   if (index === -1) {
-    return [
-      ...items,
-      {
-        kind: "file_activity",
-        id,
-        turnId,
-        files: { [path]: { kind, diffstat } },
-      },
-    ];
+    return insertBeforeTurnBoundary(items, turnId, {
+      kind: "file_activity",
+      id,
+      turnId,
+      files: { [path]: { kind, diffstat } },
+    });
   }
   const existing = items[index];
   if (!existing || existing.kind !== "file_activity") return items;

@@ -177,6 +177,14 @@ pub struct SequencedCodeEventFrame {
     pub replayed: Option<bool>,
 }
 
+/// `GET /code/sessions/{id}/debug` — journal plus turn rows for a bug report.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+pub struct CodeSessionDebug {
+    pub session: CodeSessionSnapshot,
+    pub turns: Vec<CodeTurnSnapshot>,
+    pub events: Vec<SequencedCodeEventFrame>,
+}
+
 /// Doctor report for every registered engine adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct HarnessDoctorReport {

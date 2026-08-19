@@ -738,6 +738,7 @@ function CodeSessionPane({
   const animateStreaming = store((state) => state.animateStreaming);
   const connectionState = store((state) => state.connectionState);
   const lastTurnBeganId = store((state) => state.lastTurnBeganId);
+  const lastUsage = store((state) => state.lastUsage);
   // The reducer's own applied-event cursor is the activity signal the stall
   // timer wants: every delta, tool result, and boundary advances it.
   const lastSeq = store((state) => state.lastSeq);
@@ -885,7 +886,10 @@ function CodeSessionPane({
     [client],
   );
 
-  function send(message: string) {
+  function send(
+    message: string,
+    attachments?: readonly { blob_id: string; media_type: string }[],
+  ) {
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
     follow.armFollow();
@@ -893,7 +897,12 @@ function CodeSessionPane({
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
     return submitAcceptedTurn(store.getState().update, () =>
-      client.submitCodeTurn(session.id, message, model ?? undefined),
+      client.submitCodeTurn(
+        session.id,
+        message,
+        model ?? undefined,
+        attachments,
+      ),
     ).then((outcome) => {
       if (outcome.kind === "queued") setQueued(true);
       return outcome;
@@ -925,6 +934,7 @@ function CodeSessionPane({
         )}
         <CodeTranscript
           items={items}
+          sessionId={session.id}
           hydrated={hydrated}
           busy={busy}
           streamStalled={streamStalled}
@@ -968,6 +978,7 @@ function CodeSessionPane({
           queued={queued}
           lastTurnBeganId={lastTurnBeganId}
           slashCommands={doctorEntry?.commands}
+          imageInput={doctorEntry?.caps.image_input === "supported"}
           searchPaths={(query) =>
             client
               .listCodeWorkspaceTree(workspaceId, { query })
@@ -976,6 +987,16 @@ function CodeSessionPane({
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
           }
+          contextUsage={{
+            usage: lastUsage,
+            contextWindow: catalogModels.find(
+              (entry) => entry.id === model || entry.key === model,
+            )?.context_window,
+            modelName:
+              modelOptions.find((option) => option.id === model)?.label ??
+              model ??
+              undefined,
+          }}
           onSend={send}
           onSteer={steeringSupported ? steer : undefined}
           onInterrupt={interrupt}

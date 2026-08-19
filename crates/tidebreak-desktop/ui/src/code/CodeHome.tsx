@@ -8,8 +8,10 @@ import {
   EmptyContent,
   EmptyDescription,
   EmptyHeader,
+  EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -56,6 +58,12 @@ function CodeHomeBody() {
   }, [client, refresh]);
 
   const ready = doctor?.harnesses.some(isHarnessReady) ?? false;
+  const showRepos = loaded && repos.length > 0;
+  const showEmpty = loaded && repos.length === 0 && ready;
+  const showDoctor = Boolean(doctor && !ready);
+  // Repos resolve before the doctor. Until one of the three settled
+  // bodies can render, keep this slot filled so the empty state does not pop in.
+  const showLoading = !showRepos && !showEmpty && !showDoctor && !error;
 
   async function onRefresh() {
     setRefreshing(true);
@@ -75,8 +83,17 @@ function CodeHomeBody() {
         </p>
       </div>
       {error && <p className="text-sm text-critical">{error}</p>}
-      {!loaded && <p className="text-muted-foreground text-sm">Loading…</p>}
-      {doctor && !ready && (
+      {showLoading && (
+        <Empty role="status">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Spinner aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyTitle>Loading…</EmptyTitle>
+          </EmptyHeader>
+        </Empty>
+      )}
+      {showDoctor && doctor && (
         <section className="flex flex-col gap-3">
           <h2 className="text-lg font-semibold">Install a coding harness</h2>
           <p className="text-muted-foreground text-sm">
@@ -91,7 +108,7 @@ function CodeHomeBody() {
           />
         </section>
       )}
-      {ready && repos.length === 0 && loaded && (
+      {showEmpty && (
         // Nothing is registered, so the page has exactly one thing to say.
         // A "Repos" heading over an empty list, under a second heading that
         // repeats the same instruction, is two sections carrying one message.
@@ -109,7 +126,7 @@ function CodeHomeBody() {
           </EmptyContent>
         </Empty>
       )}
-      {ready && repos.length > 0 && (
+      {showRepos && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">Repos</h2>
