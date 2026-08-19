@@ -36,11 +36,14 @@ static bearer token from the operator file. The packaged desktop app stays a
 local Desktop-profile product: it embeds its own server and does not point at
 a remote deployment.
 
-A later member client can be a desktop connection mode (URL, token, TLS
-expectations, Settings panels that degrade on a member `403`) or a hosted web
-UI the deployment serves. Either one is a second product surface, not an
-omission in the current server. Auth beyond the static token file waits on
-gateway-derived identity.
+The first member client is now specified:
+[decision 47](decisions/0047-gateway-linked-hosting.md) is a desktop remote
+connection mode (URL, token, TLS except on loopback) with host authority
+degrading on a remote machine. A hosted web UI and a supervision-first
+mobile client remain later surfaces on that same wire. Auth beyond the
+static token file is sequenced there too: roster-provisioned tokens first,
+a gateway authenticator behind decision 6's credential-to-principal seam as
+the end state.
 
 ## A coworker that can work later
 
@@ -236,14 +239,12 @@ purpose:
   editing to the user's editor via the worktree path. An embedded editor is
   a heavyweight dependency with its own product surface; it needs demand
   evidence first.
-- **Chat–code convergence.** The end state is one surface with no mode
-  choice: one conversation concept with an optional workspace binding, where
-  a workspace-bound conversation behaves code-like and engines — external
-  harnesses and Tidebreak's internal loop alike — sit behind the adapter
-  contract and are selected per conversation. The two modes are built
-  shape-compatible so this stays a mechanical merge
-  ([record 30](decisions/0030-code-mode-separate-surface.md)); the
-  convergence itself is a future record on top of two proven models.
+- **Chat–code convergence.** The plan of record is
+  [decision 48](decisions/0048-one-interaction-model.md): five independently
+  useful steps, with code-mode structures as the merge survivor and chat
+  contributing the content model. The work is no longer parked as a future
+  record; what remains deferred is the implementation, and whether the
+  internal engine later becomes an external harness process.
 - **A per-repo worktree-location override.** Worktrees live under the
   Tidebreak data directory; toolchains that misbehave outside the repo's
   ancestry are the known cost, and the override waits for real instances of
