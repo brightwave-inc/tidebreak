@@ -1,12 +1,11 @@
 import type { ComponentPropsWithoutRef } from 'react';
-import { cn } from '@/lib/utils';
 
 /**
  * The Tidebreak mark, vendored from `assets/tidebreak-mark.svg` at the repo root
  * and flattened so it renders standalone (no `<defs>`/`<use>` indirection) and
  * inherits `currentColor`.
  */
-function TidebreakMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>) {
+function TidebreakMark({ className = '', ...props }: ComponentPropsWithoutRef<'svg'>) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -14,7 +13,7 @@ function TidebreakMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>)
       fill="currentColor"
       role="img"
       aria-label="Tidebreak"
-      className={cn('h-5 w-auto', className)}
+      className={`h-5 w-auto ${className}`}
       {...props}
     >
       <g transform="translate(0 640) scale(.1 -.1)">
@@ -28,18 +27,18 @@ function TidebreakMark({ className, ...props }: ComponentPropsWithoutRef<'svg'>)
 }
 
 export function TidebreakLogo({
-  className,
+  className = '',
   ...props
 }: ComponentPropsWithoutRef<'span'>) {
   return (
     <span
-      className={cn('inline-flex items-center gap-2 text-foreground', className)}
+      className={`inline-flex items-center gap-2 text-fd-foreground ${className}`}
       {...props}
     >
       <TidebreakMark />
-      <span className="text-[15px] leading-none tracking-tight">
-        <span className="font-semibold">Tidebreak</span>
-        <span className="ml-1.5 text-muted-foreground">Docs</span>
+      <span className="tidebreak-logo-wordmark leading-none">
+        <span>Tidebreak</span>
+        <span className="tidebreak-logo-context">Docs</span>
       </span>
     </span>
   );

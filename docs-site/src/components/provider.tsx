@@ -1,14 +1,30 @@
 'use client';
 
-import { ThemeProvider } from 'next-themes';
-import { SearchDialog } from '@/components/search';
+import { RootProvider } from 'fumadocs-ui/provider/next';
 import type { ReactNode } from 'react';
 
-export function Provider({ children }: { children: ReactNode }) {
+export function Provider({
+  children,
+  searchApi,
+}: {
+  children: ReactNode;
+  searchApi: string;
+}) {
   return (
-    <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+    <RootProvider
+      search={{
+        options: {
+          type: 'static',
+          api: searchApi,
+        },
+      }}
+      theme={{
+        attribute: 'class',
+        defaultTheme: 'system',
+        enableSystem: true,
+      }}
+    >
       {children}
-      <SearchDialog />
-    </ThemeProvider>
+    </RootProvider>
   );
 }
