@@ -67,6 +67,9 @@ pub(crate) async fn export_deliverable(
     host_access: State<'_, HostAccess>,
     request: ExportDeliverableRequest,
 ) -> Result<OutputExportResult, String> {
+    host_access
+        .require_local(crate::host_authority::Authority::NativeExport)
+        .await?;
     if request.operation_id.is_nil()
         || request.output_id.as_uuid().is_nil()
         || request.chat_id.is_nil()

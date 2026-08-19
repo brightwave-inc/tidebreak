@@ -79,6 +79,9 @@ pub(crate) async fn resolve_folder_access_request(
     state: State<'_, HostAccess>,
     request: ResolveFolderAccessRequest,
 ) -> Result<(), String> {
+    state
+        .require_local(crate::host_authority::Authority::ClientExecutor)
+        .await?;
     if request.chat_id.is_nil() || request.call_id.is_nil() {
         return Err("invalid folder-access request identity".to_owned());
     }

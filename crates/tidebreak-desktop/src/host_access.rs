@@ -30,6 +30,9 @@ pub(crate) struct HostAccess {
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,
     staged_folders: OnceCell<std::sync::Arc<dyn tidebreak_server::code_execution::StagedFolders>>,
+    /// Which machine this client is attached to. Host authority applies to the
+    /// local one only, so every native command consults this first.
+    remote: std::sync::Arc<crate::remote::RemoteAttachment>,
 }
 
 impl HostAccess {
@@ -37,6 +40,7 @@ impl HostAccess {
         app: AppHandle,
         data_dir: PathBuf,
         home_dir: PathBuf,
+        remote: std::sync::Arc<crate::remote::RemoteAttachment>,
     ) -> Result<Self, String> {
         let receipts = ReceiptStore::open(&data_dir)
             .map_err(|_| "could not open private client-execution receipts".to_owned())?;
@@ -52,7 +56,22 @@ impl HostAccess {
             control_plane: OnceCell::new(),
             receipts,
             staged_folders: OnceCell::new(),
+            remote,
         })
+    }
+
+    /// Refuse `authority` unless this client is attached to the local machine.
+    ///
+    /// The error is the bare stable reason code — see
+    /// [`crate::host_authority`] for why, and for the four codes.
+    pub(crate) async fn require_local(
+        &self,
+        authority: crate::host_authority::Authority,
+    ) -> Result<(), String> {
+        crate::host_authority::require_local_authority(
+            self.remote.current().await.as_ref(),
+            authority,
+        )
     }
 
     /// Install the server's per-turn exec staging registry.
@@ -548,6 +567,9 @@ pub(crate) async fn connect_folder(
     state: State<'_, HostAccess>,
     request: ConnectFolderRequest,
 ) -> Result<Option<ConnectedFolder>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let context = state.context(request.chat_id).await?;
     let _picker = state
         .picker
@@ -584,6 +606,9 @@ pub(crate) async fn list_connected_folders(
     state: State<'_, HostAccess>,
     chat_id: Uuid,
 ) -> Result<Vec<ConnectedFolder>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     connected_folders(&state, chat_id).await
 }
 
@@ -646,6 +671,9 @@ async fn connected_folders(
 pub(crate) async fn list_approved_folders(
     state: State<'_, HostAccess>,
 ) -> Result<Vec<ConnectedFolder>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     approved_folders(&state).await
 }
 
@@ -659,6 +687,9 @@ pub(crate) async fn list_approved_folders(
 pub(crate) async fn list_capability_consents(
     state: State<'_, HostAccess>,
 ) -> Result<Vec<tidebreak_server::consent::ConsentStatementSnapshot>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let result = state
         .broker
         .control(ControlRequest::ListGrantStatements)
@@ -782,6 +813,9 @@ pub(crate) async fn revoke_capability_consent(
     state: State<'_, HostAccess>,
     request: RevokeCapabilityConsentRequest,
 ) -> Result<bool, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let subject = match request.level {
         tidebreak_core::GrantLevel::Chat { chat_id } => GrantSubject::conversation(chat_id.0),
         tidebreak_core::GrantLevel::Project { project_id } => GrantSubject::project(project_id.0),
@@ -809,6 +843,9 @@ pub(crate) async fn connect_approved_folder(
     state: State<'_, HostAccess>,
     request: ConnectApprovedFolderRequest,
 ) -> Result<Option<ConnectedFolder>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     state.context(request.chat_id).await?;
     let chat_label = conversation_label(&state, request.chat_id).await?;
     let root = approved_roots(&state)
@@ -873,6 +910,9 @@ pub(crate) async fn grant_folder_capability(
     state: State<'_, HostAccess>,
     request: GrantFolderCapabilityRequest,
 ) -> Result<Option<bool>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let chat_label = conversation_label(&state, request.chat_id).await?;
     let root = connected_folders(&state, request.chat_id)
         .await?
@@ -923,6 +963,9 @@ pub(crate) async fn disconnect_folder(
     state: State<'_, HostAccess>,
     request: DisconnectFolderRequest,
 ) -> Result<bool, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let context = state.context(request.chat_id).await?;
     let _root_change = state.root_changes.lock().await;
     crate::client_execution::root_attachment_reconciliation::disconnect_root(
@@ -952,6 +995,9 @@ pub(crate) async fn forget_folder(
     state: State<'_, HostAccess>,
     request: ForgetFolderRequest,
 ) -> Result<bool, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let _root_change = state.root_changes.lock().await;
     let result = state
         .broker
@@ -995,6 +1041,9 @@ pub(crate) async fn purge_deleted_conversation_subject(
     state: State<'_, HostAccess>,
     request: PurgeDeletedConversationSubjectRequest,
 ) -> Result<bool, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     if request.chat_id.is_nil() {
         return Err("invalid conversation identity".to_owned());
     }
@@ -1159,6 +1208,9 @@ pub(crate) async fn pick_code_directory(
     app: AppHandle,
     state: State<'_, HostAccess>,
 ) -> Result<Option<String>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
     let _picker = state
         .picker
         .try_lock()

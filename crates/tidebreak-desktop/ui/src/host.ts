@@ -16,6 +16,45 @@ export type ConnectedFolder = {
 export type FolderAccessDecision = "allow" | "decline";
 export type OutputWritebackDecision = "allow" | "decline";
 
+/**
+ * A host capability that exists only on the machine this app runs on.
+ *
+ * While this client is attached to a remote machine, none of the four apply to
+ * the conversation you are looking at, and each command that needs one refuses
+ * rather than acting against the wrong host.
+ */
+export type HostAuthority =
+  | "folder_broker"
+  | "client_executor"
+  | "native_export"
+  | "computer_use";
+
+/**
+ * The stable reason each authority gives when it is unavailable, following the
+ * precedent `output_writeback_authority_unavailable` set. These strings are the
+ * contract with the native shell; the copy that reaches the user is the
+ * renderer's, derived from the authority rather than from the code.
+ */
+const AUTHORITY_BY_REASON: Record<string, HostAuthority> = {
+  folder_broker_authority_unavailable: "folder_broker",
+  client_executor_authority_unavailable: "client_executor",
+  native_export_authority_unavailable: "native_export",
+  computer_use_authority_unavailable: "computer_use",
+};
+
+/**
+ * Which authority a failed host command refused for, or `null` if it failed for
+ * some other reason.
+ *
+ * A refusal arrives as the bare reason code and nothing else, which is what
+ * separates it from the free-text errors these commands otherwise return.
+ */
+export function hostAuthorityRefusal(error: unknown): HostAuthority | null {
+  const reason = typeof error === "string" ? error : null;
+  if (reason === null) return null;
+  return AUTHORITY_BY_REASON[reason] ?? null;
+}
+
 export function hasNativeHost(): boolean {
   return isTauri();
 }

@@ -28,6 +28,7 @@ mod deep_link;
 mod deliverables;
 mod documents;
 mod host_access;
+mod host_authority;
 mod image_attachments;
 mod node_install;
 mod office_install;
@@ -703,15 +704,22 @@ pub fn run() {
             // (stderr-only if that file cannot be created).
             tidebreak_server::logging::init_logging(&data);
             let home = home_dir(&handle)?;
-            let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
-            app.manage(host_access);
-            // Registered before the server boots: `server_info` consults the
-            // attachment first, and a remote client must not wait on a local
-            // boot it is not using.
-            app.manage(Arc::new(remote::RemoteAttachment::new(
+            // Built before anything that reaches the host: `server_info`
+            // consults the attachment first, because a remote client must not
+            // wait on a local boot it is not using, and every host-authority
+            // command consults it to decide whether it may act at all.
+            let attachment = Arc::new(remote::RemoteAttachment::new(
                 &data,
                 channel::current().keychain_service(),
-            )));
+            ));
+            let host_access = host_access::HostAccess::new(
+                handle.clone(),
+                data.clone(),
+                home,
+                attachment.clone(),
+            )?;
+            app.manage(host_access);
+            app.manage(attachment);
 
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = boot_server(handle, &info_tx, store_tx, data.clone()).await {

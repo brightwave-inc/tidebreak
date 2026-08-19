@@ -237,6 +237,9 @@ pub(crate) async fn export_library_document(
     host_access: State<'_, HostAccess>,
     request: LibraryDocumentRequest,
 ) -> Result<bool, String> {
+    host_access
+        .require_local(crate::host_authority::Authority::NativeExport)
+        .await?;
     let (chat_id, document_id) =
         resolve_document_scope(&host_access, request.chat_id, request.document_id).await?;
     let _picker = host_access

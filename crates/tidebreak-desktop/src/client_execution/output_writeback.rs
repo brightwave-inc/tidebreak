@@ -53,6 +53,9 @@ pub(crate) async fn resolve_output_writeback_request(
     state: State<'_, HostAccess>,
     request: ResolveOutputWritebackRequest,
 ) -> Result<(), String> {
+    state
+        .require_local(crate::host_authority::Authority::ClientExecutor)
+        .await?;
     if request.chat_id.is_nil() || request.call_id.is_nil() {
         return Err("invalid output write-back request identity".to_owned());
     }
