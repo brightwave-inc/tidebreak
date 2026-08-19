@@ -29,10 +29,16 @@ afterEach(() => {
 
 describe("CodeSessionRegistry", () => {
   it("marks the session hydrated even when the snapshot cannot be read", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
     const openSocket = (
       after: number,
       onFrame: (frame: SequencedCodeEventFrame) => void,
-    ) => new FakeSocket(after, onFrame) as unknown as WebSocket;
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
 
     const store = acquireCodeSession("s1", openSocket, undefined, async () => {
       throw new Error("offline");
@@ -41,8 +47,12 @@ describe("CodeSessionRegistry", () => {
 
     await Promise.resolve();
     await Promise.resolve();
-    // The skeleton has to come down either way: a snapshot that never arrives
-    // must leave a transcript the reader can send into.
+    expect(store.getState().hydrated).toBe(false);
+    sockets[0]?.onopen?.();
+    await vi.runAllTimersAsync();
+    // The skeleton has to come down either way once the initial journal is
+    // quiet: a snapshot that never arrives must still leave a transcript the
+    // reader can send into.
     expect(store.getState().hydrated).toBe(true);
   });
 

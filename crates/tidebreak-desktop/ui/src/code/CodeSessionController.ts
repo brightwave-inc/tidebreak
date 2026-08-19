@@ -23,9 +23,14 @@ export type CodeSessionControllerOptions = {
   getAfter: () => number;
   /**
    * Deliver an ordered journal chunk. Replayed history is coalesced to one
-   * browser paint; live frames still arrive immediately.
+   * browser paint; live frames still arrive immediately. The boolean is true
+   * on the one delivery that should also reveal the initial transcript, so
+   * consumers can publish history and hydration in one state update.
    */
-  onEvents: (events: readonly SequencedCodeEventFrame[]) => void;
+  onEvents: (
+    events: readonly SequencedCodeEventFrame[],
+    initialViewSettled: boolean,
+  ) => void;
   onConnectionState: (state: CodeConnectionState) => void;
   /**
    * Snapshot of durable turns, applied once before the first socket opens so
@@ -33,12 +38,6 @@ export type CodeSessionControllerOptions = {
    */
   hydrateTurns?: () => Promise<CodeTurnSnapshot[]>;
   onHydrate?: (turns: CodeTurnSnapshot[]) => void;
-  /**
-   * The snapshot settled, whether it arrived or failed. The transcript hangs
-   * its skeleton on this rather than on `onHydrate`, so a session whose history
-   * could not be read still reaches a state the reader can send from.
-   */
-  onHydrateSettled?: () => void;
 };
 
 /**
@@ -73,6 +72,7 @@ export class CodeSessionController {
       }
     | null = null;
   private replayFlush: ReturnType<typeof setTimeout> | null = null;
+  private initialViewSettled = false;
 
   constructor(private readonly options: CodeSessionControllerOptions) {}
 
@@ -91,7 +91,6 @@ export class CodeSessionController {
         if (this.disposed) return;
       }
     }
-    this.options.onHydrateSettled?.();
     this.connect();
   }
 
@@ -182,11 +181,24 @@ export class CodeSessionController {
 
   private flushReplay(): void {
     const frames = this.takeReplay();
-    if (!this.disposed && frames.length > 0) this.options.onEvents(frames);
+    const settled = this.settleInitialView();
+    if (!this.disposed && (frames.length > 0 || settled)) {
+      this.options.onEvents(frames, settled);
+    }
+  }
+
+  private settleInitialView(): boolean {
+    if (this.disposed || this.initialViewSettled) return false;
+    this.initialViewSettled = true;
+    return true;
   }
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
+    // A failed initial socket must not strand the reader behind a skeleton.
+    // Publish any replay already received, then expose the durable snapshot
+    // while the normal reconnect loop keeps trying in the background.
+    this.flushReplay();
     this.options.onConnectionState("reconnecting");
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = nextReconnectDelay(this.reconnectDelayMs);
@@ -211,7 +223,7 @@ export class CodeSessionController {
           return;
         }
         const replay = this.takeReplay();
-        this.options.onEvents([...replay, frame]);
+        this.options.onEvents([...replay, frame], this.settleInitialView());
       });
     } catch {
       this.scheduleReconnect();
@@ -223,6 +235,15 @@ export class CodeSessionController {
       if (this.disposed || this.socket !== socket) return;
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.options.onConnectionState("live");
+      // The protocol has no explicit replay-complete frame. If this session
+      // has no journal rows, the same quiet window used for a replay burst is
+      // the only boundary needed before revealing the transcript.
+      if (!this.initialViewSettled && this.replayFlush === null) {
+        this.replayFlush = setTimeout(() => {
+          this.replayFlush = null;
+          this.flushReplay();
+        }, CODE_REPLAY_SETTLE_MS);
+      }
     };
     socket.onerror = () => {
       if (this.disposed || this.socket !== socket) return;

@@ -154,14 +154,16 @@ function makeClient() {
     ),
     listCodeSessionTurns: vi.fn(async () => [TURN]),
     listCodeApprovals: vi.fn(async () => []),
-    openCodeEvents: vi.fn(
-      () =>
-        ({
-          close() {},
-          addEventListener() {},
-          removeEventListener() {},
-        }) as unknown as WebSocket,
-    ),
+    openCodeEvents: vi.fn(() => {
+      const socket = {
+        onopen: null as WebSocket["onopen"],
+        close() {},
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as WebSocket;
+      queueMicrotask(() => socket.onopen?.(new Event("open")));
+      return socket;
+    }),
     getCodeRepo: vi.fn(async () => REPO),
     archiveCodeWorkspace: vi.fn(async () => ({
       ...WORKSPACE,

@@ -183,11 +183,11 @@ export function fileActivityItemId(turnId: string | null): string {
 }
 
 /**
- * The durable snapshot has settled, whether it arrived or failed.
+ * The durable snapshot and initial journal replay have settled.
  *
- * The skeleton comes down either way: a snapshot that could not be read leaves
- * an empty transcript the reader can send into, not a placeholder that never
- * resolves.
+ * The skeleton comes down even if either source was empty or unavailable: the
+ * reader still reaches a transcript they can send into, but never watches a
+ * historical turn rebuild itself over several paints.
  */
 export function markCodeSessionHydrated(
   state: CodeSessionState,
