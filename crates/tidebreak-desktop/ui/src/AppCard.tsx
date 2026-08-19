@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import type { ResultEntry } from "@/api";
 import { Button } from "@/components/ui/button";
+import { TRANSCRIPT_RESULT_CARD_FRAME } from "@/TranscriptResultCard";
 
 /**
  * The cards a phase hangs under itself for the apps it published.
@@ -36,11 +37,11 @@ function AppCard({ entry }: { entry: ResultEntry }) {
   const navigate = useNavigate();
   const appId = entry.targetId;
   return (
-    <div className="bg-background flex max-w-full min-w-0 items-center gap-3 rounded-lg border px-4 py-3 text-left shadow-sm">
+    <div className={TRANSCRIPT_RESULT_CARD_FRAME}>
       <span className="grid size-9 shrink-0 place-items-center" aria-hidden="true">
         <LayoutGrid className="text-icon-blue size-5" />
       </span>
-      <span className="flex min-w-0 flex-col">
+      <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-sm font-semibold">{entry.label}</span>
         {entry.meta && (
           <span className="text-muted-foreground text-xs tabular-nums">

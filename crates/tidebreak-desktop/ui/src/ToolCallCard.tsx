@@ -11,9 +11,9 @@ import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import type { ToolTone } from "./ToolStatusIcon";
-import { ScrollableContainer } from "./ScrollableContainer";
+import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
 import { ToolCardShell } from "./ToolCardShell";
+import { ToolOutputPreview } from "./ToolOutputPreview";
 import { toolPreviewHeadline, toolPreviewPresentation } from "./ToolPreview";
 import { useChatSessionStore } from "./ChatSessionStore";
 
@@ -318,11 +318,14 @@ export function ToolCommandCard({
             />
           </>
         }
-        defaultExpanded={running}
+        trailing={
+          <ToolStatusIcon tone={presentation.tone} className="size-3.5" />
+        }
+        defaultExpanded={running || presentation.tone === "failed"}
       >
         {tabbed ? (
           <Tabs defaultValue="output">
-            <TabsList className="flex w-full items-center justify-start gap-1 border-b px-1">
+            <TabsList className="flex w-full items-center justify-start gap-1 px-0">
               <TabsTrigger value="command" className="py-1 text-xs capitalize">
                 command
               </TabsTrigger>
@@ -330,33 +333,39 @@ export function ToolCommandCard({
                 output
               </TabsTrigger>
             </TabsList>
-            <div className="p-1">
+            <div className="pt-1">
               <TabsContent value="command" className="mt-0">
-                <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                  {command.detail}
-                </ScrollableContainer>
+                <ToolOutputPreview
+                  text={command.detail}
+                  collapsedLines={12}
+                  label="Command"
+                  bare
+                />
               </TabsContent>
               <TabsContent value="output" className="mt-0">
                 {output === null ? (
-                  <p className="text-muted-foreground flex items-center gap-1.5 p-2 text-xs">
+                  <p className="text-muted-foreground flex items-center gap-1.5 py-1 text-xs">
                     <Spinner className="size-3.5" aria-hidden="true" />
                     Waiting for output…
                   </p>
                 ) : null}
                 {output !== null && (
-                  <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-                    {output}
-                  </ScrollableContainer>
+                  <ToolOutputPreview
+                    text={output}
+                    collapsedLines={12}
+                    bare
+                  />
                 )}
               </TabsContent>
             </div>
           </Tabs>
         ) : (
-          <div className="p-1">
-            <ScrollableContainer className="bg-muted text-muted-foreground rounded-md p-2 text-xs whitespace-pre-wrap">
-              {command.detail}
-            </ScrollableContainer>
-          </div>
+          <ToolOutputPreview
+            text={command.detail}
+            collapsedLines={12}
+            label="Command"
+            bare
+          />
         )}
       </ToolCardShell>
       {/* Outside the collapsible body on purpose: a card that reports a

@@ -478,7 +478,8 @@ describe("activity phases", () => {
     ).toEqual(["Searched sources", "Read a file", "Searched the web"]);
   });
 
-  it("surfaces a command card outside the collapsed region", () => {
+  it("surfaces a command row outside the collapsed region", async () => {
+    const user = userEvent.setup();
     list([
       { id: "t1", role: "tool", callId: "c1", name: "search", status: "completed" },
       {
@@ -494,6 +495,9 @@ describe("activity phases", () => {
     // Collapsed: the rail lists nothing, but the command is still readable.
     expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
     expect(screen.getByText("cargo build")).toBeInTheDocument();
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /cargo build/ }));
     expect(screen.getByText("Done")).toBeInTheDocument();
   });
 
@@ -996,7 +1000,12 @@ describe("actionable tool results", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Open output deck.pptx" }));
+    const outputCard = screen.getByRole("button", {
+      name: "Open output deck.pptx",
+    });
+    expect(outputCard).toHaveClass("w-full", "max-w-md");
+
+    await user.click(outputCard);
     await waitFor(() => {
       expect(router.state.location.search).toMatchObject({
         tabs: "outputs.output-1",
@@ -1148,9 +1157,12 @@ describe("actionable tool results", () => {
     await user.click(screen.getByRole("button", { name: "Created an app" }));
     expect(screen.getAllByText("Sentry triage")).toHaveLength(1);
 
-    await user.click(
-      screen.getByRole("button", { name: "Open app Sentry triage" }),
-    );
+    const openApp = screen.getByRole("button", {
+      name: "Open app Sentry triage",
+    });
+    expect(openApp.parentElement).toHaveClass("w-full", "max-w-md");
+
+    await user.click(openApp);
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/apps/app-1");
     });

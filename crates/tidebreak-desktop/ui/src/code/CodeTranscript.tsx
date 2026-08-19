@@ -1,6 +1,5 @@
 import {
   Check,
-  ChevronDown,
   CircleSlash,
   FileCode,
   FileSearch,
@@ -19,6 +18,7 @@ import { AssistantWorkingIndicator } from "@/AssistantWorkingIndicator";
 import { MessageFooter } from "@/MessageFooter";
 import { isolatedCard } from "@/PendingCard";
 import { ThinkingAccordion } from "@/ThinkingAccordion";
+import { ToolCardShell } from "@/ToolCardShell";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
@@ -448,7 +448,6 @@ export function CodeToolCard({
   const [expanded, setExpanded] = useState(
     status === "failed" || status === "denied",
   );
-  const bodyId = useId();
   const verb = toolVerb(detail, status);
   const subject = toolSubject(detail, name);
   const hasOutput = preview.trim().length > 0;
@@ -469,32 +468,22 @@ export function CodeToolCard({
     // byte of its own output, and a transcript of thirty of them would announce
     // each one atomically, over and over. The outcome rides the line's own name
     // instead, and the turn announcer says when the work as a whole ends.
-    <div className="max-w-prose [overflow-anchor:none]">
-      <button
-        type="button"
-        className={cn(
-          "-mx-1.5 flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-[13.5px] hover:bg-muted/50",
-          FOCUS_RING_TIGHT,
-          HOVER_TINT,
-        )}
-        aria-expanded={expanded || showTail}
-        aria-controls={hasOutput ? bodyId : undefined}
-        onClick={() => {
-          onReveal?.();
-          setExpanded((current) => !current);
-        }}
-      >
-        <span className="text-muted-foreground shrink-0 [&>svg]:size-3.5">
-          {toolIcon(detail)}
-        </span>
-        <span className="shrink-0 font-semibold">{verb}</span>
-        <MiddleTruncate
-          text={subject}
-          // The subject is the line's whole point, so it takes the free space
-          // and keeps a floor: a narrow column truncates it, never erases it.
-          className="text-muted-foreground min-w-[6ch] flex-1 font-mono"
-        />
-        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+    <ToolCardShell
+      icon={toolIcon(detail)}
+      title={
+        <>
+          <span className="shrink-0 font-semibold">{verb}</span>
+          <MiddleTruncate
+            text={subject}
+            // The subject is the line's whole point, so it takes the free space
+            // and keeps a floor: a narrow column truncates it, never erases it.
+            className="text-muted-foreground min-w-[6ch] flex-1 font-mono"
+          />
+        </>
+      }
+      titleClassName="flex items-center gap-2"
+      trailing={
+        <>
           {status === "running" ? elapsed : duration}
           {status !== "running" && exitCode !== null && (
             <span>exit {exitCode}</span>
@@ -503,31 +492,26 @@ export function CodeToolCard({
               fact for everyone else, in the same place in the line. */}
           <span className="sr-only">{status}</span>
           <StatusGlyph status={status} />
-          <ChevronDown
-            className={cn(
-              "text-muted-foreground/50 size-3.5 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
-              !(expanded || showTail) && "-rotate-90",
-            )}
-            aria-hidden="true"
-          />
-        </span>
-      </button>
-      {showTail && (
-        <div id={bodyId}>
-          <StreamingTail text={preview} />
-        </div>
-      )}
+        </>
+      }
+      expanded={expanded || showTail}
+      onExpandedChange={(next) => {
+        onReveal?.();
+        setExpanded(next);
+      }}
+      label={`${verb} ${subject} ${status}`}
+      announce={false}
+    >
+      {showTail && <StreamingTail text={preview} />}
       {showExpanded && (
-        <div id={bodyId}>
-          <ToolOutputPreview
-            text={preview}
-            collapsedLines={12}
-            bare
-            onToggle={onReveal}
-          />
-        </div>
+        <ToolOutputPreview
+          text={preview}
+          collapsedLines={12}
+          bare
+          onToggle={onReveal}
+        />
       )}
-    </div>
+    </ToolCardShell>
   );
 }
 

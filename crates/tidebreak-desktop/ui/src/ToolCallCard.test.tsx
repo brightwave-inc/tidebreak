@@ -132,19 +132,68 @@ describe("ToolCommandCard", () => {
     expect(done).toContain('aria-expanded="false"');
   });
 
-  it("carries the outcome in a badge rather than a second line of prose", () => {
-    for (const [status, badge] of [
-      ["running", "Running…"],
-      ["waiting_approval", "Waiting for approval"],
-      ["completed", "Done"],
-      ["failed", "Failed"],
-      ["cancelled", "Not run"],
-    ] as const) {
-      const markup = renderToStaticMarkup(
-        <ToolCommandCard name="exec" status={status} preview={preview} result={null} />,
-      );
-      expect(visibleText(markup)).toContain(badge);
-    }
+  it("keeps settled metadata in the expanded detail", () => {
+    const completed = visibleText(
+      renderToStaticMarkup(
+        <ToolCommandCard
+          name="exec"
+          status="completed"
+          preview={preview}
+          result={null}
+        />,
+      ),
+    );
+    const waiting = visibleText(
+      renderToStaticMarkup(
+        <ToolCommandCard
+          name="exec"
+          status="waiting_approval"
+          preview={preview}
+          result={null}
+        />,
+      ),
+    );
+    const cancelled = visibleText(
+      renderToStaticMarkup(
+        <ToolCommandCard
+          name="exec"
+          status="cancelled"
+          preview={preview}
+          result={null}
+        />,
+      ),
+    );
+
+    expect(completed).not.toContain("Done");
+    expect(waiting).not.toContain("Waiting for approval");
+    expect(cancelled).not.toContain("Not run");
+
+    // Active and failed commands start open, so their status is already part
+    // of the detail the reader needs now.
+    expect(
+      visibleText(
+        renderToStaticMarkup(
+          <ToolCommandCard
+            name="exec"
+            status="running"
+            preview={preview}
+            result={null}
+          />,
+        ),
+      ),
+    ).toContain("Running…");
+    expect(
+      visibleText(
+        renderToStaticMarkup(
+          <ToolCommandCard
+            name="exec"
+            status="failed"
+            preview={preview}
+            result={null}
+          />,
+        ),
+      ),
+    ).toContain("Failed");
   });
 
   it("says a degraded run is degraded without needing the card opened", () => {
@@ -331,7 +380,7 @@ describe("outcome badges", () => {
     expect(badge({ ...ran, exitCode: null, timedOut: true }, "failed")).toContain(
       "Timed out",
     );
-    expect(badge(ran, "completed")).toContain("Done");
+    expect(badge(ran, "completed")).not.toContain("Done");
     // No result to be specific about yet.
     expect(badge(null, "failed")).toContain("Failed");
   });
