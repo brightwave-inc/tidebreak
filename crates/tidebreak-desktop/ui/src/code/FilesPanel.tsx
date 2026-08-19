@@ -125,14 +125,10 @@ export function FilesPanel({
     return openDirs.has(path);
   }
 
-  // The drawn rows, in document order: what the arrow keys walk.
+  // The drawn rows, in document order: what the arrow keys walk. `isOpen` is a
+  // fresh closure every render, so the state it reads is the dep set.
   const rows = useMemo(
-    () =>
-      flattenVisibleTree(nodes, (path) => {
-        if (forcedOpen.has(path)) return true;
-        if (!path.includes("/")) return !closedTop.has(path);
-        return openDirs.has(path);
-      }),
+    () => flattenVisibleTree(nodes, isOpen),
     [nodes, forcedOpen, closedTop, openDirs],
   );
   // Tab reaches the tree once; the arrows move inside it. The tab stop follows
@@ -441,8 +437,8 @@ function TreeRow({
         if (event.target === event.currentTarget) onFocusRow(node.path);
       }}
       onClick={(event) => {
-        // Only the row that was clicked acts; the click still bubbles up
-        // through every ancestor row on its way to the tree.
+        // A click inside a nested row would otherwise reach every folder above
+        // it on the way out and collapse each one.
         event.stopPropagation();
         onFocusRow(node.path);
         onActivate(node);
