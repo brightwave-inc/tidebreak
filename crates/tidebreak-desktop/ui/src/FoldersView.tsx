@@ -42,7 +42,7 @@ import {
 } from "./FolderAccess";
 import { verbLabel } from "./settings/PermissionsPanel";
 import { useRefreshSignals } from "./RefreshSignals";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { hostErrorMessage } from "@/remoteMachine";
 
 /**
  * A chat's connected folders: the directories the native host may reach on
@@ -92,7 +92,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       // A panel that could not load is a standing state, not a transient
       // failure, so it stays on the page. Every action below reports through a
       // toast instead.
-      setError(friendlyErrorMessage(err, "The folders could not be loaded."));
+      setError(hostErrorMessage(err, "The folders could not be loaded."));
     }
   }
 
@@ -125,7 +125,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       const connected = await open();
       if (connected) useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "The folder could not be changed."));
+      toast.error(hostErrorMessage(err, "The folder could not be changed."));
     } finally {
       useNativePickerLatch.getState().release(holder);
       setWorking(false);
@@ -170,7 +170,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
       toast.error(
-        friendlyErrorMessage(err, "The folder could not be disconnected."),
+        hostErrorMessage(err, "The folder could not be disconnected."),
       );
     } finally {
       setWorking(false);
@@ -196,7 +196,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       await forgetFolder(folder.rootId);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "The folder could not be forgotten."));
+      toast.error(hostErrorMessage(err, "The folder could not be forgotten."));
     } finally {
       setWorking(false);
     }
@@ -223,7 +223,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       await revokeCapabilityConsent(statement);
       useRefreshSignals.getState().signal("folderAccess");
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "The access could not be revoked."));
+      toast.error(hostErrorMessage(err, "The access could not be revoked."));
     } finally {
       setWorking(false);
     }

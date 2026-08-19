@@ -5,6 +5,7 @@ import {
   resolveFolderAccessRequest,
   type FolderAccessDecision,
 } from "./host";
+import { hostErrorMessage } from "./remoteMachine";
 import {
   PICKER_BUSY_MESSAGE,
   useNativePickerLatch,
@@ -79,7 +80,10 @@ export function useFolderAccessRequests(
       await resolveFolderAccessRequest(startedChatId, callId, decision);
     } catch (err) {
       if (stillOpen(startedChatId)) {
-        setErrors((current) => ({ ...current, [callId]: String(err) }));
+        setErrors((current) => ({
+          ...current,
+          [callId]: hostErrorMessage(err, "That could not be done."),
+        }));
       }
     } finally {
       finishResolving(callId, startedChatId);
@@ -94,7 +98,10 @@ export function useFolderAccessRequests(
       await client.cancel(startedChatId, turnId);
     } catch (err) {
       if (stillOpen(startedChatId)) {
-        setErrors((current) => ({ ...current, [callId]: String(err) }));
+        setErrors((current) => ({
+          ...current,
+          [callId]: hostErrorMessage(err, "That could not be done."),
+        }));
       }
     } finally {
       finishResolving(callId, startedChatId);

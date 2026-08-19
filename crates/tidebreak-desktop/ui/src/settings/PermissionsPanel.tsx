@@ -8,6 +8,7 @@ import type {
   RendererToolName,
 } from "../api";
 import { useConfirm } from "../components/ConfirmDialog";
+import { hostErrorMessage } from "@/remoteMachine";
 import {
   grantFolderCapability,
   listCapabilityConsents,
@@ -23,7 +24,6 @@ import {
 } from "../NativePickerLatch";
 import { useRefreshSignals } from "../RefreshSignals";
 import { Button } from "@/components/ui/button";
-import { friendlyErrorMessage } from "@/lib/utils";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 
 // The "what may the agent do without asking" surface, rendered from the
@@ -445,7 +445,7 @@ export function PermissionsPanel({
       if (granted !== null) await reload();
     } catch (caught) {
       toast.error(
-        friendlyErrorMessage(caught, "The folder could not be granted access."),
+        hostErrorMessage(caught, "The folder could not be granted access."),
       );
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.grantFolderCapability);

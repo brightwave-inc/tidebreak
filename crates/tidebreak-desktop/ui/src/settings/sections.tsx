@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   SquareTerminal,
   Mic,
+  MonitorSmartphone,
   Terminal,
   Waypoints,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import { CodeExecutionPanel } from "./CodeExecutionPanel";
 import { CompactionPanel } from "./CompactionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
+import { MachinePanel } from "./MachinePanel";
 import { PermissionsPanel } from "./PermissionsPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
@@ -290,6 +292,16 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: ShieldCheck,
     iconClass: "text-icon-green",
     Component: PermissionsSection,
+  },
+  // Last among the substantive sections: attaching to another machine changes
+  // what every section above it is configuring, so a reader meets them in
+  // their default meaning first.
+  {
+    path: "machine",
+    label: "Machine",
+    icon: MonitorSmartphone,
+    iconClass: "text-icon-cyan",
+    Component: MachinePanel,
   },
   {
     path: "appearance",
