@@ -65,6 +65,13 @@ export class CodeSessionController {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private replayFrames: SequencedCodeEventFrame[] = [];
+  private replayDelta:
+    | {
+        type: "assistant_delta" | "reasoning_delta";
+        seq: number;
+        chunks: string[];
+      }
+    | null = null;
   private replayFlush: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: CodeSessionControllerOptions) {}
@@ -93,6 +100,7 @@ export class CodeSessionController {
     this.disposed = true;
     this.cancelReplayFlush();
     this.replayFrames = [];
+    this.replayDelta = null;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -111,7 +119,31 @@ export class CodeSessionController {
    * once.
    */
   private queueReplay(frame: SequencedCodeEventFrame): void {
-    this.replayFrames.push(frame);
+    // Keep text fragments as chunks until the run ends. Repeatedly appending
+    // to one growing JS string makes a character-at-a-time replay quadratic.
+    if (
+      frame.event.type === "assistant_delta" ||
+      frame.event.type === "reasoning_delta"
+    ) {
+      const previous = this.replayDelta;
+      if (
+        previous?.type === frame.event.type &&
+        previous.seq + 1 === frame.seq
+      ) {
+        previous.seq = frame.seq;
+        previous.chunks.push(frame.event.text);
+      } else {
+        this.flushReplayDelta();
+        this.replayDelta = {
+          type: frame.event.type,
+          seq: frame.seq,
+          chunks: [frame.event.text],
+        };
+      }
+    } else {
+      this.flushReplayDelta();
+      this.replayFrames.push(frame);
+    }
     // The protocol marks replay frames but has no separate end marker. Treat a
     // short quiet window as the boundary, resetting it for every frame. With
     // rendering withheld, even a large local journal drains inside this
@@ -129,8 +161,20 @@ export class CodeSessionController {
     this.replayFlush = null;
   }
 
+  private flushReplayDelta(): void {
+    const delta = this.replayDelta;
+    if (!delta) return;
+    this.replayFrames.push({
+      seq: delta.seq,
+      replayed: true,
+      event: { type: delta.type, text: delta.chunks.join("") },
+    });
+    this.replayDelta = null;
+  }
+
   private takeReplay(): SequencedCodeEventFrame[] {
     this.cancelReplayFlush();
+    this.flushReplayDelta();
     const frames = this.replayFrames;
     this.replayFrames = [];
     return frames;
