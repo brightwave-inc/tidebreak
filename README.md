@@ -11,26 +11,18 @@
 
 <p align="center">
   <a href="https://www.tidebreak.io">Website</a> ·
-  <a href="https://www.tidebreak.io/docs/">User documentation</a> ·
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest">Latest release</a> ·
+  <a href="#downloads">Download</a> ·
+  <a href="https://www.tidebreak.io/docs/quickstart/">Quickstart</a> ·
+  <a href="https://www.tidebreak.io/docs/">Documentation</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
-  <img src="https://img.shields.io/badge/status-pre--1.0-orange.svg" alt="Status: pre-1.0">
-  <img src="https://img.shields.io/badge/built%20with-Rust-dea584.svg?logo=rust&logoColor=white" alt="Built with Rust">
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest"><img src="https://img.shields.io/github/v/release/brightwave-inc/tidebreak?label=release&color=informational" alt="Latest release"></a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000.svg?logo=apple&logoColor=white" alt="Download the latest macOS release"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe"><img src="https://img.shields.io/badge/Windows-x86__64-0078D4.svg?logo=windows&logoColor=white" alt="Download the latest x86_64 Windows release"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe"><img src="https://img.shields.io/badge/Windows-ARM64-0078D4.svg?logo=windows&logoColor=white" alt="Download the latest ARM64 Windows release"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage"><img src="https://img.shields.io/badge/Linux%20AppImage-x86__64-FCC624.svg?logo=linux&logoColor=black" alt="Download the latest x86_64 Linux AppImage"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage"><img src="https://img.shields.io/badge/Linux%20AppImage-ARM64-FCC624.svg?logo=linux&logoColor=black" alt="Download the latest ARM64 Linux AppImage"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb"><img src="https://img.shields.io/badge/Linux%20.deb-x86__64-A81D33.svg?logo=debian&logoColor=white" alt="Download the latest x86_64 Linux Debian package"></a>
-  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb"><img src="https://img.shields.io/badge/Linux%20.deb-ARM64-A81D33.svg?logo=debian&logoColor=white" alt="Download the latest ARM64 Linux Debian package"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/brightwave-inc/tidebreak/ci.yml?branch=main&amp;style=flat-square&amp;logo=githubactions&amp;logoColor=white&amp;label=CI" alt="CI status"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases/latest"><img src="https://img.shields.io/github/v/release/brightwave-inc/tidebreak?style=flat-square&amp;logo=github&amp;label=release" alt="Latest release"></a>
+  <a href="https://github.com/brightwave-inc/tidebreak/releases"><img src="https://img.shields.io/github/downloads/brightwave-inc/tidebreak/total?style=flat-square&amp;logo=github&amp;label=downloads" alt="Total downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/brightwave-inc/tidebreak?style=flat-square&amp;label=license" alt="Apache-2.0 license"></a>
+  <a href="https://www.tidebreak.io/docs/roadmap/"><img src="https://img.shields.io/badge/status-pre--1.0-F59E0B?style=flat-square" alt="Project status: pre-1.0"></a>
 </p>
 
 <p align="center">
@@ -67,6 +59,32 @@ the headless CLI.
 > migrated. Windows and Linux packages ship for x86_64 and ARM64; some native
 > capabilities remain macOS-only and are reported as unavailable in the app.
 
+## Downloads
+
+| Platform | Latest packages | Notes |
+| --- | --- | --- |
+| **macOS** | [Universal `.dmg`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg) | Apple Silicon and Intel; signed and notarized |
+| **Windows** | [x86_64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe) · [ARM64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe) | Windows may show a SmartScreen warning while installers are not Authenticode-signed |
+| **Linux** | x86_64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-x86_64.deb) · ARM64 [AppImage](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.AppImage) / [`.deb`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-linux-aarch64.deb) | Built on Ubuntu 22.04; use a compatible glibc-based distribution |
+
+Every package has a `.sha256` sidecar on the release. See the
+[installation guide](https://www.tidebreak.io/docs/installation/) for checksum
+commands, Linux runtime requirements, update behavior, and platform-specific
+limitations.
+
+## Quick start
+
+1. Install the latest desktop build above and open Tidebreak.
+2. In **Settings → Providers**, sign in with a ChatGPT Plus or Pro subscription,
+   add a provider API key, or configure a local Ollama/OpenAI-compatible model.
+3. Start a chat, attach a file with `@` or connect a folder, choose a permission
+   mode, and ask for a concrete output: a cleaned spreadsheet, a deck, a report,
+   a chart, or a working app.
+4. Open files from the **Outputs** panel and export the version you want.
+
+The [full quickstart](https://www.tidebreak.io/docs/quickstart/) walks through a
+first file-backed task and explains the approval prompts you will see.
+
 ## Features
 
 | Area | What it does |
@@ -80,17 +98,54 @@ the headless CLI.
 | **Extensions** | Built-in skills for Word, PDF, PowerPoint, spreadsheets, and charts; add your own. MCP servers over stdio or HTTP. REST APIs from an OpenAPI document, for local apps. Ask once for a mini-app and keep it in the sidebar. |
 | **Code mode** | Experimental. A second surface that drives coding agents (Claude Code, Codex CLI, opencode, Grok CLI) in isolated git worktrees: native approvals, per-turn diffs, and a reviewable change flow. |
 
+## Data, privacy, and security
+
+Tidebreak does not require a Tidebreak account or route work through a hosted
+Tidebreak service. Chats, attached documents, and outputs live in the local app
+profile, and provider credentials live in the operating system's credential
+store.
+
+Local-first does not automatically mean offline. The selected model provider may
+receive relevant prompts and document content; search providers receive search
+queries; configured APIs and MCP servers receive the calls made to them; and
+explicit web fetches reach the requested sites. Use a local model, avoid external
+integrations, and select an offline execution policy when a workflow must remain
+on the machine.
+
+Permission modes govern what the agent may do without asking, while the selected
+execution backend and per-chat network policy govern where code runs and what it
+can reach. Start with the [permission guide](https://www.tidebreak.io/docs/permission-modes/)
+and [code-execution guide](https://www.tidebreak.io/docs/code-execution/). Report
+vulnerabilities privately through [`SECURITY.md`](SECURITY.md), not a public
+issue.
+
 ## Run from source
 
-Install the pinned Rust toolchain, [pnpm](https://pnpm.io), the
-[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), and CMake
-(used by the local voice engine). Then, from the repository root:
+Install [rustup](https://rustup.rs/) (which picks up the repository's pinned Rust
+toolchain), Node.js 22, [pnpm](https://pnpm.io), the
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), the Tauri
+CLI, and CMake (used by the local voice engine):
+
+```sh
+cargo install tauri-cli --version "^2"
+```
+
+Then, from the repository root on macOS or Linux:
 
 ```sh
 scripts/dev.sh
 ```
 
-That installs the desktop UI dependencies and opens the app. See
+The script checks the prerequisites, installs the desktop UI dependencies, and
+opens the app. On Windows, or without Bash, run the equivalent commands:
+
+```sh
+cd crates/tidebreak-desktop
+pnpm --dir ui install
+cargo tauri dev
+```
+
+See
 [`CONTRIBUTING.md`](CONTRIBUTING.md#development) for formatting, tests, and
 platform notes, or
 [`crates/tidebreak-desktop/README.md`](crates/tidebreak-desktop/README.md) for
@@ -126,7 +181,18 @@ maintainer documentation.
 Tidebreak is built in the open. Bug reports, focused fixes, and design
 discussion are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before
 opening a substantial change. Decisions that future work must preserve live in
-[`docs/decisions/`](docs/decisions).
+[`docs/decisions/`](docs/decisions), and all participation is covered by the
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
+## Support
+
+- Read the [troubleshooting guide](https://www.tidebreak.io/docs/troubleshooting/)
+  for installation, provider, execution, and local-state problems.
+- [Open a bug report](https://github.com/brightwave-inc/tidebreak/issues/new?template=bug-report.yml)
+  with a reproducible case and diagnostics scrubbed of sensitive data.
+- [Request a feature](https://github.com/brightwave-inc/tidebreak/issues/new?template=feature-request.yml)
+  by describing the workflow and desired outcome.
+- Follow [`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
 
 ## License
 
