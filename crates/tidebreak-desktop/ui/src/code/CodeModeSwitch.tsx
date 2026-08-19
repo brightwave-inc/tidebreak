@@ -32,12 +32,22 @@ export function CodeModeSwitch() {
           {
             value: "chat",
             label: "Chat",
-            icon: <MessageSquare className="size-3.5 shrink-0" aria-hidden />,
+            icon: (
+              <MessageSquare
+                className={`${value === "chat" ? "text-icon-blue" : ""} size-3.5 shrink-0`}
+                aria-hidden
+              />
+            ),
           },
           {
             value: "code",
             label: "Code",
-            icon: <FolderGit2 className="size-3.5 shrink-0" aria-hidden />,
+            icon: (
+              <FolderGit2
+                className={`${value === "code" ? "text-icon-violet" : ""} size-3.5 shrink-0`}
+                aria-hidden
+              />
+            ),
           },
         ]}
       />

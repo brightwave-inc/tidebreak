@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import { isRendererToolName, type RendererToolName } from "./api";
+import { cn } from "./lib/utils";
 
 /**
  * The icon for a tool, derived only from its allowlisted renderer name.
@@ -67,6 +68,39 @@ const TOOL_ICONS: Record<RendererToolName, LucideIcon> = {
   other: Wrench,
 };
 
+/**
+ * Capability color is categorical, not status. Keep routine reads, lists,
+ * plans, and commands neutral; reserve color for the smaller set of actions
+ * where the capability boundary itself is useful to notice at a glance.
+ */
+const TOOL_ICON_TONES: Record<RendererToolName, string> = {
+  search: "text-icon-cyan",
+  list_documents: "text-muted-foreground",
+  read_document: "text-muted-foreground",
+  read_tool_result: "text-muted-foreground",
+  web_search: "text-icon-cyan",
+  web_extract: "text-icon-cyan",
+  read_delegated_file: "text-muted-foreground",
+  read_file: "text-muted-foreground",
+  list_dir: "text-muted-foreground",
+  write_file: "text-icon-green",
+  write_output_to_connected_folder: "text-icon-green",
+  request_folder_access: "text-icon-amber",
+  connect_folder: "text-icon-amber",
+  list_connected_folders: "text-muted-foreground",
+  list_folder: "text-muted-foreground",
+  read_connected_file: "text-muted-foreground",
+  import_connected_file: "text-icon-green",
+  ask_user_questions: "text-icon-rose",
+  exit_plan_mode: "text-muted-foreground",
+  update_task_plan: "text-muted-foreground",
+  spawn_sandbox_agent: "text-icon-violet",
+  wait_for_agents: "text-muted-foreground",
+  exec: "text-muted-foreground",
+  create_app: "text-icon-blue",
+  other: "text-muted-foreground",
+};
+
 export function ToolIcon({
   name,
   className,
@@ -74,6 +108,7 @@ export function ToolIcon({
   name: string;
   className?: string;
 }) {
-  const Icon = isRendererToolName(name) ? TOOL_ICONS[name] : TOOL_ICONS.other;
-  return <Icon className={className} />;
+  const safeName = isRendererToolName(name) ? name : "other";
+  const Icon = TOOL_ICONS[safeName];
+  return <Icon className={cn(TOOL_ICON_TONES[safeName], className)} />;
 }

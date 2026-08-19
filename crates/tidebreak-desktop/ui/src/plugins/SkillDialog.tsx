@@ -73,7 +73,7 @@ export function SkillDialog({
           </div>
 
           <div className="flex flex-col gap-2 pr-28">
-            <div className="grid size-10 place-items-center rounded-lg border bg-muted text-muted-foreground">
+            <div className="text-icon-amber grid size-10 place-items-center">
               <Sparkles className="size-5" aria-hidden="true" />
             </div>
             <DialogTitle className="flex items-baseline gap-2">

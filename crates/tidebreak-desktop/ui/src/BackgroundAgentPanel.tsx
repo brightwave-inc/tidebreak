@@ -194,7 +194,7 @@ function BackgroundAgentDetail({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="shrink-0 px-4 pt-4">
         <div className="flex items-start gap-2.5">
-          <div className="grid size-7 shrink-0 place-items-center rounded-lg border bg-muted text-muted-foreground">
+          <div className="text-icon-violet grid size-7 shrink-0 place-items-center">
             <Bot className="size-4" aria-hidden="true" />
           </div>
           <div className="min-w-0 flex-1">

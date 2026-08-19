@@ -86,7 +86,7 @@ function CodeHomeBody() {
       {showLoading && (
         <Empty role="status">
           <EmptyHeader>
-            <EmptyMedia variant="icon">
+            <EmptyMedia variant="icon" className="text-muted-foreground">
               <Spinner aria-hidden="true" />
             </EmptyMedia>
             <EmptyTitle>Loading…</EmptyTitle>

@@ -55,7 +55,7 @@ export function AgentsPanel({
         </div>
       ) : (
         <div className="flex flex-col items-center gap-2 p-8 text-center">
-          <Bot className="size-6 text-muted-foreground" aria-hidden="true" />
+          <Bot className="text-icon-violet size-6" aria-hidden="true" />
           <p className="text-sm font-medium">No background agents yet</p>
           <p className="text-sm text-muted-foreground">
             Ask for something to be worked on in the background and its agent

@@ -108,7 +108,7 @@ export function AppsView({
         ) : !hasApps ? (
           <Empty>
             <EmptyHeader>
-              <EmptyMedia variant="icon">
+              <EmptyMedia variant="icon" className="text-icon-blue">
                 <LayoutGrid />
               </EmptyMedia>
               <EmptyTitle>No apps yet</EmptyTitle>
@@ -135,7 +135,10 @@ export function AppsView({
                   <span className="min-w-0 flex-1 truncate">{app.name}</span>
                   {app.granted && (
                     <Badge variant="outline" className="shrink-0 gap-1">
-                      <ShieldCheck className="size-3" aria-hidden="true" />
+                      <ShieldCheck
+                        className="text-success size-3"
+                        aria-hidden="true"
+                      />
                       Granted
                     </Badge>
                   )}

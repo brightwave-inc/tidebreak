@@ -224,7 +224,7 @@ export function OutputsView({
         ) : !hasOutputs ? (
           <Empty>
             <EmptyHeader>
-              <EmptyMedia variant="icon">
+              <EmptyMedia variant="icon" className="text-icon-green">
                 <FileOutputIcon />
               </EmptyMedia>
               <EmptyTitle>No outputs yet</EmptyTitle>

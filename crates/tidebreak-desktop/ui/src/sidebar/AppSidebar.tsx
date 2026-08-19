@@ -31,6 +31,9 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
   const chatsError = useChatListStore((state) => state.chatsError);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
+  const appsActive = pathname === "/apps" || pathname.startsWith("/apps/");
+  const pluginsActive =
+    pathname === "/plugins" || pathname.startsWith("/plugins/");
 
   return (
     <SidebarFrame>
@@ -43,14 +46,20 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
             — so each is a full page of its own rather than a tab beside one. */}
         <RouteButton
           label="Apps"
-          icon={<LayoutGrid />}
-          active={pathname === "/apps" || pathname.startsWith("/apps/")}
+          icon={
+            <LayoutGrid className={appsActive ? "text-icon-blue" : undefined} />
+          }
+          active={appsActive}
           onClick={() => void navigate({ to: "/apps" })}
         />
         <RouteButton
           label="Plugins"
-          icon={<Puzzle />}
-          active={pathname === "/plugins" || pathname.startsWith("/plugins/")}
+          icon={
+            <Puzzle
+              className={pluginsActive ? "text-icon-violet" : undefined}
+            />
+          }
+          active={pluginsActive}
           onClick={() => void navigate({ to: "/plugins" })}
         />
       </div>

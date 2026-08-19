@@ -92,7 +92,10 @@ export function AppConsentSheet({
                 </span>
                 {binding.granted && (
                   <span className="text-muted-foreground flex items-center gap-1 text-xs">
-                    <ShieldCheck className="size-3" aria-hidden="true" />
+                    <ShieldCheck
+                      className="text-success size-3"
+                      aria-hidden="true"
+                    />
                     granted
                   </span>
                 )}
@@ -113,7 +116,10 @@ export function AppConsentSheet({
               {binding.access !== null && (
                 <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs">
-                    <FolderOpen className="size-3 shrink-0" aria-hidden="true" />
+                    <FolderOpen
+                      className="size-3 shrink-0"
+                      aria-hidden="true"
+                    />
                     Read files and folders
                   </span>
                   {binding.access === "read_write" && (
@@ -130,7 +136,10 @@ export function AppConsentSheet({
                     key={operationId}
                     className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs"
                   >
-                    <Globe className="size-3 shrink-0" aria-hidden="true" />
+                    <Globe
+                      className="size-3 shrink-0"
+                      aria-hidden="true"
+                    />
                     <span className="truncate font-mono">{operationId}</span>
                   </li>
                 ))}
