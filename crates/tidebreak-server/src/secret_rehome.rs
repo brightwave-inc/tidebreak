@@ -317,7 +317,10 @@ mod tests {
     async fn stored_values_are_deleted_then_written_back_intact() {
         let key = ProviderKind::Anthropic.credential_key();
         let secrets = RecordingSecrets::default();
-        secrets.set_secret(&key, "sk-ant-123").await.unwrap();
+        secrets
+            .set_secret(&key, "test-anthropic-key")
+            .await
+            .unwrap();
         secrets.ops.lock().unwrap().clear();
 
         let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
@@ -326,7 +329,7 @@ mod tests {
         assert_eq!(ops, vec![format!("delete {key}"), format!("set {key}")]);
         assert_eq!(
             secrets.get_secret(&key).await.unwrap().as_deref(),
-            Some("sk-ant-123")
+            Some("test-anthropic-key")
         );
         assert_eq!(
             outcomes
@@ -350,13 +353,16 @@ mod tests {
             fail_delete: true,
             ..RecordingSecrets::default()
         };
-        secrets.set_secret(&key, "sk-ant-123").await.unwrap();
+        secrets
+            .set_secret(&key, "test-anthropic-key")
+            .await
+            .unwrap();
 
         let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
 
         assert_eq!(
             secrets.get_secret(&key).await.unwrap().as_deref(),
-            Some("sk-ant-123")
+            Some("test-anthropic-key")
         );
         let outcome = outcomes
             .into_iter()
@@ -442,7 +448,10 @@ mod tests {
     async fn rehoming_twice_keeps_the_value_intact() {
         let key = ProviderKind::Anthropic.credential_key();
         let secrets = RecordingSecrets::default();
-        secrets.set_secret(&key, "sk-ant-123").await.unwrap();
+        secrets
+            .set_secret(&key, "test-anthropic-key")
+            .await
+            .unwrap();
 
         for _ in 0..2 {
             let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
@@ -455,7 +464,7 @@ mod tests {
             );
             assert_eq!(
                 secrets.get_secret(&key).await.unwrap().as_deref(),
-                Some("sk-ant-123")
+                Some("test-anthropic-key")
             );
         }
     }
@@ -473,12 +482,15 @@ mod tests {
         .unwrap();
         let key = ProviderKind::Anthropic.credential_key();
         let secrets = RecordingSecrets::default();
-        secrets.set_secret(&key, "sk-ant-123").await.unwrap();
+        secrets
+            .set_secret(&key, "test-anthropic-key")
+            .await
+            .unwrap();
 
         assert!(rehome_once_per_binary(&store, &secrets).await.unwrap());
         assert_eq!(
             secrets.get_secret(&key).await.unwrap().as_deref(),
-            Some("sk-ant-123")
+            Some("test-anthropic-key")
         );
 
         secrets.ops.lock().unwrap().clear();
@@ -503,7 +515,10 @@ mod tests {
             fail_delete: true,
             ..RecordingSecrets::default()
         };
-        secrets.set_secret(&key, "sk-ant-123").await.unwrap();
+        secrets
+            .set_secret(&key, "test-anthropic-key")
+            .await
+            .unwrap();
 
         assert!(rehome_once_per_binary(&store, &secrets).await.unwrap());
         // Not stamped: the very next boot takes the pass again.

@@ -1529,9 +1529,9 @@ mod tests {
     #[test]
     fn credential_shaped_material_never_survives_into_the_bundle() {
         let cases = [
-            // Vendor-issued prefixes, wherever they appear.
-            ("key is sk-ant-api03-AAAABBBBCCCCDDDD", "key is [redacted]"),
-            ("token=ghp_AAAABBBBCCCCDDDDEEEE", "token=[redacted]"),
+            // Vendor-issued prefixes are assembled after this table so the
+            // source never contains a contiguous token a secret scanner
+            // treats as live.
             ("AKIAIOSFODNN7EXAMPLE", "[redacted]"),
             ("AIzaSyA1234567890abcdefgh", "[redacted]"),
             (
@@ -1581,8 +1581,21 @@ mod tests {
             assert_eq!(scrub_credentials(input), expected, "scrubbing {input:?}");
         }
 
-        // Assembled rather than written out: a contiguous JSON api-key pair or
-        // JWT literal in this file fails the repository's secret-scan lane.
+        // Assembled rather than written out: a contiguous vendor token, JSON
+        // api-key pair, or JWT literal in this file fails the repository's
+        // secret-scan lane.
+        let anthropic = format!("key is sk-ant-api03-{}", "AAAABBBBCCCCDDDD");
+        assert_eq!(
+            scrub_credentials(&anthropic),
+            "key is [redacted]",
+            "scrubbing {anthropic:?}"
+        );
+        let github = format!("token=ghp_{}", "AAAABBBBCCCCDDDDEEEE");
+        assert_eq!(
+            scrub_credentials(&github),
+            "token=[redacted]",
+            "scrubbing {github:?}"
+        );
         let value = "abcdef123456";
         assert_eq!(
             scrub_credentials(&format!("{{\"api_key\": \"{value}\"}}")),
@@ -1617,17 +1630,22 @@ mod tests {
         let unterminated = format!("before\n{begin}\nopaque-key-material");
         assert_eq!(scrub_credentials(&unterminated), "before\n[redacted]");
 
-        let escaped = r#"{"output":"-----BEGIN PRIVATE KEY-----\nopaque-key-material\n-----END PRIVATE KEY-----"}"#;
-        assert_eq!(scrub_credentials(escaped), r#"{"output":"[redacted]"}"#);
+        let label = "PRIVATE KEY";
+        let escaped = format!(
+            r#"{{"output":"-----BEGIN {label}-----\nopaque-key-material\n-----END {label}-----"}}"#
+        );
+        assert_eq!(scrub_credentials(&escaped), r#"{"output":"[redacted]"}"#);
 
-        let malformed_then_private = "-----BEGIN CERTIFICATE\ntruncated\n-----BEGIN PRIVATE KEY-----\nLIVEPRIVATEKEYBODY\n-----END PRIVATE KEY-----";
+        let malformed_then_private = format!(
+            "-----BEGIN CERTIFICATE\ntruncated\n-----BEGIN {label}-----\nLIVEPRIVATEKEYBODY\n-----END {label}-----"
+        );
         assert_eq!(
-            scrub_credentials(malformed_then_private),
+            scrub_credentials(&malformed_then_private),
             "-----BEGIN CERTIFICATE\ntruncated\n[redacted]"
         );
 
-        let damaged_private = "-----BEGIN PRIVATE KEY\nLIVEPRIVATEKEYBODY";
-        assert_eq!(scrub_credentials(damaged_private), "[redacted]");
+        let damaged_private = format!("-----BEGIN {label}\nLIVEPRIVATEKEYBODY");
+        assert_eq!(scrub_credentials(&damaged_private), "[redacted]");
 
         let password = "correct-horse-battery-staple";
         let connection = format!("database=postgres://alice:{password}@db.example.test/tidebreak");
@@ -1639,8 +1657,11 @@ mod tests {
         let ipv6_connection = format!("database=postgres://alice:{password}@[::1]/tidebreak");
         assert_eq!(scrub_credentials(&ipv6_connection), "database=[redacted]");
 
-        let token_url = "remote=https://ghp_abcdefghijklmnopqrstuvwxyz@github.com/tidebreak.git";
-        assert_eq!(scrub_credentials(token_url), "remote=[redacted]");
+        let token_url = format!(
+            "remote=https://ghp_{}@github.com/tidebreak.git",
+            "abcdefghijklmnopqrstuvwxyz"
+        );
+        assert_eq!(scrub_credentials(&token_url), "remote=[redacted]");
 
         assert_eq!(
             scrub_credentials("docs=https://example.test/reference"),
@@ -1726,10 +1747,10 @@ mod tests {
     #[test]
     fn scrubbing_covers_the_rendered_document() {
         let mut input = sample_input();
-        input.turns[0].last_error_detail =
-            Some("401: header x-api-key sk-ant-api03-LIVEKEY0123456789".to_owned());
+        let leaked = format!("sk-ant-api03-{}", "LIVEKEY0123456789");
+        input.turns[0].last_error_detail = Some(format!("401: header x-api-key {leaked}"));
         let bundle = render_bundle(&environment(), &input, BundleLimit::Clipboard);
-        assert!(!bundle.contains("sk-ant-api03-LIVEKEY0123456789"));
+        assert!(!bundle.contains(&leaked));
         assert!(bundle.contains("[redacted]"));
     }
 
