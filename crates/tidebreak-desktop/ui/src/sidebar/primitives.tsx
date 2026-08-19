@@ -121,7 +121,10 @@ function SidebarResizeHandle({
         }
       }}
     >
-      <div className="absolute top-0 right-1 bottom-0 w-[0.5px] bg-border transition-all group-hover:w-px group-hover:translate-x-[0.5px] group-hover:bg-foreground/35 group-hover:delay-75 group-data-[dragging]:bg-foreground/75" />
+      {/* The hit target straddles the rail edge. Keep its rule off the idle
+          surface so it cannot show through a neighboring card's rounded
+          corner; reveal it only while the resize affordance is engaged. */}
+      <div className="absolute top-0 bottom-0 left-1/2 w-[0.5px] -translate-x-1/2 bg-border opacity-0 transition-all group-hover:w-px group-hover:bg-foreground/35 group-hover:opacity-100 group-hover:delay-75 group-focus-visible:opacity-100 group-data-[dragging]:bg-foreground/75 group-data-[dragging]:opacity-100" />
       <div className="absolute top-1/2 right-0 h-6 w-2 -translate-y-1/2 cursor-col-resize rounded-full border-[0.5px] border-border bg-background opacity-0 shadow transition duration-200 group-hover:opacity-100 group-hover:delay-75 group-data-[dragging]:opacity-100 group-data-[dragging]:border-foreground/10 group-data-[dragging]:bg-foreground" />
     </div>
   );
