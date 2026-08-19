@@ -445,6 +445,7 @@ mod windows_tests {
     use super::{spawn_process_tree, ProcessTreeChild};
 
     const DESCENDANT_TIMEOUT: Duration = Duration::from_secs(10);
+    const PID_PUBLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
     #[tokio::test]
     async fn terminating_a_process_tree_kills_its_descendant() {
@@ -464,11 +465,17 @@ mod windows_tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("descendant.pid");
         let powershell = powershell_path();
+        let ping =
+            PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set on Windows"))
+                .join("System32")
+                .join("ping.exe");
         let pid_literal = format!("'{}'", pid_file.to_string_lossy().replace('\'', "''"));
+        let ping_literal = format!("'{}'", ping.to_string_lossy().replace('\'', "''"));
+        // Nested PowerShell startup regularly exceeded the old 10s pid wait on
+        // a loaded runner. `ping.exe -t` is a lighter long-lived descendant.
         let script = format!(
-            "$child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') \
-             -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command',\
-             'Start-Sleep -Seconds 120') -PassThru; \
+            "$child = Start-Process -FilePath {ping_literal} \
+             -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; \
              [IO.File]::WriteAllText({pid_literal}, $child.Id.ToString(), [Text.UTF8Encoding]::new($false)); \
              Wait-Process -Id $child.Id"
         );
@@ -484,8 +491,8 @@ mod windows_tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = spawn_process_tree(&mut command).unwrap();
-        let pid = wait_for_pid(&pid_file).await;
+        let mut child = spawn_process_tree(&mut command).unwrap();
+        let pid = wait_for_pid(&pid_file, &mut child).await;
         let descendant = open_process(pid);
         assert_eq!(
             wait_status(&descendant, Duration::ZERO),
@@ -498,8 +505,8 @@ mod windows_tests {
         (child, descendant)
     }
 
-    async fn wait_for_pid(path: &Path) -> u32 {
-        let deadline = Instant::now() + DESCENDANT_TIMEOUT;
+    async fn wait_for_pid(path: &Path, child: &mut ProcessTreeChild) -> u32 {
+        let deadline = Instant::now() + PID_PUBLISH_TIMEOUT;
         loop {
             if let Ok(value) = tokio::fs::read_to_string(path).await {
                 if let Ok(pid) = value.trim().trim_start_matches('\u{feff}').trim().parse() {
@@ -507,8 +514,12 @@ mod windows_tests {
                 }
             }
             assert!(
+                child.try_wait().ok().flatten().is_none(),
+                "PowerShell ended before publishing its descendant pid"
+            );
+            assert!(
                 Instant::now() < deadline,
-                "PowerShell descendant pid was not published within {DESCENDANT_TIMEOUT:?}"
+                "PowerShell descendant pid was not published within {PID_PUBLISH_TIMEOUT:?}"
             );
             sleep(Duration::from_millis(25)).await;
         }

@@ -2466,7 +2466,9 @@ async fn local_cancellation_accounts_usage_observed_before_stream_drop() {
 /// then snapshot the totals into the cancelled receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_cancellation_finalization_survives_accounting_failure_past_execution_lease() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // Inner waits already spend up to 9s. 10s left no slack for SQLite setup
+    // on a loaded runner.
+    tokio::time::timeout(Duration::from_secs(30), async {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(
             DbStore::connect(&format!(
