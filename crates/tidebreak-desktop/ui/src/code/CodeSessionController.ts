@@ -111,7 +111,31 @@ export class CodeSessionController {
    * once.
    */
   private queueReplay(frame: SequencedCodeEventFrame): void {
-    this.replayFrames.push(frame);
+    const previous = this.replayFrames[this.replayFrames.length - 1];
+    if (
+      previous?.replayed === true &&
+      previous.seq + 1 === frame.seq &&
+      (previous.event.type === "assistant_delta" ||
+        previous.event.type === "reasoning_delta") &&
+      frame.event.type === previous.event.type
+    ) {
+      // Some engines emit reasoning one character at a time. A saved Grok
+      // turn can therefore contain tens of thousands of adjacent delta rows.
+      // Replaying each row preserves no extra presentation state: the reducer
+      // appends the same text to the same open bubble. Fold the run in place,
+      // retaining the newest sequence cursor so reconnect still resumes after
+      // every durable row represented by this compact frame.
+      this.replayFrames[this.replayFrames.length - 1] = {
+        ...frame,
+        replayed: true,
+        event: {
+          type: frame.event.type,
+          text: previous.event.text + frame.event.text,
+        },
+      };
+    } else {
+      this.replayFrames.push(frame);
+    }
     // The protocol marks replay frames but has no separate end marker. Treat a
     // short quiet window as the boundary, resetting it for every frame. With
     // rendering withheld, even a large local journal drains inside this
