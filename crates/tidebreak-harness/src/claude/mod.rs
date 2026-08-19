@@ -182,7 +182,10 @@ mod tests {
     #[test]
     fn fixture_replay_plain_text() {
         let (events, unrecognized) = replay("plain-text");
-        assert!(unrecognized > 0, "hook/status events must be counted");
+        assert_eq!(
+            unrecognized, 0,
+            "captured hook/status metadata is recognized protocol noise"
+        );
         assert!(events
             .iter()
             .any(|event| matches!(event, HarnessEvent::SessionStarted { .. })));

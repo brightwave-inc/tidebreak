@@ -218,7 +218,18 @@ impl OpencodeStreamParser {
             }
             "permission.asked" => self.parse_permission_asked(&props),
             "permission.replied" => self.parse_permission_replied(&props),
-            "server.connected" | "server.heartbeat" => Vec::new(),
+            "server.connected"
+            | "server.heartbeat"
+            | "catalog.updated"
+            | "integration.updated"
+            | "plugin.added"
+            | "reference.updated"
+            | "session.diff"
+            | "session.updated" => {
+                // Known catalog/session broadcasts with no normalized
+                // transcript state. They are recognized no-ops.
+                Vec::new()
+            }
             other => {
                 self.count_unrecognized(other, event);
                 Vec::new()

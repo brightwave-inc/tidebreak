@@ -217,6 +217,20 @@ impl CodexStreamParser {
                 self.last_usage = usage_from(params.get("tokenUsage"));
                 Vec::new()
             }
+            "account/rateLimits/updated"
+            | "hook/completed"
+            | "hook/started"
+            | "mcpServer/startupStatus/updated"
+            | "remoteControl/status/changed"
+            | "serverRequest/resolved"
+            | "thread/started"
+            | "thread/status/changed"
+            | "thread/goal/cleared" => {
+                // Known app-server state notifications that do not change the
+                // normalized transcript. Treating them as unknown made every
+                // healthy turn look like protocol drift.
+                Vec::new()
+            }
             other => {
                 self.count_unrecognized(other, value);
                 Vec::new()
