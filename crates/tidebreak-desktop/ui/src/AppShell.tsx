@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -43,7 +43,6 @@ import { Logomark } from "./Logomark";
 import { ManagedGate } from "./ManagedGate";
 import { resolvedRoleKey } from "./ModelSelection";
 import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
-import { useSyncSidebarWidthCssVar } from "./sidebar/primitives";
 import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
@@ -132,9 +131,7 @@ export function AppShell() {
   const desktopNavigation = useDesktopNavigation();
   const zoom = useInterfaceZoom();
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
-  // The expanded rail width is published by the shell, not the rail itself, so
-  // the titlebar can size to it while the rail is mounted.
-  useSyncSidebarWidthCssVar();
+  const sidebarWidth = useUiStore((state) => state.sidebarWidth);
   // Read at keydown rather than subscribed to: which mode a shortcut fires in
   // is the route's answer, and the shell has no other reason to re-render on
   // every navigation.
@@ -689,7 +686,17 @@ export function AppShell() {
           restartForUpdate: onRestartForUpdate,
         }}
       >
-        <div className={`app-shell${nativeTitlebar ? " with-titlebar" : ""}`}>
+        <div
+          className={`app-shell${nativeTitlebar ? " with-titlebar" : ""}`}
+          // Publish this as part of the shell's first render. An effect that
+          // queries for `.app-shell` can run while the boot or managed gate is
+          // still showing, then never retry when the shell finally mounts.
+          style={
+            {
+              "--sidebar-expanded-width": `${sidebarWidth}px`,
+            } as CSSProperties
+          }
+        >
           {confirmDialog}
           <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
           {nativeTitlebar && !sidebarCollapsed && (
