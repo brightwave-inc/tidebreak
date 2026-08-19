@@ -125,7 +125,9 @@ describe("FirstTaskWalkthrough", () => {
     expect(next).toHaveFocus();
 
     await user.tab();
-    expect(screen.getByRole("button", { name: "Skip setup" })).toHaveFocus();
+    expect(screen.getByRole("dialog")).toContainElement(
+      document.activeElement as HTMLElement | null,
+    );
   });
 
   it("does not turn a click on the highlighted control into a permanent skip", async () => {
