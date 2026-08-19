@@ -6793,7 +6793,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/react-bootstrap/dom-helpers.git
 - License text: `LICENSE` ([L-1b0a9ba95a67](#l-1b0a9ba95a67))
 
-### dompurify 3.4.8
+### dompurify 3.4.14
 
 - License: `(MPL-2.0 OR Apache-2.0)`
 - Repository: git://github.com/cure53/DOMPurify.git
