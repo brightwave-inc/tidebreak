@@ -60,28 +60,32 @@ describe("PrCard", () => {
   it("shows the no-commits state", () => {
     renderState(BASE);
     expect(screen.getByText("No commits")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Commit" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Push" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
+    expect(screen.getByText(/No local commits yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("enables commit when the tree is dirty", async () => {
     const { onCommit } = renderState({ ...BASE, dirty: true });
     expect(screen.getByText("Uncommitted")).toBeInTheDocument();
-    const commit = screen.getByRole("button", { name: "Commit" });
+    const commit = screen.getByRole("button", { name: "Commit changes" });
     expect(commit).toBeEnabled();
     await userEvent.setup().click(commit);
     expect(onCommit).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("button", { name: "Push branch" }),
+    ).not.toBeInTheDocument();
   });
 
   it("enables push when commits are unpushed", async () => {
     const { onPush } = renderState({ ...BASE, unpushed: true, ahead: 1 });
     expect(screen.getByText("Unpushed")).toBeInTheDocument();
-    const push = screen.getByRole("button", { name: "Push" });
+    const push = screen.getByRole("button", { name: "Push branch" });
     expect(push).toBeEnabled();
     await userEvent.setup().click(push);
     expect(onPush).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Create pull request" }),
+    ).not.toBeInTheDocument();
   });
 
   it("enables create PR after a push with no pull request", async () => {
@@ -91,13 +95,16 @@ describe("PrCard", () => {
       has_upstream: true,
     });
     expect(screen.getByText("Pushed")).toBeInTheDocument();
-    const create = screen.getByRole("button", { name: "Create PR" });
+    const create = screen.getByRole("button", {
+      name: "Create pull request",
+    });
     expect(create).toBeEnabled();
     await userEvent.setup().click(create);
     expect(onCreatePr).toHaveBeenCalledOnce();
   });
 
-  it("shows PR state and checks chips", () => {
+  it("shows a compact link for an existing clean pull request", async () => {
+    hostMocks.openExternal.mockResolvedValue(true);
     renderState({
       ...BASE,
       ahead: 2,
@@ -110,21 +117,85 @@ describe("PrCard", () => {
       },
     });
     expect(screen.getByText("open")).toBeInTheDocument();
-    expect(screen.getByText("#12", { exact: false })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
+    expect(screen.getByText("Pull request #12")).toBeInTheDocument();
+    const open = screen.getByRole("link", { name: "Open" });
+    await userEvent.setup().click(open);
+    expect(hostMocks.openExternal).toHaveBeenCalledWith(
+      "https://github.com/example/demo/pull/12",
+    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("shows copyable gh-absent remediation", () => {
+  it("keeps an existing pull request visible while changes are dirty", () => {
     renderState({
       ...BASE,
+      dirty: true,
+      pr: {
+        number: 12,
+        url: "https://github.com/example/demo/pull/12",
+        state: "open",
+        checks_summary: "2 passing, 1 pending, 0 failing",
+      },
+    });
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("Uncommitted")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Commit changes" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps an existing pull request visible while commits are unpushed", () => {
+    renderState({
+      ...BASE,
+      unpushed: true,
+      ahead: 1,
+      pr: {
+        number: 12,
+        url: "https://github.com/example/demo/pull/12",
+        state: "open",
+        checks_summary: "2 passing, 1 pending, 0 failing",
+      },
+    });
+    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("Unpushed")).toBeInTheDocument();
+    expect(screen.getByText(/update #12/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Push branch" }),
+    ).toBeEnabled();
+  });
+
+  it("shows copyable gh-absent remediation for a pushed branch", () => {
+    renderState({
+      ...BASE,
+      ahead: 1,
+      has_upstream: true,
       gh_found: false,
       gh_authenticated: undefined,
       remediation:
         "gh is not installed.\n\n  git push -u origin tidebreak/first-change\n  gh pr create --title 'first change' --body '...'\n",
     });
     expect(screen.getAllByText(/gh is not installed/).length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Create PR" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Copy instructions" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create pull request" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Copy instructions" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows signed-out remediation for a pushed branch", () => {
+    renderState({
+      ...BASE,
+      ahead: 1,
+      has_upstream: true,
+      gh_authenticated: false,
+      remediation: "gh auth login",
+    });
+    expect(screen.getAllByText(/not signed in/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "Create pull request" }),
+    ).toBeDisabled();
+    expect(screen.getByText("gh auth login")).toBeInTheDocument();
   });
 
   it("reloads git state when the session journal completes a turn", async () => {
@@ -181,7 +252,9 @@ describe("PrCard", () => {
 
     expect(await screen.findByText("Uncommitted")).toBeInTheDocument();
     expect(client.getCodeWorkspacePr).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("button", { name: "Commit" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Commit changes" }),
+    ).toBeEnabled();
   });
 
   it("refreshes an untouched suggested commit message with the latest diffstat", async () => {

@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { HttpError, type ApiClient } from "../api/client";
@@ -11,7 +17,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { openExternal } from "@/host";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { FOCUS_RING } from "./interactive";
 import { useLiveResource } from "./useLiveContent";
 
 /**
@@ -126,7 +133,10 @@ export function PrCard({
       }
       toast.success("Pull request created");
     } catch (err) {
-      if (err instanceof HttpError && (err.kind === "gh_absent" || err.kind === "gh_signed_out")) {
+      if (
+        err instanceof HttpError &&
+        (err.kind === "gh_absent" || err.kind === "gh_signed_out")
+      ) {
         setActionError(err.message);
       } else {
         toast.error(friendlyErrorMessage(err, "Could not create a pull request"));
@@ -191,6 +201,12 @@ export function PrCardView({
     !ghSignedOut &&
     !snapshot?.pr &&
     busy === null;
+  const readyForPr =
+    Boolean(snapshot) &&
+    !snapshot?.dirty &&
+    !snapshot?.unpushed &&
+    snapshot?.ahead !== 0 &&
+    !snapshot?.pr;
 
   return (
     <section
@@ -228,87 +244,129 @@ export function PrCardView({
           {error}
         </p>
       )}
-      <label className="flex flex-col gap-1">
-        <span className="text-muted-foreground text-xs">Commit message</span>
-        <Textarea
-          rows={3}
-          value={message}
-          onChange={(event) => onMessageChange(event.target.value)}
-          placeholder="Describe the change"
-          disabled={busy !== null}
-        />
-      </label>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          size="sm"
-          disabled={!canCommit}
-          onClick={onCommit}
-        >
-          Commit
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
+      {snapshot?.dirty ? (
+        <div className="flex flex-col gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-muted-foreground text-xs">
+              Commit message
+            </span>
+            <Textarea
+              rows={3}
+              value={message}
+              onChange={(event) => onMessageChange(event.target.value)}
+              placeholder="Describe the change"
+              disabled={busy !== null}
+            />
+          </label>
+          <Button
+            type="button"
+            size="sm"
+            className="self-start"
+            disabled={!canCommit}
+            onClick={onCommit}
+          >
+            {busy === "commit" && <Spinner aria-hidden />}
+            {busy === "commit" ? "Committing…" : "Commit changes"}
+          </Button>
+        </div>
+      ) : snapshot?.unpushed ? (
+        <NextGitAction
+          description={
+            snapshot.pr
+              ? `Push the latest commit to update #${snapshot.pr.number}.`
+              : "The commit is ready locally. Push this branch to origin."
+          }
+          label={busy === "push" ? "Pushing…" : "Push branch"}
+          busy={busy === "push"}
           disabled={!canPush}
           onClick={onPush}
-        >
-          Push
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
+        />
+      ) : readyForPr ? (
+        <NextGitAction
+          description={
+            ghMissing || ghSignedOut
+              ? "The branch is pushed. Set up GitHub CLI to create its pull request."
+              : "The branch is pushed and ready for a pull request."
+          }
+          label={busy === "pr" ? "Creating…" : "Create pull request"}
+          busy={busy === "pr"}
           disabled={!canCreatePr}
           onClick={onCreatePr}
-        >
-          Create PR
-        </Button>
-      </div>
-      {snapshot && (ghMissing || ghSignedOut) && (
+        />
+      ) : snapshot?.pr ? (
+        <PrDigest snapshot={snapshot} />
+      ) : snapshot ? (
+        <p className="text-muted-foreground text-xs leading-relaxed">
+          No local commits yet. Changes made in this workspace appear here.
+        </p>
+      ) : null}
+      {snapshot && readyForPr && (ghMissing || ghSignedOut) && (
         <GhRemediation snapshot={snapshot} />
       )}
-      {snapshot?.pr && <PrDigest snapshot={snapshot} />}
     </section>
   );
 }
 
 function GitStateChips({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
+  const chips: ReactNode[] = [];
   if (snapshot.pr) {
-    return (
-      <div className="flex flex-wrap items-center gap-1">
-        <Badge variant={prStateVariant(snapshot.pr.state)} size="sm">
-          {snapshot.pr.state}
-        </Badge>
-      </div>
+    chips.push(
+      <Badge key="pr" variant={prStateVariant(snapshot.pr.state)} size="sm">
+        {snapshot.pr.state}
+      </Badge>,
     );
   }
   if (snapshot.dirty) {
-    return (
-      <Badge variant="warning" size="sm">
+    chips.push(
+      <Badge key="dirty" variant="warning" size="sm">
         Uncommitted
-      </Badge>
+      </Badge>,
     );
-  }
-  if (snapshot.unpushed) {
-    return (
-      <Badge variant="warning" size="sm">
+  } else if (snapshot.unpushed) {
+    chips.push(
+      <Badge key="unpushed" variant="warning" size="sm">
         Unpushed
-      </Badge>
+      </Badge>,
     );
-  }
-  if (snapshot.ahead > 0) {
-    return (
-      <Badge variant="info" size="sm">
+  } else if (!snapshot.pr && snapshot.ahead > 0) {
+    chips.push(
+      <Badge key="pushed" variant="info" size="sm">
         Pushed
-      </Badge>
+      </Badge>,
+    );
+  } else if (!snapshot.pr) {
+    chips.push(
+      <Badge key="empty" variant="outline" size="sm">
+        No commits
+      </Badge>,
     );
   }
+  return <div className="flex flex-wrap items-center gap-1">{chips}</div>;
+}
+
+function NextGitAction({
+  description,
+  label,
+  busy,
+  disabled,
+  onClick,
+}: {
+  description: string;
+  label: string;
+  busy: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
   return (
-    <Badge variant="outline" size="sm">
-      No commits
-    </Badge>
+    <div className="flex flex-col items-start gap-2">
+      <p className="text-muted-foreground text-xs leading-relaxed">
+        {description}
+      </p>
+      <Button type="button" size="sm" disabled={disabled} onClick={onClick}>
+        {busy && <Spinner aria-hidden />}
+        {label}
+      </Button>
+    </div>
   );
 }
 
@@ -316,25 +374,24 @@ function PrDigest({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
   const pr = snapshot.pr;
   if (!pr) return null;
   return (
-    <div className="flex flex-col gap-1 text-xs">
-      <p>
-        #{pr.number}
-        {pr.url ? (
-          <>
-            {" "}
-            <a
-              href={pr.url}
-              className="text-info-foreground underline"
-              onClick={(event) => {
-                event.preventDefault();
-                void openExternal(pr.url!).catch(() => undefined);
-              }}
-            >
-              {pr.url}
-            </a>
-          </>
-        ) : null}
-      </p>
+    <div className="flex items-center justify-between gap-2 text-xs">
+      <p className="min-w-0 truncate">Pull request #{pr.number}</p>
+      {pr.url && (
+        <a
+          href={pr.url}
+          className={cn(
+            "text-info-foreground flex shrink-0 items-center gap-1 rounded-sm underline-offset-2 hover:underline",
+            FOCUS_RING,
+          )}
+          onClick={(event) => {
+            event.preventDefault();
+            void openExternal(pr.url!).catch(() => undefined);
+          }}
+        >
+          Open
+          <ExternalLink className="size-3" aria-hidden />
+        </a>
+      )}
     </div>
   );
 }
@@ -371,4 +428,3 @@ function prStateVariant(state: string): StatusTone {
   if (token === "closed") return "critical";
   return "outline";
 }
-
