@@ -202,13 +202,21 @@ mod tests {
     #[test]
     fn fixture_replay_tool_use() {
         let (events, _) = replay("tool-use");
+        // The `pending` part opens the call with `input: {}`, so the started
+        // detail names nothing. The terminal part repeats the complete input
+        // and rides the completion as a correction.
         assert!(events.iter().any(|event| matches!(
             event,
-            HarnessEvent::ToolStarted { name, .. } if name == "read"
+            HarnessEvent::ToolStarted { name, detail, .. }
+                if name == "read" && detail.specificity() == 0
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HarnessEvent::ToolCompleted { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                detail: Some(tidebreak_core::ToolDetail::FileRead { path }),
+                ..
+            } if path == "/workspace/README.md"
+        )));
     }
 
     #[test]

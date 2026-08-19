@@ -399,6 +399,7 @@ export function reduceCodeSessionEvent(
                   ...item,
                   status: event.outcome,
                   preview: event.preview,
+                  detail: mergeToolDetail(item.detail, event.detail),
                   durationMs: framed.replayed
                     ? null
                     : durationMs(item.startedAt, deps.now()),
@@ -717,4 +718,44 @@ function durationMs(
     return null;
   }
   return end - start;
+}
+
+/**
+ * How much a detail says about the call: the subject a tool line names.
+ *
+ * Zero is a detail with no subject, one is a bare tool name, and two is a
+ * real command, path, or query. Mirrors `ToolDetail::specificity` in
+ * `tidebreak-core`.
+ */
+function toolDetailSpecificity(detail: ToolDetail): number {
+  const subject =
+    detail.kind === "command"
+      ? detail.cmd
+      : detail.kind === "search"
+        ? detail.query
+        : detail.kind === "other"
+          ? detail.summary
+          : detail.path;
+  if (!subject.trim()) return 0;
+  return detail.kind === "other" ? 1 : 2;
+}
+
+/**
+ * Fold a completed call's detail into the one its start carried.
+ *
+ * Engines open a tool call before its arguments finish streaming, so the
+ * detail on `tool_started` can name nothing and the line falls back to the
+ * tool's name. `tool_completed` carries the detail rebuilt from the complete
+ * arguments, which is the more trustworthy view — it wins unless it says
+ * less, so a correction never downgrades a line that already names its
+ * subject.
+ */
+function mergeToolDetail(
+  current: ToolDetail,
+  correction: ToolDetail | null | undefined,
+): ToolDetail {
+  if (!correction) return current;
+  return toolDetailSpecificity(correction) >= toolDetailSpecificity(current)
+    ? correction
+    : current;
 }

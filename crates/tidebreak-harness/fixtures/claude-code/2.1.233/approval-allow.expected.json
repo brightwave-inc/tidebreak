@@ -18,7 +18,11 @@
     "type": "tool_completed",
     "call_id": "toolu_01AccXU5wrjo1GDyiNaAGDXM",
     "outcome": "succeeded",
-    "preview": "File created successfully at: /workspace/probe.txt (file state is current in your context — no need to Read it back)"
+    "preview": "File created successfully at: /workspace/probe.txt (file state is current in your context — no need to Read it back)",
+    "detail": {
+      "kind": "file_edit",
+      "path": "/workspace/probe.txt"
+    }
   },
   {
     "type": "assistant_delta",

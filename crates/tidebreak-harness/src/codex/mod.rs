@@ -192,13 +192,20 @@ mod tests {
     #[test]
     fn fixture_replay_tool_use() {
         let (events, _) = replay("tool-use");
+        // `item/started` already carries the whole command, so the started
+        // detail names its subject; `item/completed` repeats it.
         assert!(events.iter().any(|event| matches!(
             event,
-            HarnessEvent::ToolStarted { name, .. } if name == "commandExecution"
+            HarnessEvent::ToolStarted { name, detail, .. }
+                if name == "commandExecution" && detail.specificity() > 0
         )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HarnessEvent::ToolCompleted { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                detail: Some(tidebreak_core::ToolDetail::Command { cmd, .. }),
+                ..
+            } if cmd.contains("note.txt")
+        )));
     }
 
     #[test]

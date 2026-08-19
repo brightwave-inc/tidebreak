@@ -92,6 +92,13 @@ pub enum HarnessEvent {
         outcome: ToolOutcome,
         /// Bounded preview.
         preview: String,
+        /// Classification rebuilt from the call's complete arguments, when
+        /// the engine reports them by the time the call resolves. Engines
+        /// open a call before its arguments finish streaming, so the detail
+        /// on [`HarnessEvent::ToolStarted`] can name nothing; this corrects
+        /// it. `None` when the adapter never sees final arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ToolDetail>,
     },
     /// A file changed.
     FileChanged {

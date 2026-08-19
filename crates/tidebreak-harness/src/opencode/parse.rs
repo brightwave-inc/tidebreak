@@ -399,10 +399,16 @@ impl OpencodeStreamParser {
                     .or_else(|| state.get("output").and_then(Value::as_str))
                     .or(if error.is_empty() { None } else { Some(error) })
                     .unwrap_or("");
+                // The `pending` part that opens the call carries `input: {}`;
+                // the arguments land on the `running` and terminal parts. The
+                // terminal part is the correction for the call already
+                // started, and the detail above for one that was not.
+                let detail = tool_detail(&name, &input);
                 events.push(HarnessEvent::ToolCompleted {
                     call_id,
                     outcome,
                     preview: bound(preview, MAX_PREVIEW_CHARS),
+                    detail: (detail.specificity() > 0).then_some(detail),
                 });
                 events
             }

@@ -65,7 +65,12 @@
     "type": "tool_completed",
     "call_id": "exec-f5557c0a-1ece-4571-8bd5-5a74e11e269a",
     "outcome": "succeeded",
-    "preview": "42\n"
+    "preview": "42\n",
+    "detail": {
+      "kind": "command",
+      "cmd": "/bin/zsh -lc \"python3 -c 'print(42)'\"",
+      "cwd": "/workspace"
+    }
   },
   {
     "type": "assistant_delta",

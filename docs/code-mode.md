@@ -236,7 +236,7 @@ bounded):
 | `AssistantDelta` / `AssistantMessage` | streamed or whole assistant text |
 | `ReasoningDelta` | streamed thinking text where the harness reports it |
 | `ToolStarted` | call id, name, `ToolDetail` (`Command {cmd, cwd}` \| `FileEdit {path}` \| `FileRead {path}` \| `Search {query}` \| `Other {summary}`) |
-| `ToolCompleted` | call id, outcome, bounded preview |
+| `ToolCompleted` | call id, outcome, bounded preview, optional corrected `ToolDetail` |
 | `FileChanged` | path, change kind, diffstat |
 | `ApprovalRequested` | approval id (hint; body loads from the approvals route) |
 | `ApprovalResolved` | approval id, decision |
@@ -247,6 +247,14 @@ bounded):
 | `CheckpointRecorded` | turn id, diffstat |
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `AttentionChanged` | state, source |
+
+Engines open a tool call before its arguments finish streaming, so the
+`ToolDetail` on `ToolStarted` can name nothing and the transcript line falls
+back to the tool's name. `ToolCompleted` carries the detail rebuilt from the
+complete arguments as a correction, and the renderer takes it unless it says
+less than what the line already shows. An adapter whose completion payload
+carries no arguments leaves it unset — Grok's `tool_call` frame already
+carries the whole `rawInput`, so it has nothing to correct.
 
 ## Server API surface
 

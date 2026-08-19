@@ -404,15 +404,10 @@ impl CodexStreamParser {
         if call_id.is_empty() || !self.started_tools.insert(call_id.clone()) {
             return Vec::new();
         }
-        let cmd = item.get("command").and_then(Value::as_str).unwrap_or("");
-        let cwd = item.get("cwd").and_then(Value::as_str).unwrap_or("");
         vec![HarnessEvent::ToolStarted {
             call_id,
             name: "commandExecution".into(),
-            detail: ToolDetail::Command {
-                cmd: bound(cmd, MAX_EVENT_TEXT_CHARS),
-                cwd: cwd.to_owned(),
-            },
+            detail: command_detail(item),
         }]
     }
 
@@ -437,10 +432,14 @@ impl CodexStreamParser {
             .get("aggregatedOutput")
             .and_then(Value::as_str)
             .unwrap_or("");
+        // `item/completed` repeats the whole item, command included, so the
+        // resolved call can always name its own subject.
+        let detail = command_detail(item);
         vec![HarnessEvent::ToolCompleted {
             call_id,
             outcome,
             preview: bound(preview, MAX_PREVIEW_CHARS),
+            detail: (detail.specificity() > 0).then_some(detail),
         }]
     }
 
@@ -455,6 +454,22 @@ impl CodexStreamParser {
             payload = %rendered,
             "unrecognized engine event"
         );
+    }
+}
+
+/// Classification for a `commandExecution` item. Both `item/started` and
+/// `item/completed` carry the whole item, so both can name the command.
+fn command_detail(item: &Value) -> ToolDetail {
+    ToolDetail::Command {
+        cmd: bound(
+            item.get("command").and_then(Value::as_str).unwrap_or(""),
+            MAX_EVENT_TEXT_CHARS,
+        ),
+        cwd: item
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
     }
 }
 

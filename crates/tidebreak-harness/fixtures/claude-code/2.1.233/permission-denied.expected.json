@@ -23,7 +23,11 @@
     "type": "tool_completed",
     "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC",
     "outcome": "failed",
-    "preview": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet."
+    "preview": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet.",
+    "detail": {
+      "kind": "file_edit",
+      "path": "/workspace/probe.txt"
+    }
   },
   {
     "type": "assistant_delta",

@@ -22,7 +22,12 @@
     "type": "tool_completed",
     "call_id": "exec-59525603-b92d-49e3-a3f2-b59f9373bdff",
     "outcome": "succeeded",
-    "preview": "alpha\n"
+    "preview": "alpha\n",
+    "detail": {
+      "kind": "command",
+      "cmd": "/bin/zsh -lc \"sed -n '1,200p' note.txt\"",
+      "cwd": "/workspace"
+    }
   },
   {
     "type": "assistant_delta",
