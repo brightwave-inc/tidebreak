@@ -29,6 +29,9 @@ export * from "./components/ui/textarea";
 export * from "./components/ui/toggle";
 export * from "./components/ui/tooltip";
 
+export * from "./components/ui/segmented";
+export * from "./components/ui/context-menu";
+
 export * from "./components/PanelHeader";
 export * from "./components/SearchInput";
 export * from "./components/OptionListbox";
@@ -55,6 +58,10 @@ export * from "./ContextUsageIndicator";
 export * from "./ChangeSummaryCard";
 export * from "./AppCard";
 
+export * from "./ToolOutputPreview";
+export * from "./UserMessage";
+export * from "./TranscriptSkeleton";
+
 export * from "./sidebar/primitives";
 
 export * from "./code/AttentionBadge";
@@ -62,3 +69,5 @@ export * from "./code/TurnReviewCard";
 export * from "./code/HarnessPicker";
 export * from "./code/DoctorList";
 export * from "./code/CodeTranscript";
+export * from "./code/MiddleTruncate";
+
