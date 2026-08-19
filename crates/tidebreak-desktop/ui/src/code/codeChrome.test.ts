@@ -6,6 +6,7 @@ import {
   closeCodeChromeTab,
   closeEditorTab,
   closeEditorTabsToRight,
+  closeFocusedCodeTab,
   closeOtherEditorTabs,
   focusCodeChromeTab,
   focusConversation,
@@ -275,6 +276,56 @@ describe("code chrome layout", () => {
       { type: "file", path: "src/lib.rs" },
     ]);
   });
+
+  it("closes the editor tab that owns focus for the shell shortcut", () => {
+    const primary = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 1,
+      fullscreen: false,
+      conversationFocused: false,
+      editorSplit: {
+        tabs: [{ type: "file" as const, path: "README.md" }],
+        activeIndex: 0,
+      },
+    };
+
+    expect(closeFocusedCodeTab(primary)).toEqual({
+      ...primary,
+      tabs: [
+        { type: "file", path: "src/lib.rs" },
+        { type: "terminal" },
+      ],
+      activeIndex: 0,
+    });
+
+    const secondary = {
+      ...primary,
+      editorSplit: { ...primary.editorSplit, focused: true },
+    };
+    expect(closeFocusedCodeTab(secondary)).toEqual({
+      ...primary,
+      editorSplit: undefined,
+    });
+  });
+
+  it(
+    "does not claim Cmd/Ctrl+W when the persistent conversation owns focus",
+    () => {
+      const layout = {
+        tabs: [{ type: "file" as const, path: "src/lib.rs" }],
+        activeIndex: 0,
+        fullscreen: false,
+        conversationFocused: true,
+      };
+
+      expect(closeFocusedCodeTab(layout)).toBeNull();
+      expect(closeFocusedCodeTab(EMPTY_LAYOUT)).toBeNull();
+    },
+  );
 
   it("opens new editors in the group that last received focus", () => {
     const split = moveEditorTab(

@@ -66,6 +66,33 @@ export function isEditorTab(tab: PanelContent): boolean {
 
 export type CodeEditorRegion = "primary" | "secondary";
 
+/**
+ * Close the tab the Code workspace is actually showing.
+ *
+ * Editor tabs live outside the legacy side-panel strip, and the right split
+ * keeps its own focus marker. Shell shortcuts must follow those two facts or
+ * Cmd/Ctrl+W falls through to the native window-close behavior while a file
+ * tab is visibly selected. `null` means the persistent conversation (or no
+ * workspace tab at all) owns focus and there is nothing closable here.
+ */
+export function closeFocusedCodeTab(layout: LayoutState): LayoutState | null {
+  const chrome = splitCodeChromeLayout(layout);
+  if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
+    return closeEditorTab(
+      layout,
+      chrome.splitEditors.activeIndex,
+      "secondary",
+    );
+  }
+  if (!chrome.editors.conversationFocused && chrome.editors.tabs.length > 0) {
+    return closeEditorTab(layout, chrome.editors.activeIndex, "primary");
+  }
+  if (chrome.panels.tabs.length > 0) {
+    return closeCodeChromeTab(layout, chrome.panels.activeIndex);
+  }
+  return null;
+}
+
 /** Show the conversation while keeping file and diff tabs open. */
 export function focusConversation(layout: LayoutState): LayoutState {
   return {

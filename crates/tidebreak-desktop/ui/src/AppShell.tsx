@@ -22,7 +22,10 @@ import {
   prependReplacementChat,
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
-import { closeCodeChromeTab, splitCodeChromeLayout, toggleTerminalLayout } from "./code/codeChrome";
+import {
+  closeFocusedCodeTab,
+  toggleTerminalLayout,
+} from "./code/codeChrome";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import {
   codeRepoIdFromPath,
@@ -201,9 +204,8 @@ export function AppShell() {
       const workspaceId = codeWorkspaceIdFromPath(pathname);
       if (!workspaceId) return false;
       const layout = layoutFromSearch(search as PanelSearch);
-      const chrome = splitCodeChromeLayout(layout);
-      if (chrome.panels.tabs.length === 0) return false;
-      const next = closeCodeChromeTab(layout, chrome.panels.activeIndex);
+      const next = closeFocusedCodeTab(layout);
+      if (!next) return false;
       void navigate({
         to: "/code/w/$workspaceId",
         params: { workspaceId },
