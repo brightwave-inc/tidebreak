@@ -344,8 +344,8 @@ const mutations = [
     mutate: (source) =>
       editWorkflowJob(source, "publish_docs", (job) =>
         job.replace(
-          '            --scope "$VERCEL_SCOPE" \\\n            --json)',
-          '            --scope "$VERCEL_SCOPE" \\\n            --token "$VERCEL_TOKEN" \\\n            --json)',
+          '            --meta "releaseSha=$RELEASE_SHA" \\\n            --json)',
+          '            --meta "releaseSha=$RELEASE_SHA" \\\n            --token "$VERCEL_TOKEN" \\\n            --json)',
         ),
       ),
   },

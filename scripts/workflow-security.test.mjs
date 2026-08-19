@@ -1168,12 +1168,25 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(publish, /jq -ce '\.deployment \/\/ \.'/);
   assert.match(publish, /deployment_url=.*jq -er \.url/);
   assert.match(publish, /deployment_id=.*jq -er \.id/);
-  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
+  assert.doesNotMatch(publish, /(?:^|\s)--scope(?:\s|$)/m);
+  assert.doesNotMatch(publish, /VERCEL_SCOPE/);
+  assert.match(publish, /url\.searchParams\.set\("teamId", teamId\)/);
+  assert.match(
+    publish,
+    /\/v10\/projects\/" \+ projectId \+ "\/promote\/" \+ deploymentId/,
+  );
+  assert.match(publish, /\/v13\/deployments\/tidebreak-docs\.vercel\.app/);
+  assert.match(
+    publish,
+    /JSON\.stringify\(\{\s*id: deployment\.id,\s*readyState: deployment\.readyState,\s*\}\)/,
+  );
+  assert.match(publish, /Vercel promote failed: " \+ response\.status/);
+  assert.doesNotMatch(publish, /\+ await response\.text\(\)/);
   assert.doesNotMatch(publish, /--token/);
   assert.match(publish, /\/docs\/quickstart\//);
   assert.match(publish, /\/docs\/search-index\.json/);
   assert.match(publish, /\/docs\/sitemap\.xml/);
-  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel promote/);
+  assert.doesNotMatch(publish, /vercel (?:curl|promote|inspect)/);
 
   const deploy = publish.indexOf("Create an unaliased production deployment");
   const verify = publish.indexOf("Verify the transferred documentation");
