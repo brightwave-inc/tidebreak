@@ -348,7 +348,7 @@ describe("hydrate then replay", () => {
         type: "tool_started",
         call_id: "c1",
         name: "Grep",
-        detail: { kind: "search", pattern: "image" },
+        detail: { kind: "search", query: "image" },
       },
       {
         type: "assistant_message",

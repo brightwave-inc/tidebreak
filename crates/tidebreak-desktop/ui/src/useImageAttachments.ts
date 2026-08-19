@@ -220,7 +220,7 @@ export function useImageAttachments(
         typeof URL.createObjectURL === "function"
           ? URL.createObjectURL(file)
           : null;
-      backing.previews.set(id, previewUrl);
+      if (previewUrl) backing.previews.set(id, previewUrl);
       return queuedImageAttachment(id, {
         name: imageAttachmentName(file, now),
         byteLen: file.size,
