@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Check,
   CircleDashed,
+  CircleMinus,
   ExternalLink,
   Files,
   GitBranch,
@@ -38,7 +39,7 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { useCodeUiStore } from "./CodeUiStore";
-import { DiffPanel } from "./DiffPanel";
+import { DiffOverview } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
@@ -58,9 +59,10 @@ const TAB_TRIGGER_SELECTED_CLASS =
 /**
  * Right workspace rail: Files, Source control, and Pull request as icon tabs.
  *
- * Files is a nested worktree explorer. Source control is the worktree patch
- * plus commit, push, and PR creation. Pull request carries the PR's own
- * life: status, checks, and review comments once one exists.
+ * Files is a nested worktree explorer. Source control is a compact changed-file
+ * index plus commit, push, and PR creation; individual patches open in the
+ * center pane. Pull request carries the PR's own life: status, checks, and
+ * review comments once one exists.
  */
 export function CodeInspector({
   client,
@@ -74,7 +76,7 @@ export function CodeInspector({
   workspaceId: string;
   workspace: CodeWorkspaceSnapshot | null;
   contentRevision: number;
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (path: string, line?: number) => void;
   onOpenDiff?: (path: string) => void;
 }) {
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
@@ -92,9 +94,9 @@ export function CodeInspector({
     setFile(undefined);
   }, [scope]);
 
-  function openFile(next: string) {
+  function openFile(next: string, line?: number) {
     if (onOpenFile) {
-      onOpenFile(next);
+      onOpenFile(next, line);
       return;
     }
     setFile(next);
@@ -102,11 +104,11 @@ export function CodeInspector({
   }
 
   function openDiff(next: string) {
+    setFile(next);
     if (onOpenDiff) {
       onOpenDiff(next);
       return;
     }
-    setFile(next);
     setTab("source");
   }
 
@@ -186,12 +188,12 @@ export function CodeInspector({
                 />
               </div>
             )}
-            <DiffPanel
+            <DiffOverview
               client={client}
               workspaceId={workspaceId}
               turnId={turnId}
               turnLabel={scope?.label}
-              file={file}
+              selected={file}
               contentRevision={contentRevision}
               onOpenFile={openDiff}
             />
@@ -439,8 +441,8 @@ function PrTab({
       </div>
 
       <div className="flex flex-wrap items-center gap-1">
-        <ReviewDecisionBadge decision={pr.review_decision} />
-        {pr.auto_merge_enabled && (
+        {open && <ReviewDecisionBadge decision={pr.review_decision} />}
+        {open && pr.auto_merge_enabled && (
           <Badge variant="info" size="sm">
             Auto-merge on
           </Badge>
@@ -621,7 +623,7 @@ function CheckList({
   counts,
 }: {
   checks: PullRequestCheck[];
-  counts: { passing: number; pending: number; failing: number };
+  counts: { passing: number; pending: number; failing: number; skipped: number };
 }) {
   const [open, setOpen] = useState(checks.length > 0);
   return (
@@ -629,7 +631,7 @@ function CheckList({
       <button
         type="button"
         className={cn(
-          "hover:bg-muted/50 -mx-1 flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-left text-xs",
+          "hover:bg-muted/50 -mx-1 flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-1 py-1 text-left text-xs",
           FOCUS_RING_TIGHT,
           HOVER_TINT,
         )}
@@ -640,7 +642,7 @@ function CheckList({
           icon={<Check className="size-3.5" />}
           count={counts.passing}
           label="passing"
-          // These three carry a word each, so they take the readable ink rather
+          // These counts carry words, so they take the readable ink rather
           // than the mark colour the bare glyphs below use.
           className="text-success-foreground"
         />
@@ -656,6 +658,14 @@ function CheckList({
           label="failing"
           className="text-critical-foreground"
         />
+        {counts.skipped > 0 && (
+          <CheckCount
+            icon={<CircleMinus className="size-3.5" />}
+            count={counts.skipped}
+            label="skipped"
+            className="text-muted-foreground"
+          />
+        )}
       </button>
       {open &&
         checks.map((check) => (
@@ -692,7 +702,13 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
         ? "text-critical"
         : "text-muted-foreground";
   const Icon =
-    check.bucket === "pass" ? Check : check.bucket === "fail" ? X : CircleDashed;
+    check.bucket === "pass"
+      ? Check
+      : check.bucket === "fail"
+        ? X
+        : check.bucket === "skipped"
+          ? CircleMinus
+          : CircleDashed;
   const body = (
     <>
       <Icon className={cn("size-3.5 shrink-0", tone)} />
@@ -734,6 +750,7 @@ function checkCounts(pr: PullRequestDigest): {
   passing: number;
   pending: number;
   failing: number;
+  skipped: number;
 } {
   const checks = pr.checks ?? [];
   if (checks.length > 0) {
@@ -741,13 +758,15 @@ function checkCounts(pr: PullRequestDigest): {
       passing: checks.filter((check) => check.bucket === "pass").length,
       pending: checks.filter((check) => check.bucket === "pending").length,
       failing: checks.filter((check) => check.bucket === "fail").length,
+      skipped: checks.filter((check) => check.bucket === "skipped").length,
     };
   }
   const summary = pr.checks_summary ?? "";
   const passing = Number(/(\d+) passing/.exec(summary)?.[1] ?? 0);
   const pending = Number(/(\d+) pending/.exec(summary)?.[1] ?? 0);
   const failing = Number(/(\d+) failing/.exec(summary)?.[1] ?? 0);
-  return { passing, pending, failing };
+  const skipped = Number(/(\d+) skipped/.exec(summary)?.[1] ?? 0);
+  return { passing, pending, failing, skipped };
 }
 
 function prStateVariant(

@@ -339,7 +339,7 @@ pub struct QuickAction {
 pub struct PullRequestCheck {
     /// Check name as the host reports it.
     pub name: String,
-    /// pass, pending, or fail.
+    /// pass, pending, fail, or skipped.
     pub bucket: PullRequestCheckBucket,
     /// Host status phrase, when distinct from the bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +361,8 @@ pub enum PullRequestCheckBucket {
     Pending,
     /// The check failed.
     Fail,
+    /// The host deliberately skipped or cancelled the check.
+    Skipped,
 }
 
 /// Bounded pull-request digest stored on a workspace.

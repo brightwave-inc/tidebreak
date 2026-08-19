@@ -183,4 +183,79 @@ describe("PrCard", () => {
     expect(client.getCodeWorkspacePr).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: "Commit" })).toBeEnabled();
   });
+
+  it("refreshes an untouched suggested commit message with the latest diffstat", async () => {
+    const first = {
+      ...BASE,
+      dirty: true,
+      suggested_commit_message:
+        "Improve source control\n\n2 files changed, 30 insertions(+), 23 deletions(-)",
+    };
+    const second = {
+      ...first,
+      suggested_commit_message:
+        "Improve source control\n\n1 file changed, 5 insertions(+), 5 deletions(-)",
+    };
+    const client = {
+      getCodeWorkspacePr: vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValue(second),
+      commitCodeWorkspace: vi.fn(),
+      pushCodeWorkspace: vi.fn(),
+      createCodePullRequest: vi.fn(),
+    };
+    const { rerender } = render(
+      <PrCard client={client} workspaceId="ws-1" contentRevision={0} />,
+    );
+
+    const message = await screen.findByRole("textbox", {
+      name: "Commit message",
+    });
+    await waitFor(() =>
+      expect(message).toHaveValue(first.suggested_commit_message),
+    );
+
+    rerender(
+      <PrCard client={client} workspaceId="ws-1" contentRevision={1} />,
+    );
+    await waitFor(() =>
+      expect(message).toHaveValue(second.suggested_commit_message),
+    );
+  });
+
+  it("preserves an edited commit message when git state refreshes", async () => {
+    const client = {
+      getCodeWorkspacePr: vi
+        .fn()
+        .mockResolvedValueOnce({ ...BASE, dirty: true })
+        .mockResolvedValue({
+          ...BASE,
+          dirty: true,
+          suggested_commit_message: "new generated suggestion",
+        }),
+      commitCodeWorkspace: vi.fn(),
+      pushCodeWorkspace: vi.fn(),
+      createCodePullRequest: vi.fn(),
+    };
+    const { rerender } = render(
+      <PrCard client={client} workspaceId="ws-1" contentRevision={0} />,
+    );
+    const message = await screen.findByRole("textbox", {
+      name: "Commit message",
+    });
+    await waitFor(() =>
+      expect(message).toHaveValue(BASE.suggested_commit_message),
+    );
+    await userEvent.setup().clear(message);
+    await userEvent.setup().type(message, "Keep my message");
+
+    rerender(
+      <PrCard client={client} workspaceId="ws-1" contentRevision={1} />,
+    );
+    await waitFor(() =>
+      expect(client.getCodeWorkspacePr).toHaveBeenCalledTimes(2),
+    );
+    expect(message).toHaveValue("Keep my message");
+  });
 });

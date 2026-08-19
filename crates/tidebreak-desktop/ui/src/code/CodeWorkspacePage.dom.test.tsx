@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -391,7 +398,7 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByText("repo-1")).not.toBeInTheDocument();
   });
 
-  it("marks unread engine events with a warning dot", async () => {
+  it("marks recorded unrecognized engine events with a warning dot", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([
       { ...SESSION, unrecognized_event_count: 3 },
@@ -403,7 +410,7 @@ describe("CodeWorkspacePage", () => {
     ).toBeInTheDocument();
     expect(screen.getByTestId("unrecognized-event-dot")).toHaveAttribute(
       "aria-label",
-      "3 unread engine events",
+      "3 unrecognized engine events recorded in this session",
     );
   });
 
@@ -615,6 +622,70 @@ describe("CodeWorkspacePage", () => {
       chat.getAttribute("aria-controls") ?? "",
     );
     expect(chatPanel).toHaveAttribute("aria-labelledby", chat.id);
+  });
+
+  it("offers useful right-click actions for center tabs", async () => {
+    const client = makeClient();
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=file.src%252Flib.rs,diff.f.src%252Fmain.rs&active=diff.f.src%252Fmain.rs",
+    );
+
+    const fileTab = await screen.findByRole("tab", { name: "lib.rs" });
+    expect(screen.getByRole("tab", { name: "main.rs (diff)" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    fireEvent.contextMenu(fileTab);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("lib.rs")).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Copy path" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Close tab" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Close other tabs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Close tabs to the right" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Close all tabs" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: "Copy path" }));
+    await waitFor(async () =>
+      expect(await window.navigator.clipboard.readText()).toBe("src/lib.rs"),
+    );
+    expect(toast.success).toHaveBeenCalledWith("Copied path");
+
+    fireEvent.contextMenu(fileTab);
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Close tabs to the right",
+      }),
+    );
+    expect(
+      screen.queryByRole("tab", { name: "main.rs (diff)" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "file.src%2Flib.rs",
+      }),
+    );
+
+    const chatTab = screen.getByRole("tab", { name: "Chat" });
+    fireEvent.contextMenu(chatTab);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Close other tabs" }),
+    );
+    expect(
+      screen.queryByRole("tablist", { name: "Workspace center" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the jump-to-latest pill out of the tab order until it is on screen", async () => {

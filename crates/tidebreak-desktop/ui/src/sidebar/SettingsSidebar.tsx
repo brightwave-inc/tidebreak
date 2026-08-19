@@ -1,7 +1,6 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
-import { useExperimentalFlags } from "@/experimental";
 import { useManagedPolicy } from "@/managedPolicy";
 import { settingsSectionsFor } from "@/settings/sections";
 import { Sidebar, SidebarButton, SidebarContent } from "./primitives";
@@ -20,8 +19,7 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { managed } = useManagedPolicy();
-  const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
-  const sections = settingsSectionsFor(managed, codeModeEnabled);
+  const sections = settingsSectionsFor(managed);
 
   return (
     <Sidebar>

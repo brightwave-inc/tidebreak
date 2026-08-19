@@ -18,6 +18,7 @@ import type {
   CodeTerminalSnapshot,
   CodeWorkspaceDiff,
   CodeWorkspaceFiles,
+  CodeWorkspaceSearch,
   CodeWorkspaceBlob,
   CodeWorkspaceTree,
   CodeWorkspacePrSnapshot,
@@ -58,6 +59,8 @@ import type {
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  CodeWorkspaceSearch as WireCodeWorkspaceSearch,
+  CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   CodeWorkspaceTree as WireCodeWorkspaceTree,
   CodeTurnAttachment as WireCodeTurnAttachment,
@@ -398,7 +401,8 @@ function parsePullRequestChecks(
       typeof item.name !== "string" ||
       (item.bucket !== "pass" &&
         item.bucket !== "pending" &&
-        item.bucket !== "fail") ||
+        item.bucket !== "fail" &&
+        item.bucket !== "skipped") ||
       (item.detail !== undefined && typeof item.detail !== "string") ||
       (item.url !== undefined && typeof item.url !== "string")
     ) {
@@ -798,6 +802,42 @@ export function parseCodeWorkspaceTree(
     paths.push(item);
   }
   return { paths, truncated: value.truncated };
+}
+
+export function parseCodeWorkspaceSearch(
+  value: unknown,
+): CodeWorkspaceSearch | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspaceSearch>(value, ["matches", "truncated"]) ||
+    !Array.isArray(value.matches) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  const matches: WireCodeWorkspaceSearchMatch[] = [];
+  for (const item of value.matches) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys<WireCodeWorkspaceSearchMatch>(item, [
+        "path",
+        "line_number",
+        "line",
+      ]) ||
+      !nonEmpty(item.path) ||
+      !isFiniteNumber(item.line_number) ||
+      item.line_number < 1 ||
+      typeof item.line !== "string"
+    ) {
+      return null;
+    }
+    matches.push({
+      path: item.path,
+      line_number: item.line_number,
+      line: item.line,
+    });
+  }
+  return { matches, truncated: value.truncated };
 }
 
 export function parseCodeWorkspaceFiles(

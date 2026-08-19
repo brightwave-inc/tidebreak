@@ -21,7 +21,7 @@ function caps(
 }
 
 describe("sessionLifecycleTooltip", () => {
-  it("joins the harness version and unread engine events", () => {
+  it("joins the harness version and recorded unrecognized engine events", () => {
     expect(
       sessionLifecycleTooltip({
         lifecycle: "idle",
@@ -30,7 +30,7 @@ describe("sessionLifecycleTooltip", () => {
         unrecognizedEventCount: 3,
       }),
     ).toBe(
-      "Idle · Claude Code 2.1.233 · 3 unread engine events — transcript may be incomplete",
+      "Idle · Claude Code 2.1.233 · 3 unrecognized engine events recorded — transcript may be incomplete",
     );
     expect(
       sessionLifecycleTooltip({
@@ -39,7 +39,7 @@ describe("sessionLifecycleTooltip", () => {
         unrecognizedEventCount: 1,
       }),
     ).toBe(
-      "Running · Codex CLI · 1 unread engine event — transcript may be incomplete",
+      "Running · Codex CLI · 1 unrecognized engine event recorded — transcript may be incomplete",
     );
   });
 });

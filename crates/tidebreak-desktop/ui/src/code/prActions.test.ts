@@ -29,7 +29,27 @@ describe("prBarModel", () => {
       passing: 1,
       pending: 0,
       failing: 0,
+      skipped: 0,
       total: 1,
+    });
+  });
+
+  it("counts skipped checks without treating them as pending", () => {
+    const model = prBarModel(
+      pr({
+        checks: [
+          { name: "ci", bucket: "pass" },
+          { name: "release", bucket: "skipped", detail: "skipping" },
+        ],
+      }),
+    );
+    expect(model.status).toBe("Ready to merge");
+    expect(model.checks).toEqual({
+      passing: 1,
+      pending: 0,
+      failing: 0,
+      skipped: 1,
+      total: 2,
     });
   });
 

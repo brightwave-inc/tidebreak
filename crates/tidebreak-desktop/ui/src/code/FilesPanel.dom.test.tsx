@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -25,6 +25,36 @@ function makeClient(tree = TREE) {
           : tree.paths;
         return Promise.resolve({ paths, truncated: tree.truncated });
       }),
+    searchCodeWorkspace: vi
+      .fn()
+      .mockImplementation(
+        (
+          _id: string,
+          opts: { query: string; include?: string; exclude?: string },
+        ) => {
+          const rows = [
+            {
+              path: "README.md",
+              line_number: 3,
+              line: "A crisp workspace search.",
+            },
+            {
+              path: "src/lib.rs",
+              line_number: 12,
+              line: "fn crisp_result() {}",
+            },
+          ].filter((row) =>
+            row.line.toLowerCase().includes(opts.query.toLowerCase()),
+          );
+          const included = opts.include === "*.rs"
+            ? rows.filter((row) => row.path.endsWith(".rs"))
+            : rows;
+          const matches = opts.exclude === "*.md"
+            ? included.filter((row) => !row.path.endsWith(".md"))
+            : included;
+          return Promise.resolve({ matches, truncated: false });
+        },
+      ),
   };
 }
 
@@ -127,34 +157,80 @@ describe("FilesPanel", () => {
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     await userEvent
       .setup()
-      .type(screen.getByRole("searchbox", { name: "Search files" }), "zzz");
+      .type(
+        screen.getByRole("searchbox", { name: "Search file contents" }),
+        "zzz",
+      );
     expect(await screen.findByText("zzz")).toBeInTheDocument();
 
     await userEvent
       .setup()
-      .click(screen.getByRole("button", { name: "Clear search and filters" }));
+      .click(screen.getByText("Clear search", { selector: "button" }));
     expect(await screen.findByText("README.md")).toBeInTheDocument();
   });
 
-  it("focuses search on Cmd+F and filters by include and exclude", async () => {
+  it("searches file contents, groups matches, and opens the matching line", async () => {
+    const onOpenFile = vi.fn();
+    const client = makeClient();
+    render(
+      <FilesPanel
+        client={client}
+        workspaceId="ws-1"
+        onOpenFile={onOpenFile}
+      />,
+    );
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+    await userEvent.setup().type(
+      screen.getByRole("searchbox", { name: "Search file contents" }),
+      "crisp",
+    );
+
+    expect(await screen.findByText("A ", { exact: false })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "File content matches" })).toBeInTheDocument();
+    expect(client.searchCodeWorkspace).toHaveBeenLastCalledWith("ws-1", {
+      query: "crisp",
+      include: undefined,
+      exclude: undefined,
+      limit: 200,
+    });
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "src/lib.rs, line 12" }));
+    expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs", 12);
+  });
+
+  it("focuses content search on Cmd+F and sends include and exclude globs", async () => {
     const client = makeClient();
     render(
       <FilesPanel client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
     );
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "f", metaKey: true });
-    const search = screen.getByRole("searchbox", { name: "Search files" });
+    const search = screen.getByRole("searchbox", { name: "Search file contents" });
     expect(search).toHaveFocus();
+    await userEvent.setup().type(search, "crisp");
     const include = screen.getByRole("textbox", { name: "Files to include" });
     await userEvent.setup().type(include, "*.rs");
-    expect(screen.getByText("lib.rs")).toBeInTheDocument();
-    expect(screen.queryByText("README.md")).not.toBeInTheDocument();
-    expect(screen.queryByText("new.txt")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(client.searchCodeWorkspace).toHaveBeenLastCalledWith("ws-1", {
+        query: "crisp",
+        include: "*.rs",
+        exclude: undefined,
+        limit: 200,
+      }),
+    );
+    expect(await screen.findByText("fn ", { exact: false })).toBeInTheDocument();
 
     const exclude = screen.getByRole("textbox", { name: "Files to exclude" });
-    await userEvent.setup().clear(include);
     await userEvent.setup().type(exclude, "*.md");
-    expect(screen.queryByText("README.md")).not.toBeInTheDocument();
-    expect(screen.getByText("new.txt")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(client.searchCodeWorkspace).toHaveBeenLastCalledWith("ws-1", {
+        query: "crisp",
+        include: "*.rs",
+        exclude: "*.md",
+        limit: 200,
+      }),
+    );
   });
 });

@@ -1302,6 +1302,16 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
 export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, };
 
 /**
+ * Bounded content-search response for `GET /code/workspaces/{id}/search`.
+ */
+export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, truncated: boolean, };
+
+/**
+ * One matching line from a workspace content search.
+ */
+export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line: string, };
+
+/**
  * One isolated workspace (worktree + branch) on a repo.
  */
 export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, };
@@ -2740,7 +2750,7 @@ export type PullRequestCheck = {
  */
 name: string, 
 /**
- * pass, pending, or fail.
+ * pass, pending, fail, or skipped.
  */
 bucket: PullRequestCheckBucket, 
 /**
@@ -2755,7 +2765,7 @@ url?: string, };
 /**
  * Coarse CI bucket used to color a check row.
  */
-export type PullRequestCheckBucket = "pass" | "pending" | "fail";
+export type PullRequestCheckBucket = "pass" | "pending" | "fail" | "skipped";
 
 /**
  * One pull-request comment: an issue comment, a review body, or an inline
@@ -3282,13 +3292,7 @@ model_visibility_overrides: { [key in string]: ModelVisibility },
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
  */
-computer_use_enabled: boolean, 
-/**
- * Whether the experimental code-mode surface is shown. Opt-in: default
- * off, flipped in Settings → Experimental. The flag gates the desktop's
- * navigation and pages, not the `/code/*` routes themselves.
- */
-code_mode_enabled: boolean, };
+computer_use_enabled: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.

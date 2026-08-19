@@ -40,8 +40,11 @@ import {
 } from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
 import {
+  closeAllEditorTabs,
   closeCodeChromeTab,
   closeEditorTab,
+  closeEditorTabsToRight,
+  closeOtherEditorTabs,
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
@@ -67,6 +70,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
+import { CodeQuickOpen } from "./CodeQuickOpen";
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
@@ -132,6 +136,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [reloadToken, setReloadToken] = useState(0);
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
+  const [fileReveal, setFileReveal] = useState<{
+    path: string;
+    line: number;
+    revision: number;
+  } | null>(null);
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const setViewedWorkspace = useCodeUpdatesStore((state) => state.setViewedWorkspace);
   const contentRevision = useCodeContentRevision(session?.id ?? null, client);
@@ -247,12 +256,27 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     openPanel({ type: "diff", turnId });
   }
 
-  function openFile(path: string) {
+  function openFile(path: string, line?: number) {
+    setFileReveal((current) =>
+      line === undefined
+        ? null
+        : {
+            path,
+            line,
+            revision: (current?.revision ?? 0) + 1,
+          },
+    );
     openPanel({ type: "file", path });
   }
 
   function openFileDiff(path: string) {
     openPanel({ type: "diff", path });
+  }
+
+  function copyEditorPath(path: string) {
+    void copyPlainText(path)
+      .then(() => toast.success("Copied path"))
+      .catch(() => toast.error("Could not copy path"));
   }
 
   const editorTabs = chrome.editors.tabs;
@@ -274,6 +298,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onSelectChat={() => setLayout(focusConversation(layout))}
         onSelectEditor={(index) => setLayout(focusEditorTab(layout, index))}
         onCloseEditor={(index) => setLayout(closeEditorTab(layout, index))}
+        onCloseAllEditors={() => setLayout(closeAllEditorTabs(layout))}
+        onCloseOtherEditors={(index) =>
+          setLayout(closeOtherEditorTabs(layout, index))
+        }
+        onCloseEditorsToRight={(index) =>
+          setLayout(closeEditorTabsToRight(layout, index))
+        }
+        onCopyPath={copyEditorPath}
       />
       <div
         className={cn("min-h-0 flex-1", !showingChat && "hidden")}
@@ -346,6 +378,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 workspaceId={workspaceId}
                 path={activeEditor.path}
                 contentRevision={contentRevision}
+                revealLine={
+                  fileReveal?.path === activeEditor.path
+                    ? fileReveal.line
+                    : undefined
+                }
+                revealRevision={fileReveal?.revision}
               />
             </Suspense>
           ) : activeEditor.type === "diff" ? (
@@ -374,6 +412,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       {dialogs}
+      <CodeQuickOpen
+        client={client}
+        workspaceId={workspaceId}
+        contentRevision={contentRevision}
+        onOpenFile={openFile}
+      />
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
         <div className="min-w-0 flex-1">
           <h1 className="flex min-w-0 items-center gap-2 text-sm font-medium">
@@ -562,10 +606,11 @@ function SessionAttentionBadge({
 }
 
 /**
- * The engine dropped part of its own stream. Saying so where the session is
- * read is the point of counting it at all — a silently degraded transcript
- * looks exactly like a complete one (decision 0031). The count comes from the
- * session row, so it settles at the end of a turn rather than mid-stream.
+ * The adapter could not classify part of the engine stream. Saying so where
+ * the session is read is the point of counting it at all — a silently
+ * degraded transcript looks exactly like a complete one (decision 0031). The
+ * count comes from the session row, so it settles at the end of a turn rather
+ * than mid-stream and remains historical after the adapter is updated.
  */
 function SessionLifecycleMark({
   lifecycle,
@@ -603,7 +648,7 @@ function SessionLifecycleMark({
             data-testid="unrecognized-event-dot"
             className="bg-warning-foreground-muted inline-block size-2 shrink-0 rounded-full"
             role="img"
-            aria-label={`${unrecognizedEventCount} unread engine ${unrecognizedEventCount === 1 ? "event" : "events"}`}
+            aria-label={`${unrecognizedEventCount} unrecognized engine ${unrecognizedEventCount === 1 ? "event" : "events"} recorded in this session`}
           />
         )}
         <span>{LIFECYCLE_LABELS[lifecycle]}</span>
@@ -1024,5 +1069,3 @@ function useRegisteredCodeSession(
   }, [sessionId, client]);
   return storeRef.current;
 }
-
-

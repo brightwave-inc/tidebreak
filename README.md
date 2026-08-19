@@ -45,10 +45,9 @@
 Tidebreak is a local-first desktop agent for work that ends in a file, not just
 a chat response. It can read attached documents, work in explicitly connected
 folders, run code in a sandbox, search the web, delegate parallel jobs, and
-publish anything it creates as a versioned output. An experimental code mode
-turns the same supervision onto software work: it drives coding agents such as
-Claude Code in isolated git worktrees, with native approvals and per-turn
-diffs.
+publish anything it creates as a versioned output. Code mode turns the same
+supervision onto software work: it drives coding agents such as Claude Code in
+isolated git worktrees, with native approvals and per-turn diffs.
 
 You choose the model route: Anthropic, OpenAI, Google, xAI, OpenRouter, a local
 Ollama daemon, or another OpenAI-compatible endpoint. Conversations can switch
@@ -78,7 +77,7 @@ the headless CLI.
 | **Execution** | Native macOS sandbox, local Docker, E2B, or Daytona. Per-chat network policy. Background agents one level deep. Built-in or configured web search (Exa, Tavily, Brave, SearXNG). Computer use: screen capture and consent-gated control of native apps. |
 | **Permissions** | Plan, Ask, Auto, or Allow all, per chat. Folder access is per capability from a native picker. Standing grants are revocable. Overwrite of a connected file always asks. |
 | **Extensions** | Built-in skills for Word, PDF, PowerPoint, spreadsheets, and charts; add your own. MCP servers over stdio or HTTP. REST APIs from an OpenAPI document, for local apps. Ask once for a mini-app and keep it in the sidebar. |
-| **Code mode** | Experimental. A second surface that drives coding agents (Claude Code, Codex CLI, opencode, Grok CLI) in isolated git worktrees: native approvals, per-turn diffs, and a reviewable change flow. |
+| **Code mode** | A second surface that drives coding agents (Claude Code, Codex CLI, opencode, Grok CLI) in isolated git worktrees: native approvals, per-turn diffs, and a reviewable change flow. |
 
 ## Run from source
 

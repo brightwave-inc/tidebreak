@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -15,10 +15,17 @@ use super::setup_script::run_workspace_script;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default number of paths the tree route returns.
 pub(crate) const DEFAULT_TREE_LIMIT: u32 = 50;
 /// Hard cap on the tree route. The explorer may request this many paths.
 pub(crate) const MAX_TREE_LIMIT: u32 = 5_000;
+/// Default number of matching lines returned by content search.
+pub(crate) const DEFAULT_SEARCH_LIMIT: u32 = 200;
+/// Hard cap for one content-search response.
+pub(crate) const MAX_SEARCH_LIMIT: u32 = 500;
+const MAX_SEARCH_QUERY_CHARS: usize = 500;
+const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brave", "calm", "crisp", "dusk", "ember", "faint", "gentle", "hidden", "ivory",
@@ -182,6 +189,217 @@ pub(crate) async fn list_tree_paths(
     let truncated = matched.len() > limit;
     matched.truncate(limit);
     Ok((matched, truncated))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeSearchMatch {
+    pub(crate) path: String,
+    pub(crate) line_number: u32,
+    pub(crate) line: String,
+}
+
+/// Literal, case-insensitive content search across tracked and untracked files
+/// that are not ignored by Git. Git's own grep engine keeps the hot path fast;
+/// results are streamed and the process is stopped after one row beyond the
+/// requested bound, so a one-character query cannot flood server memory.
+pub(crate) async fn search_worktree_contents(
+    worktree_path: &Path,
+    query: &str,
+    include: &str,
+    exclude: &str,
+    limit: u32,
+) -> Result<(Vec<WorktreeSearchMatch>, bool), WorktreeError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err(WorktreeError::user(format!(
+            "search query must be at most {MAX_SEARCH_QUERY_CHARS} characters"
+        )));
+    }
+
+    let limit = search_limit(limit);
+    let mut args = vec![
+        "grep".to_owned(),
+        "--no-index".to_owned(),
+        "--exclude-standard".to_owned(),
+        "--null".to_owned(),
+        "--line-number".to_owned(),
+        "-I".to_owned(),
+        "--ignore-case".to_owned(),
+        "--fixed-strings".to_owned(),
+        "--no-color".to_owned(),
+        "--full-name".to_owned(),
+        "-e".to_owned(),
+        query.to_owned(),
+        "--".to_owned(),
+    ];
+    args.extend(search_pathspecs(include, exclude));
+
+    let mut command = Command::new("git");
+    command
+        .args(&args)
+        .current_dir(worktree_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut child = command
+        .spawn()
+        .map_err(|err| WorktreeError::internal(format!("failed to spawn git grep: {err}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WorktreeError::internal("git grep stdout was not piped"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| WorktreeError::internal("git grep stderr was not piped"))?;
+
+    let searched = timeout(SEARCH_TIMEOUT, async {
+        let mut reader = BufReader::new(stdout);
+        let mut matches = Vec::with_capacity(limit.min(64));
+        let mut truncated = false;
+
+        loop {
+            let mut path = Vec::new();
+            if reader.read_until(0, &mut path).await.map_err(|err| {
+                WorktreeError::internal(format!("could not read git grep path: {err}"))
+            })? == 0
+            {
+                break;
+            }
+            if path.last() == Some(&0) {
+                path.pop();
+            }
+
+            let mut line_number = Vec::new();
+            reader
+                .read_until(0, &mut line_number)
+                .await
+                .map_err(|err| {
+                    WorktreeError::internal(format!("could not read git grep line number: {err}"))
+                })?;
+            if line_number.last() == Some(&0) {
+                line_number.pop();
+            }
+
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await.map_err(|err| {
+                WorktreeError::internal(format!("could not read git grep match: {err}"))
+            })?;
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+
+            if matches.len() >= limit {
+                truncated = true;
+                let _ = child.kill().await;
+                break;
+            }
+
+            let line_number = String::from_utf8_lossy(&line_number)
+                .parse::<u32>()
+                .unwrap_or(1);
+            let path = String::from_utf8_lossy(&path)
+                .trim_start_matches("./")
+                .to_owned();
+            let line = truncate_search_preview(&String::from_utf8_lossy(&line));
+            matches.push(WorktreeSearchMatch {
+                path,
+                line_number,
+                line,
+            });
+        }
+
+        let status = child.wait().await.map_err(|err| {
+            WorktreeError::internal(format!("could not wait for git grep: {err}"))
+        })?;
+        let mut stderr_bytes = Vec::new();
+        stderr.read_to_end(&mut stderr_bytes).await.map_err(|err| {
+            WorktreeError::internal(format!("could not read git grep stderr: {err}"))
+        })?;
+        // grep exits 1 when it found no matches. A deliberately killed process
+        // is also expected once the response bound is known to be exceeded.
+        if !status.success() && status.code() != Some(1) && !truncated {
+            let message = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
+            return Err(WorktreeError::user(if message.is_empty() {
+                "workspace search failed".to_owned()
+            } else {
+                message
+            }));
+        }
+        Ok((matches, truncated))
+    })
+    .await;
+
+    match searched {
+        Ok(result) => result,
+        Err(_) => Err(WorktreeError::user("workspace search timed out")),
+    }
+}
+
+fn search_limit(limit: u32) -> usize {
+    let requested = if limit == 0 {
+        DEFAULT_SEARCH_LIMIT
+    } else {
+        limit.min(MAX_SEARCH_LIMIT)
+    };
+    usize::try_from(requested).unwrap_or(DEFAULT_SEARCH_LIMIT as usize)
+}
+
+fn search_pathspecs(include: &str, exclude: &str) -> Vec<String> {
+    let includes = search_globs(include)
+        .into_iter()
+        .map(|pattern| format!(":(glob){pattern}"))
+        .collect::<Vec<_>>();
+    let mut pathspecs = if includes.is_empty() {
+        vec![".".to_owned()]
+    } else {
+        includes
+    };
+    pathspecs.extend(
+        search_globs(exclude)
+            .into_iter()
+            .map(|pattern| format!(":(exclude,glob){pattern}")),
+    );
+    pathspecs
+}
+
+fn search_globs(spec: &str) -> Vec<String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(|pattern| {
+            pattern
+                .replace('\\', "/")
+                .trim_start_matches('/')
+                .to_owned()
+        })
+        .filter(|pattern| !pattern.is_empty())
+        .map(|pattern| {
+            if pattern.contains('/') {
+                pattern
+            } else {
+                format!("**/{pattern}")
+            }
+        })
+        .collect()
+}
+
+fn truncate_search_preview(line: &str) -> String {
+    let mut chars = line.chars();
+    let preview = chars
+        .by_ref()
+        .take(MAX_SEARCH_PREVIEW_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
 }
 
 fn tree_limit(limit: u32) -> usize {
@@ -886,6 +1104,49 @@ mod tests {
         let (page, page_truncated) = list_tree_paths(&repo, "bulk-", 500).await.unwrap();
         assert_eq!(page.len(), 250);
         assert!(!page_truncated);
+    }
+
+    #[tokio::test]
+    async fn content_search_matches_lines_and_honors_globs_and_bounds() {
+        let (_dir, repo) = init_repo();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            "fn crisp_search() {}\n// crisp second match\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("notes.md"), "A crisp untracked note.\n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "crisp secret\n").unwrap();
+        run(&repo, &["git", "add", ".gitignore", "src/lib.rs"]);
+        run(&repo, &["git", "commit", "-m", "search fixture"]);
+
+        let (all, truncated) = search_worktree_contents(&repo, "CRISP", "", "", 50)
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert!(all.iter().any(|row| {
+            row.path == "src/lib.rs" && row.line_number == 1 && row.line == "fn crisp_search() {}"
+        }));
+        assert!(all.iter().any(|row| row.path == "notes.md"));
+        assert!(!all.iter().any(|row| row.path == "ignored.txt"));
+
+        let (rust_only, _) = search_worktree_contents(&repo, "crisp", "*.rs", "", 50)
+            .await
+            .unwrap();
+        assert!(rust_only.iter().all(|row| row.path.ends_with(".rs")));
+        assert_eq!(rust_only.len(), 2);
+
+        let (excluded, _) = search_worktree_contents(&repo, "crisp", "", "**/*.md", 50)
+            .await
+            .unwrap();
+        assert!(!excluded.iter().any(|row| row.path.ends_with(".md")));
+
+        let (bounded, bounded_truncated) = search_worktree_contents(&repo, "crisp", "", "", 1)
+            .await
+            .unwrap();
+        assert_eq!(bounded.len(), 1);
+        assert!(bounded_truncated);
     }
 
     #[test]

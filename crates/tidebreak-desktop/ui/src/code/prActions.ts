@@ -16,6 +16,7 @@ export type PrCheckCounts = {
   passing: number;
   pending: number;
   failing: number;
+  skipped: number;
   total: number;
 };
 
@@ -35,13 +36,21 @@ export function prCheckCounts(pr: PullRequestDigest): PrCheckCounts {
     const passing = checks.filter((check) => check.bucket === "pass").length;
     const pending = checks.filter((check) => check.bucket === "pending").length;
     const failing = checks.filter((check) => check.bucket === "fail").length;
-    return { passing, pending, failing, total: checks.length };
+    const skipped = checks.filter((check) => check.bucket === "skipped").length;
+    return { passing, pending, failing, skipped, total: checks.length };
   }
   const summary = pr.checks_summary ?? "";
   const passing = Number(/(\d+) passing/.exec(summary)?.[1] ?? 0);
   const pending = Number(/(\d+) pending/.exec(summary)?.[1] ?? 0);
   const failing = Number(/(\d+) failing/.exec(summary)?.[1] ?? 0);
-  return { passing, pending, failing, total: passing + pending + failing };
+  const skipped = Number(/(\d+) skipped/.exec(summary)?.[1] ?? 0);
+  return {
+    passing,
+    pending,
+    failing,
+    skipped,
+    total: passing + pending + failing + skipped,
+  };
 }
 
 export function prHasConflicts(pr: PullRequestDigest): boolean {
