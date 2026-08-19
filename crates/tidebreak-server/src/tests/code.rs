@@ -3125,6 +3125,45 @@ async fn workspace_tree_is_bounded_ignores_and_never_returns_contents() {
         .await
         .unwrap();
     assert_eq!(named["paths"][0], "notes.md");
+
+    let searched = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/search",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .query(&[
+            ("query", "unique_payload_XYZ"),
+            ("include", "*.md"),
+            ("limit", "50"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(searched.status(), reqwest::StatusCode::OK);
+    let searched: serde_json::Value = searched.json().await.unwrap();
+    assert_eq!(searched["truncated"], false);
+    assert_eq!(searched["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(searched["matches"][0]["path"], "notes.md");
+    assert_eq!(searched["matches"][0]["line_number"], 1);
+    assert_eq!(searched["matches"][0]["line"], "UNIQUE_PAYLOAD_xyz");
+    assert!(searched.to_string().find("secret.bin").is_none());
+
+    let bounded_search = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/search",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .query(&[("query", "x"), ("include", "bulk-*.txt"), ("limit", "1")])
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(bounded_search["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(bounded_search["truncated"], true);
 }
 
 #[allow(dead_code)]

@@ -206,6 +206,38 @@ describe("CodeTranscript", () => {
     expect(line).toHaveTextContent("Read");
   });
 
+  it("shows Codex shell commands without launcher and quote-escape noise", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-shell",
+            turnId: "t1",
+            callId: "c5",
+            name: "commandExecution",
+            detail: {
+              kind: "command",
+              cmd: String.raw`/bin/zsh -lc "rg --files -g '"'!node_modules'"' && printf '\\nDone\\n'"`,
+              cwd: "/tmp",
+            },
+            status: "succeeded",
+            preview: "",
+            startedAt: null,
+            durationMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const line = screen.getByRole("button", { name: /Command run.*succeeded/ });
+    expect(line).toHaveTextContent(
+      String.raw`rg --files -g '!node_modules' && printf '\nDone\n'`,
+    );
+    expect(line).not.toHaveTextContent("/bin/zsh -lc");
+    expect(line).not.toHaveTextContent(`'"'`);
+  });
+
   it("holds the transcript's shape until the session hydrates", () => {
     const { container, rerender } = render(
       <CodeTranscript items={[]} hydrated={false} />,

@@ -735,6 +735,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::list_workspace_tree),
         )
         .route(
+            "/code/workspaces/{id}/search",
+            get(routes::code::search_workspace),
+        )
+        .route(
             "/code/workspaces/{id}/blob",
             get(routes::code::get_workspace_blob),
         )

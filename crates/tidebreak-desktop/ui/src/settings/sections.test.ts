@@ -27,6 +27,14 @@ describe("settings sections", () => {
     );
   });
 
+  it("always exposes coding harnesses and has no experimental section", () => {
+    for (const managed of [false, true]) {
+      const paths = settingsSectionsFor(managed).map((section) => section.path);
+      expect(paths).toContain("coding-harnesses");
+      expect(paths).not.toContain("experimental");
+    }
+  });
+
   it("keeps a providers deep link to what it can act on", () => {
     // The picker's CTAs address this route; anything else in the URL — a stale
     // link, a hand-edited one — must reach the panel as nothing rather than as

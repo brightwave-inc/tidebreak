@@ -5,16 +5,18 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 
-import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, File, FileText, Folder, FolderOpen } from "lucide-react";
 import type { ApiClient } from "../api/client";
+import type { CodeWorkspaceSearchMatch } from "../api/types";
 import { SearchInput } from "@/components/SearchInput";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import {
   ancestorPaths,
   buildFileTree,
@@ -29,8 +31,9 @@ import { useLiveResource } from "./useLiveContent";
 const TREE_PAGE = 5000;
 
 /**
- * Nested worktree explorer. Search is Cmd+F (Ctrl+F): file names and
- * include/exclude globs. Diffs stay on the Source tab.
+ * Nested worktree explorer plus content search. Search is Cmd+F (Ctrl+F): the
+ * query matches file contents and include/exclude fields use VS Code-style
+ * globs. Filename-only quick open lives at Cmd+P in the workspace center.
  */
 export function FilesPanel({
   client,
@@ -39,10 +42,10 @@ export function FilesPanel({
   onOpenFile,
   contentRevision = 0,
 }: {
-  client: Pick<ApiClient, "listCodeWorkspaceTree">;
+  client: Pick<ApiClient, "listCodeWorkspaceTree" | "searchCodeWorkspace">;
   workspaceId: string;
   selected?: string;
-  onOpenFile: (file: string) => void;
+  onOpenFile: (file: string, line?: number) => void;
   /** Bumped by the session journal when the worktree may have moved. */
   contentRevision?: number;
 }) {
@@ -52,8 +55,11 @@ export function FilesPanel({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [openDirs, setOpenDirs] = useState<Set<string>>(() => new Set());
   const [closedTop, setClosedTop] = useState<Set<string>>(() => new Set());
-  const [searchHits, setSearchHits] = useState<string[] | null>(null);
+  const [searchHits, setSearchHits] = useState<CodeWorkspaceSearchMatch[] | null>(
+    null,
+  );
   const [searchTruncated, setSearchTruncated] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -79,6 +85,7 @@ export function FilesPanel({
     const needle = query.trim();
     setSearchHits(null);
     setSearchTruncated(false);
+    setSearchError(null);
     if (!needle) {
       setSearching(false);
       return;
@@ -87,37 +94,49 @@ export function FilesPanel({
     setSearching(true);
     const timer = window.setTimeout(() => {
       void client
-        .listCodeWorkspaceTree(workspaceId, { query: needle, limit: TREE_PAGE })
+        .searchCodeWorkspace(workspaceId, {
+          query: needle,
+          include: include.trim() || undefined,
+          exclude: exclude.trim() || undefined,
+          limit: 200,
+        })
         .then((hits) => {
           if (cancelled) return;
-          setSearchHits(hits.paths);
+          setSearchHits(hits.matches);
           setSearchTruncated(hits.truncated);
           setSearching(false);
         })
-        .catch(() => {
-          if (!cancelled) setSearching(false);
+        .catch((caught) => {
+          if (cancelled) return;
+          setSearchError(friendlyErrorMessage(caught, "Could not search files"));
+          setSearching(false);
         });
     }, 250);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [client, workspaceId, query, contentRevision]);
+  }, [client, workspaceId, query, include, exclude, contentRevision]);
 
   const visiblePaths = useMemo(() => {
-    return filterPaths(searchHits ?? tree?.paths ?? [], include, exclude);
-  }, [searchHits, tree, include, exclude]);
+    return filterPaths(tree?.paths ?? [], include, exclude);
+  }, [tree, include, exclude]);
 
   const nodes = useMemo(() => buildFileTree(visiblePaths), [visiblePaths]);
 
   const forcedOpen = useMemo(() => {
-    if (!query.trim() && !include.trim() && !exclude.trim()) return new Set<string>();
+    if (!include.trim() && !exclude.trim()) return new Set<string>();
     const dirs = new Set<string>();
     for (const path of visiblePaths) {
       for (const parent of ancestorPaths(path)) dirs.add(parent);
     }
     return dirs;
-  }, [query, include, exclude, visiblePaths]);
+  }, [include, exclude, visiblePaths]);
+
+  const searchGroups = useMemo(
+    () => groupSearchMatches(searchHits ?? []),
+    [searchHits],
+  );
 
   function isOpen(path: string): boolean {
     if (forcedOpen.has(path)) return true;
@@ -172,8 +191,9 @@ export function FilesPanel({
     return () => window.removeEventListener("keydown", onFind);
   }, []);
 
+  const searchMode = Boolean(query.trim());
   const ready = tree !== null;
-  const truncated = Boolean(tree?.truncated || searchTruncated);
+  const truncated = searchMode ? searchTruncated : Boolean(tree?.truncated);
   const empty = ready && nodes.length === 0 && !error;
   const busy = refreshing || searching;
 
@@ -253,8 +273,8 @@ export function FilesPanel({
           size="sm"
           value={query}
           onValueChange={setQuery}
-          placeholder="Search files"
-          aria-label="Search files"
+          placeholder="Search file contents"
+          aria-label="Search file contents"
           inputRef={searchInput}
         />
         {filtersOpen || include || exclude ? (
@@ -288,20 +308,41 @@ export function FilesPanel({
           </button>
         )}
       </div>
-      {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
+      {!searchMode && error && (
+        <p className="text-critical px-3 py-2 text-sm">{error}</p>
+      )}
+      {searchMode && searchError && (
+        <p className="text-critical px-3 py-2 text-sm">{searchError}</p>
+      )}
       {truncated && (
         <p className="text-muted-foreground px-3 py-2 text-xs">
-          File list was truncated. Narrow the search to see the rest.
+          {searchMode
+            ? "Search results were truncated. Narrow the query or file filters."
+            : "File list was truncated. Add a file filter to narrow it."}
         </p>
       )}
-      {!ready && !error && (
+      {searchMode && searchHits === null && !searchError ? (
+        <SearchResultsSkeleton />
+      ) : !searchMode && !ready && !error ? (
         <div className="flex flex-col gap-2 px-3 py-3" aria-hidden="true">
           <Skeleton className="h-4 w-2/3" />
           <Skeleton className="h-4 w-1/2" />
           <Skeleton className="h-4 w-3/5" />
         </div>
-      )}
-      {empty ? (
+      ) : searchMode ? (
+        searchGroups.length > 0 ? (
+          <SearchResults
+            groups={searchGroups}
+            query={query.trim()}
+            onOpenFile={onOpenFile}
+          />
+        ) : !searchError ? (
+          <ContentSearchEmpty
+            query={query.trim()}
+            onClear={() => setQuery("")}
+          />
+        ) : null
+      ) : empty ? (
         <FilesEmpty
           query={query.trim()}
           filtered={Boolean(include.trim() || exclude.trim())}
@@ -333,6 +374,136 @@ export function FilesPanel({
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+type SearchGroup = {
+  path: string;
+  matches: CodeWorkspaceSearchMatch[];
+};
+
+export function groupSearchMatches(
+  matches: readonly CodeWorkspaceSearchMatch[],
+): SearchGroup[] {
+  const groups = new Map<string, CodeWorkspaceSearchMatch[]>();
+  for (const matched of matches) {
+    const rows = groups.get(matched.path);
+    if (rows) rows.push(matched);
+    else groups.set(matched.path, [matched]);
+  }
+  return [...groups].map(([path, rows]) => ({ path, matches: rows }));
+}
+
+function SearchResults({
+  groups,
+  query,
+  onOpenFile,
+}: {
+  groups: readonly SearchGroup[];
+  query: string;
+  onOpenFile: (path: string, line?: number) => void;
+}) {
+  return (
+    <div
+      className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pt-2"
+      role="list"
+      aria-label="File content matches"
+    >
+      {groups.map((group) => (
+        <section key={group.path} className="mb-2" aria-label={group.path}>
+          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1 text-[11px]">
+            <FileText className="size-3.5 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1 truncate font-mono" title={group.path}>
+              {group.path}
+            </span>
+            <span className="shrink-0 tabular-nums">{group.matches.length}</span>
+          </div>
+          <div className="space-y-0.5">
+            {group.matches.map((matched) => (
+              <button
+                key={`${matched.line_number}:${matched.line}`}
+                type="button"
+                className={cn(
+                  "hover:bg-muted/50 flex w-full cursor-pointer items-start gap-2 rounded-sm px-2 py-1 text-left",
+                  FOCUS_RING,
+                  HOVER_TINT,
+                )}
+                aria-label={`${group.path}, line ${matched.line_number}`}
+                onClick={() => onOpenFile(group.path, matched.line_number)}
+              >
+                <span className="text-muted-foreground w-7 shrink-0 text-right font-mono text-[10px] leading-5 tabular-nums">
+                  {matched.line_number}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] leading-5">
+                  <LiteralMatch text={matched.line} query={query} />
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function LiteralMatch({ text, query }: { text: string; query: string }) {
+  if (!query) return text;
+  const lower = text.toLocaleLowerCase();
+  const needle = query.toLocaleLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let index = lower.indexOf(needle);
+  while (index >= 0) {
+    if (index > cursor) parts.push(text.slice(cursor, index));
+    parts.push(
+      <mark
+        key={`${index}:${cursor}`}
+        className="bg-warning-background text-warning-foreground rounded-[2px] px-0.5"
+      >
+        {text.slice(index, index + query.length)}
+      </mark>,
+    );
+    cursor = index + query.length;
+    index = lower.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts.length > 0 ? parts : text;
+}
+
+function SearchResultsSkeleton() {
+  return (
+    <div className="flex flex-col gap-2 px-3 py-3" aria-label="Searching files">
+      <Skeleton className="h-3 w-2/3" />
+      <Skeleton className="h-4 w-full" />
+      <Skeleton className="h-4 w-4/5" />
+    </div>
+  );
+}
+
+function ContentSearchEmpty({
+  query,
+  onClear,
+}: {
+  query: string;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-1 px-3 py-6">
+      <p className="text-muted-foreground line-clamp-2 text-sm">
+        No text matches <span className="font-mono break-all">{query}</span>.
+      </p>
+      <button
+        type="button"
+        className={cn(
+          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+          FOCUS_RING,
+          HOVER_TINT,
+        )}
+        onClick={onClear}
+      >
+        Clear search
+      </button>
     </div>
   );
 }

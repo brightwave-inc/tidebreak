@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
@@ -45,6 +45,7 @@ export function PrCard({
   framed?: boolean;
 }) {
   const [message, setMessage] = useState("");
+  const lastSuggestedMessage = useRef<string | null>(null);
   const [busy, setBusy] = useState<"commit" | "push" | "pr" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -65,13 +66,19 @@ export function PrCard({
     errorMessage: "Could not load pull-request status",
   });
 
-  // The server's suggestion is a default, not an override: it fills an empty
-  // box and never clobbers what the operator has typed.
+  // The server's suggestion is a live default, not an override: refresh it
+  // while the box still contains the previous suggestion, but never clobber
+  // what the operator has typed.
   useEffect(() => {
     if (!snapshot) return;
-    setMessage((current) =>
-      current.trim().length === 0 ? snapshot.suggested_commit_message : current,
-    );
+    const previousSuggestion = lastSuggestedMessage.current;
+    const nextSuggestion = snapshot.suggested_commit_message;
+    lastSuggestedMessage.current = nextSuggestion;
+    setMessage((current) => {
+      const untouched =
+        current.trim().length === 0 || current === previousSuggestion;
+      return untouched ? nextSuggestion : current;
+    });
   }, [snapshot]);
 
   async function commit() {
@@ -364,5 +371,4 @@ function prStateVariant(state: string): StatusTone {
   if (token === "closed") return "critical";
   return "outline";
 }
-
 

@@ -11,6 +11,21 @@ const ContextMenuGroup = ContextMenuPrimitive.Group;
 const ContextMenuPortal = ContextMenuPrimitive.Portal;
 const ContextMenuSub = ContextMenuPrimitive.Sub;
 
+const ContextMenuLabel = React.forwardRef<
+  React.ComponentRef<typeof ContextMenuPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Label>
+>(({ className, ...props }, ref) => (
+  <ContextMenuPrimitive.Label
+    ref={ref}
+    className={cn(
+      "text-muted-foreground px-2 py-1.5 text-[11px] font-medium tracking-wide",
+      className,
+    )}
+    {...props}
+  />
+));
+ContextMenuLabel.displayName = ContextMenuPrimitive.Label.displayName;
+
 const menuContentMotion =
   "motion-safe:data-[state=open]:animate-in motion-safe:data-[state=closed]:animate-out motion-safe:data-[state=closed]:fade-out-0 motion-safe:data-[state=open]:fade-in-0 motion-safe:data-[state=closed]:zoom-out-95 motion-safe:data-[state=open]:zoom-in-95 motion-safe:data-[side=bottom]:slide-in-from-top-2 motion-safe:data-[side=left]:slide-in-from-right-2 motion-safe:data-[side=right]:slide-in-from-left-2 motion-safe:data-[side=top]:slide-in-from-bottom-2 motion-safe:duration-150 motion-safe:ease-out";
 
@@ -145,6 +160,7 @@ export {
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
+  ContextMenuLabel,
   ContextMenuCheckboxItem,
   ContextMenuItem,
   ContextMenuSeparator,

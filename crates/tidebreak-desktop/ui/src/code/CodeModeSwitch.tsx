@@ -9,8 +9,8 @@ type Mode = "chat" | "code";
 /**
  * Chat / Code switch used at the top of both rails.
  *
- * One primitive, two hosts: the code rail always shows it, and the chat rail
- * shows it only when the code-mode flag is on.
+ * One primitive, two hosts: both rails always show it so Code remains a
+ * first-class product surface rather than a setting the reader has to find.
  */
 export function CodeModeSwitch() {
   const navigate = useNavigate();

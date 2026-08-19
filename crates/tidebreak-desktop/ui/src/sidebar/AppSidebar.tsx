@@ -6,7 +6,6 @@ import type { Chat } from "@/api";
 import { useApp } from "@/AppContext";
 import { useChatListStore } from "@/ChatListStore";
 import { CodeModeSwitch } from "@/code/CodeModeSwitch";
-import { useExperimentalFlags } from "@/experimental";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
 import { ProjectsSection } from "./ProjectsSection";
@@ -30,14 +29,13 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
   const { refreshChats } = useApp();
   const chatsError = useChatListStore((state) => state.chatsError);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const codeModeEnabled = useExperimentalFlags((state) => state.codeModeEnabled);
   const appsActive = pathname === "/apps" || pathname.startsWith("/apps/");
   const pluginsActive =
     pathname === "/plugins" || pathname.startsWith("/plugins/");
 
   return (
     <SidebarFrame>
-      {codeModeEnabled && <CodeModeSwitch />}
+      <CodeModeSwitch />
 
       <div className="flex shrink-0 flex-col gap-0.5">
         <InboxButton />

@@ -1,6 +1,23 @@
-import { useRef, type KeyboardEvent } from "react";
-import { FileCode, FileDiff, MessageSquare, X } from "lucide-react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import {
+  ArrowRightFromLine,
+  CircleX,
+  Copy,
+  FileCode,
+  FileDiff,
+  ListX,
+  MessageSquare,
+  X,
+} from "lucide-react";
 
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
@@ -27,6 +44,10 @@ export function CodeCenterTabs({
   onSelectChat,
   onSelectEditor,
   onCloseEditor,
+  onCloseAllEditors,
+  onCloseOtherEditors,
+  onCloseEditorsToRight,
+  onCopyPath,
 }: {
   editorTabs: PanelContent[];
   editorActiveIndex: number;
@@ -34,6 +55,10 @@ export function CodeCenterTabs({
   onSelectChat: () => void;
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;
+  onCloseAllEditors: () => void;
+  onCloseOtherEditors: (index: number) => void;
+  onCloseEditorsToRight: (index: number) => void;
+  onCopyPath: (path: string) => void;
 }) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -74,99 +99,176 @@ export function CodeCenterTabs({
       role="tablist"
       aria-label="Workspace center"
     >
-      <button
-        type="button"
-        role="tab"
-        id={CHAT_TAB_ID}
-        aria-selected={conversationFocused}
-        aria-controls={CHAT_PANEL_ID}
-        tabIndex={conversationFocused ? 0 : -1}
-        ref={(node) => {
-          tabRefs.current[0] = node;
-        }}
-        className={cn(
-          "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
-          FOCUS_RING_TIGHT,
-          HOVER_TINT,
-          conversationFocused
-            ? "bg-muted text-foreground"
-            : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-        )}
-        onClick={onSelectChat}
-        onKeyDown={(event) => onKeyDown(event, 0)}
-      >
-        <MessageSquare className="size-3.5" />
-        Chat
-      </button>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            role="tab"
+            id={CHAT_TAB_ID}
+            aria-selected={conversationFocused}
+            aria-controls={CHAT_PANEL_ID}
+            tabIndex={conversationFocused ? 0 : -1}
+            ref={(node) => {
+              tabRefs.current[0] = node;
+            }}
+            className={cn(
+              "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
+              FOCUS_RING_TIGHT,
+              HOVER_TINT,
+              conversationFocused
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+            )}
+            onClick={onSelectChat}
+            onKeyDown={(event) => onKeyDown(event, 0)}
+          >
+            <MessageSquare className="size-3.5" />
+            Chat
+          </button>
+        </ContextMenuTrigger>
+        <TabContextMenuContent label="Chat">
+          <ContextMenuItem
+            className="gap-3 py-2"
+            disabled={editorTabs.length === 0}
+            onSelect={onCloseAllEditors}
+          >
+            <ListX />
+            Close other tabs
+          </ContextMenuItem>
+        </TabContextMenuContent>
+      </ContextMenu>
       {editorTabs.map((panel, index) => {
         const active = !conversationFocused && index === editorActiveIndex;
         const { name, suffix } = centerTabParts(panel);
         const label = suffix ? `${name} ${suffix}` : name;
+        const path =
+          panel.type === "file" || panel.type === "diff"
+            ? panel.path
+            : undefined;
         return (
-          // A tablist owns tabs. The close control is a second control on the
-          // same row, so the box that pairs them has to be transparent to
-          // assistive tech rather than a stray group inside the list.
-          <div
-            key={panelKey(panel)}
-            role="presentation"
-            className={cn(
-              "flex min-w-0 shrink-0 items-center rounded-md pr-1",
-              HOVER_TINT,
-              active ? "bg-muted" : "hover:bg-muted/60",
-            )}
-          >
-            <button
-              type="button"
-              role="tab"
-              id={editorTabId(index)}
-              aria-selected={active}
-              aria-controls={EDITOR_PANEL_ID}
-              tabIndex={active ? 0 : -1}
-              ref={(node) => {
-                tabRefs.current[index + 1] = node;
-              }}
-              className={cn(
-                "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
-                FOCUS_RING_TIGHT,
-                HOVER_TINT,
-                active ? "text-foreground" : "text-muted-foreground",
-              )}
-              onClick={() => onSelectEditor(index)}
-              onKeyDown={(event) => onKeyDown(event, index + 1)}
-            >
-              {panel.type === "diff" ? (
-                <FileDiff className="size-3.5 shrink-0" />
-              ) : (
-                <FileCode className="size-3.5 shrink-0" />
-              )}
-              <span
-                className="flex min-w-0 items-baseline gap-1"
-                title={centerTabTitle(panel)}
+          <ContextMenu key={panelKey(panel)}>
+            <ContextMenuTrigger asChild>
+              {/* A tablist owns tabs. The close control is a second control on
+                  the same row, so this pair is transparent to assistive tech. */}
+              <div
+                role="presentation"
+                className={cn(
+                  "flex min-w-0 shrink-0 items-center rounded-md pr-1",
+                  HOVER_TINT,
+                  active ? "bg-muted" : "hover:bg-muted/60",
+                )}
               >
-                <span className="max-w-40 truncate">{name}</span>
-                {/*
-                  The suffix is what separates this tab from the plain file tab
-                  for the same path, so it never joins the part that truncates.
-                */}
-                {suffix && <span className="shrink-0">{suffix}</span>}
-              </span>
-            </button>
-            <button
-              type="button"
-              className={cn(
-                "text-muted-foreground hover:text-foreground grid size-4 shrink-0 cursor-pointer place-items-center rounded-sm",
-                FOCUS_RING_TIGHT,
-                HOVER_TINT,
+                <button
+                  type="button"
+                  role="tab"
+                  id={editorTabId(index)}
+                  aria-label={label}
+                  aria-selected={active}
+                  aria-controls={EDITOR_PANEL_ID}
+                  tabIndex={active ? 0 : -1}
+                  ref={(node) => {
+                    tabRefs.current[index + 1] = node;
+                  }}
+                  className={cn(
+                    "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
+                    FOCUS_RING_TIGHT,
+                    HOVER_TINT,
+                    active ? "text-foreground" : "text-muted-foreground",
+                  )}
+                  onClick={() => onSelectEditor(index)}
+                  onKeyDown={(event) => onKeyDown(event, index + 1)}
+                >
+                  {panel.type === "diff" ? (
+                    <FileDiff className="size-3.5 shrink-0" />
+                  ) : (
+                    <FileCode className="size-3.5 shrink-0" />
+                  )}
+                  <span
+                    className="flex min-w-0 items-baseline gap-1"
+                    title={centerTabTitle(panel)}
+                  >
+                    <span className="max-w-40 truncate">{name}</span>
+                    {/* The suffix stays outside the truncating name. */}
+                    {suffix && <span className="shrink-0">{suffix}</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "text-muted-foreground hover:text-foreground grid size-4 shrink-0 cursor-pointer place-items-center rounded-sm",
+                    FOCUS_RING_TIGHT,
+                    HOVER_TINT,
+                  )}
+                  onClick={() => onCloseEditor(index)}
+                >
+                  <X className="size-3" />
+                  <span className="sr-only">{`Close ${label}`}</span>
+                </button>
+              </div>
+            </ContextMenuTrigger>
+            <TabContextMenuContent label={label}>
+              {path && (
+                <>
+                  <ContextMenuItem
+                    className="gap-3 py-2"
+                    onSelect={() => onCopyPath(path)}
+                  >
+                    <Copy />
+                    Copy path
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                </>
               )}
-              onClick={() => onCloseEditor(index)}
-            >
-              <X className="size-3" />
-              <span className="sr-only">{`Close ${label}`}</span>
-            </button>
-          </div>
+              <ContextMenuItem
+                className="gap-3 py-2"
+                onSelect={() => onCloseEditor(index)}
+              >
+                <X />
+                Close tab
+              </ContextMenuItem>
+              <ContextMenuItem
+                className="gap-3 py-2"
+                disabled={editorTabs.length <= 1}
+                onSelect={() => onCloseOtherEditors(index)}
+              >
+                <ListX />
+                Close other tabs
+              </ContextMenuItem>
+              <ContextMenuItem
+                className="gap-3 py-2"
+                disabled={index === editorTabs.length - 1}
+                onSelect={() => onCloseEditorsToRight(index)}
+              >
+                <ArrowRightFromLine />
+                Close tabs to the right
+              </ContextMenuItem>
+              <ContextMenuItem
+                className="gap-3 py-2"
+                onSelect={onCloseAllEditors}
+              >
+                <CircleX />
+                Close all tabs
+              </ContextMenuItem>
+            </TabContextMenuContent>
+          </ContextMenu>
         );
       })}
     </div>
+  );
+}
+
+function TabContextMenuContent({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <ContextMenuContent className="min-w-56 rounded-xl border-border/70 bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl">
+      <ContextMenuLabel className="max-w-52 truncate">{label}</ContextMenuLabel>
+      {children}
+    </ContextMenuContent>
   );
 }
 

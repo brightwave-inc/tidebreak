@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatListStore } from "./ChatListStore";
 import { useCodeCatalogStore } from "./code/CodeCatalogStore";
 import { useCodeUiStore } from "./code/CodeUiStore";
-import { useExperimentalFlags } from "./experimental";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useProjectListStore } from "./ProjectListStore";
 import { useRefreshSignals } from "./RefreshSignals";
@@ -65,7 +64,6 @@ const createProject = vi.fn(async (title: string) => ({
 const getSettings = vi.fn(async () => ({
   model: null,
   has_api_key: false,
-  code_mode_enabled: false,
 }));
 const listCodeRepos = vi.fn(async () => [
   {
@@ -299,14 +297,10 @@ beforeEach(() => {
   getSettings.mockResolvedValue({
     model: null,
     has_api_key: false,
-    code_mode_enabled: false,
   });
   listCodeRepos.mockClear();
   listCodeWorkspaces.mockClear();
   listCodeHarnessModels.mockClear();
-  // Code mode is opt-in and its catalog outlives a render, so a test that
-  // turned it on must not decide the next one's routes.
-  useExperimentalFlags.setState({ loaded: false, codeModeEnabled: false });
   useCodeCatalogStore.getState().reset();
   useCodeUiStore.setState({
     newWorkspaceOpen: false,
@@ -348,6 +342,8 @@ describe("app shell", () => {
 
     expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/");
+    expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     // Home used to create a chat on every cold start, leaving an empty one
     // behind whenever the reader did not use it.
     expect(createChat).not.toHaveBeenCalled();
@@ -730,11 +726,6 @@ describe("app shell", () => {
       // Shell shortcuts are mode-scoped, and the mode is the route family. The
       // regression this pins is Cmd+N on a /code route creating a chat and
       // navigating the reader out of the mode they were working in.
-      getSettings.mockResolvedValue({
-        model: null,
-        has_api_key: false,
-        code_mode_enabled: true,
-      });
       const user = userEvent.setup();
       const { router } = await mountApp({ at: "/code" });
 
@@ -757,4 +748,12 @@ describe("app shell", () => {
       expect(router.state.location.pathname).toBe("/code");
     },
   );
+
+  it("redirects the retired experimental settings link to coding harnesses", async () => {
+    const { router } = await mountApp({ at: "/settings/experimental" });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/settings/coding-harnesses"),
+    );
+  });
 });

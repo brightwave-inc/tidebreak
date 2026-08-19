@@ -41,11 +41,11 @@ describe("DiffPanel", () => {
         file="src/lib.rs"
       />,
     );
-    expect(
-      await screen.findByRole("heading", { name: "src/lib.rs" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
     expect(screen.queryByText("Turn 4")).not.toBeInTheDocument();
     expect(screen.getByText("+new")).toBeInTheDocument();
+    expect(screen.queryByText("--- a/src/lib.rs")).not.toBeInTheDocument();
+    expect(screen.queryByText("+++ b/src/lib.rs")).not.toBeInTheDocument();
 
     const added = screen.getByText("+new").parentElement;
     expect(added?.querySelector('[data-diff-gutter="old"]')?.textContent).toBe(
@@ -57,6 +57,7 @@ describe("DiffPanel", () => {
     expect(added?.querySelector('[data-diff-gutter="new"]')).toHaveClass(
       "select-none",
     );
+    expect(added).toHaveClass("bg-success-background/55");
 
     const removed = screen.getByText("-old").parentElement;
     expect(removed?.querySelector('[data-diff-gutter="old"]')?.textContent).toBe(
@@ -65,6 +66,7 @@ describe("DiffPanel", () => {
     expect(removed?.querySelector('[data-diff-gutter="new"]')?.textContent).toBe(
       "",
     );
+    expect(removed).toHaveClass("bg-critical-background/55");
 
     expect(
       screen.getByText("This diff was truncated. Open a single file for the rest."),

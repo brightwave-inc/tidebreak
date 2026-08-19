@@ -1,6 +1,6 @@
 # Code mode
 
-Status: implemented (first version). The decision records
+Status: supported and enabled by default. The decision records
 [`0030`](decisions/0030-code-mode-separate-surface.md) through
 [`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md) carry the decisions
 and are accepted; this page carries the working design detail in one place.
@@ -16,7 +16,8 @@ the mode is chosen — see
 [`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)) — with the
 deliberately parked scope recorded in [`docs/deferred.md`](deferred.md).
 
-Code mode is Tidebreak's second product surface: pick a local git repository,
+Code mode is Tidebreak's second product surface and is available without an
+experimental opt-in: pick a local git repository,
 spin up isolated **workspaces** (one worktree + branch each), and run
 **sessions** — durable conversations with external coding-agent harnesses
 (Claude Code first; Codex CLI, opencode, and Grok CLI behind it) — supervised

@@ -1,5 +1,5 @@
 import { useCallback, useId, useMemo, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, FileCode2 } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -96,6 +96,20 @@ export function DiffPanel({
             )}
           </span>
           {payload && <DiffstatBadge stat={payload.stat} />}
+          {file && onOpenFile && (
+            <button
+              type="button"
+              className={cn(
+                "text-muted-foreground hover:bg-muted hover:text-foreground flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px]",
+                FOCUS_RING_TIGHT,
+                HOVER_TINT,
+              )}
+              onClick={() => onOpenFile(file)}
+            >
+              <FileCode2 className="size-3" aria-hidden />
+              Open file
+            </button>
+          )}
         </div>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
@@ -112,13 +126,17 @@ export function DiffPanel({
             <Skeleton className="h-3 w-2/3" />
           </div>
         )}
-        {groups.map((group) => (
-          <FileDiffSection
-            key={group.path}
-            group={group}
-            onOpenFile={onOpenFile}
-          />
-        ))}
+        {file && groups.length === 1 ? (
+          <DiffBody group={groups[0]} />
+        ) : (
+          groups.map((group) => (
+            <FileDiffSection
+              key={group.path}
+              group={group}
+              onOpenFile={onOpenFile}
+            />
+          ))
+        )}
         {payload && groups.length === 0 && !error && (
           <p className="text-muted-foreground px-3 py-6 text-sm">
             {emptyDiffText(file, turnId, turnLabel)}
@@ -226,17 +244,7 @@ function FileDiffSection({
         </span>
       </header>
       {expanded ? (
-        <pre
-          id={bodyId}
-          className="overflow-x-auto py-1 font-mono text-[13px] leading-5"
-        >
-          {group.lines.map((line, index) => (
-            <DiffLineRow
-              key={`${group.path}:${index}`}
-              line={line}
-            />
-          ))}
-        </pre>
+        <DiffBody group={group} id={bodyId} />
       ) : large ? (
         <button
           type="button"
@@ -255,33 +263,62 @@ function FileDiffSection({
   );
 }
 
+function DiffBody({ group, id }: { group: DiffFileGroup; id?: string }) {
+  return (
+    <pre
+      id={id}
+      className="overflow-x-auto py-1 font-mono text-[13px] leading-5"
+    >
+      {group.lines.map((line, index) => (
+        <DiffLineRow key={`${group.path}:${index}`} line={line} />
+      ))}
+    </pre>
+  );
+}
+
 function DiffLineRow({ line }: { line: DiffLine }) {
+  if (line.kind === "meta" && isNoisyDiffMeta(line.text)) return null;
+
   return (
     // The tint carries "added" or "removed"; the ink carries readability. Tinted
     // ink on a tinted row is what made added lines a 3.2:1 pale green in the
     // light theme while reading fine in the dark one.
     <span
       className={cn(
-        "flex min-h-4 min-w-max",
-        line.kind === "add" && "text-success-foreground bg-success/10",
-        line.kind === "del" && "text-critical-foreground bg-critical/10",
-        (line.kind === "hunk" || line.kind === "meta") && "text-muted-foreground",
+        "flex min-h-5 min-w-max border-l-2 border-transparent",
+        line.kind === "add" &&
+          "border-success-border bg-success-background/55 text-success-foreground",
+        line.kind === "del" &&
+          "border-critical-border bg-critical-background/55 text-critical-foreground",
+        line.kind === "context" && "text-foreground/90",
+        line.kind === "hunk" &&
+          "border-info-border/60 bg-info-background/45 text-info-foreground my-1 border-y border-l-0",
+        line.kind === "meta" &&
+          "text-muted-foreground bg-muted/20 border-l-0 text-[11px]",
       )}
     >
       <span
-        className="text-muted-foreground w-[3.25ch] shrink-0 select-none text-right text-[11px] tabular-nums"
+        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-[11px] tabular-nums"
         data-diff-gutter="old"
       >
         {line.oldNo ?? ""}
       </span>
       <span
-        className="text-muted-foreground w-[3.25ch] shrink-0 select-none pr-2 text-right text-[11px] tabular-nums"
+        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-[11px] tabular-nums"
         data-diff-gutter="new"
       >
         {line.newNo ?? ""}
       </span>
       <span className="px-1 whitespace-pre">{line.text || " "}</span>
     </span>
+  );
+}
+
+function isNoisyDiffMeta(text: string): boolean {
+  return (
+    text.startsWith("index ") ||
+    text.startsWith("--- ") ||
+    text.startsWith("+++ ")
   );
 }
 

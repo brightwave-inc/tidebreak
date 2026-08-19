@@ -402,7 +402,16 @@ function WorkspaceCard({
               )}
               <span className="truncate">{sessionRowLabel(digest)}</span>
               {age && (
-                <span className="ml-auto shrink-0 tabular-nums">{age}</span>
+                <span
+                  className="ml-auto shrink-0 tabular-nums"
+                  title={
+                    age === "now"
+                      ? "Session created just now"
+                      : `Session created ${age} ago`
+                  }
+                >
+                  session {age}
+                </span>
               )}
             </span>
           )}

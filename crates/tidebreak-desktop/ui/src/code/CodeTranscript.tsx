@@ -636,7 +636,7 @@ function parseExitCode(preview: string): number | null {
 function toolSubject(detail: ToolDetail, name: string): string {
   switch (detail.kind) {
     case "command":
-      return detail.cmd.trim() || name;
+      return humanizeShellCommand(detail.cmd) || name;
     case "file_read":
     case "file_edit":
       return detail.path.trim() || name;
@@ -645,6 +645,34 @@ function toolSubject(detail: ToolDetail, name: string): string {
     case "other":
       return detail.summary.trim() || name;
   }
+}
+
+/**
+ * Codex reports commands as the complete shell launcher. Showing that
+ * serialization verbatim leaves ordinary globs looking like
+ * `'"'!node_modules'"'`. Decode the outer double-quoted `-lc` argument for
+ * display only; the command is never executed from this value.
+ */
+function humanizeShellCommand(command: string): string {
+  const trimmed = command.trim();
+  const wrapped = trimmed.match(
+    /^\/(?:usr\/)?bin\/(?:zsh|bash|sh) -lc "([\s\S]*)"$/,
+  );
+  if (!wrapped) return trimmed;
+
+  const inner = wrapped[1] ?? "";
+  let decoded = "";
+  for (let index = 0; index < inner.length; index += 1) {
+    const char = inner[index];
+    const next = inner[index + 1];
+    if (char === "\\" && next && ['"', "\\", "$", "`"].includes(next)) {
+      decoded += next;
+      index += 1;
+    } else {
+      decoded += char;
+    }
+  }
+  return decoded.replaceAll(`'"'`, "'").trim();
 }
 
 function StatusGlyph({
@@ -835,5 +863,4 @@ function CodeTurnImages({
     />
   );
 }
-
 

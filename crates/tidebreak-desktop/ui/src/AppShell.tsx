@@ -30,7 +30,6 @@ import {
   shellShortcutMode,
 } from "./code/routes";
 import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panel/panelUrl";
-import { useExperimentalFlags } from "./experimental";
 import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
@@ -260,9 +259,6 @@ export function AppShell() {
         if (!cancelled) setBootError(String(err));
       }
     })();
-    // Loads apart from the catalog on purpose: a flags failure keeps the
-    // opted-out defaults instead of taking down the shell.
-    void useExperimentalFlags.getState().refresh(client);
     return () => {
       cancelled = true;
     };

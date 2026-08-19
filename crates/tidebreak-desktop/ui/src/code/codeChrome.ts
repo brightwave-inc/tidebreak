@@ -85,6 +85,70 @@ export function closeEditorTab(layout: LayoutState, editorIndex: number): Layout
   return next;
 }
 
+/** Close every file and diff tab, returning the center to the conversation. */
+export function closeAllEditorTabs(layout: LayoutState): LayoutState {
+  const tabs = layout.tabs.filter((tab) => !isEditorTab(tab));
+  if (tabs.length === layout.tabs.length) return layout;
+  if (tabs.length === 0) return EMPTY_LAYOUT;
+
+  const active = layout.tabs[layout.activeIndex];
+  const activeIndex = active && !isEditorTab(active)
+    ? Math.max(0, tabs.findIndex((tab) => panelKey(tab) === panelKey(active)))
+    : 0;
+  return {
+    ...layout,
+    tabs,
+    activeIndex,
+    conversationFocused: undefined,
+  };
+}
+
+/** Keep one file or diff tab and close the other editor tabs around it. */
+export function closeOtherEditorTabs(
+  layout: LayoutState,
+  editorIndex: number,
+): LayoutState {
+  const editors = layout.tabs.filter(isEditorTab);
+  const target = editors[editorIndex];
+  if (!target || editors.length <= 1) return layout;
+  const targetKey = panelKey(target);
+  const tabs = layout.tabs.filter(
+    (tab) => !isEditorTab(tab) || panelKey(tab) === targetKey,
+  );
+  return {
+    ...layout,
+    tabs,
+    activeIndex: tabs.findIndex((tab) => panelKey(tab) === targetKey),
+    conversationFocused: false,
+  };
+}
+
+/** Close only the file and diff tabs that follow `editorIndex`. */
+export function closeEditorTabsToRight(
+  layout: LayoutState,
+  editorIndex: number,
+): LayoutState {
+  const editors = layout.tabs.filter(isEditorTab);
+  const target = editors[editorIndex];
+  const closing = editors.slice(editorIndex + 1);
+  if (!target || closing.length === 0) return layout;
+
+  const closingKeys = new Set(closing.map(panelKey));
+  const tabs = layout.tabs.filter(
+    (tab) => !isEditorTab(tab) || !closingKeys.has(panelKey(tab)),
+  );
+  const active = layout.tabs[layout.activeIndex];
+  const activeKey = active ? panelKey(active) : null;
+  const activeIndex = activeKey && !closingKeys.has(activeKey)
+    ? tabs.findIndex((tab) => panelKey(tab) === activeKey)
+    : tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  return {
+    ...layout,
+    tabs,
+    activeIndex: Math.max(activeIndex, 0),
+  };
+}
+
 /**
  * URL-tab index of the side-region tab at `stripIndex`.
  *

@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { EMPTY_LAYOUT } from "@/panel/panelTypes";
 import {
+  closeAllEditorTabs,
   closeCodeChromeTab,
   closeEditorTab,
+  closeEditorTabsToRight,
+  closeOtherEditorTabs,
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
@@ -138,5 +141,45 @@ describe("code chrome layout", () => {
       "diff",
       "terminal",
     ]);
+  });
+
+  it("closes editor-tab groups without dropping side panels or the terminal", () => {
+    const layout = {
+      tabs: [
+        { type: "folders" as const },
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+        { type: "file" as const, path: "README.md" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 3,
+      fullscreen: false,
+    };
+
+    expect(closeEditorTabsToRight(layout, 0)).toEqual({
+      ...layout,
+      tabs: [
+        { type: "folders" },
+        { type: "file", path: "src/lib.rs" },
+        { type: "terminal" },
+      ],
+      activeIndex: 1,
+    });
+    expect(closeOtherEditorTabs(layout, 1)).toEqual({
+      ...layout,
+      tabs: [
+        { type: "folders" },
+        { type: "diff", path: "src/main.rs" },
+        { type: "terminal" },
+      ],
+      activeIndex: 1,
+      conversationFocused: false,
+    });
+    expect(closeAllEditorTabs(layout)).toEqual({
+      ...layout,
+      tabs: [{ type: "folders" }, { type: "terminal" }],
+      activeIndex: 0,
+      conversationFocused: undefined,
+    });
   });
 });

@@ -15,11 +15,6 @@ pub(crate) const MODEL_VISIBILITY_OVERRIDES_SETTING: &str = "models.visibility_o
 /// Master switch for the computer-use capability (screen capture + app
 /// control). Default on; setting it false unregisters the tools at boot.
 pub(crate) const COMPUTER_USE_ENABLED_SETTING: &str = "computer_use.enabled";
-/// Opt-in switch for the experimental code-mode surface. Default off: the
-/// desktop hides the surface until the reader enables it in Settings →
-/// Experimental. The `/code/*` routes keep serving either way — the flag
-/// gates discovery, not data.
-pub(crate) const CODE_MODE_ENABLED_SETTING: &str = "code_mode.enabled";
 
 mod agent_runs;
 mod app_gateway_page;

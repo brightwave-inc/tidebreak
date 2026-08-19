@@ -1,10 +1,11 @@
-import { useCallback, useEffect } from "react";
-import Editor from "@monaco-editor/react";
+import { useCallback, useEffect, useRef } from "react";
+import Editor, { type OnMount } from "@monaco-editor/react";
 
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspaceBlob } from "../api/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { useTheme } from "@/theme";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { useLiveResource } from "./useLiveContent";
@@ -17,12 +18,17 @@ export function FileViewer({
   workspaceId,
   path,
   contentRevision = 0,
+  revealLine,
+  revealRevision = 0,
 }: {
   client: Pick<ApiClient, "getCodeWorkspaceBlob">;
   workspaceId: string;
   path: string;
   contentRevision?: number;
+  revealLine?: number;
+  revealRevision?: number;
 }) {
+  const { resolved: resolvedTheme } = useTheme();
   const load = useCallback(
     () => client.getCodeWorkspaceBlob(workspaceId, path),
     [client, workspaceId, path],
@@ -70,12 +76,72 @@ export function FileViewer({
           <Skeleton className="h-4 w-2/3" />
         </div>
       )}
-      {data && <BlobBody blob={data} />}
+      {data && (
+        <BlobBody
+          blob={data}
+          theme={resolvedTheme}
+          revealLine={revealLine}
+          revealRevision={revealRevision}
+        />
+      )}
     </div>
   );
 }
 
-function BlobBody({ blob }: { blob: CodeWorkspaceBlob }) {
+function BlobBody({
+  blob,
+  theme,
+  revealLine,
+  revealRevision,
+}: {
+  blob: CodeWorkspaceBlob;
+  theme: "light" | "dark";
+  revealLine?: number;
+  revealRevision: number;
+}) {
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const revealFrameRef = useRef<number | null>(null);
+
+  const reveal = useCallback((line: number | undefined) => {
+    const editor = editorRef.current;
+    if (!editor || line === undefined) return;
+    if (revealFrameRef.current !== null) {
+      window.cancelAnimationFrame(revealFrameRef.current);
+    }
+    const revealNow = () => {
+      const model = editor.getModel();
+      if (!model) return;
+      const lineNumber = Math.min(
+        model.getLineCount(),
+        Math.max(1, Math.round(line)),
+      );
+      editor.setPosition({ lineNumber, column: 1 });
+      editor.revealLineInCenter(lineNumber);
+    };
+
+    // @monaco-editor/react can invoke onMount just before it applies the
+    // controlled value to a newly-created model. Reveal once immediately and
+    // once after the next paint so the first search result opened in a fresh
+    // tab is not reset to line 1 by that initial model update.
+    revealNow();
+    revealFrameRef.current = window.requestAnimationFrame(() => {
+      revealFrameRef.current = null;
+      revealNow();
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (revealFrameRef.current !== null) {
+        window.cancelAnimationFrame(revealFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    reveal(revealLine);
+  }, [reveal, revealLine, revealRevision]);
+
   if (blob.binary) {
     return (
       <p className="text-muted-foreground px-3 py-6 text-sm">
@@ -94,8 +160,13 @@ function BlobBody({ blob }: { blob: CodeWorkspaceBlob }) {
         <Editor
           height="100%"
           language={monacoLanguage(blob.path)}
-          theme={monacoTheme()}
+          path={blob.path}
+          theme={monacoTheme(theme)}
           value={blob.content}
+          onMount={(editor) => {
+            editorRef.current = editor;
+            reveal(revealLine);
+          }}
           options={{
             readOnly: true,
             minimap: { enabled: false },

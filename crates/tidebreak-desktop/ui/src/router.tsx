@@ -22,7 +22,6 @@ import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
-import { CodeModeGate } from "./code/CodeModeGate";
 import { CodeRepoPage } from "./code/CodeRepoPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
@@ -206,11 +205,7 @@ function ProjectRouteComponent() {
 const codeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code",
-  component: () => (
-    <CodeModeGate>
-      <CodeHome />
-    </CodeModeGate>
-  ),
+  component: CodeHome,
 });
 
 const codeRepoRoute = createRoute({
@@ -221,11 +216,7 @@ const codeRepoRoute = createRoute({
 
 function CodeRepoRouteComponent() {
   const { repoId } = codeRepoRoute.useParams();
-  return (
-    <CodeModeGate>
-      <CodeRepoPage key={repoId} repoId={repoId} />
-    </CodeModeGate>
-  );
+  return <CodeRepoPage key={repoId} repoId={repoId} />;
 }
 
 const codeWorkspaceRoute = createRoute({
@@ -237,11 +228,7 @@ const codeWorkspaceRoute = createRoute({
 
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
-  return (
-    <CodeModeGate>
-      <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />
-    </CodeModeGate>
-  );
+  return <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />;
 }
 
 export const settingsRoute = createRoute({
@@ -299,6 +286,27 @@ const settingsMcpRedirectRoute = createRoute({
   component: McpSettingsRedirect,
 });
 
+/**
+ * Code mode graduated from the Experimental panel. Preserve old bookmarks by
+ * landing on the settings page that now owns its harness setup.
+ */
+function ExperimentalSettingsRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const codingHarnessesPath: string = "/settings/coding-harnesses";
+    void navigate({ to: codingHarnessesPath, replace: true });
+  }, [navigate]);
+  return (
+    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
+  );
+}
+
+const settingsExperimentalRedirectRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: "experimental",
+  component: ExperimentalSettingsRedirect,
+});
+
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
   createRoute({
     getParentRoute: () => settingsRoute,
@@ -328,6 +336,7 @@ export const routeTree = rootRoute.addChildren([
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,
+    settingsExperimentalRedirectRoute,
     ...settingsSectionRoutes,
   ]),
 ]);

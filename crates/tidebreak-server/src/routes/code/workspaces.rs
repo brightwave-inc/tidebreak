@@ -9,9 +9,9 @@ use crate::state::AppState;
 use super::require_code;
 use super::types::{
     ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CreateWorkspaceBody, ListWorkspacesQuery,
-    PatchWorkspaceBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
-    WorkspaceTreeQuery,
+    CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
+    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, WorkspaceBlobQuery,
+    WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -89,6 +89,33 @@ pub async fn list_workspace_tree(
         .workspace_tree(id, query.query.as_deref().unwrap_or(""), query.limit)
         .await?;
     Ok(Json(CodeWorkspaceTree { paths, truncated }))
+}
+
+pub async fn search_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<WorkspaceId>,
+    Query(query): Query<WorkspaceSearchQuery>,
+) -> Result<Json<CodeWorkspaceSearch>, ServerError> {
+    let (matches, truncated) = require_code(&state)?
+        .workspace_search(
+            id,
+            &query.query,
+            query.include.as_deref().unwrap_or(""),
+            query.exclude.as_deref().unwrap_or(""),
+            query.limit,
+        )
+        .await?;
+    Ok(Json(CodeWorkspaceSearch {
+        matches: matches
+            .into_iter()
+            .map(|matched| CodeWorkspaceSearchMatch {
+                path: matched.path,
+                line_number: matched.line_number,
+                line: matched.line,
+            })
+            .collect(),
+        truncated,
+    }))
 }
 
 pub async fn get_workspace_blob(

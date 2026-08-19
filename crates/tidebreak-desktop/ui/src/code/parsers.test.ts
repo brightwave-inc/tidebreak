@@ -21,6 +21,7 @@ import {
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspaceSearch,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
   parseCodePrComments,
@@ -121,6 +122,24 @@ describe("parseCodeWorkspaceTree", () => {
         paths: ["README.md"],
         truncated: false,
         contents: "hello",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeWorkspaceSearch", () => {
+  it("accepts bounded line matches and rejects malformed rows", () => {
+    const result = {
+      matches: [
+        { path: "src/lib.rs", line_number: 12, line: "fn crisp() {}" },
+      ],
+      truncated: false,
+    };
+    expect(parseCodeWorkspaceSearch(result)).toEqual(result);
+    expect(
+      parseCodeWorkspaceSearch({
+        ...result,
+        matches: [{ ...result.matches[0], line_number: 0 }],
       }),
     ).toBeNull();
   });
@@ -257,7 +276,11 @@ describe("parseCodeWorkspacePr", () => {
       number: 12,
       url: "https://github.com/example/demo/pull/12",
       state: "open",
-      checks_summary: "1 passing, 0 pending, 0 failing",
+      checks_summary: "1 passing, 0 pending, 0 failing, 1 skipped",
+      checks: [
+        { name: "ci / rust", bucket: "pass" },
+        { name: "release draft", bucket: "skipped", detail: "skipping" },
+      ],
       draft: false,
       merged: false,
       review_decision: "changes_requested",

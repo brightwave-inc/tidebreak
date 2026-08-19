@@ -1159,6 +1159,26 @@ impl CodeRuntime {
         .map_err(map_worktree)
     }
 
+    pub(crate) async fn workspace_search(
+        &self,
+        workspace_id: WorkspaceId,
+        query: &str,
+        include: &str,
+        exclude: &str,
+        limit: Option<u32>,
+    ) -> Result<(Vec<worktree::WorktreeSearchMatch>, bool), ServerError> {
+        let workspace = self.require_live_workspace(workspace_id).await?;
+        worktree::search_worktree_contents(
+            std::path::Path::new(&workspace.worktree_path),
+            query,
+            include,
+            exclude,
+            limit.unwrap_or(worktree::DEFAULT_SEARCH_LIMIT),
+        )
+        .await
+        .map_err(map_worktree)
+    }
+
     pub(crate) async fn workspace_files(
         &self,
         workspace_id: WorkspaceId,

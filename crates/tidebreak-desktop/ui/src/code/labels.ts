@@ -43,8 +43,8 @@ export const LIFECYCLE_LABELS: Record<CodeSessionLifecycle, string> = {
 };
 
 /**
- * Lifecycle cluster tooltip: posture, harness + version, and unread engine
- * events when the journal dropped frames (decision 0031).
+ * Lifecycle cluster tooltip: posture, harness + version, and historical
+ * engine events the adapter could not classify (decision 0031).
  */
 export function sessionLifecycleTooltip(input: {
   lifecycle: CodeSessionLifecycle;
@@ -60,7 +60,7 @@ export function sessionLifecycleTooltip(input: {
     const count = input.unrecognizedEventCount;
     const noun = count === 1 ? "event" : "events";
     parts.push(
-      `${count} unread engine ${noun} — transcript may be incomplete`,
+      `${count} unrecognized engine ${noun} recorded — transcript may be incomplete`,
     );
   }
   return parts.join(" · ");

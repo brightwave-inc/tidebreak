@@ -39,13 +39,14 @@ pub(crate) use types::{
     CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
     CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
     CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, CodeWorkspaceTree, HarnessDoctorReport,
-    HarnessModelList, MergeCodePrBody, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot,
+    CodeWorkspaceTree, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    SequencedCodeEventFrame,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_blob, get_workspace_diff,
-    list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace,
+    list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace, search_workspace,
 };
 
 use crate::code::CodeRuntime;

@@ -85,8 +85,8 @@ function DoctorCard({ entry }: { entry: HarnessDoctorEntry }) {
         />
         {entry.unrecognized_event_count > 0 && (
           <Row
-            label="Unrecognized events"
-            value={String(entry.unrecognized_event_count)}
+            label="Protocol gaps (history)"
+            value={`${entry.unrecognized_event_count} ${entry.unrecognized_event_count === 1 ? "event" : "events"} across saved sessions`}
           />
         )}
         {entry.remediation && (

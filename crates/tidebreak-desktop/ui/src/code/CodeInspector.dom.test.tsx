@@ -155,6 +155,35 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
 });
 
+it("shows skipped checks as neutral and hides stale review state after merge", async () => {
+  const merged: PullRequestDigest = {
+    ...PR,
+    state: "merged",
+    merged: true,
+    draft: false,
+    review_decision: "review_required",
+    checks: [
+      { name: "ci / rust", bucket: "pass" },
+      { name: "release draft", bucket: "skipped", detail: "skipping" },
+    ],
+  } as never;
+  render(
+    <CodeInspector
+      client={makeClient() as never}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, pr: merged } as never}
+      contentRevision={0}
+    />,
+  );
+
+  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
+  expect(screen.getAllByText("Merged").length).toBeGreaterThan(0);
+  expect(screen.getByText("1 passing")).toBeInTheDocument();
+  expect(screen.getByText("1 skipped")).toBeInTheDocument();
+  expect(screen.queryByText("Review required")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Merge" })).not.toBeInTheDocument();
+});
+
 it("exposes a tablist and passes the scoped turn into files and source", async () => {
   const client = makeClient();
   useCodeUiStore.setState({
@@ -185,10 +214,10 @@ it("exposes a tablist and passes the scoped turn into files and source", async (
   ).toBeInTheDocument();
 
   await waitFor(() =>
-    expect(client.getCodeWorkspaceDiff).toHaveBeenCalledWith("ws-1", {
-      turn: "turn-1",
-      file: undefined,
-    }),
+    expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith(
+      "ws-1",
+      "turn-1",
+    ),
   );
 
   await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
@@ -197,6 +226,44 @@ it("exposes a tablist and passes the scoped turn into files and source", async (
       limit: 5000,
     }),
   );
+});
+
+it("keeps patch contents out of Source control and opens them in the center", async () => {
+  const client = makeClient();
+  vi.mocked(client.listCodeWorkspaceFiles).mockResolvedValue({
+    files: [
+      {
+        path: "src/login.rs",
+        kind: "modified",
+        insertions: 3,
+        deletions: 1,
+      },
+    ],
+    truncated: false,
+    stat: { files: 1, insertions: 3, deletions: 1, truncated: false },
+  });
+  const onOpenDiff = vi.fn();
+
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+      onOpenDiff={onOpenDiff}
+    />,
+  );
+
+  await userEvent.setup().click(
+    screen.getByRole("tab", { name: "Source control" }),
+  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: /Modified src\/login\.rs/ }));
+
+  expect(onOpenDiff).toHaveBeenCalledWith("src/login.rs");
+  expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith("ws-1", undefined);
+  expect(client.getCodeWorkspaceDiff).not.toHaveBeenCalled();
 });
 
 it("gives the active inspector tab a selected fill idle tabs do not share", async () => {

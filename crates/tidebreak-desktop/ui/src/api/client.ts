@@ -89,6 +89,7 @@ import {
   type CodeTerminalSnapshot,
   type CodeWorkspaceDiff,
   type CodeWorkspaceFiles,
+  type CodeWorkspaceSearch,
   type CodeWorkspaceBlob,
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
@@ -135,6 +136,7 @@ import {
   parseCodeWorkspace,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspaceSearch,
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
@@ -383,7 +385,6 @@ export class ApiClient {
     sandbox_agent_checkin_steps?: number;
     sandbox_agent_error_checkin?: number;
     model_visibility_overrides?: Record<string, ModelVisibility>;
-    code_mode_enabled?: boolean;
     compaction?: {
       threshold_fraction?: number;
       target_fraction?: number;
@@ -1989,6 +1990,30 @@ export class ApiClient {
         ),
       ),
       "code workspace tree",
+    );
+  }
+
+  async searchCodeWorkspace(
+    workspaceId: string,
+    query: {
+      query: string;
+      include?: string;
+      exclude?: string;
+      limit?: number;
+    },
+  ): Promise<CodeWorkspaceSearch> {
+    const params = new URLSearchParams({ query: query.query });
+    if (query.include) params.set("include", query.include);
+    if (query.exclude) params.set("exclude", query.exclude);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    return requireParsed(
+      parseCodeWorkspaceSearch(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/search?${params}`,
+          { headers: this.headers() },
+        ),
+      ),
+      "code workspace search",
     );
   }
 

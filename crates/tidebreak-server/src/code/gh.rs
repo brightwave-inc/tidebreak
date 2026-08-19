@@ -1034,7 +1034,12 @@ pub(crate) fn parse_pr_checks(output: &str) -> Vec<tidebreak_core::PullRequestCh
         }
         let status = columns.get(1).copied().unwrap_or(trimmed);
         let status_lower = status.to_ascii_lowercase();
-        let bucket = if status_lower.contains("pass") || status_lower.contains("success") {
+        let bucket = if status_lower.contains("skip")
+            || status_lower.contains("neutral")
+            || status_lower.contains("cancel")
+        {
+            PullRequestCheckBucket::Skipped
+        } else if status_lower.contains("pass") || status_lower.contains("success") {
             PullRequestCheckBucket::Pass
         } else if status_lower.contains("fail") || status_lower.contains("error") {
             PullRequestCheckBucket::Fail
@@ -1043,6 +1048,8 @@ pub(crate) fn parse_pr_checks(output: &str) -> Vec<tidebreak_core::PullRequestCh
             || status_lower.contains("queued")
         {
             PullRequestCheckBucket::Pending
+        } else if lower.contains("skip") || lower.contains("neutral") || lower.contains("cancel") {
+            PullRequestCheckBucket::Skipped
         } else if lower.contains("pass") || lower.contains("success") {
             PullRequestCheckBucket::Pass
         } else if lower.contains("fail") || lower.contains("error") {
@@ -1079,16 +1086,20 @@ pub(crate) fn summarize_checks(checks: &[tidebreak_core::PullRequestCheck]) -> O
     let mut passing = 0_u32;
     let mut failing = 0_u32;
     let mut pending = 0_u32;
+    let mut skipped = 0_u32;
     for check in checks {
         match check.bucket {
             PullRequestCheckBucket::Pass => passing += 1,
             PullRequestCheckBucket::Fail => failing += 1,
             PullRequestCheckBucket::Pending => pending += 1,
+            PullRequestCheckBucket::Skipped => skipped += 1,
         }
     }
-    Some(format!(
-        "{passing} passing, {pending} pending, {failing} failing"
-    ))
+    let mut summary = format!("{passing} passing, {pending} pending, {failing} failing");
+    if skipped > 0 {
+        summary.push_str(&format!(", {skipped} skipped"));
+    }
+    Some(summary)
 }
 
 fn pr_number_from_url(url: &str) -> Option<u64> {
@@ -1488,13 +1499,13 @@ mod tests {
 
     #[test]
     fn checks_summary_counts_buckets() {
-        let table = "lint\tpass\t1s\thttps://example.test/lint\ntest\tpending\t0\thttps://example.test/test\nfmt\tfail\t2s\thttps://example.test/fmt\n";
+        let table = "lint\tpass\t1s\thttps://example.test/lint\ntest\tpending\t0\thttps://example.test/test\nfmt\tfail\t2s\thttps://example.test/fmt\nrelease\tskipping\t0\thttps://example.test/release\n";
         let checks = parse_pr_checks(table);
-        assert_eq!(checks.len(), 3);
+        assert_eq!(checks.len(), 4);
         assert_eq!(checks[0].name, "lint");
         assert_eq!(
             summarize_checks(&checks).as_deref(),
-            Some("1 passing, 1 pending, 1 failing")
+            Some("1 passing, 1 pending, 1 failing, 1 skipped")
         );
         assert_eq!(summarize_checks(&[]).as_deref(), Some("no checks"));
     }

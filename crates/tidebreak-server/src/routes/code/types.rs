@@ -497,6 +497,33 @@ pub struct CodeWorkspaceTree {
     pub truncated: bool,
 }
 
+/// Query for `GET /code/workspaces/{id}/search`.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceSearchQuery {
+    pub query: String,
+    #[serde(default)]
+    pub include: Option<String>,
+    #[serde(default)]
+    pub exclude: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// One matching line from a workspace content search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceSearchMatch {
+    pub path: String,
+    pub line_number: u32,
+    pub line: String,
+}
+
+/// Bounded content-search response for `GET /code/workspaces/{id}/search`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceSearch {
+    pub matches: Vec<CodeWorkspaceSearchMatch>,
+    pub truncated: bool,
+}
+
 /// Query for `GET /code/workspaces/{id}/files`.
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceFilesQuery {
