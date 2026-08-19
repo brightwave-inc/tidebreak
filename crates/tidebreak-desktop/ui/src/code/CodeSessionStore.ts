@@ -33,42 +33,76 @@ export type CodeSessionStore = CodeSessionState & {
     framed: SequencedCodeEventFrame,
     deps: CodeSessionDeps,
   ) => CodeSessionEffect[];
+  /**
+   * Reduce a replay chunk and publish it as one store update.
+   *
+   * A reopened session can contain hundreds of journal frames. Publishing
+   * every frame separately forces React's external-store subscribers to
+   * synchronously re-render the whole transcript for every historical token.
+   */
+  applyEvents: (
+    framed: readonly SequencedCodeEventFrame[],
+    deps: CodeSessionDeps,
+  ) => CodeSessionEffect[];
   update: (change: (session: CodeSessionState) => CodeSessionState) => void;
   reset: () => void;
 };
 
 export function createCodeSessionStore() {
-  return create<CodeSessionStore>()((set, get) => ({
-    ...initialCodeSessionState(),
-    connectionState: "live",
-    lastTurnBeganId: null,
-    setConnectionState: (connectionState) => set({ connectionState }),
-    applyEvent: (framed, deps) => {
-      const { state, effects } = reduceCodeSessionEvent(
-        sessionOf(get()),
-        framed,
-        deps,
-      );
-      const began = effects.find((effect) => effect.type === "turn_began");
-      set(began ? { ...state, lastTurnBeganId: began.turnId } : state);
+  return create<CodeSessionStore>()((set, get) => {
+    const applyEvents = (
+      framed: readonly SequencedCodeEventFrame[],
+      deps: CodeSessionDeps,
+    ): CodeSessionEffect[] => {
+      const current = sessionOf(get());
+      let state = current;
+      const effects: CodeSessionEffect[] = [];
+      for (const frame of framed) {
+        const transition = reduceCodeSessionEvent(state, frame, deps);
+        state = transition.state;
+        effects.push(...transition.effects);
+      }
+
+      // The reducer returns its input for duplicate/stale frames. Do not turn
+      // that no-op into a fresh Zustand snapshot and wake every subscriber.
+      if (state !== current) {
+        const began = [...effects]
+          .reverse()
+          .find((effect) => effect.type === "turn_began");
+        set(began ? { ...state, lastTurnBeganId: began.turnId } : state);
+      }
       return effects;
-    },
-    update: (change) => {
-      set(change(sessionOf(get())));
-    },
-    reset: () => {
-      set({
-        ...initialCodeSessionState(),
-        connectionState: "live",
-        lastTurnBeganId: null,
-      });
-    },
-  }));
+    };
+
+    return {
+      ...initialCodeSessionState(),
+      connectionState: "live",
+      lastTurnBeganId: null,
+      setConnectionState: (connectionState) => {
+        if (get().connectionState !== connectionState) set({ connectionState });
+      },
+      applyEvent: (framed, deps) => applyEvents([framed], deps),
+      applyEvents,
+      update: (change) => {
+        const current = sessionOf(get());
+        const next = change(current);
+        if (next !== current) set(next);
+      },
+      reset: () => {
+        set({
+          ...initialCodeSessionState(),
+          connectionState: "live",
+          lastTurnBeganId: null,
+        });
+      },
+    };
+  });
 }
 
 function sessionOf(store: CodeSessionStore): CodeSessionState {
   const {
     applyEvent,
+    applyEvents,
     update,
     reset,
     connectionState,
@@ -77,6 +111,7 @@ function sessionOf(store: CodeSessionStore): CodeSessionState {
     ...session
   } = store;
   void applyEvent;
+  void applyEvents;
   void update;
   void reset;
   void connectionState;

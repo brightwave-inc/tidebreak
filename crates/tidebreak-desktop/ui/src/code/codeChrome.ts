@@ -15,6 +15,7 @@ import {
 export function splitCodeChromeLayout(layout: LayoutState): {
   panels: LayoutState;
   editors: LayoutState;
+  splitEditors: LayoutState;
   terminal: Extract<PanelContent, { type: "terminal" }> | null;
 } {
   const terminal = layout.tabs.find((tab) => tab.type === "terminal") as
@@ -23,13 +24,20 @@ export function splitCodeChromeLayout(layout: LayoutState): {
   const active = layout.tabs[layout.activeIndex];
   const side = layout.tabs.filter((tab) => !isDrawerTab(tab) && !isEditorTab(tab));
   const editors = layout.tabs.filter(isEditorTab);
+  const splitTabs = layout.editorSplit?.tabs.filter(isEditorTab) ?? [];
+  const splitActive = layout.editorSplit?.tabs[layout.editorSplit.activeIndex];
 
+  const primaryEditors = sliceLayout(editors, active, false);
   return {
     panels: sliceLayout(side, active, layout.fullscreen),
-    editors: {
-      ...sliceLayout(editors, active, false),
-      conversationFocused: layout.conversationFocused,
-    },
+    editors:
+      layout.conversationFocused === undefined
+        ? primaryEditors
+        : {
+            ...primaryEditors,
+            conversationFocused: layout.conversationFocused,
+          },
+    splitEditors: sliceLayout(splitTabs, splitActive, false),
     terminal: terminal ?? null,
   };
 }
@@ -56,23 +64,73 @@ export function isEditorTab(tab: PanelContent): boolean {
   return tab.type === "file" || tab.type === "diff";
 }
 
+export type CodeEditorRegion = "primary" | "secondary";
+
 /** Show the conversation while keeping file and diff tabs open. */
 export function focusConversation(layout: LayoutState): LayoutState {
-  return { ...layout, conversationFocused: true };
+  return {
+    ...layout,
+    conversationFocused: true,
+    editorSplit: layout.editorSplit
+      ? { ...layout.editorSplit, focused: undefined }
+      : undefined,
+  };
 }
 
 /** Bring a file or diff tab forward. `editorIndex` counts only those tabs. */
-export function focusEditorTab(layout: LayoutState, editorIndex: number): LayoutState {
+export function focusEditorTab(
+  layout: LayoutState,
+  editorIndex: number,
+  region: CodeEditorRegion = "primary",
+): LayoutState {
+  if (region === "secondary") {
+    const split = layout.editorSplit;
+    if (!split?.tabs[editorIndex]) return layout;
+    return {
+      ...layout,
+      editorSplit: { ...split, activeIndex: editorIndex, focused: true },
+    };
+  }
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
   if (!target) return layout;
   const index = layout.tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
   if (index < 0) return layout;
-  return { ...layout, activeIndex: index, conversationFocused: false };
+  return {
+    ...layout,
+    activeIndex: index,
+    conversationFocused: false,
+    editorSplit: layout.editorSplit
+      ? { ...layout.editorSplit, focused: undefined }
+      : undefined,
+  };
 }
 
 /** Close a file or diff tab. `editorIndex` counts only those tabs. */
-export function closeEditorTab(layout: LayoutState, editorIndex: number): LayoutState {
+export function closeEditorTab(
+  layout: LayoutState,
+  editorIndex: number,
+  region: CodeEditorRegion = "primary",
+): LayoutState {
+  if (region === "secondary") {
+    const split = layout.editorSplit;
+    if (!split || editorIndex < 0 || editorIndex >= split.tabs.length) {
+      return layout;
+    }
+    const tabs = split.tabs.filter((_, index) => index !== editorIndex);
+    if (tabs.length === 0) return { ...layout, editorSplit: undefined };
+    let activeIndex = split.activeIndex;
+    if (editorIndex < activeIndex) activeIndex -= 1;
+    else if (editorIndex === activeIndex) activeIndex = editorIndex - 1;
+    return {
+      ...layout,
+      editorSplit: {
+        ...split,
+        tabs,
+        activeIndex: Math.min(Math.max(activeIndex, 0), tabs.length - 1),
+      },
+    };
+  }
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
   if (!target) return layout;
@@ -88,8 +146,10 @@ export function closeEditorTab(layout: LayoutState, editorIndex: number): Layout
 /** Close every file and diff tab, returning the center to the conversation. */
 export function closeAllEditorTabs(layout: LayoutState): LayoutState {
   const tabs = layout.tabs.filter((tab) => !isEditorTab(tab));
-  if (tabs.length === layout.tabs.length) return layout;
-  if (tabs.length === 0) return EMPTY_LAYOUT;
+  if (tabs.length === layout.tabs.length && !layout.editorSplit) return layout;
+  if (tabs.length === 0) {
+    return { ...EMPTY_LAYOUT, editorSplit: undefined };
+  }
 
   const active = layout.tabs[layout.activeIndex];
   const activeIndex = active && !isEditorTab(active)
@@ -100,6 +160,7 @@ export function closeAllEditorTabs(layout: LayoutState): LayoutState {
     tabs,
     activeIndex,
     conversationFocused: undefined,
+    editorSplit: undefined,
   };
 }
 
@@ -107,10 +168,23 @@ export function closeAllEditorTabs(layout: LayoutState): LayoutState {
 export function closeOtherEditorTabs(
   layout: LayoutState,
   editorIndex: number,
+  region: CodeEditorRegion = "primary",
 ): LayoutState {
+  if (region === "secondary") {
+    const target = layout.editorSplit?.tabs[editorIndex];
+    if (!target) return layout;
+    const tabs = layout.tabs.filter((tab) => !isEditorTab(tab));
+    return {
+      ...layout,
+      tabs,
+      activeIndex: Math.min(layout.activeIndex, Math.max(0, tabs.length - 1)),
+      conversationFocused: undefined,
+      editorSplit: { tabs: [target], activeIndex: 0, focused: true },
+    };
+  }
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
-  if (!target || editors.length <= 1) return layout;
+  if (!target || (editors.length <= 1 && !layout.editorSplit)) return layout;
   const targetKey = panelKey(target);
   const tabs = layout.tabs.filter(
     (tab) => !isEditorTab(tab) || panelKey(tab) === targetKey,
@@ -120,6 +194,7 @@ export function closeOtherEditorTabs(
     tabs,
     activeIndex: tabs.findIndex((tab) => panelKey(tab) === targetKey),
     conversationFocused: false,
+    editorSplit: undefined,
   };
 }
 
@@ -127,7 +202,21 @@ export function closeOtherEditorTabs(
 export function closeEditorTabsToRight(
   layout: LayoutState,
   editorIndex: number,
+  region: CodeEditorRegion = "primary",
 ): LayoutState {
+  if (region === "secondary") {
+    const split = layout.editorSplit;
+    if (!split || editorIndex >= split.tabs.length - 1) return layout;
+    const tabs = split.tabs.slice(0, editorIndex + 1);
+    return {
+      ...layout,
+      editorSplit: {
+        ...split,
+        tabs,
+        activeIndex: Math.min(split.activeIndex, tabs.length - 1),
+      },
+    };
+  }
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
   const closing = editors.slice(editorIndex + 1);
@@ -147,6 +236,121 @@ export function closeEditorTabsToRight(
     tabs,
     activeIndex: Math.max(activeIndex, 0),
   };
+}
+
+/** Open one editor in the group that last had focus, unless a group is named. */
+export function openCodeEditor(
+  layout: LayoutState,
+  panel: Extract<PanelContent, { type: "file" | "diff" }>,
+  preferredRegion?: CodeEditorRegion,
+): LayoutState {
+  const key = panelKey(panel);
+  const primaryIndex = layout.tabs
+    .filter(isEditorTab)
+    .findIndex((tab) => panelKey(tab) === key);
+  if (primaryIndex >= 0) {
+    const urlIndex = editorUrlIndex(layout, primaryIndex);
+    const tabs = layout.tabs.slice();
+    tabs[urlIndex] = panel;
+    return focusEditorTab({ ...layout, tabs }, primaryIndex, "primary");
+  }
+  const splitIndex = layout.editorSplit?.tabs.findIndex(
+    (tab) => panelKey(tab) === key,
+  ) ?? -1;
+  if (splitIndex >= 0 && layout.editorSplit) {
+    const tabs = layout.editorSplit.tabs.slice();
+    tabs[splitIndex] = panel;
+    return focusEditorTab(
+      { ...layout, editorSplit: { ...layout.editorSplit, tabs } },
+      splitIndex,
+      "secondary",
+    );
+  }
+
+  const region =
+    preferredRegion ?? (layout.editorSplit?.focused ? "secondary" : "primary");
+  if (region === "secondary") {
+    const split = layout.editorSplit ?? { tabs: [], activeIndex: 0 };
+    return {
+      ...layout,
+      editorSplit: {
+        tabs: [...split.tabs, panel],
+        activeIndex: split.tabs.length,
+        focused: true,
+      },
+    };
+  }
+  const editors = layout.tabs.filter(isEditorTab);
+  return focusEditorTab(
+    { ...layout, tabs: [...layout.tabs, panel] },
+    editors.length,
+    "primary",
+  );
+}
+
+/** Move an existing file/diff tab between the two visible editor groups. */
+export function moveEditorTab(
+  layout: LayoutState,
+  from: CodeEditorRegion,
+  editorIndex: number,
+  to: CodeEditorRegion,
+): LayoutState {
+  if (from === to) return layout;
+  const target =
+    from === "primary"
+      ? layout.tabs.filter(isEditorTab)[editorIndex]
+      : layout.editorSplit?.tabs[editorIndex];
+  if (!target) return layout;
+
+  if (from === "primary") {
+    const without = closeEditorTab(layout, editorIndex, "primary");
+    const split = without.editorSplit ?? { tabs: [], activeIndex: 0 };
+    const existing = split.tabs.findIndex(
+      (tab) => panelKey(tab) === panelKey(target),
+    );
+    const tabs = existing >= 0 ? split.tabs : [...split.tabs, target];
+    return {
+      ...without,
+      editorSplit: {
+        tabs,
+        activeIndex: existing >= 0 ? existing : tabs.length - 1,
+        focused: true,
+      },
+    };
+  }
+
+  const without = closeEditorTab(layout, editorIndex, "secondary");
+  return openCodeEditor(
+    without,
+    target as Extract<PanelContent, { type: "file" | "diff" }>,
+    "primary",
+  );
+}
+
+/** Collapse the right group without closing its tabs. */
+export function mergeEditorSplit(layout: LayoutState): LayoutState {
+  const splitTabs = layout.editorSplit?.tabs.filter(isEditorTab) ?? [];
+  if (splitTabs.length === 0) return { ...layout, editorSplit: undefined };
+  let next: LayoutState = { ...layout, editorSplit: undefined };
+  for (const tab of splitTabs) {
+    next = openCodeEditor(
+      next,
+      tab as Extract<PanelContent, { type: "file" | "diff" }>,
+      "primary",
+    );
+  }
+  return next;
+}
+
+function editorUrlIndex(layout: LayoutState, editorIndex: number): number {
+  let remaining = editorIndex;
+  for (let index = 0; index < layout.tabs.length; index += 1) {
+    const tab = layout.tabs[index];
+    if (!tab || !isEditorTab(tab)) continue;
+    if (remaining === 0) return index;
+    remaining -= 1;
+  }
+  return -1;
 }
 
 /**
@@ -178,17 +382,18 @@ export function focusCodeChromeTab(layout: LayoutState, stripIndex: number): Lay
 export function closeCodeChromeTab(layout: LayoutState, stripIndex: number): LayoutState {
   const { panels, editors, terminal } = splitCodeChromeLayout(layout);
   const nextPanels = closeLayoutTab(panels, stripIndex);
-  return combineChrome(nextPanels, editors, terminal);
+  return combineChrome(nextPanels, editors, terminal, layout.editorSplit);
 }
 
 function combineChrome(
   panels: LayoutState,
   editors: LayoutState,
   terminal: Extract<PanelContent, { type: "terminal" }> | null,
+  editorSplit?: LayoutState["editorSplit"],
 ): LayoutState {
   const tabs = [...editors.tabs, ...panels.tabs];
   if (terminal) tabs.push(terminal);
-  if (tabs.length === 0) return EMPTY_LAYOUT;
+  if (tabs.length === 0 && !editorSplit) return EMPTY_LAYOUT;
   const focused =
     !editors.conversationFocused && editors.tabs[editors.activeIndex]
       ? editors.tabs[editors.activeIndex]
@@ -201,13 +406,22 @@ function combineChrome(
     activeIndex,
     fullscreen: panels.fullscreen && panels.tabs.length > 0,
     conversationFocused: editors.conversationFocused,
+    editorSplit,
   };
 }
 
 function closeLayoutTab(layout: LayoutState, index: number): LayoutState {
   if (index < 0 || index >= layout.tabs.length) return layout;
   const tabs = layout.tabs.filter((_, at) => at !== index);
-  if (tabs.length === 0) return EMPTY_LAYOUT;
+  if (tabs.length === 0) {
+    return {
+      ...layout,
+      tabs: [],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: undefined,
+    };
+  }
   let activeIndex = layout.activeIndex;
   if (index < activeIndex) activeIndex -= 1;
   else if (index === activeIndex) activeIndex = index - 1;
@@ -231,7 +445,17 @@ export function toggleTerminalLayout(layout: LayoutState): LayoutState {
   }
 
   const tabs = layout.tabs.filter((_, at) => at !== index);
-  if (tabs.length === 0) return EMPTY_LAYOUT;
+  if (tabs.length === 0) {
+    return layout.editorSplit
+      ? {
+          ...layout,
+          tabs: [],
+          activeIndex: 0,
+          fullscreen: false,
+          conversationFocused: undefined,
+        }
+      : EMPTY_LAYOUT;
+  }
 
   let activeIndex = layout.activeIndex;
   if (index < activeIndex) activeIndex -= 1;

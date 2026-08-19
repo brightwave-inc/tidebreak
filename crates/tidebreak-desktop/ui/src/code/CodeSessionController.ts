@@ -7,6 +7,9 @@ import {
 
 export type CodeConnectionState = "live" | "reconnecting";
 
+/** A brief quiet window means the initial journal burst has reached its tail. */
+export const CODE_REPLAY_SETTLE_MS = 40;
+
 export type CodeSessionControllerOptions = {
   /**
    * Open the session's event socket resuming after the given seq. The callback
@@ -18,7 +21,11 @@ export type CodeSessionControllerOptions = {
   ) => WebSocket;
   /** Read the resume cursor freshly on every (re)connect attempt. */
   getAfter: () => number;
-  onEvent: (event: SequencedCodeEventFrame) => void;
+  /**
+   * Deliver an ordered journal chunk. Replayed history is coalesced to one
+   * browser paint; live frames still arrive immediately.
+   */
+  onEvents: (events: readonly SequencedCodeEventFrame[]) => void;
   onConnectionState: (state: CodeConnectionState) => void;
   /**
    * Snapshot of durable turns, applied once before the first socket opens so
@@ -57,6 +64,8 @@ export class CodeSessionController {
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+  private replayFrames: SequencedCodeEventFrame[] = [];
+  private replayFlush: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: CodeSessionControllerOptions) {}
 
@@ -82,6 +91,8 @@ export class CodeSessionController {
   /** Close the socket and silence every callback and pending timer, forever. */
   dispose(): void {
     this.disposed = true;
+    this.cancelReplayFlush();
+    this.replayFrames = [];
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -90,6 +101,44 @@ export class CodeSessionController {
       this.socket.close();
       this.socket = null;
     }
+  }
+
+  /**
+   * WebSocket replay arrives as one task per historical frame. React's
+   * external-store contract treats each task as a synchronous update, so a
+   * large transcript can exceed its nested-update guard before history has
+   * settled. Collect replay frames until the burst goes quiet and reduce them
+   * once.
+   */
+  private queueReplay(frame: SequencedCodeEventFrame): void {
+    this.replayFrames.push(frame);
+    // The protocol marks replay frames but has no separate end marker. Treat a
+    // short quiet window as the boundary, resetting it for every frame. With
+    // rendering withheld, even a large local journal drains inside this
+    // window and appears as one settled transcript instead of typing itself
+    // into view over several paints.
+    this.cancelReplayFlush();
+    this.replayFlush = setTimeout(() => {
+      this.replayFlush = null;
+      this.flushReplay();
+    }, CODE_REPLAY_SETTLE_MS);
+  }
+
+  private cancelReplayFlush(): void {
+    if (this.replayFlush !== null) clearTimeout(this.replayFlush);
+    this.replayFlush = null;
+  }
+
+  private takeReplay(): SequencedCodeEventFrame[] {
+    this.cancelReplayFlush();
+    const frames = this.replayFrames;
+    this.replayFrames = [];
+    return frames;
+  }
+
+  private flushReplay(): void {
+    const frames = this.takeReplay();
+    if (!this.disposed && frames.length > 0) this.options.onEvents(frames);
   }
 
   private scheduleReconnect(): void {
@@ -113,7 +162,12 @@ export class CodeSessionController {
           console.error("dropping malformed code event frame", frame);
           return;
         }
-        this.options.onEvent(frame);
+        if (frame.replayed === true) {
+          this.queueReplay(frame);
+          return;
+        }
+        const replay = this.takeReplay();
+        this.options.onEvents([...replay, frame]);
       });
     } catch {
       this.scheduleReconnect();

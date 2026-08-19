@@ -40,7 +40,13 @@ const TONE_CLASS: Record<PrBarTone, string> = {
  * Status and the check count stay visible on Files and Source control. Each
  * action writes a prompt into the composer rather than calling GitHub here.
  */
-export function PrActionBar({ pr }: { pr: PullRequestDigest }) {
+export function PrActionBar({
+  pr,
+  variant = "inspector",
+}: {
+  pr: PullRequestDigest;
+  variant?: "inspector" | "header";
+}) {
   const offerComposerPrompt = useCodeUiStore((state) => state.offerComposerPrompt);
   const model = prBarModel(pr);
   const [primary, ...rest] = model.actions;
@@ -57,10 +63,14 @@ export function PrActionBar({ pr }: { pr: PullRequestDigest }) {
   return (
     <div
       className={cn(
-        "flex shrink-0 items-center gap-2 border-b px-2 py-1.5",
+        "flex min-w-0 shrink-0 items-center gap-2",
+        variant === "inspector"
+          ? "border-b px-2 py-1.5"
+          : "max-w-[min(46vw,38rem)] rounded-md border px-2 py-1",
         TONE_CLASS[model.tone],
       )}
       data-testid="pr-action-bar"
+      data-variant={variant}
     >
       {model.url ? (
         <a

@@ -51,4 +51,38 @@ describe("CodeQuickOpen", () => {
     expect(onOpenFile).toHaveBeenCalledWith("src/model.rs");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  it("opens when the visible new-tab control increments its request", async () => {
+    const client = {
+      listCodeWorkspaceTree: vi.fn(async () => ({
+        paths: ["src/main.rs"],
+        truncated: false,
+      })),
+    };
+    const { rerender } = render(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-1"
+        contentRevision={0}
+        onOpenFile={vi.fn()}
+        openRequest={0}
+      />,
+    );
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    rerender(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-1"
+        contentRevision={0}
+        onOpenFile={vi.fn()}
+        openRequest={1}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("textbox", { name: "Search files by name" }),
+    ).toHaveFocus();
+    expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(1);
+  });
 });

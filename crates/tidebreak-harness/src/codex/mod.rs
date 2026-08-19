@@ -13,15 +13,21 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::{json, Value};
 use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::codex::session::attach;
 use crate::probe::{observe_version, probe_shell, HostEnv};
-use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
+use crate::{
+    filter_child_env, spawn_process_tree, HarnessAdapter, HarnessError, HarnessProbe,
+    HarnessSession, ListedHarnessModel, SessionSpec,
+};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Codex CLI adapter. Capabilities below are for the captured version
 /// 0.147.0: verified flags are `Supported`/`Unsupported`; anything not
@@ -91,12 +97,169 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
+    async fn list_models(&self, probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
+        let Some(binary) = probe.binary_path.as_deref() else {
+            return Vec::new();
+        };
+        list_app_server_models(binary, &probe.env).await
+    }
+
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
         if !spec.binary.is_absolute() {
             return Err(HarnessError::NotFound);
         }
         Ok(Box::new(attach(spec).await?))
     }
+}
+
+/// Ask the same app-server protocol a real session uses. Codex has no
+/// `models` CLI subcommand, so the generic harness probe necessarily returns
+/// an empty list even though the native picker has a catalog.
+async fn list_app_server_models(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<ListedHarnessModel> {
+    let mut command = Command::new(binary);
+    command
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_clear();
+    for (key, value) in filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    let Ok(mut child) = spawn_process_tree(&mut command) else {
+        return Vec::new();
+    };
+    let Some(mut stdin) = child.take_stdin() else {
+        return Vec::new();
+    };
+    let Some(stdout) = child.take_stdout() else {
+        return Vec::new();
+    };
+    let mut stdout = BufReader::new(stdout);
+
+    if write_rpc(
+        &mut stdin,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": { "name": "tidebreak-harness", "version": "0.0.0" },
+                "capabilities": { "experimentalApi": false }
+            }
+        }),
+    )
+    .await
+    .is_err()
+    {
+        return Vec::new();
+    }
+    if timeout(MODEL_LIST_TIMEOUT, read_rpc_result(&mut stdout, 1))
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Vec::new();
+    }
+    if write_rpc(&mut stdin, &json!({ "method": "initialized" }))
+        .await
+        .is_err()
+    {
+        return Vec::new();
+    }
+
+    let mut listed = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page in 0..4_i64 {
+        let id = page + 2;
+        if write_rpc(
+            &mut stdin,
+            &json!({
+                "id": id,
+                "method": "model/list",
+                "params": {
+                    "cursor": cursor,
+                    "limit": 100,
+                    "includeHidden": false
+                }
+            }),
+        )
+        .await
+        .is_err()
+        {
+            break;
+        }
+        let Some(result) = timeout(MODEL_LIST_TIMEOUT, read_rpc_result(&mut stdout, id))
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        listed.extend(parse_model_list(&result));
+        cursor = result
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    listed
+}
+
+async fn write_rpc(stdin: &mut tokio::process::ChildStdin, message: &Value) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(message).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    stdin.write_all(&bytes).await?;
+    stdin.flush().await
+}
+
+async fn read_rpc_result<R: AsyncBufRead + Unpin>(reader: &mut R, id: i64) -> Option<Value> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let message: Value = serde_json::from_str(&line).ok()?;
+        if message.get("id").and_then(Value::as_i64) != Some(id) {
+            continue;
+        }
+        return message.get("result").cloned();
+    }
+}
+
+fn parse_model_list(result: &Value) -> Vec<ListedHarnessModel> {
+    result
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| !row.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+        .filter_map(|row| {
+            let id = row.get("model").or_else(|| row.get("id"))?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let label = row
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or(id);
+            Some(ListedHarnessModel {
+                id: id.to_owned(),
+                label: label.to_owned(),
+                default: row
+                    .get("isDefault")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 /// `codex login status` — "Logged in…" vs "Not logged in". Never reads tokens.
@@ -308,6 +471,36 @@ mod tests {
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn native_model_catalog_uses_the_thread_start_token_and_hides_hidden_rows() {
+        let listed = parse_model_list(&json!({
+            "data": [
+                {
+                    "id": "catalog-row-1",
+                    "model": "gpt-5.6-luna",
+                    "displayName": "GPT-5.6-Luna",
+                    "hidden": false,
+                    "isDefault": true
+                },
+                {
+                    "id": "catalog-row-2",
+                    "model": "internal-model",
+                    "displayName": "Internal",
+                    "hidden": true,
+                    "isDefault": false
+                }
+            ]
+        }));
+        assert_eq!(
+            listed,
+            vec![ListedHarnessModel {
+                id: "gpt-5.6-luna".into(),
+                label: "GPT-5.6-Luna".into(),
+                default: true,
+            }]
+        );
     }
 
     #[test]

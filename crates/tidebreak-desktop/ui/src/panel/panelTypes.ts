@@ -45,6 +45,17 @@ export type LayoutState = {
    * stay open. Absent everywhere else.
    */
   conversationFocused?: boolean;
+  /**
+   * Code workspace: a second editor group to the right of the main-agent
+   * group. The transcript itself never moves or mounts twice; only file and
+   * diff tabs are stored here.
+   */
+  editorSplit?: {
+    tabs: PanelContent[];
+    activeIndex: number;
+    /** The second group received the most recent explicit focus. */
+    focused?: boolean;
+  };
 };
 
 export const EMPTY_LAYOUT: LayoutState = { tabs: [], activeIndex: 0, fullscreen: false };

@@ -150,9 +150,11 @@ export function workspaceHeaderCommands(input: {
 export function WorkspaceOverflowMenu({
   commands,
   onCommand,
+  context,
 }: {
   commands: readonly WorkspaceCommand[];
   onCommand: (command: WorkspaceCommand) => void;
+  context?: { repoName?: string; worktreePath?: string };
 }) {
   if (commands.length === 0) return null;
   return (
@@ -168,6 +170,26 @@ export function WorkspaceOverflowMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        {(context?.repoName || context?.worktreePath) && (
+          <>
+            <div className="flex max-w-72 flex-col gap-0.5 px-2 py-2">
+              {context.repoName && (
+                <span className="truncate text-xs font-medium">
+                  {context.repoName}
+                </span>
+              )}
+              {context.worktreePath && (
+                <span
+                  className="text-muted-foreground truncate font-mono text-[10px]"
+                  title={context.worktreePath}
+                >
+                  {context.worktreePath}
+                </span>
+              )}
+            </div>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {commands.map((command) => (
           <WorkspaceOverflowItem
             key={`${command.id}:${command.actionName ?? ""}`}

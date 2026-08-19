@@ -77,6 +77,13 @@ export async function renderWithRouter(
       tabs: typeof search.tabs === "string" ? search.tabs : undefined,
       active: typeof search.active === "string" ? search.active : undefined,
       fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+      split: typeof search.split === "string" ? search.split : undefined,
+      splitActive:
+        typeof search.splitActive === "string" ? search.splitActive : undefined,
+      splitFocused:
+        typeof search.splitFocused === "string"
+          ? search.splitFocused
+          : undefined,
       left: typeof search.left === "string" ? search.left : undefined,
       right: typeof search.right === "string" ? search.right : undefined,
     }),

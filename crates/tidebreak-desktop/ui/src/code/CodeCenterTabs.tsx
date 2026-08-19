@@ -1,12 +1,22 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useRef,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   ArrowRightFromLine,
   CircleX,
+  Columns2,
   Copy,
   FileCode,
   FileDiff,
   ListX,
   MessageSquare,
+  MoveLeft,
+  MoveRight,
+  PanelRightClose,
+  Plus,
   X,
 } from "lucide-react";
 
@@ -25,17 +35,24 @@ import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 /** Ids the strip and the two center panels agree on, so tabs name panels. */
 export const CHAT_TAB_ID = "code-center-tab-chat";
 export const CHAT_PANEL_ID = "code-center-panel-chat";
-export const EDITOR_PANEL_ID = "code-center-panel-editor";
-const editorTabId = (index: number) => `code-center-tab-editor-${index}`;
+export const EDITOR_PANEL_ID = "code-center-panel-editor-primary";
+export const SPLIT_EDITOR_PANEL_ID = "code-center-panel-editor-secondary";
+const editorTabId = (region: CenterTabRegion, index: number) =>
+  `code-center-tab-editor-${region}-${index}`;
+
+export type CenterTabRegion = "primary" | "secondary";
 
 /** Which tab labels the editor panel right now. */
-export function centerEditorTabId(index: number): string {
-  return editorTabId(index);
+export function centerEditorTabId(
+  index: number,
+  region: CenterTabRegion = "primary",
+): string {
+  return editorTabId(region, index);
 }
 
 /**
- * Center strip: Chat is always first and cannot close. File and diff tabs
- * sit beside it.
+ * Center strip: the main agent is always first and cannot close. File and diff
+ * tabs sit beside it, and the plus control opens a new file tab.
  */
 export function CodeCenterTabs({
   editorTabs,
@@ -48,6 +65,14 @@ export function CodeCenterTabs({
   onCloseOtherEditors,
   onCloseEditorsToRight,
   onCopyPath,
+  onNewTab,
+  region = "primary",
+  showMainAgent = true,
+  onMoveEditorToOtherGroup,
+  onSplitActive,
+  onCloseGroup,
+  onDragEditorStart,
+  onDragEditorEnd,
 }: {
   editorTabs: PanelContent[];
   editorActiveIndex: number;
@@ -59,10 +84,19 @@ export function CodeCenterTabs({
   onCloseOtherEditors: (index: number) => void;
   onCloseEditorsToRight: (index: number) => void;
   onCopyPath: (path: string) => void;
+  onNewTab: () => void;
+  region?: CenterTabRegion;
+  showMainAgent?: boolean;
+  onMoveEditorToOtherGroup?: (index: number) => void;
+  onSplitActive?: () => void;
+  onCloseGroup?: () => void;
+  onDragEditorStart?: (index: number) => void;
+  onDragEditorEnd?: () => void;
 }) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-
-  if (editorTabs.length === 0) return null;
+  const tabOffset = showMainAgent ? 1 : 0;
+  const panelId =
+    region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
 
   /**
    * The tabs pattern: one tab stop for the strip, arrows to move between
@@ -70,10 +104,10 @@ export function CodeCenterTabs({
    * tab is what opening it means.
    */
   function select(position: number) {
-    const last = editorTabs.length;
+    const last = editorTabs.length + tabOffset - 1;
     const wrapped = position < 0 ? last : position > last ? 0 : position;
-    if (wrapped === 0) onSelectChat();
-    else onSelectEditor(wrapped - 1);
+    if (showMainAgent && wrapped === 0) onSelectChat();
+    else onSelectEditor(wrapped - tabOffset);
     tabRefs.current[wrapped]?.focus();
   }
 
@@ -89,7 +123,7 @@ export function CodeCenterTabs({
       select(0);
     } else if (event.key === "End") {
       event.preventDefault();
-      select(editorTabs.length);
+      select(editorTabs.length + tabOffset - 1);
     }
   }
 
@@ -97,46 +131,48 @@ export function CodeCenterTabs({
     <div
       className="flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1"
       role="tablist"
-      aria-label="Workspace center"
+      aria-label={region === "primary" ? "Workspace center" : "Workspace split"}
     >
-      <ContextMenu>
-        <ContextMenuTrigger asChild>
-          <button
-            type="button"
-            role="tab"
-            id={CHAT_TAB_ID}
-            aria-selected={conversationFocused}
-            aria-controls={CHAT_PANEL_ID}
-            tabIndex={conversationFocused ? 0 : -1}
-            ref={(node) => {
-              tabRefs.current[0] = node;
-            }}
-            className={cn(
-              "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
-              FOCUS_RING_TIGHT,
-              HOVER_TINT,
-              conversationFocused
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-            )}
-            onClick={onSelectChat}
-            onKeyDown={(event) => onKeyDown(event, 0)}
-          >
-            <MessageSquare className="size-3.5" />
-            Chat
-          </button>
-        </ContextMenuTrigger>
-        <TabContextMenuContent label="Chat">
-          <ContextMenuItem
-            className="gap-3 py-2"
-            disabled={editorTabs.length === 0}
-            onSelect={onCloseAllEditors}
-          >
-            <ListX />
-            Close other tabs
-          </ContextMenuItem>
-        </TabContextMenuContent>
-      </ContextMenu>
+      {showMainAgent && (
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <button
+              type="button"
+              role="tab"
+              id={CHAT_TAB_ID}
+              aria-selected={conversationFocused}
+              aria-controls={CHAT_PANEL_ID}
+              tabIndex={conversationFocused ? 0 : -1}
+              ref={(node) => {
+                tabRefs.current[0] = node;
+              }}
+              className={cn(
+                "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
+                FOCUS_RING_TIGHT,
+                HOVER_TINT,
+                conversationFocused
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+              onClick={onSelectChat}
+              onKeyDown={(event) => onKeyDown(event, 0)}
+            >
+              <MessageSquare className="size-3.5" />
+              Main agent
+            </button>
+          </ContextMenuTrigger>
+          <TabContextMenuContent label="Main agent">
+            <ContextMenuItem
+              className="gap-3 py-2"
+              disabled={editorTabs.length === 0}
+              onSelect={onCloseAllEditors}
+            >
+              <ListX />
+              Close other tabs
+            </ContextMenuItem>
+          </TabContextMenuContent>
+        </ContextMenu>
+      )}
       {editorTabs.map((panel, index) => {
         const active = !conversationFocused && index === editorActiveIndex;
         const { name, suffix } = centerTabParts(panel);
@@ -152,22 +188,32 @@ export function CodeCenterTabs({
                   the same row, so this pair is transparent to assistive tech. */}
               <div
                 role="presentation"
+                draggable
                 className={cn(
-                  "flex min-w-0 shrink-0 items-center rounded-md pr-1",
+                  "flex min-w-0 shrink-0 cursor-grab items-center rounded-md pr-1 active:cursor-grabbing",
                   HOVER_TINT,
                   active ? "bg-muted" : "hover:bg-muted/60",
                 )}
+                onDragStart={(event: DragEvent<HTMLDivElement>) => {
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData(
+                    "text/plain",
+                    `${region}:${index}`,
+                  );
+                  onDragEditorStart?.(index);
+                }}
+                onDragEnd={onDragEditorEnd}
               >
                 <button
                   type="button"
                   role="tab"
-                  id={editorTabId(index)}
+                  id={editorTabId(region, index)}
                   aria-label={label}
                   aria-selected={active}
-                  aria-controls={EDITOR_PANEL_ID}
+                  aria-controls={panelId}
                   tabIndex={active ? 0 : -1}
                   ref={(node) => {
-                    tabRefs.current[index + 1] = node;
+                    tabRefs.current[index + tabOffset] = node;
                   }}
                   className={cn(
                     "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
@@ -176,7 +222,9 @@ export function CodeCenterTabs({
                     active ? "text-foreground" : "text-muted-foreground",
                   )}
                   onClick={() => onSelectEditor(index)}
-                  onKeyDown={(event) => onKeyDown(event, index + 1)}
+                  onKeyDown={(event) =>
+                    onKeyDown(event, index + tabOffset)
+                  }
                 >
                   {panel.type === "diff" ? (
                     <FileDiff className="size-3.5 shrink-0" />
@@ -219,6 +267,20 @@ export function CodeCenterTabs({
                   <ContextMenuSeparator />
                 </>
               )}
+              {onMoveEditorToOtherGroup && (
+                <>
+                  <ContextMenuItem
+                    className="gap-3 py-2"
+                    onSelect={() => onMoveEditorToOtherGroup(index)}
+                  >
+                    {region === "primary" ? <MoveRight /> : <MoveLeft />}
+                    {region === "primary"
+                      ? "Move to split right"
+                      : "Move to main group"}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                </>
+              )}
               <ContextMenuItem
                 className="gap-3 py-2"
                 onSelect={() => onCloseEditor(index)}
@@ -253,6 +315,47 @@ export function CodeCenterTabs({
           </ContextMenu>
         );
       })}
+      <button
+        type="button"
+        className={cn(
+          "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
+        )}
+        aria-label="New tab"
+        onClick={onNewTab}
+      >
+        <Plus className="size-3.5" />
+      </button>
+      {region === "primary" && onSplitActive && (
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md disabled:cursor-default disabled:opacity-40",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          aria-label="Split active tab right"
+          disabled={conversationFocused || editorTabs.length === 0}
+          onClick={onSplitActive}
+        >
+          <Columns2 className="size-3.5" />
+        </button>
+      )}
+      {region === "secondary" && onCloseGroup && (
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground ml-auto grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          aria-label="Move split tabs to main group"
+          onClick={onCloseGroup}
+        >
+          <PanelRightClose className="size-3.5" />
+        </button>
+      )}
     </div>
   );
 }

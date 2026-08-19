@@ -658,10 +658,14 @@ export function CodeComposer({
               harness={harness}
               options={modelOptions}
               value={selectedModel || undefined}
-              onChange={(next) => {
-                setSelectedModel(next);
-                onModelChange?.(next);
-              }}
+              onChange={
+                onModelChange
+                  ? (next) => {
+                      setSelectedModel(next);
+                      onModelChange(next);
+                    }
+                  : undefined
+              }
             />
           ) : undefined
         }
