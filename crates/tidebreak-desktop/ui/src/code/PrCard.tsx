@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
@@ -19,7 +13,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { FOCUS_RING } from "./interactive";
-import { useLiveResource } from "./useLiveContent";
+import {
+  useCodeWorkspacePr,
+  type CodeWorkspacePrMutation,
+  type CodeWorkspacePrResource,
+} from "./useCodeWorkspacePr";
 
 /**
  * Commit, push, and pull-request card on a workspace.
@@ -51,27 +49,70 @@ export function PrCard({
   /** When false, drop the card chrome — the host already frames this. */
   framed?: boolean;
 }) {
+  const resource = useCodeWorkspacePr(client, workspaceId, contentRevision);
+  return (
+    <PrCardController
+      client={client}
+      workspaceId={workspaceId}
+      framed={framed}
+      resource={resource}
+    />
+  );
+}
+
+/** Use the page-level snapshot so the header and inspector never double-load. */
+export function PrCardWithResource({
+  client,
+  workspaceId,
+  framed = true,
+  resource,
+}: {
+  client: Pick<
+    ApiClient,
+    "commitCodeWorkspace" | "pushCodeWorkspace" | "createCodePullRequest"
+  >;
+  workspaceId: string;
+  framed?: boolean;
+  resource: CodeWorkspacePrResource;
+}) {
+  return (
+    <PrCardController
+      client={client}
+      workspaceId={workspaceId}
+      framed={framed}
+      resource={resource}
+    />
+  );
+}
+
+function PrCardController({
+  client,
+  workspaceId,
+  framed,
+  resource,
+}: {
+  client: Pick<
+    ApiClient,
+    "commitCodeWorkspace" | "pushCodeWorkspace" | "createCodePullRequest"
+  >;
+  workspaceId: string;
+  framed: boolean;
+  resource: CodeWorkspacePrResource;
+}) {
   const [message, setMessage] = useState("");
   const lastSuggestedMessage = useRef<string | null>(null);
-  const [busy, setBusy] = useState<"commit" | "push" | "pr" | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
 
-  const load = useCallback(
-    () => client.getCodeWorkspacePr(workspaceId),
-    [client, workspaceId],
-  );
   const {
     data: snapshot,
     error: loadError,
     refreshing,
     refresh,
     adopt,
-  } = useLiveResource({
-    key: workspaceId,
-    revision: contentRevision,
-    load,
-    errorMessage: "Could not load pull-request status",
-  });
+    busy,
+    mutationError,
+    setMutationError,
+    runMutation,
+  } = resource;
 
   // The server's suggestion is a live default, not an override: refresh it
   // while the box still contains the previous suggestion, but never clobber
@@ -89,44 +130,49 @@ export function PrCard({
   }, [snapshot]);
 
   async function commit() {
-    setBusy("commit");
     try {
-      await client.commitCodeWorkspace(workspaceId, message);
+      const committed = await runMutation("commit", async () => {
+        await client.commitCodeWorkspace(workspaceId, message);
+        await refresh();
+        return true;
+      });
+      if (!committed) return;
       setMessage("");
-      setActionError(null);
-      await refresh();
       toast.success("Committed");
     } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not commit"));
-    } finally {
-      setBusy(null);
+      const message = friendlyErrorMessage(err, "Could not commit");
+      setMutationError(message);
+      toast.error(message);
     }
   }
 
   async function push() {
-    setBusy("push");
     try {
-      await client.pushCodeWorkspace(workspaceId);
-      setActionError(null);
-      await refresh();
+      const pushed = await runMutation("push", async () => {
+        await client.pushCodeWorkspace(workspaceId);
+        await refresh();
+        return true;
+      });
+      if (!pushed) return;
       toast.success("Pushed");
     } catch (err) {
-      if (err instanceof HttpError && err.kind === "git_auth_failed") {
-        toast.error(err.message);
-      } else {
-        toast.error(friendlyErrorMessage(err, "Could not push"));
-      }
-    } finally {
-      setBusy(null);
+      const message =
+        err instanceof HttpError && err.kind === "git_auth_failed"
+          ? err.message
+          : friendlyErrorMessage(err, "Could not push");
+      setMutationError(message);
+      toast.error(message);
     }
   }
 
   async function createPr() {
-    setBusy("pr");
     try {
-      const next = await client.createCodePullRequest(workspaceId);
-      setActionError(null);
-      adopt(next);
+      const next = await runMutation("create_pr", async () => {
+        const created = await client.createCodePullRequest(workspaceId);
+        adopt(created);
+        return created;
+      });
+      if (!next) return;
       const url = next.pr?.url;
       if (url && !(await openExternal(url).catch(() => false))) {
         toast.message("Copy the pull-request URL to open it.");
@@ -137,19 +183,22 @@ export function PrCard({
         err instanceof HttpError &&
         (err.kind === "gh_absent" || err.kind === "gh_signed_out")
       ) {
-        setActionError(err.message);
+        setMutationError(err.message);
       } else {
-        toast.error(friendlyErrorMessage(err, "Could not create a pull request"));
+        const message = friendlyErrorMessage(
+          err,
+          "Could not create a pull request",
+        );
+        setMutationError(message);
+        toast.error(message);
       }
-    } finally {
-      setBusy(null);
     }
   }
 
   return (
     <PrCardView
       snapshot={snapshot}
-      error={actionError ?? loadError}
+      error={mutationError ?? loadError}
       message={message}
       busy={busy}
       refreshing={refreshing}
@@ -179,7 +228,7 @@ export function PrCardView({
   snapshot: CodeWorkspacePrSnapshot | null;
   error?: string | null;
   message: string;
-  busy: "commit" | "push" | "pr" | null;
+  busy: CodeWorkspacePrMutation | null;
   refreshing?: boolean;
   framed?: boolean;
   onMessageChange: (value: string) => void;
@@ -288,8 +337,8 @@ export function PrCardView({
               ? "The branch is pushed. Set up GitHub CLI to create its pull request."
               : "The branch is pushed and ready for a pull request."
           }
-          label={busy === "pr" ? "Creating…" : "Create pull request"}
-          busy={busy === "pr"}
+          label={busy === "create_pr" ? "Creating…" : "Create pull request"}
+          busy={busy === "create_pr"}
           disabled={!canCreatePr}
           onClick={onCreatePr}
         />

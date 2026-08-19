@@ -1,4 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -70,13 +78,13 @@ const FileViewer = lazy(async () => {
   return { default: module.FileViewer };
 });
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector } from "./CodeInspector";
+import { CodeInspector, type InspectorTab } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import { CodeQuickOpen } from "./CodeQuickOpen";
-import { PrActionBar } from "./PrActionBar";
+import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
@@ -88,6 +96,7 @@ import { FOCUS_RING } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
+import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
 import {
   WorkspaceOverflowMenu,
@@ -130,9 +139,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { setLayout } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
-  const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
+  const toggleReviewSidebar = useCodeUiStore(
+    (state) => state.toggleReviewSidebar,
+  );
+  const setReviewSidebarOpen = useCodeUiStore(
+    (state) => state.setReviewSidebarOpen,
+  );
   const shortcutHints = useCodeShortcutHints();
-  const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
+  const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
+    null,
+  );
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
   const [session, setSession] = useState<CodeSessionSnapshot | null>(
     catalog.sessionsByWorkspace[workspaceId] ?? null,
@@ -142,6 +158,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [quickOpenRequest, setQuickOpenRequest] = useState(0);
   const [quickOpenTarget, setQuickOpenTarget] =
     useState<CodeEditorRegion>("primary");
+  const [inspectorTabRequest, setInspectorTabRequest] = useState<{
+    tab: InspectorTab;
+    revision: number;
+  } | null>(null);
   const [draggedEditor, setDraggedEditor] = useState<{
     region: CodeEditorRegion;
     index: number;
@@ -154,8 +174,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     revision: number;
   } | null>(null);
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
-  const setViewedWorkspace = useCodeUpdatesStore((state) => state.setViewedWorkspace);
+  const setViewedWorkspace = useCodeUpdatesStore(
+    (state) => state.setViewedWorkspace,
+  );
   const contentRevision = useCodeContentRevision(session?.id ?? null, client);
+  const prResource = useCodeWorkspacePr(
+    client,
+    workspaceId,
+    contentRevision,
+    digest?.pr_state,
+  );
   const rememberedSession = useCodeCatalogStore(
     (state) => state.sessionsByWorkspace[workspaceId] ?? null,
   );
@@ -172,6 +200,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     return () => {
       useCodeUiStore.getState().setInspectorScope(null);
+      useCodeUiStore.getState().finishComposerAction(workspaceId);
     };
   }, [workspaceId]);
 
@@ -283,9 +312,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             revision: (current?.revision ?? 0) + 1,
           },
     );
-    setLayout(
-      openCodeEditor(layout, { type: "file", path }, preferredRegion),
-    );
+    setLayout(openCodeEditor(layout, { type: "file", path }, preferredRegion));
   }
 
   function openFileDiff(path: string) {
@@ -297,15 +324,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     setQuickOpenRequest((request) => request + 1);
   }
 
+  function openInspectorTab(tab: InspectorTab) {
+    setReviewSidebarOpen(true);
+    setInspectorTabRequest((request) => ({
+      tab,
+      revision: (request?.revision ?? 0) + 1,
+    }));
+  }
+
+  const handleInspectorTabRequest = useCallback((revision: number) => {
+    setInspectorTabRequest((request) =>
+      request?.revision === revision ? null : request,
+    );
+  }, []);
+
   function dropDraggedEditor(region: CodeEditorRegion) {
     if (!draggedEditor || draggedEditor.region === region) return;
     setLayout(
-      moveEditorTab(
-        layout,
-        draggedEditor.region,
-        draggedEditor.index,
-        region,
-      ),
+      moveEditorTab(layout, draggedEditor.region, draggedEditor.index, region),
     );
     setDraggedEditor(null);
   }
@@ -332,8 +368,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     region: CodeEditorRegion,
     index: number,
   ) {
-    const id =
-      region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
+    const id = region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
     return (
       <div
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -452,6 +487,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               )}
               {!session && workspace?.status === "active" && (
                 <StartSessionPrompt
+                  workspaceId={workspaceId}
                   harnesses={doctorHarnesses}
                   starting={starting}
                   selectedMode={createMode}
@@ -478,9 +514,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               )}
             </div>
           )}
-          renderPanel={(panel) =>
-            renderCodePanel(panel, client, workspaceId)
-          }
+          renderPanel={(panel) => renderCodePanel(panel, client, workspaceId)}
         />
       </div>
       {!showingChat &&
@@ -546,7 +580,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
         {hasEditorSplit ? (
-          <ResizablePanelGroup direction="horizontal" className="h-full min-h-0">
+          <ResizablePanelGroup
+            direction="horizontal"
+            className="h-full min-h-0"
+          >
             <ResizablePanel defaultSize={55} minSize={25} className="min-w-0">
               {primaryEditorGroup}
             </ResizablePanel>
@@ -593,17 +630,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onOpenFile={(path) => openFile(path, undefined, quickOpenTarget)}
         openRequest={quickOpenRequest}
       />
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-        <div className="min-w-0 flex-1">
+      <header className="flex h-12 min-w-0 shrink-0 items-center gap-2 border-b border-border-subtle px-4">
+        <div className="min-w-0 flex-1 overflow-hidden">
           <h1 className="flex min-w-0 items-center text-sm font-medium">
             {title ? (
               <span
                 className="min-w-0 flex-1 truncate"
-                title={
-                  [title, repoName, workspace?.worktree_path]
-                    .filter(Boolean)
-                    .join(" · ")
-                }
+                title={[title, repoName, workspace?.worktree_path]
+                  .filter(Boolean)
+                  .join(" · ")}
               >
                 {title}
               </span>
@@ -618,12 +653,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             )}
           </h1>
         </div>
-        {pr && (
-          <div className="flex min-w-0 flex-1 justify-center">
-            <PrActionBar pr={pr} variant="header" />
-          </div>
-        )}
-        <div className="flex shrink-0 items-center gap-2">
+        <div
+          className="flex shrink-0 items-center gap-2"
+          data-testid="workspace-header-utilities"
+        >
+          {workspace && workspace.status !== "archived" && (
+            <WorkspaceWorkflowControl
+              client={client}
+              workspaceId={workspaceId}
+              branchName={workspace.branch_name}
+              baseRef={workspace.base_ref}
+              fallbackPr={pr}
+              resource={prResource}
+              onOpenSourceControl={() => openInspectorTab("source")}
+            />
+          )}
           {session && (
             <>
               <SessionAttentionBadge
@@ -714,7 +758,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           direction="horizontal"
           className="min-h-0 flex-1"
         >
-          <ResizablePanel defaultSize={72} minSize={36} className="h-full min-h-0 min-w-0">
+          <ResizablePanel
+            defaultSize={72}
+            minSize={36}
+            className="h-full min-h-0 min-w-0"
+          >
             {workspaceMain}
           </ResizablePanel>
           <ResizableHandle />
@@ -725,13 +773,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               workspaceId={workspaceId}
               workspace={workspace}
               contentRevision={contentRevision}
+              prResource={prResource}
+              requestedTab={inspectorTabRequest}
+              onRequestedTabHandled={handleInspectorTabRequest}
               onOpenFile={openFile}
               onOpenDiff={openFileDiff}
             />
           </ResizablePanel>
         </ResizablePanelGroup>
       ) : (
-        <div className="flex h-full min-h-0 flex-1 overflow-hidden">{workspaceMain}</div>
+        <div className="flex h-full min-h-0 flex-1 overflow-hidden">
+          {workspaceMain}
+        </div>
       )}
     </>
   );
@@ -910,9 +963,9 @@ function CodeSessionPane({
   const lastSeq = store((state) => state.lastSeq);
   const streamStalled = useStreamStalled(busy, lastSeq);
   const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
-  const [approvals, setApprovals] = useState<Record<string, CodeApprovalSnapshot>>(
-    {},
-  );
+  const [approvals, setApprovals] = useState<
+    Record<string, CodeApprovalSnapshot>
+  >({});
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
   const [queued, setQueued] = useState(false);
@@ -931,7 +984,10 @@ function CodeSessionPane({
       defaultModelKey,
     );
     const listed = gateway.length > 0 ? gateway : (cachedModels ?? []);
-    if (!session.model || listed.some((option) => option.id === session.model)) {
+    if (
+      !session.model ||
+      listed.some((option) => option.id === session.model)
+    ) {
       return listed;
     }
     // Historical or engine-default sessions can name a model that is hidden
@@ -959,7 +1015,10 @@ function CodeSessionPane({
   }, [inferred, session.model]);
 
   useEffect(() => {
-    if (gatewayCodeModels(catalogModels, session.harness_kind, defaultModelKey).length > 0) {
+    if (
+      gatewayCodeModels(catalogModels, session.harness_kind, defaultModelKey)
+        .length > 0
+    ) {
       return;
     }
     // An empty list is a finished fetch: this engine advertised no models.
@@ -1158,6 +1217,7 @@ function CodeSessionPane({
           harness={session.harness_kind}
           model={model ?? undefined}
           modelOptions={modelOptions}
+          promptScope={workspaceId}
           sessionId={session.id}
           history={composerHistory}
           queued={queued}
@@ -1191,13 +1251,10 @@ function CodeSessionPane({
   );
 }
 
-function useRegisteredCodeSession(
-  sessionId: string,
-  client: ApiClient,
-) {
-  const storeRef = useRef<ReturnType<typeof acquireCodeSessionFromClient> | null>(
-    null,
-  );
+function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
+  const storeRef = useRef<ReturnType<
+    typeof acquireCodeSessionFromClient
+  > | null>(null);
   if (storeRef.current === null) {
     storeRef.current = acquireCodeSessionFromClient(sessionId, client);
   }

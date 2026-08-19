@@ -4,10 +4,15 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import type { ApiClient } from "../api/client";
-import type { CodeWorkspaceSnapshot, PullRequestDigest } from "../api/types";
+import type {
+  CodeWorkspacePrSnapshot,
+  CodeWorkspaceSnapshot,
+  PullRequestDigest,
+} from "../api/types";
 import { CodeInspector, inspectorTurnLabel } from "./CodeInspector";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 
 afterEach(() => {
   cleanup();
@@ -15,6 +20,7 @@ afterEach(() => {
   useCodeUiStore.setState({
     inspectorScope: null,
     pendingComposerPrompt: null,
+    composerActionScope: null,
   });
   vi.clearAllMocks();
 });
@@ -42,6 +48,27 @@ const PR: PullRequestDigest = {
     { name: "ci / ui", bucket: "pending" },
   ],
 } as never;
+
+const OPEN_PR: PullRequestDigest = {
+  number: 41,
+  state: "open",
+  title: "Fix login flow",
+  url: "https://github.com/acme/app/pull/41",
+  draft: false,
+  head_branch: "tidebreak/fix-login",
+  base_branch: "main",
+};
+
+const CLEAN_PR_SNAPSHOT: Omit<CodeWorkspacePrSnapshot, "pr"> = {
+  dirty: false,
+  unpushed: false,
+  ahead: 0,
+  has_upstream: true,
+  suggested_commit_message: "",
+  gh_found: true,
+  gh_authenticated: true,
+  remediation: "",
+};
 
 function makeClient(): Pick<
   ApiClient,
@@ -143,6 +170,176 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   );
   expect(screen.getByText("src/login.rs:12")).toBeInTheDocument();
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
+});
+
+it.each([
+  [
+    "unknown mergeability",
+    OPEN_PR,
+    "GitHub is still determining mergeability. Merge stays unavailable until the pull request is explicitly ready.",
+    true,
+  ],
+  [
+    "conflicts",
+    { ...OPEN_PR, mergeable: "conflicting", merge_state_status: "dirty" },
+    "Resolve the merge conflicts before merging directly.",
+    false,
+  ],
+  [
+    "a behind branch",
+    { ...OPEN_PR, mergeable: "mergeable", merge_state_status: "behind" },
+    "Update the branch from its base before merging directly.",
+    true,
+  ],
+  [
+    "a blocked requirement",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "blocked",
+      review_decision: "review_required",
+    },
+    "A review or repository requirement is still blocking a direct merge.",
+    true,
+  ],
+  [
+    "requested changes",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      review_decision: "changes_requested",
+    },
+    "Address the requested changes before merging directly.",
+    true,
+  ],
+  [
+    "failing checks",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      checks: [{ name: "ci / ui", bucket: "fail" }],
+    },
+    "Fix the failing checks before merging directly.",
+    true,
+  ],
+  [
+    "pending checks",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      checks: [{ name: "ci / ui", bucket: "pending" }],
+    },
+    "Wait for the pending checks before merging directly.",
+    true,
+  ],
+  [
+    "merge queue membership",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      in_merge_queue: true,
+    },
+    "This pull request is already waiting in the merge queue.",
+    false,
+  ],
+] as const)(
+  "holds direct merge for %s and explains why",
+  async (_, pr, copy, autoMergeEnabled) => {
+    render(
+      <CodeInspector
+        client={makeClient() as never}
+        workspaceId="ws-1"
+        workspace={{ ...WORKSPACE, pr } as never}
+        contentRevision={0}
+      />,
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("tab", { name: "Pull request" }));
+
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    const autoMerge = screen.getByRole("button", {
+      name: "Enable auto-merge",
+    });
+    if (autoMergeEnabled) expect(autoMerge).toBeEnabled();
+    else expect(autoMerge).toBeDisabled();
+    expect(screen.getByText(copy)).toBeInTheDocument();
+  },
+);
+
+it("only enables direct merge for an affirmatively ready PR", async () => {
+  render(
+    <CodeInspector
+      client={makeClient() as never}
+      workspaceId="ws-1"
+      workspace={{
+        ...WORKSPACE,
+        pr: {
+          ...OPEN_PR,
+          mergeable: "mergeable",
+          merge_state_status: "clean",
+          checks: [{ name: "ci / ui", bucket: "pass" }],
+        },
+      } as never}
+      contentRevision={0}
+    />,
+  );
+
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Pull request" }));
+
+  expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: "Enable auto-merge" }),
+  ).toBeEnabled();
+});
+
+it("routes manual refresh through the shared serialized PR resource", async () => {
+  const client = makeClient();
+  const refreshed = {
+    ...CLEAN_PR_SNAPSHOT,
+    pr: {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+    },
+  };
+  const refreshFromHost = vi.fn(async () => refreshed);
+  const resource = {
+    data: { ...CLEAN_PR_SNAPSHOT, pr: OPEN_PR },
+    error: null,
+    refreshing: false,
+    refresh: vi.fn(async () => undefined),
+    adopt: vi.fn(),
+    busy: null,
+    mutationError: null,
+    setMutationError: vi.fn(),
+    refreshFromHost,
+    runMutation: vi.fn(),
+  } as unknown as CodeWorkspacePrResource;
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, pr: OPEN_PR } as never}
+      contentRevision={0}
+      prResource={resource}
+    />,
+  );
+
+  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Refresh pull request" }));
+
+  await waitFor(() => expect(refreshFromHost).toHaveBeenCalledOnce());
+  expect(client.refreshCodeWorkspacePr).not.toHaveBeenCalled();
 });
 
 it("shows skipped checks as neutral and hides stale review state after merge", async () => {

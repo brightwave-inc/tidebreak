@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { PullRequestDigest } from "../api/types";
-import { prBarModel, prBarPrompt, prHasConflicts } from "./prActions";
+import {
+  prHasConflicts,
+  prIsQueued,
+  prWorkflowPrompt,
+  prWorkflowStatus,
+} from "./prActions";
 
 function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
   return {
@@ -11,21 +16,16 @@ function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
   };
 }
 
-describe("prBarModel", () => {
-  it("leads with watch and fix when the PR is open and clean", () => {
-    const model = prBarModel(
+describe("prWorkflowStatus", () => {
+  it("classifies a clean open PR as ready", () => {
+    const model = prWorkflowStatus(
       pr({
         checks: [{ name: "ci", bucket: "pass" }],
+        mergeable: "mergeable",
+        merge_state_status: "clean",
       }),
     );
-    expect(model.status).toBe("Ready to merge");
-    expect(model.actions[0]).toBe("watch_and_fix");
-    expect(model.actions).toEqual([
-      "watch_and_fix",
-      "merge",
-      "fix_errors",
-      "resolve_conflicts",
-    ]);
+    expect(model.state).toBe("ready");
     expect(model.checks).toEqual({
       passing: 1,
       pending: 0,
@@ -36,15 +36,17 @@ describe("prBarModel", () => {
   });
 
   it("counts skipped checks without treating them as pending", () => {
-    const model = prBarModel(
+    const model = prWorkflowStatus(
       pr({
         checks: [
           { name: "ci", bucket: "pass" },
           { name: "release", bucket: "skipped", detail: "skipping" },
         ],
+        mergeable: "mergeable",
+        merge_state_status: "clean",
       }),
     );
-    expect(model.status).toBe("Ready to merge");
+    expect(model.state).toBe("ready");
     expect(model.checks).toEqual({
       passing: 1,
       pending: 0,
@@ -54,8 +56,8 @@ describe("prBarModel", () => {
     });
   });
 
-  it("keeps the contextual fix action directly after watch and fix", () => {
-    const model = prBarModel(
+  it("classifies a failing check before ready state", () => {
+    const model = prWorkflowStatus(
       pr({
         checks: [
           { name: "ci / rust", bucket: "fail" },
@@ -63,51 +65,119 @@ describe("prBarModel", () => {
         ],
       }),
     );
-    expect(model.status).toBe("1 check failing");
-    expect(model.actions.slice(0, 2)).toEqual(["watch_and_fix", "fix_errors"]);
+    expect(model.state).toBe("failing");
   });
 
-  it("keeps the contextual conflict action directly after watch and fix", () => {
-    const model = prBarModel(pr({ mergeable: "CONFLICTING" }));
+  it("classifies conflicts", () => {
+    const model = prWorkflowStatus(pr({ mergeable: "CONFLICTING" }));
     expect(prHasConflicts(pr({ mergeable: "CONFLICTING" }))).toBe(true);
-    expect(model.status).toBe("Conflicts");
-    expect(model.actions.slice(0, 2)).toEqual([
-      "watch_and_fix",
-      "resolve_conflicts",
-    ]);
+    expect(model.state).toBe("conflict");
   });
 
   it("names a draft even when checks are still pending", () => {
-    const model = prBarModel(
+    const model = prWorkflowStatus(
       pr({
         draft: true,
         checks: [{ name: "ci", bucket: "pending" }],
       }),
     );
-    expect(model.status).toBe("Draft");
-    expect(model.actions.slice(0, 2)).toEqual(["watch_and_fix", "merge"]);
+    expect(model.state).toBe("draft");
   });
 
-  it("hides actions on a merged PR", () => {
-    const model = prBarModel(pr({ state: "merged", merged: true }));
-    expect(model.status).toBe("Merged");
-    expect(model.actions).toEqual([]);
+  it("recognizes an armed merge queue without hiding real failures", () => {
+    const queued = pr({
+      in_merge_queue: true,
+      auto_merge_enabled: true,
+      merge_state_status: "blocked",
+      checks: [{ name: "ci", bucket: "pending" }],
+    });
+    expect(prIsQueued(queued)).toBe(true);
+    expect(prWorkflowStatus(queued).state).toBe("queued");
+
+    expect(
+      prWorkflowStatus({
+        ...queued,
+        checks: [{ name: "ci", bucket: "fail" }],
+      }).state,
+    ).toBe("failing");
+  });
+
+  it("keeps auto-merge distinct from an explicit queue state", () => {
+    const model = prWorkflowStatus(
+      pr({
+        auto_merge_enabled: true,
+        merge_state_status: "clean",
+        checks: [{ name: "ci", bucket: "pass" }],
+      }),
+    );
+    expect(model.state).toBe("auto_merge");
+  });
+
+  it("does not call review-blocked or behind PRs ready", () => {
+    expect(
+      prWorkflowStatus(pr({ review_decision: "changes_requested" })).state,
+    ).toBe("changes_requested");
+    expect(prWorkflowStatus(pr({ merge_state_status: "behind" })).state).toBe(
+      "behind",
+    );
+    expect(prWorkflowStatus(pr({ merge_state_status: "blocked" })).state).toBe(
+      "blocked",
+    );
+  });
+
+  it("keeps incomplete host data in a checking state", () => {
+    expect(prWorkflowStatus(pr({})).state).toBe("checking");
+    expect(
+      prWorkflowStatus(
+        pr({ mergeable: "unknown", merge_state_status: "unknown" }),
+      ).state,
+    ).toBe("checking");
+  });
+
+  it("classifies a merged PR", () => {
+    const model = prWorkflowStatus(pr({ state: "merged", merged: true }));
+    expect(model.state).toBe("merged");
   });
 });
 
-describe("prBarPrompt", () => {
-  it("names the PR and the base branch", () => {
-    const digest = pr({ base_branch: "main", title: "Fix login" });
-    expect(prBarPrompt("merge", digest)).toMatch(/#41/);
-    expect(prBarPrompt("merge", digest)).toMatch(/main/);
-    expect(prBarPrompt("fix_errors", digest)).toMatch(/failing checks/);
-    expect(prBarPrompt("resolve_conflicts", digest)).toMatch(/conflicts/);
-    const watch = prBarPrompt("watch_and_fix", digest);
+describe("prWorkflowPrompt", () => {
+  it("includes enough live PR context for one-click agent actions", () => {
+    const digest = pr({
+      title: "Fix login",
+      url: "https://github.com/acme/app/pull/41",
+      head_branch: "fix-login",
+      base_branch: "main",
+      mergeable: "conflicting",
+      review_decision: "changes_requested",
+      checks: [
+        {
+          name: "ci / ui",
+          bucket: "fail",
+          detail: "Tests failed",
+          url: "https://github.com/acme/app/actions/runs/7",
+        },
+      ],
+    });
+    expect(prWorkflowPrompt("merge", digest)).toMatch(/#41/);
+    expect(prWorkflowPrompt("merge", digest)).toMatch(/main/);
+    expect(prWorkflowPrompt("merge", digest)).toMatch(/Fix login/);
+    expect(prWorkflowPrompt("merge", digest)).toMatch(/fix-login -> main/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/ci \/ ui/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/Tests failed/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/actions\/runs\/7/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/failing checks/);
+    expect(prWorkflowPrompt("resolve_conflicts", digest)).toMatch(/conflicts/);
+    expect(prWorkflowPrompt("update_branch", digest)).toMatch(/Update pull request/);
+    expect(prWorkflowPrompt("address_feedback", digest)).toMatch(
+      /requested changes/,
+    );
+    const watch = prWorkflowPrompt("watch_and_fix", digest);
     expect(watch).toMatch(/keep watching/i);
     expect(watch).toMatch(/Enable auto-merge/);
     expect(watch).toMatch(/required human approval/);
     expect(watch).toMatch(/current head SHA/);
     expect(watch).toMatch(/rebase onto main/);
     expect(watch).toMatch(/mark it ready for review/);
+    expect(prWorkflowPrompt("mark_ready", digest)).toMatch(/ready for review/);
   });
 });

@@ -418,6 +418,10 @@ pub struct PullRequestDigest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub auto_merge_enabled: Option<bool>,
+    // True when the host timeline says the PR is currently in its merge queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub in_merge_queue: Option<bool>,
 }
 
 /// One pull-request comment: an issue comment, a review body, or an inline

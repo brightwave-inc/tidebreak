@@ -99,6 +99,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[entry("claude_code", {})]}
           starting={false}
           selectedMode={null}
@@ -128,6 +129,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[
             entry("claude_code", {
               structured_approvals: "unsupported",
@@ -159,6 +161,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[
             entry("claude_code", {}),
             entry("grok", {
@@ -199,6 +202,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[entry("claude_code", {})]}
           starting={false}
           selectedMode={null}
@@ -240,6 +244,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[entry("claude_code", {}), entry("codex", {})]}
           starting={false}
           selectedMode={null}
@@ -282,6 +287,7 @@ describe("StartSessionPrompt", () => {
     await renderWithRouter(
       wrap(
         <StartSessionPrompt
+          workspaceId="workspace-1"
           harnesses={[entry("claude_code", {})]}
           starting={false}
           selectedMode="allow"
