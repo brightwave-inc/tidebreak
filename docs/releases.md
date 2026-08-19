@@ -295,6 +295,12 @@ signs and collects only the completed package bytes. This avoids exposing a
 default-branch cache writer to code executed during a manually dispatched
 release.
 
+Hosted `ubuntu-22.04` runners pin apt at `azure.archive.ubuntu.com`, which can
+stall on `apt-get update` for most of the 90-minute job. The packaging step
+rewrites that mirror to `archive.ubuntu.com` (or `ports.ubuntu.com` on ARM),
+sets short apt timeouts, and fails the step in eight minutes if the public
+archive is also unreachable.
+
 The public download contract is rooted at:
 
 ```text

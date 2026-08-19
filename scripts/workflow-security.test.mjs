@@ -449,6 +449,22 @@ test("PR lanes are scope-gated, never label-gated", () => {
     desktop,
     /cargo test -p tidebreak-desktop --locked/,
   );
+  for (const [name, step] of [
+    ["lint", "Install system deps (Tauri)"],
+    ["desktop", "Install system deps (Tauri)"],
+    ["test", "Install headless system deps"],
+  ]) {
+    const job = workflowJob(ci, name);
+    const deps = job.match(
+      new RegExp(
+        `- name: ${step.replace(/[()]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- (?:name:|uses:))`,
+      ),
+    )?.[0];
+    assert.ok(deps, `missing ${name} apt step`);
+    assert.match(deps, /timeout-minutes: 8/);
+    assert.match(deps, /scripts\/install-linux-apt-packages\.sh/);
+    assert.doesNotMatch(deps, /sudo apt-get update/);
+  }
   assert.match(
     desktopCargo,
     /tidebreak-server = \{ path = "\.\.\/tidebreak-server" \}/,
@@ -1612,6 +1628,17 @@ test("Linux packaging writes no shared cache before loading updater material", (
     /xdg-utils/,
     "AppImage packaging must install the xdg-mime provider on every runner",
   );
+  assert.match(
+    buildJob,
+    /scripts\/install-linux-apt-packages\.sh/,
+    "Linux packaging must pin apt to a public Ubuntu archive instead of a hanging Azure mirror",
+  );
+  const linuxDeps = buildJob.match(
+    /- name: Install Linux packaging dependencies[\s\S]*?(?=\n\s+- (?:name:|uses:))/,
+  )?.[0];
+  assert.ok(linuxDeps, "missing Linux packaging dependency step");
+  assert.match(linuxDeps, /timeout-minutes: 8/);
+  assert.doesNotMatch(linuxDeps, /sudo apt-get update/);
   assert.match(buildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(buildJob, /version: 10\.18\.3/);
   assert.match(buildJob, /pnpm install --frozen-lockfile --ignore-scripts/);
