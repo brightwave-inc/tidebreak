@@ -857,37 +857,78 @@ fn cap_raw(raw: &serde_json::Value) -> serde_json::Value {
 }
 
 fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
+    let input = raw
+        .get("input")
+        .or_else(|| raw.get("metadata"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // Codex puts the command on the request itself, not under `input`.
+    if let Some(cmd) = raw
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        return CodeApprovalKind::Command {
+            cmd: cmd.to_owned(),
+            cwd: raw
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+    if let Some(cmd) = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        return CodeApprovalKind::Command {
+            cmd: cmd.to_owned(),
+            cwd: input
+                .get("cwd")
+                .or_else(|| raw.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+    }
     let tool = raw
         .get("tool_name")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let input = raw.get("input").cloned().unwrap_or(serde_json::Value::Null);
+        .or_else(|| raw.get("permission").and_then(serde_json::Value::as_str))
+        .unwrap_or("");
+    let path = input
+        .get("file_path")
+        .or_else(|| input.get("path"))
+        .or_else(|| raw.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     match tool {
-        "Write" | "Edit" | "NotebookEdit" => {
-            let path = input
-                .get("file_path")
-                .or_else(|| input.get("path"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            CodeApprovalKind::FileWrite { paths: vec![path] }
-        }
-        "Bash" => CodeApprovalKind::Command {
-            cmd: input
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_owned(),
+        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => CodeApprovalKind::FileWrite {
+            paths: vec![path.to_owned()],
+        },
+        "Bash" | "bash" => CodeApprovalKind::Command {
+            cmd: String::new(),
             cwd: input
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
         },
-        "WebFetch" | "WebSearch" => CodeApprovalKind::Network {
+        "WebFetch" | "WebSearch" | "webfetch" | "websearch" => CodeApprovalKind::Network {
             summary: tool.to_owned(),
         },
-        _ => CodeApprovalKind::Other {
-            summary: tool.to_owned(),
+        "Read" | "read" | "Grep" | "grep" | "Glob" | "glob" | "NotebookRead" => {
+            CodeApprovalKind::Other {
+                summary: if path.is_empty() {
+                    tool.to_owned()
+                } else {
+                    format!("{tool} {path}")
+                },
+            }
+        }
+        "" | "unknown" => CodeApprovalKind::Other {
+            summary: "The engine needs approval".to_owned(),
+        },
+        other => CodeApprovalKind::Other {
+            summary: other.to_owned(),
         },
     }
 }
@@ -1001,5 +1042,44 @@ mod tests {
         assert_eq!(stored["truncated"], true);
         assert_eq!(stored["call_id"], "toolu_oversized");
         assert!(stored.get("tool_use_id").is_none());
+    }
+
+    #[test]
+    fn kind_from_raw_reads_codex_and_opencode_payloads() {
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "command": "/bin/zsh -lc rg foo",
+                "cwd": "/workspace",
+            })),
+            CodeApprovalKind::Command {
+                cmd: "/bin/zsh -lc rg foo".into(),
+                cwd: Some("/workspace".into()),
+            }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "permission": "bash",
+                "metadata": { "command": "rg foo" },
+            })),
+            CodeApprovalKind::Command {
+                cmd: "rg foo".into(),
+                cwd: None,
+            }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "tool_name": "Read",
+                "input": { "file_path": "/workspace/README.md" },
+            })),
+            CodeApprovalKind::Other {
+                summary: "Read /workspace/README.md".into(),
+            }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::Value::Null),
+            CodeApprovalKind::Other {
+                summary: "The engine needs approval".into(),
+            }
+        );
     }
 }

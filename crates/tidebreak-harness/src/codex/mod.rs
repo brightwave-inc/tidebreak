@@ -211,9 +211,12 @@ mod tests {
     #[test]
     fn fixture_replay_approval_approve() {
         let (events, _) = replay("approval-approve");
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ApprovalRequested { raw, .. }
+                if raw.get("command").and_then(|value| value.as_str())
+                    .is_some_and(|cmd| cmd.contains("python3"))
+        )));
         assert!(events.iter().any(|event| matches!(
             event,
             HarnessEvent::ApprovalResolved {

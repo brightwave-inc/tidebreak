@@ -222,9 +222,11 @@ mod tests {
     #[test]
     fn fixture_replay_approval_approve() {
         let (events, _) = replay("approval-approve");
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ApprovalRequested { raw, .. }
+                if raw.get("permission") == Some(&serde_json::json!("bash"))
+        )));
         assert!(events.iter().any(|event| matches!(
             event,
             HarnessEvent::ApprovalResolved {

@@ -116,6 +116,22 @@ describe("CodeApprovalCard", () => {
     ).not.toBeNull();
   });
 
+  it("does not render an unknown engine summary as the decision", () => {
+    render(
+      <CodeApprovalCard
+        approval={{
+          ...pendingCommand,
+          kind: { type: "other", summary: "unknown" },
+          harness_raw_json: "null",
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Allow this?")).toBeInTheDocument();
+    expect(screen.getByText("The engine needs approval")).toBeInTheDocument();
+    expect(screen.queryByText("unknown")).not.toBeInTheDocument();
+  });
+
   it("tones a denial as a warning and shows the feedback", () => {
     render(
       <CodeApprovalCard
