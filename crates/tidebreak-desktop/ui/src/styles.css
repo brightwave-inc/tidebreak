@@ -77,14 +77,14 @@
   --citation-mark: oklch(0.87 0 0);
   --citation-mark-active-ink: var(--foreground);
 
-  /* The Gateway system is deliberately monochrome. Semantic colors remain
-     reserved for success, warning, critical, and info states. */
-  --icon-blue: var(--foreground);
-  --icon-cyan: var(--foreground);
-  --icon-violet: var(--foreground);
-  --icon-amber: var(--foreground);
-  --icon-rose: var(--foreground);
-  --icon-green: var(--foreground);
+  /* Categorical icon ink follows the Gateway prototype's color treatment:
+     the stronger 600 step on light surfaces, without adding colored tiles. */
+  --icon-blue: var(--color-blue-600);
+  --icon-cyan: var(--color-cyan-600);
+  --icon-violet: var(--color-violet-600);
+  --icon-amber: var(--color-amber-600);
+  --icon-rose: var(--color-rose-600);
+  --icon-green: var(--color-emerald-600);
 
   --radius: 0.5rem;
   --control-height: 2rem;
@@ -189,12 +189,13 @@
   --citation-mark: oklch(0.34 0 0);
   --citation-mark-active-ink: var(--background);
 
-  --icon-blue: var(--foreground);
-  --icon-cyan: var(--foreground);
-  --icon-violet: var(--foreground);
-  --icon-amber: var(--foreground);
-  --icon-rose: var(--foreground);
-  --icon-green: var(--foreground);
+  /* Vivian's dark treatments lift colored ink to the 400 step. */
+  --icon-blue: var(--color-blue-400);
+  --icon-cyan: var(--color-cyan-400);
+  --icon-violet: var(--color-violet-400);
+  --icon-amber: var(--color-amber-400);
+  --icon-rose: var(--color-rose-400);
+  --icon-green: var(--color-emerald-400);
 
   --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.24);
   --shadow: 0 2px 6px oklch(0 0 0 / 0.28);
