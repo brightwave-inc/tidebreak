@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { readDeliverable, type DeliverablePreview } from "@/deliverables";
 import { parseChartFigure } from "@/outputs/chartFigure";
 import { usePanelNav } from "@/panel/usePanelNav";
+import { TRANSCRIPT_RESULT_CARD_FRAME } from "@/TranscriptResultCard";
 import { useActiveChatId } from "@/useActiveChatId";
 
 // The plotting engine is a large dependency and most conversations never make a
@@ -41,9 +42,6 @@ export function OutputCardList({ outputs }: { outputs: ResultEntry[] }) {
   );
 }
 
-const CARD_FRAME =
-  "bg-background inline-flex max-w-full min-w-0 items-center gap-3 rounded-lg border px-4 py-3 text-left shadow-sm";
-
 function OpenOutputCard({
   entry,
   outputId,
@@ -55,7 +53,7 @@ function OpenOutputCard({
   return (
     <button
       type="button"
-      className={`${CARD_FRAME} hover:bg-muted/40 cursor-pointer transition-colors`}
+      className={`${TRANSCRIPT_RESULT_CARD_FRAME} hover:bg-muted/40 cursor-pointer transition-colors`}
       onClick={() => openPanel({ type: "outputs", outputId })}
       aria-label={`Open output ${entry.label}`}
     >
@@ -92,7 +90,7 @@ function OutputCard({ entry }: { entry: ResultEntry }) {
 
   if (outputId === null) {
     return (
-      <div className={CARD_FRAME}>
+      <div className={TRANSCRIPT_RESULT_CARD_FRAME}>
         <OutputCardBody entry={entry} />
       </div>
     );

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { useChatSessionStore } from "./ChatSessionStore";
@@ -54,5 +55,36 @@ describe("ToolCommandCard sandbox preparation", () => {
     );
 
     expect(screen.queryByText(/Preparing the sandbox image/)).toBeNull();
+  });
+});
+
+describe("ToolCommandCard expansion", () => {
+  it("reveals the backend and successful outcome with the command detail", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolCommandCard
+        name="exec"
+        status="completed"
+        preview={preview}
+        result={{
+          tool: "exec",
+          exitCode: 0,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "rendered\n",
+          stderr: "",
+          backend: "local",
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Local")).toBeNull();
+    expect(screen.queryByText("Done")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /python3 render.py/ }));
+
+    expect(screen.getByText("Local")).toBeTruthy();
+    expect(screen.getByText("Done")).toBeTruthy();
+    expect(screen.getByLabelText("Output")).toHaveTextContent("rendered");
   });
 });
