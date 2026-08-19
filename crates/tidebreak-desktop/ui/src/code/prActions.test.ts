@@ -106,5 +106,8 @@ describe("prBarPrompt", () => {
     expect(watch).toMatch(/keep watching/i);
     expect(watch).toMatch(/Enable auto-merge/);
     expect(watch).toMatch(/required human approval/);
+    expect(watch).toMatch(/current head SHA/);
+    expect(watch).toMatch(/rebase onto main/);
+    expect(watch).toMatch(/mark it ready for review/);
   });
 });
