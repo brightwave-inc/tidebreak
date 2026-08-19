@@ -24,9 +24,9 @@ export function SettingsPanel({
 }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto" aria-busy={busy}>
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-10 px-6 py-8 md:px-10">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8 md:px-10">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-medium tracking-tight">{title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           {description && (
             <p className="text-sm text-muted-foreground">{description}</p>
           )}
@@ -54,7 +54,7 @@ export function SettingsField({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="font-bold">{label}</span>
+      <span className="font-medium">{label}</span>
       {children}
       {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
     </label>
@@ -76,16 +76,18 @@ export function SettingsSection({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4">
+    <section className="flex flex-col gap-3">
       {(title || description) && (
-        <div className="flex flex-col gap-1">
-          {title && <h2 className="text-lg font-semibold">{title}</h2>}
+        <div className="flex flex-col gap-0.5">
+          {title && <h2 className="text-sm font-medium">{title}</h2>}
           {description && (
             <p className="text-sm text-muted-foreground">{description}</p>
           )}
         </div>
       )}
-      <Card className="gap-4 border bg-transparent p-4">{children}</Card>
+      <Card className="gap-4 rounded-md border bg-transparent p-4 ring-0">
+        {children}
+      </Card>
     </section>
   );
 }

@@ -102,7 +102,7 @@ export function promptTitle(name: string): string {
 }
 
 const CARD_CLASS =
-  "flex items-center gap-2.5 rounded-[10px] border border-border bg-background px-3.5 py-2.5 text-[0.85rem] font-medium text-left text-foreground transition-[background-color,border-color] duration-[120ms] ease-in-out hover:border-[color-mix(in_srgb,var(--ink)_22%,var(--line))] hover:bg-accent [&_svg]:flex-none";
+  "flex items-center gap-2.5 rounded-lg border border-border-subtle bg-background px-3 py-2.5 text-left text-[0.85rem] font-medium text-foreground transition-colors duration-150 hover:border-border hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25 active:translate-y-px [&_svg]:flex-none";
 
 export function WelcomeState({
   onSelectPrompt,

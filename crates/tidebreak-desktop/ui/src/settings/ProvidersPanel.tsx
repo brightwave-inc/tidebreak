@@ -131,7 +131,7 @@ export function ProvidersPanel({
       title="Providers"
       description="Credentials stay on this machine. Enable a provider, then save a credential."
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
         {providers
           // The gateway signs in with OAuth, not a pasted key; its whole
           // surface (connect, identity, entitled models) lives in the
@@ -289,7 +289,7 @@ function ProviderRow({
   return (
     <Card
       ref={cardRef}
-      className="gap-0 overflow-hidden border bg-transparent p-0"
+      className="gap-0 overflow-hidden rounded-md border bg-transparent p-0 ring-0"
     >
       <div
         role="button"
@@ -297,7 +297,7 @@ function ProviderRow({
         aria-expanded={expanded}
         aria-controls={bodyId}
         aria-label={`${expanded ? "Collapse" : "Expand"} ${providerLabel(info.kind)}`}
-        className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-muted/40"
+        className="flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/50"
         onClick={() => onExpandedChange(!expanded)}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;

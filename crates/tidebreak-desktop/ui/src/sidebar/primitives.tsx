@@ -141,7 +141,7 @@ export function Sidebar({ className, children, ...props }: ComponentProps<"div">
       <div
         {...props}
         className={cn(
-          "relative flex shrink-0 flex-col overflow-hidden",
+          "relative flex shrink-0 flex-col overflow-hidden border-r border-border-subtle bg-page-background text-foreground",
           // Animate width changes, but not live drags — easing lags the pointer.
           !resizing && "transition-[flex-basis,min-width,width] duration-200",
           className,
@@ -167,7 +167,13 @@ export function SidebarHeader({
 }: ComponentProps<"div"> & { asChild?: boolean }) {
   const Comp = asChild ? Slot : "div";
   return (
-    <Comp className={cn("mt-2 flex h-9 shrink-0 items-center gap-2 px-2", className)} {...props} />
+    <Comp
+      className={cn(
+        "flex h-12 shrink-0 items-center gap-2 border-b border-border-subtle px-3",
+        className,
+      )}
+      {...props}
+    />
   );
 }
 
@@ -176,7 +182,7 @@ export const SidebarContent = forwardRef<
   ComponentProps<"div"> & { asChild?: boolean }
 >(function SidebarContent({ asChild = false, className, ...props }, ref) {
   const Comp = asChild ? Slot : "div";
-  return <Comp ref={ref} className={cn("mt-4 flex grow flex-col", className)} {...props} />;
+  return <Comp ref={ref} className={cn("mt-2 flex grow flex-col", className)} {...props} />;
 });
 
 export function SidebarFooter({
@@ -192,7 +198,7 @@ export function SidebarSectionTitle({ className, ...props }: ComponentProps<"div
   return (
     <div
       className={cn(
-        "line-clamp-1 shrink-0 truncate px-2 py-1 text-sm font-medium text-muted-foreground",
+        "line-clamp-1 shrink-0 truncate px-2 py-1 text-xs font-medium text-foreground-subtle",
         className,
       )}
       {...props}
@@ -209,7 +215,7 @@ export function SidebarButton({
   return (
     <Comp
       className={cn(
-        "inline-flex w-full cursor-pointer items-center gap-2 rounded-md p-2 text-left text-sm font-[450] whitespace-nowrap ring-offset-background transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
+        "inline-flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2.5 text-left text-sm font-normal whitespace-nowrap transition-colors outline-none hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/25 disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
         className,
       )}
       {...props}
