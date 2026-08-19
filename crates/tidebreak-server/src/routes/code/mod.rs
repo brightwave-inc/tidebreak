@@ -1,4 +1,9 @@
 //! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
+//!
+//! Every route here is owner-scoped through `ScopedCode`. The routes that
+//! change what the machine *is* — installing pinned harness binaries, and the
+//! clone-parent-directory setting every principal shares — are registered on
+//! the deployment-plane router in `crate::lib` instead, behind `require_admin`.
 
 mod approvals;
 mod git;
@@ -7,7 +12,7 @@ mod repos;
 mod session_events;
 mod sessions;
 mod terminals;
-mod types;
+pub(crate) mod types;
 mod updates;
 mod workspaces;
 
@@ -49,13 +54,9 @@ pub(crate) use workspaces::{
     list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace, search_workspace,
 };
 
-use crate::code::CodeRuntime;
-use crate::error::ServerError;
-use crate::state::AppState;
-
-pub(crate) fn require_code(state: &AppState) -> Result<&CodeRuntime, ServerError> {
-    state
-        .code
-        .as_deref()
-        .ok_or_else(|| ServerError::internal("code mode is not configured on this server"))
-}
+// Nothing here reaches `AppState.code` directly. Every handler in this module
+// extracts a `crate::code::ScopedCode`, which binds the process runtime to the
+// requesting principal and refuses when code mode is not configured — so a new
+// `/code/*` route is owner-scoped by construction rather than by remembering
+// to filter (decision 6's "enforcement is a router property, not a handler
+// habit", applied to data scoping).

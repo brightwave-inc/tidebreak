@@ -9,16 +9,18 @@ use crate::code::{
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::model::MAX_MESSAGE_ATTACHMENTS;
+use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
 
-/// Insert a turn row.
-pub async fn insert_turn(store: &DbStore, turn: &CodeTurn) -> Result<()> {
+/// Insert a turn row under its session's owner.
+pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<()> {
     validate_attachments(&turn.attachments)?;
     let txn = store.conn.begin().await.map_err(store_err)?;
     entities::code_turn::ActiveModel {
         id: Set(turn.id.0),
+        owner: Set(owner.as_str().to_owned()),
         session_id: Set(turn.session_id.0),
         ordinal: Set(turn.ordinal),
         status: Set(turn.status.as_str().to_owned()),
@@ -40,7 +42,7 @@ pub async fn insert_turn(store: &DbStore, turn: &CodeTurn) -> Result<()> {
     .insert(&txn)
     .await
     .map_err(store_err)?;
-    insert_attachments_on(&txn, turn.id, &turn.attachments).await?;
+    insert_attachments_on(&txn, owner, turn.id, &turn.attachments).await?;
     txn.commit().await.map_err(store_err)?;
     Ok(())
 }
@@ -71,6 +73,7 @@ fn validate_attachments(attachments: &[CodeTurnAttachment]) -> Result<()> {
 
 async fn insert_attachments_on<C>(
     conn: &C,
+    owner: &OwnerId,
     turn_id: CodeTurnId,
     attachments: &[CodeTurnAttachment],
 ) -> Result<()>
@@ -92,6 +95,7 @@ where
             })?;
             Ok(entities::code_turn_attachment::ActiveModel {
                 turn_id: Set(turn_id.0),
+                owner: Set(owner.as_str().to_owned()),
                 ordinal: Set(ordinal),
                 blob_id: Set(attachment.blob_id),
                 media_type: Set(attachment.media_type.as_str().to_owned()),
@@ -112,11 +116,16 @@ where
     Ok(())
 }
 
-async fn load_attachments_on<C>(conn: &C, turn_id: CodeTurnId) -> Result<Vec<CodeTurnAttachment>>
+async fn load_attachments_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    turn_id: CodeTurnId,
+) -> Result<Vec<CodeTurnAttachment>>
 where
     C: ConnectionTrait,
 {
     let rows = entities::code_turn_attachment::Entity::find()
+        .filter(entities::code_turn_attachment::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
         .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
         .all(conn)
@@ -144,21 +153,31 @@ where
         .collect()
 }
 
-/// Load a turn by id.
-pub async fn get_turn(store: &DbStore, id: CodeTurnId) -> Result<Option<CodeTurn>> {
+/// Load one of the owner's turns by id.
+pub async fn get_turn(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeTurnId,
+) -> Result<Option<CodeTurn>> {
     let Some(row) = entities::code_turn::Entity::find_by_id(id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
     else {
         return Ok(None);
     };
-    turn_from_stored(store, row).await.map(Some)
+    turn_from_stored(store, owner, row).await.map(Some)
 }
 
-/// Turns of one session, oldest first.
-pub async fn list_turns(store: &DbStore, session_id: CodeSessionId) -> Result<Vec<CodeTurn>> {
+/// Turns of one of the owner's sessions, oldest first.
+pub async fn list_turns(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Vec<CodeTurn>> {
     let rows = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
         .order_by_asc(entities::code_turn::Column::Ordinal)
         .all(&store.conn)
@@ -166,14 +185,19 @@ pub async fn list_turns(store: &DbStore, session_id: CodeSessionId) -> Result<Ve
         .map_err(store_err)?;
     let mut turns = Vec::with_capacity(rows.len());
     for row in rows {
-        turns.push(turn_from_stored(store, row).await?);
+        turns.push(turn_from_stored(store, owner, row).await?);
     }
     Ok(turns)
 }
 
-/// How many turns a session has recorded.
-pub async fn count_turns(store: &DbStore, session_id: CodeSessionId) -> Result<i64> {
+/// How many turns one of the owner's sessions has recorded.
+pub async fn count_turns(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<i64> {
     let count = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
         .count(&store.conn)
         .await
@@ -182,9 +206,14 @@ pub async fn count_turns(store: &DbStore, session_id: CodeSessionId) -> Result<i
         .map_err(|_| AgentError::Store(format!("turn count overflow for session {session_id}")))
 }
 
-/// Most recently created turn for a session, if any.
-pub async fn latest_turn(store: &DbStore, session_id: CodeSessionId) -> Result<Option<CodeTurn>> {
+/// Most recently created turn for one of the owner's sessions, if any.
+pub async fn latest_turn(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Option<CodeTurn>> {
     let Some(row) = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
         .order_by_desc(entities::code_turn::Column::Ordinal)
         .one(&store.conn)
@@ -193,21 +222,30 @@ pub async fn latest_turn(store: &DbStore, session_id: CodeSessionId) -> Result<O
     else {
         return Ok(None);
     };
-    turn_from_stored(store, row).await.map(Some)
+    turn_from_stored(store, owner, row).await.map(Some)
 }
 
-/// The open (non-terminal) turn for a session, if any.
-pub async fn get_open_turn(store: &DbStore, session_id: CodeSessionId) -> Result<Option<CodeTurn>> {
-    let turns = list_turns(store, session_id).await?;
+/// The open (non-terminal) turn for one of the owner's sessions, if any.
+pub async fn get_open_turn(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Option<CodeTurn>> {
+    let turns = list_turns(store, owner, session_id).await?;
     Ok(turns
         .into_iter()
         .rev()
         .find(|turn| turn.status == CodeTurnStatus::Running))
 }
 
-/// Next 1-based ordinal for a new turn on this session.
-pub async fn next_turn_ordinal(store: &DbStore, session_id: CodeSessionId) -> Result<i64> {
+/// Next 1-based ordinal for a new turn on one of the owner's sessions.
+pub async fn next_turn_ordinal(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<i64> {
     let last = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
         .order_by_desc(entities::code_turn::Column::Ordinal)
         .one(&store.conn)
@@ -220,7 +258,7 @@ pub async fn next_turn_ordinal(store: &DbStore, session_id: CodeSessionId) -> Re
 }
 
 /// Persist mutable turn fields. `id`, `session_id`, `ordinal`, and `started_at` stay as stored.
-pub async fn save_turn(store: &DbStore, turn: &CodeTurn) -> Result<bool> {
+pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<bool> {
     let result = entities::code_turn::Entity::update_many()
         .col_expr(
             entities::code_turn::Column::Status,
@@ -261,15 +299,20 @@ pub async fn save_turn(store: &DbStore, turn: &CodeTurn) -> Result<bool> {
             sea_orm::sea_query::Expr::value(turn.ended_at),
         )
         .filter(entities::code_turn::Column::Id.eq(turn.id.0))
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
     Ok(result.rows_affected == 1)
 }
 
-async fn turn_from_stored(store: &DbStore, row: entities::code_turn::Model) -> Result<CodeTurn> {
+async fn turn_from_stored(
+    store: &DbStore,
+    owner: &OwnerId,
+    row: entities::code_turn::Model,
+) -> Result<CodeTurn> {
     let mut turn = turn_from_row(row)?;
-    turn.attachments = load_attachments_on(&store.conn, turn.id).await?;
+    turn.attachments = load_attachments_on(&store.conn, owner, turn.id).await?;
     Ok(turn)
 }
 

@@ -342,7 +342,10 @@ async fn quick_actions_return_bounded_output_and_do_not_need_a_session() {
     let (repo_body, workspace) =
         register_and_workspace(&client, addr, &token, &repo, "actions").await;
     let repo_id: RepoId = json_id(&repo_body).parse().unwrap();
-    let mut stored = runtime.get_repo(repo_id).await.unwrap();
+    let mut stored = runtime
+        .get_repo(&tidebreak_core::OwnerId::local(), repo_id)
+        .await
+        .unwrap();
     stored.quick_actions = vec![
         QuickAction {
             name: "echo".into(),
@@ -406,7 +409,10 @@ async fn auto_run_on_create_runs_after_setup() {
         .unwrap();
     let repo_body: serde_json::Value = registered.json().await.unwrap();
     let repo_id: RepoId = json_id(&repo_body).parse().unwrap();
-    let mut stored = runtime.get_repo(repo_id).await.unwrap();
+    let mut stored = runtime
+        .get_repo(&tidebreak_core::OwnerId::local(), repo_id)
+        .await
+        .unwrap();
     stored.quick_actions = vec![QuickAction {
         name: "stamp".into(),
         command: "printf 'auto\\n' > stamp.txt".into(),

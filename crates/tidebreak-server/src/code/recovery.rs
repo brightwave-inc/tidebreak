@@ -10,7 +10,7 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle, save_turn,
+    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_turn,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
@@ -47,7 +47,8 @@ pub(crate) async fn recover_running_sessions_with(
     bus: &CodeEventBus,
     probe: impl Fn(i64) -> PidLiveness,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
-    let running = list_sessions_by_lifecycle(store, CodeSessionLifecycle::Running).await?;
+    let running =
+        list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
     let mut actions = Vec::new();
     for session in running {
         if let Some(action) = recover_one(store, bus, session, &probe).await? {
@@ -171,12 +172,13 @@ async fn interrupt_open_turn(
     store: &DbStore,
     session: &CodeSession,
 ) -> Result<(), tidebreak_core::AgentError> {
-    if let Some(mut turn) = get_open_turn(store, session.id).await? {
+    if let Some(mut turn) = get_open_turn(store, &session.owner, session.id).await? {
         turn.status = CodeTurnStatus::Interrupted;
         turn.ended_at = Some(Utc::now());
-        save_turn(store, &turn).await?;
+        save_turn(store, &session.owner, &turn).await?;
         match append_event(
             store,
+            &session.owner,
             session.id,
             session.spawn_epoch,
             &CodeEvent::TurnInterrupted,
@@ -299,6 +301,7 @@ mod tests {
         let turn_id = CodeTurnId::new();
         insert_turn(
             &store,
+            &tidebreak_core::OwnerId::local(),
             &CodeTurn {
                 id: turn_id,
                 session_id,
@@ -336,6 +339,7 @@ mod tests {
             &store,
             &CodeRepo {
                 id: repo_id,
+                owner: tidebreak_core::OwnerId::local(),
                 root_path: directory.path().join("repo").display().to_string(),
                 display_name: "example".into(),
                 default_base_ref: "main".into(),
@@ -353,6 +357,7 @@ mod tests {
             &store,
             &CodeWorkspace {
                 id: workspace_id,
+                owner: tidebreak_core::OwnerId::local(),
                 repo_id,
                 title: "first".into(),
                 worktree_path: directory.path().join("wt").display().to_string(),
@@ -371,6 +376,7 @@ mod tests {
             &store,
             &CodeSession {
                 id: session_id,
+                owner: tidebreak_core::OwnerId::local(),
                 workspace_id,
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
@@ -402,7 +408,10 @@ mod tests {
             actions.as_slice(),
             [RecoveryAction::Interrupted { .. }]
         ));
-        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
         assert!(matches!(
             session.attention.state,
@@ -411,7 +420,10 @@ mod tests {
                 ..
             }
         ));
-        let turn = get_turn(&store, turn_id).await.unwrap().unwrap();
+        let turn = get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Interrupted);
     }
 
@@ -439,7 +451,10 @@ mod tests {
             actions.as_slice(),
             [RecoveryAction::Fenced { .. }]
         ));
-        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
         assert_eq!(session.fence_reason, Some(FenceReason::OrphanAlive));
         assert!(matches!(
@@ -448,7 +463,10 @@ mod tests {
                 reason: FenceReason::OrphanAlive
             }
         ));
-        let turn = get_turn(&store, turn_id).await.unwrap().unwrap();
+        let turn = get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Running);
         assert!(
             decoy.try_wait().ok().flatten().is_none(),
@@ -468,10 +486,14 @@ mod tests {
         let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Idle).await;
         let store = Arc::new(store);
         let bus = Arc::new(crate::code::bus::CodeEventBus::default());
-        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         let sink = crate::code::session_worker::sink_for(
             store.clone(),
             bus.clone(),
+            session.owner.clone(),
             session_id,
             session.spawn_epoch,
             None,
@@ -516,7 +538,10 @@ mod tests {
 
         let recorded = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let current = get_session(&store, session_id).await.unwrap().unwrap();
+                let current = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 if let Some(pid) = current.child_pid {
                     return pid;
                 }
@@ -549,7 +574,10 @@ mod tests {
     #[tokio::test]
     async fn fenced_recovery_does_not_overwrite_a_manual_pin() {
         let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
-        let mut session = get_session(&store, session_id).await.unwrap().unwrap();
+        let mut session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         session.attention = Attention::manual("hold");
         tidebreak_core::db::code::save_session(&store, &session)
             .await
@@ -562,7 +590,10 @@ mod tests {
             actions.as_slice(),
             [RecoveryAction::Fenced { .. }]
         ));
-        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
         assert!(
             matches!(session.attention.state, AttentionState::Manual { .. }),
@@ -582,7 +613,10 @@ mod tests {
             actions.as_slice(),
             [RecoveryAction::Fenced { .. }]
         ));
-        let session = get_session(&store, session_id).await.unwrap().unwrap();
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
     }
 

@@ -1,41 +1,34 @@
-use axum::extract::{Path, State};
+use axum::extract::Path;
 
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::Json;
-use crate::state::AppState;
 
-use super::require_code;
 use super::types::{HarnessDoctorEntry, HarnessDoctorReport, HarnessModel, HarnessModelList};
 use tidebreak_core::HarnessKind;
 
 /// The doctor surface, served from the memoized probes (decision 0034).
-pub async fn list_harnesses(
-    State(state): State<AppState>,
-) -> Result<Json<HarnessDoctorReport>, ServerError> {
-    Ok(Json(doctor(&state).await?))
+pub async fn list_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport>, ServerError> {
+    Ok(Json(doctor(&code).await?))
 }
 
 /// The explicit re-probe decision 0034 puts behind the doctor's refresh: drop
 /// the memoized probes, then report what a cold read finds. This is how a
 /// harness installed or signed into while the app runs becomes visible.
-pub async fn refresh_harnesses(
-    State(state): State<AppState>,
-) -> Result<Json<HarnessDoctorReport>, ServerError> {
-    let runtime = require_code(&state)?;
+pub async fn refresh_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport>, ServerError> {
     #[cfg(not(test))]
-    runtime.refresh_pinned_harnesses().await;
-    runtime.invalidate_probes();
-    Ok(Json(doctor(&state).await?))
+    code.refresh_pinned_harnesses().await;
+    code.invalidate_probes();
+    Ok(Json(doctor(&code).await?))
 }
 
 /// Models this harness currently lists. Not on the doctor path.
 pub async fn list_harness_models(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(kind): Path<HarnessKind>,
 ) -> Result<Json<HarnessModelList>, ServerError> {
-    let runtime = require_code(&state)?;
-    let adapter = runtime.adapter(kind)?;
-    let probe = runtime.probe(adapter.as_ref()).await;
+    let adapter = code.adapter(kind)?;
+    let probe = code.probe(adapter.as_ref()).await;
     if !probe.found {
         return Err(ServerError::unprocessable_kind(
             "harness_not_found",
@@ -54,24 +47,23 @@ pub async fn list_harness_models(
     Ok(Json(HarnessModelList { kind, models }))
 }
 
-async fn doctor(state: &AppState) -> Result<HarnessDoctorReport, ServerError> {
-    let runtime = require_code(state)?;
-    let sessions = runtime.list_sessions().await?;
+async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
+    let sessions = code.list_sessions().await?;
     let sessions = &sessions;
     // Probe the kinds concurrently. A cold probe is a login shell plus a
     // version and an authentication subprocess, so a serial walk over the
     // harnesses is most of what this route costs on a cache miss.
     let harnesses = futures::future::join_all(HarnessKind::ALL.iter().filter_map(|kind| {
-        let adapter = runtime.adapters.get(*kind)?;
+        let adapter = code.adapters().get(*kind)?;
         Some(async move {
-            let probe = runtime.probe(adapter.as_ref()).await;
+            let probe = code.probe(adapter.as_ref()).await;
             let caps = adapter.capabilities(&probe);
             let unrecognized_event_count = sessions
                 .iter()
                 .filter(|session| session.harness_kind == *kind)
                 .map(|session| session.unrecognized_event_count)
                 .sum();
-            let install_error = runtime.pin_install_error(*kind);
+            let install_error = code.pin_install_error(*kind);
             let remediation = if let Some(err) = install_error {
                 format!("could not install the pinned {kind} binary: {err}")
             } else if !probe.found {

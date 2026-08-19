@@ -128,7 +128,7 @@ pub(crate) async fn after_turn_completed(
         Ok(recorded) => {
             turn.checkpoint_ref = Some(recorded.checkpoint_ref.clone());
             turn.diffstat = Some(recorded.diffstat.clone());
-            if let Err(err) = save_turn(db, turn).await {
+            if let Err(err) = save_turn(db, &session.owner, turn).await {
                 warn!(
                     session = %session.id,
                     turn = %turn.id,
@@ -174,7 +174,7 @@ async fn record_for_turn(
     session: &CodeSession,
     turn: &CodeTurn,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
-    let workspace = get_workspace(db, session.workspace_id)
+    let workspace = get_workspace(db, &session.owner, session.workspace_id)
         .await
         .map_err(|err| CheckpointError::internal(err.to_string()))?
         .ok_or_else(|| CheckpointError::user("workspace not found"))?;
@@ -455,11 +455,11 @@ pub(crate) async fn resolve_diff_range(
             Ok((worktree, from, to, None))
         }
         Some(id) => {
-            let turn = get_turn(db, id)
+            let turn = get_turn(db, &workspace.owner, id)
                 .await
                 .map_err(|err| CheckpointError::internal(err.to_string()))?
                 .ok_or_else(|| CheckpointError::user("turn not found"))?;
-            let session = get_session(db, turn.session_id)
+            let session = get_session(db, &workspace.owner, turn.session_id)
                 .await
                 .map_err(|err| CheckpointError::internal(err.to_string()))?
                 .ok_or_else(|| CheckpointError::user("session not found"))?;
@@ -501,7 +501,7 @@ async fn previous_checkpoint_oid(
             return Ok(Some(oid));
         }
     }
-    let turns = list_turns(db, turn.session_id)
+    let turns = list_turns(db, &workspace.owner, turn.session_id)
         .await
         .map_err(|err| CheckpointError::internal(err.to_string()))?;
     Ok(turns
@@ -690,7 +690,7 @@ async fn journal(
     session: &CodeSession,
     event: CodeEvent,
 ) -> Result<(), tidebreak_core::db::code::CodeJournalError> {
-    let seq = append_event(db, session.id, session.spawn_epoch, &event).await?;
+    let seq = append_event(db, &session.owner, session.id, session.spawn_epoch, &event).await?;
     bus.publish(session.id, SequencedCodeEvent { seq, event });
     Ok(())
 }

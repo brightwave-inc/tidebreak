@@ -662,10 +662,14 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
     assert_eq!(body["kind"], "uncommitted");
 
     let parsed: CodeSessionId = json_id(&session).parse().unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(row.lifecycle, CodeSessionLifecycle::Idle);
     assert!(std::path::Path::new(path).exists());
 
@@ -925,10 +929,14 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-                .await
-                .unwrap()
-                .unwrap();
+            let row = tidebreak_core::db::code::get_session(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                parsed,
+            )
+            .await
+            .unwrap()
+            .unwrap();
             if row.lifecycle == CodeSessionLifecycle::Running {
                 break;
             }
@@ -973,9 +981,13 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let turns = tidebreak_core::db::code::list_turns(&runtime.db, parsed)
-                .await
-                .unwrap();
+            let turns = tidebreak_core::db::code::list_turns(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                parsed,
+            )
+            .await
+            .unwrap();
             if turns.len() >= 2
                 && turns[1].status == CodeTurnStatus::Completed
                 && turns[1].user_input == "follow-up"
@@ -1104,10 +1116,14 @@ async fn a_recovered_session_accepts_a_turn() {
     assert_eq!(body["user_input"], "after restart");
 
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     row.lifecycle = CodeSessionLifecycle::Fenced;
     row.fence_reason = Some(FenceReason::OrphanAlive);
     row.attention = Attention::new(
@@ -1304,10 +1320,14 @@ async fn archive_ends_the_session_before_removing_the_worktree() {
     assert_eq!(archived.status(), reqwest::StatusCode::OK);
     assert!(!std::path::Path::new(&path).exists());
     let parsed: CodeSessionId = json_id(&session).parse().unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
 
     let again = client
@@ -1382,10 +1402,14 @@ async fn archive_refuses_a_running_session_without_force() {
     });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-                .await
-                .unwrap()
-                .unwrap();
+            let row = tidebreak_core::db::code::get_session(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                parsed,
+            )
+            .await
+            .unwrap()
+            .unwrap();
             if row.lifecycle == CodeSessionLifecycle::Running {
                 break;
             }
@@ -1421,10 +1445,14 @@ async fn archive_refuses_a_running_session_without_force() {
         .unwrap();
     assert_eq!(forced.status(), reqwest::StatusCode::OK);
     let _ = turn.await;
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
 }
 
@@ -1533,6 +1561,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     let current = *seqs.last().unwrap();
     let _ = tidebreak_core::db::code::append_event(
         &runtime.db,
+        &tidebreak_core::OwnerId::local(),
         parsed,
         1,
         &tidebreak_core::CodeEvent::HarnessNotice {
@@ -1544,6 +1573,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     .unwrap();
     let seq_b = tidebreak_core::db::code::append_event(
         &runtime.db,
+        &tidebreak_core::OwnerId::local(),
         parsed,
         1,
         &tidebreak_core::CodeEvent::HarnessNotice {
@@ -1610,6 +1640,7 @@ async fn superseded_worker_cannot_append_to_the_journal() {
         .unwrap();
     let err = tidebreak_core::db::code::append_event(
         &runtime.db,
+        &tidebreak_core::OwnerId::local(),
         session_id,
         bumped - 1,
         &tidebreak_core::CodeEvent::TurnInterrupted,
@@ -1718,10 +1749,14 @@ async fn a_completed_turn_records_a_checkpoint_and_serves_bounded_review() {
     );
     assert_eq!(diff["truncated"], false);
 
-    let events =
-        tidebreak_core::db::code::list_events(&_runtime.db, json_id(&session).parse().unwrap(), 0)
-            .await
-            .unwrap();
+    let events = tidebreak_core::db::code::list_events(
+        &_runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        json_id(&session).parse().unwrap(),
+        0,
+    )
+    .await
+    .unwrap();
     assert!(
         events.iter().any(|framed| {
             matches!(
@@ -1812,10 +1847,14 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
     assert_eq!(turn["status"], "completed");
     assert!(turn["checkpoint_ref"].is_null());
 
-    let events =
-        tidebreak_core::db::code::list_events(&runtime.db, json_id(&session).parse().unwrap(), 0)
-            .await
-            .unwrap();
+    let events = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        json_id(&session).parse().unwrap(),
+        0,
+    )
+    .await
+    .unwrap();
     assert!(
         events.iter().any(|framed| {
             matches!(
@@ -1918,10 +1957,14 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     .expect("pending approval never appeared");
 
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(row.lifecycle, CodeSessionLifecycle::Running);
     assert!(!turn.is_finished(), "run_turn must still be executing");
 
@@ -1953,9 +1996,14 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
     let body: serde_json::Value = finished.json().await.unwrap();
     assert_eq!(body["status"], "completed");
-    let events = tidebreak_core::db::code::list_events(&runtime.db, parsed, 0)
-        .await
-        .unwrap();
+    let events = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        0,
+    )
+    .await
+    .unwrap();
     let kinds: Vec<&str> = events
         .iter()
         .map(|framed| match &framed.event {
@@ -2029,10 +2077,14 @@ async fn deny_feedback_reaches_the_scripted_engine() {
             let body: Vec<serde_json::Value> = listed.json().await.unwrap();
             if let Some(row) = body.into_iter().next() {
                 let parsed: CodeSessionId = json_id(&session).parse().unwrap();
-                let session = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let session = tidebreak_core::db::code::get_session(
+                    &runtime.db,
+                    &tidebreak_core::OwnerId::local(),
+                    parsed,
+                )
+                .await
+                .unwrap()
+                .unwrap();
                 if matches!(
                     session.attention.state,
                     AttentionState::NeedsYou {
@@ -2054,10 +2106,14 @@ async fn deny_feedback_reaches_the_scripted_engine() {
         .contains("Write"));
 
     let parsed: CodeSessionId = json_id(&session).parse().unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(matches!(
         row.attention.state,
         AttentionState::NeedsYou { .. }
@@ -2196,10 +2252,14 @@ async fn pending_approval_survives_restart_and_is_decidable() {
     assert_eq!(pending[0]["id"], approval["id"]);
 
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(matches!(
         row.attention.state,
         AttentionState::NeedsYou { .. }
@@ -2444,10 +2504,14 @@ async fn attention_follows_approval_completion_and_view() {
                 .unwrap();
             let body: Vec<serde_json::Value> = listed.json().await.unwrap();
             if let Some(row) = body.into_iter().next() {
-                let session = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let session = tidebreak_core::db::code::get_session(
+                    &runtime.db,
+                    &tidebreak_core::OwnerId::local(),
+                    parsed,
+                )
+                .await
+                .unwrap()
+                .unwrap();
                 if matches!(
                     session.attention.state,
                     AttentionState::NeedsYou {
@@ -2476,10 +2540,14 @@ async fn attention_follows_approval_completion_and_view() {
         .unwrap();
     assert_eq!(decided.status(), reqwest::StatusCode::OK);
 
-    let after_decision = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let after_decision = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         !matches!(
             after_decision.attention.state,
@@ -2494,10 +2562,14 @@ async fn attention_follows_approval_completion_and_view() {
 
     let finished = turn.await.unwrap();
     assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(row.attention.state, AttentionState::DoneUnreviewed);
 
     let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
@@ -2509,10 +2581,14 @@ async fn attention_follows_approval_completion_and_view() {
     let (_socket, _) = connect_async(request).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-                .await
-                .unwrap()
-                .unwrap();
+            let row = tidebreak_core::db::code::get_session(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                parsed,
+            )
+            .await
+            .unwrap()
+            .unwrap();
             if row.attention.state == AttentionState::Working {
                 return;
             }
@@ -2547,10 +2623,14 @@ async fn stall_sweep_marks_a_silent_running_session() {
         .await
         .unwrap();
     let parsed: CodeSessionId = json_id(&session).parse().unwrap();
-    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     row.lifecycle = CodeSessionLifecycle::Running;
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
@@ -2559,10 +2639,14 @@ async fn stall_sweep_marks_a_silent_running_session() {
     crate::code::attention::sweep_stalled(&runtime.db, &runtime.bus, 0)
         .await
         .unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         matches!(row.attention.state, AttentionState::Stalled { .. }),
         "{:?}",
@@ -2611,10 +2695,14 @@ async fn user_can_pin_and_clear_attention() {
     assert_eq!(body["attention"]["source"], "user");
 
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     row.lifecycle = CodeSessionLifecycle::Running;
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
@@ -2622,10 +2710,14 @@ async fn user_can_pin_and_clear_attention() {
     crate::code::attention::sweep_stalled(&runtime.db, &runtime.bus, 0)
         .await
         .unwrap();
-    let row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         matches!(row.attention.state, AttentionState::Manual { .. }),
         "Manual must survive the stall sweep"
@@ -2873,10 +2965,14 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
     let parsed: CodeSessionId = session_id.parse().unwrap();
 
     // The session carries a ref from an earlier engine process.
-    let mut row = tidebreak_core::db::code::get_session(&runtime.db, parsed)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     row.harness_resume_ref = Some("dead-thread".into());
     assert!(tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
@@ -3175,4 +3271,332 @@ fn _types(
     _mode: CodePermissionMode,
     _kind: HarnessKind,
 ) {
+}
+
+/// A self-host code app with two principals: alice is an admin, bob a member.
+async fn two_user_code_app() -> (Router, tempfile::TempDir, std::path::PathBuf) {
+    let (dir, store) = temp_db_store("code-two-user.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(
+        &tokens_file,
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
+    )
+    .unwrap();
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+    let runtime = Arc::new(CodeRuntime::with_registry(
+        db,
+        dir.path().to_path_buf(),
+        registry,
+    ));
+    let mut config = Config::desktop(dir.path());
+    config.profile = tidebreak_core::Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let mut state = AppState::new(
+        config,
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime);
+    let repo = init_git_repo(dir.path());
+    (app(state), dir, repo)
+}
+
+/// Decision 47's validation for decision point 4, through real routes: a
+/// second user on a shared machine sees neither another owner's `code_*` rows
+/// nor their session events on the updates channel.
+///
+/// The plausible wrong implementation scopes the reads and leaves the live
+/// channel install-wide, so the digest half of this test is the load-bearing
+/// half.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_user_sees_neither_code_rows_nor_updates_of_another_owner() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let (alice_repo, alice_workspace) =
+        register_and_workspace(&client, addr, ALICE_TOKEN, &repo).await;
+    let alice_session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&alice_workspace)
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let alice_session_id = json_id(&alice_session).to_owned();
+
+    // Bob's listings are empty, not filtered copies of Alice's.
+    for path in ["/code/repos", "/code/workspaces", "/code/approvals"] {
+        let listed = client
+            .get(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .json::<Vec<serde_json::Value>>()
+            .await
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "{path} carried another owner's rows to a second user"
+        );
+    }
+
+    // Every by-id read answers as if the row does not exist, which is what
+    // keeps the reply from confirming that it does.
+    for path in [
+        format!("/code/repos/{}", json_id(&alice_repo)),
+        format!("/code/workspaces/{}", json_id(&alice_workspace)),
+        format!("/code/workspaces/{}/sessions", json_id(&alice_workspace)),
+        format!("/code/workspaces/{}/files", json_id(&alice_workspace)),
+        format!("/code/workspaces/{}/diff", json_id(&alice_workspace)),
+        format!("/code/workspaces/{}/tree", json_id(&alice_workspace)),
+        format!("/code/workspaces/{}/terminals", json_id(&alice_workspace)),
+        format!("/code/sessions/{alice_session_id}/turns"),
+        format!("/code/sessions/{alice_session_id}/debug"),
+    ] {
+        let response = client
+            .get(format!("http://{addr}{path}"))
+            .bearer_auth(BOB_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{path} answered a second user about another owner's row"
+        );
+    }
+
+    // Writes are refused the same way, so a guessed id is not a way in.
+    let submitted = client
+        .post(format!(
+            "http://{addr}/code/sessions/{alice_session_id}/turns"
+        ))
+        .bearer_auth(BOB_TOKEN)
+        .json(&serde_json::json!({ "message": "whose session is this" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), reqwest::StatusCode::NOT_FOUND);
+    let interrupted = client
+        .post(format!(
+            "http://{addr}/code/sessions/{alice_session_id}/interrupt"
+        ))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // The updates channel. Bob's connect snapshot is empty even though Alice
+    // has a live session, and Alice's turn produces no notice on his socket.
+    let mut request = format!("ws://{addr}/code/updates")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {BOB_TOKEN}").parse().unwrap(),
+    );
+    let (mut bob_socket, _) = connect_async(request).await.unwrap();
+    let snapshot = next_json(&mut bob_socket).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert!(
+        snapshot["sessions"]
+            .as_array()
+            .expect("snapshot sessions")
+            .is_empty(),
+        "the connect snapshot restated another owner's sessions"
+    );
+
+    let mut request = format!("ws://{addr}/code/updates")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {ALICE_TOKEN}").parse().unwrap(),
+    );
+    let (mut alice_socket, _) = connect_async(request).await.unwrap();
+    let alice_snapshot = next_json(&mut alice_socket).await;
+    assert_eq!(
+        alice_snapshot["sessions"]
+            .as_array()
+            .expect("alice sessions")
+            .len(),
+        1,
+        "the owner still sees her own session"
+    );
+
+    let _ = client
+        .post(format!(
+            "http://{addr}/code/sessions/{alice_session_id}/turns"
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .json(&serde_json::json!({ "message": "hi" }))
+        .send()
+        .await
+        .unwrap();
+
+    // Alice's socket carries the turn; Bob's stays silent for as long again.
+    let mut saw_turn = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let Some(notice) =
+            tokio::time::timeout(Duration::from_millis(500), next_json(&mut alice_socket))
+                .await
+                .ok()
+        else {
+            continue;
+        };
+        if notice["type"] == "digest" && notice["turn_count"] == 1 {
+            saw_turn = true;
+            break;
+        }
+    }
+    assert!(saw_turn, "the owner's own digest must still arrive");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), next_json(&mut bob_socket))
+            .await
+            .is_err(),
+        "a second user received a notice for another owner's session"
+    );
+}
+
+/// Deployment-plane code routes are admin-gated by where they are registered
+/// (decision 6). A member is refused; an admin is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_deployment_plane_routes_refuse_a_member() {
+    let (router, _dir, _repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let member = client
+        .get(format!("http://{addr}/code/repos/clone-defaults"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member.status(), reqwest::StatusCode::FORBIDDEN);
+    let admin = client
+        .get(format!("http://{addr}/code/repos/clone-defaults"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), reqwest::StatusCode::OK);
+
+    let member_refresh = client
+        .post(format!("http://{addr}/code/harnesses/refresh"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_refresh.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // The member plane is untouched: the doctor read still answers a member.
+    let doctor = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(doctor.status(), reqwest::StatusCode::OK);
+}
+
+/// Two users cloning the same remote must not collide on disk. The clone
+/// parent directory is one shared setting, so the owner segment is what keeps
+/// the second clone from landing on the first one's checkout.
+#[test]
+fn clone_targets_are_keyed_by_owner() {
+    use crate::code::clone::owner_clone_dir;
+    let parent = std::path::Path::new("/srv/checkouts");
+    // The local profile is single-user and keeps the paths people already have.
+    assert_eq!(
+        owner_clone_dir(parent, &tidebreak_core::OwnerId::local()),
+        parent.to_path_buf()
+    );
+    let alice = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("alice").unwrap());
+    let bob = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("bob").unwrap());
+    assert_ne!(alice, bob);
+    assert_eq!(alice, parent.join("alice"));
+    // An owner key is visible ASCII, so it may carry separators and dots that
+    // must not escape the parent or resolve to it.
+    let hostile = owner_clone_dir(
+        parent,
+        &tidebreak_core::OwnerId::new("../../etc/passwd").unwrap(),
+    );
+    assert_eq!(hostile.parent(), Some(parent));
+    assert!(hostile.starts_with(parent));
+    let dots = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("..").unwrap());
+    assert_eq!(dots, parent.join("owner"));
+}
+
+/// The `/code/*` routes reach the store only through the owner-scoped view.
+///
+/// Decision 6 puts enforcement in the router rather than in handler habits,
+/// and decision 48 step 1 applies that to data scoping: a new code route is
+/// owner-scoped because of what it extracts, not because its author
+/// remembered to filter. This check is the tripwire for the two ways back
+/// out — an unscoped runtime gate, or a system-path store function called
+/// from a request path.
+#[test]
+fn code_routes_go_through_the_owner_scoped_view() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/routes/code");
+    let mut findings = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("code routes directory") {
+        let path = entry.expect("code routes entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let text = std::fs::read_to_string(&path).expect("code route file");
+        // A system-path store function is never a request path.
+        if text.contains("_all_owners") {
+            findings.push(format!(
+                "{name} calls an `_all_owners` store function; those are system \
+                 paths (boot recovery, the stall sweep), not request paths"
+            ));
+        }
+        // The pre-scoping gate answered "is code mode configured", never
+        // "whose row is this". `ScopedCode` answers both.
+        if text.contains("require_code(") {
+            findings.push(format!(
+                "{name} uses an unscoped code gate; extract `ScopedCode` instead"
+            ));
+        }
+        // Files that serve code data extract the scoped view. `mod.rs` and
+        // `types.rs` declare and shape, and serve nothing.
+        let serves_data = text.contains("pub async fn") && name != "mod.rs";
+        if serves_data && !text.contains("ScopedCode") {
+            findings.push(format!(
+                "{name} defines route handlers but never extracts `ScopedCode`"
+            ));
+        }
+    }
+    assert!(
+        findings.is_empty(),
+        "code routes must query through the owner-scoped view: {findings:?}"
+    );
 }

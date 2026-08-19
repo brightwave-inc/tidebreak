@@ -449,6 +449,21 @@ pub fn app(state: AppState) -> Router {
             "/voice-transcription/install",
             post(routes::post_voice_transcription_install),
         )
+        // Code mode's two deployment-plane routes. Installing a pinned harness
+        // writes a binary to this machine, and the clone parent directory is
+        // one shared setting that decides where every principal's checkouts
+        // land on its disk — both change what the deployment *is*, so neither
+        // belongs to a member (decisions 6 and 48 step 1). Reading and
+        // cloning into that directory stay on the member plane: those produce
+        // owner-scoped rows and owner-keyed checkouts.
+        .route(
+            "/code/harnesses/refresh",
+            post(routes::code::refresh_harnesses),
+        )
+        .route(
+            "/code/repos/clone-defaults",
+            get(routes::code::clone_defaults),
+        )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
     let api = Router::new()
@@ -693,10 +708,6 @@ pub fn app(state: AppState) -> Router {
             "/code/repos",
             post(routes::code::create_repo).get(routes::code::list_repos),
         )
-        .route(
-            "/code/repos/clone-defaults",
-            get(routes::code::clone_defaults),
-        )
         .route("/code/repos/clone", post(routes::code::start_clone))
         .route("/code/repos/clone/{job}", get(routes::code::get_clone_job))
         .route(
@@ -706,10 +717,6 @@ pub fn app(state: AppState) -> Router {
                 .delete(routes::code::delete_repo),
         )
         .route("/code/harnesses", get(routes::code::list_harnesses))
-        .route(
-            "/code/harnesses/refresh",
-            post(routes::code::refresh_harnesses),
-        )
         .route(
             "/code/harnesses/{kind}/models",
             get(routes::code::list_harness_models),

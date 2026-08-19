@@ -805,6 +805,7 @@ pub(crate) enum CodeRepo {
     ArchiveScript,
     QuickActions,
     CreatedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -820,6 +821,7 @@ pub(crate) enum CodeWorkspace {
     Pr,
     CreatedAt,
     ArchivedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -840,6 +842,7 @@ pub(crate) enum CodeSession {
     AttentionSource,
     UnrecognizedEventCount,
     CreatedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -857,6 +860,7 @@ pub(crate) enum CodeTurn {
     Narrative,
     StartedAt,
     EndedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -867,6 +871,7 @@ pub(crate) enum CodeTurnAttachment {
     BlobId,
     MediaType,
     ByteLen,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -876,6 +881,7 @@ pub(crate) enum CodeEvent {
     Seq,
     Event,
     CreatedAt,
+    Owner,
 }
 
 #[derive(DeriveIden)]
@@ -890,4 +896,5 @@ pub(crate) enum CodeApproval {
     Feedback,
     RequestedAt,
     DecidedAt,
+    Owner,
 }

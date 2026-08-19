@@ -12,14 +12,15 @@ use tokio::sync::oneshot;
 use tidebreak_core::db::code::{
     delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
     get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
-    list_events, list_repos, list_sessions, list_sessions_for_workspace, list_turns,
-    list_workspaces, save_approval, save_repo, save_session, save_workspace,
+    list_events, list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
+    list_sessions_for_workspace, list_turns, list_workspaces, save_approval, save_repo,
+    save_session, save_workspace,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    Diffstat, FenceReason, HarnessKind, RepoId, WorkspaceId,
+    Diffstat, FenceReason, HarnessKind, OwnerId, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -86,6 +87,17 @@ async fn wait_for_managed_node(
         }
         tokio::time::sleep(MANAGED_NODE_POLL_INTERVAL).await;
     }
+}
+
+/// Optional metadata on `POST /code/repos`. Every field left `None` takes
+/// the value [`CodeRuntime::register_repo`] derives from the checkout.
+#[derive(Debug, Default)]
+pub(crate) struct RepoRegistration {
+    pub display_name: Option<String>,
+    pub default_base_ref: Option<String>,
+    pub branch_prefix: Option<String>,
+    pub setup_script: Option<String>,
+    pub archive_script: Option<String>,
 }
 
 /// Result of `POST /code/sessions/{id}/turns`.
@@ -234,7 +246,7 @@ impl CodeRuntime {
         // that is still usable so submit_turn is not stuck after a restart.
         // Concurrently: each attach launches an engine child, so a serial pass
         // charged app launch the sum of every restored session.
-        let resumable: Vec<CodeSession> = list_sessions(&self.db)
+        let resumable: Vec<CodeSession> = list_sessions_all_owners(&self.db)
             .await?
             .into_iter()
             .filter(|session| {
@@ -397,20 +409,24 @@ impl CodeRuntime {
 
     pub(crate) async fn register_repo(
         &self,
+        owner: &OwnerId,
         root_path: PathBuf,
-        display_name: Option<String>,
-        default_base_ref: Option<String>,
-        branch_prefix: Option<String>,
-        setup_script: Option<String>,
-        archive_script: Option<String>,
+        metadata: RepoRegistration,
     ) -> Result<CodeRepo, ServerError> {
+        let RepoRegistration {
+            display_name,
+            default_base_ref,
+            branch_prefix,
+            setup_script,
+            archive_script,
+        } = metadata;
         let validated = validate_repo_path(&root_path).await.map_err(map_worktree)?;
         let toplevel = validated.toplevel.display().to_string();
-        let exact = get_repo_by_root_path(&self.db, &toplevel).await?;
+        let exact = get_repo_by_root_path(&self.db, owner, &toplevel).await?;
         #[cfg(windows)]
         let existing = match exact {
             Some(repo) => Some(repo),
-            None => list_repos(&self.db).await?.into_iter().find(|repo| {
+            None => list_repos(&self.db, owner).await?.into_iter().find(|repo| {
                 repo_paths_equivalent(std::path::Path::new(&repo.root_path), &validated.toplevel)
             }),
         };
@@ -440,6 +456,7 @@ impl CodeRuntime {
             });
         let repo = CodeRepo {
             id: RepoId::new(),
+            owner: owner.clone(),
             root_path: toplevel,
             display_name: name,
             default_base_ref: default_base_ref
@@ -457,12 +474,16 @@ impl CodeRuntime {
         Ok(repo)
     }
 
-    pub(crate) async fn list_repos(&self) -> Result<Vec<CodeRepo>, ServerError> {
-        Ok(list_repos(&self.db).await?)
+    pub(crate) async fn list_repos(&self, owner: &OwnerId) -> Result<Vec<CodeRepo>, ServerError> {
+        Ok(list_repos(&self.db, owner).await?)
     }
 
-    pub(crate) async fn get_repo(&self, id: RepoId) -> Result<CodeRepo, ServerError> {
-        get_repo(&self.db, id)
+    pub(crate) async fn get_repo(
+        &self,
+        owner: &OwnerId,
+        id: RepoId,
+    ) -> Result<CodeRepo, ServerError> {
+        get_repo(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))
     }
@@ -477,8 +498,8 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn delete_repo(&self, id: RepoId) -> Result<(), ServerError> {
-        let workspaces = list_workspaces(&self.db, Some(id)).await?;
+    pub(crate) async fn delete_repo(&self, owner: &OwnerId, id: RepoId) -> Result<(), ServerError> {
+        let workspaces = list_workspaces(&self.db, owner, Some(id)).await?;
         if workspaces
             .iter()
             .any(|workspace| workspace.status != CodeWorkspaceStatus::Archived)
@@ -488,7 +509,7 @@ impl CodeRuntime {
                 "archive every workspace before deleting the repository",
             ));
         }
-        if !delete_repo(&self.db, id).await? {
+        if !delete_repo(&self.db, owner, id).await? {
             return Err(ServerError::not_found(format!("repo {id} not found")));
         }
         Ok(())
@@ -496,18 +517,19 @@ impl CodeRuntime {
 
     pub(crate) async fn create_workspace(
         &self,
+        owner: &OwnerId,
         repo_id: RepoId,
         title: Option<String>,
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
-        let repo = self.get_repo(repo_id).await?;
+        let repo = self.get_repo(owner, repo_id).await?;
         let title = title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let id = WorkspaceId::new();
         let branch = branch_name(&repo.branch_prefix, &title, id.0.as_u128());
-        let existing = list_workspaces(&self.db, Some(repo_id)).await?;
+        let existing = list_workspaces(&self.db, owner, Some(repo_id)).await?;
         if existing
             .iter()
             .any(|workspace| workspace.branch_name == branch)
@@ -544,6 +566,7 @@ impl CodeRuntime {
             .unwrap_or_else(|| repo.default_base_ref.clone());
         let mut workspace = CodeWorkspace {
             id,
+            owner: owner.clone(),
             repo_id,
             title: display_title,
             worktree_path: path.display().to_string(),
@@ -558,7 +581,7 @@ impl CodeRuntime {
         match create_worktree(std::path::Path::new(&repo.root_path), &path, &branch, &base).await {
             Ok(()) => {}
             Err(err) => {
-                let _ = delete_workspace(&self.db, id).await;
+                let _ = delete_workspace(&self.db, owner, id).await;
                 return Err(map_worktree(err));
             }
         }
@@ -582,16 +605,18 @@ impl CodeRuntime {
 
     pub(crate) async fn list_workspaces(
         &self,
+        owner: &OwnerId,
         repo_id: Option<RepoId>,
     ) -> Result<Vec<CodeWorkspace>, ServerError> {
-        Ok(list_workspaces(&self.db, repo_id).await?)
+        Ok(list_workspaces(&self.db, owner, repo_id).await?)
     }
 
     pub(crate) async fn get_workspace(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<CodeWorkspace, ServerError> {
-        get_workspace(&self.db, id)
+        get_workspace(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("workspace {id} not found")))
     }
@@ -606,23 +631,30 @@ impl CodeRuntime {
                 workspace.id
             )));
         }
-        super::attention::emit_workspace_digests(&self.db, &self.bus, workspace.id).await;
+        super::attention::emit_workspace_digests(
+            &self.db,
+            &self.bus,
+            &workspace.owner,
+            workspace.id,
+        )
+        .await;
         Ok(())
     }
 
     pub(crate) async fn archive_workspace(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
         force: bool,
     ) -> Result<CodeWorkspace, ServerError> {
-        let mut workspace = self.get_workspace(id).await?;
+        let mut workspace = self.get_workspace(owner, id).await?;
         if workspace.status == CodeWorkspaceStatus::Archived {
             return Ok(workspace);
         }
-        let repo = self.get_repo(workspace.repo_id).await?;
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
         // Blockers first: a refused archive must leave the workspace exactly as
         // it was, and running the hook script is not "exactly as it was".
-        self.refuse_running_sessions(id, force).await?;
+        self.refuse_running_sessions(owner, id, force).await?;
         let path = std::path::Path::new(&workspace.worktree_path);
         if path.exists() {
             if let Some(block) = archive_blockers(path, &workspace.base_ref)
@@ -648,7 +680,7 @@ impl CodeRuntime {
                 ));
             }
         }
-        self.end_workspace_sessions(id).await?;
+        self.end_workspace_sessions(owner, id).await?;
         remove_worktree(std::path::Path::new(&repo.root_path), path)
             .await
             .map_err(map_worktree)?;
@@ -662,7 +694,7 @@ impl CodeRuntime {
             );
         }
         if let Err(error) = self
-            .sweep_repo_checkpoint_refs(std::path::Path::new(&repo.root_path), repo.id)
+            .sweep_repo_checkpoint_refs(owner, std::path::Path::new(&repo.root_path), repo.id)
             .await
         {
             tracing::warn!(
@@ -678,10 +710,11 @@ impl CodeRuntime {
 
     pub(crate) async fn commit_workspace(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
         message: Option<String>,
     ) -> Result<CommitOutcome, ServerError> {
-        let workspace = self.require_live_workspace(id).await?;
+        let workspace = self.require_live_workspace(owner, id).await?;
         gh::commit_all(
             std::path::Path::new(&workspace.worktree_path),
             &workspace.title,
@@ -691,8 +724,12 @@ impl CodeRuntime {
         .map_err(map_gh)
     }
 
-    pub(crate) async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
-        let workspace = self.require_live_workspace(id).await?;
+    pub(crate) async fn push_workspace(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<PushOutcome, ServerError> {
+        let workspace = self.require_live_workspace(owner, id).await?;
         gh::push_branch(
             std::path::Path::new(&workspace.worktree_path),
             &workspace.branch_name,
@@ -703,9 +740,10 @@ impl CodeRuntime {
 
     pub(crate) async fn workspace_pr(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        let mut workspace = self.get_workspace(id).await?;
+        let mut workspace = self.get_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
         let status = gh::workspace_git_status(
             std::path::Path::new(&workspace.worktree_path),
@@ -730,17 +768,19 @@ impl CodeRuntime {
     /// normal status path.
     pub(crate) async fn refresh_workspace_pr(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         self.pr_cache.invalidate(id);
-        self.workspace_pr(id).await
+        self.workspace_pr(owner, id).await
     }
 
     pub(crate) async fn workspace_pr_comments(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<gh::PrComments, ServerError> {
-        let workspace = self.get_workspace(id).await?;
+        let workspace = self.get_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
         gh::load_pr_comments(
             std::path::Path::new(&workspace.worktree_path),
@@ -755,11 +795,12 @@ impl CodeRuntime {
     /// result. This is the only route to `gh pr merge`.
     pub(crate) async fn merge_workspace_pr(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
         method: gh::MergeMethod,
         auto: bool,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        let workspace = self.require_live_workspace(id).await?;
+        let workspace = self.require_live_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
         gh::merge_pull_request(
             std::path::Path::new(&workspace.worktree_path),
@@ -771,16 +812,17 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
-        self.workspace_pr(id).await
+        self.workspace_pr(owner, id).await
     }
 
     pub(crate) async fn create_workspace_pr(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
         title: Option<String>,
         body: Option<String>,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        let mut workspace = self.require_live_workspace(id).await?;
+        let mut workspace = self.require_live_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
         let digest = gh::create_pull_request(
             std::path::Path::new(&workspace.worktree_path),
@@ -797,16 +839,17 @@ impl CodeRuntime {
         .map_err(map_gh)?;
         workspace.pr = Some(digest);
         self.save_workspace(&workspace).await?;
-        self.workspace_pr(id).await
+        self.workspace_pr(owner, id).await
     }
 
     pub(crate) async fn run_workspace_action(
         &self,
+        owner: &OwnerId,
         id: WorkspaceId,
         name: &str,
     ) -> Result<ActionOutcome, ServerError> {
-        let workspace = self.require_live_workspace(id).await?;
-        let repo = self.get_repo(workspace.repo_id).await?;
+        let workspace = self.require_live_workspace(owner, id).await?;
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
         gh::run_named_action(
             std::path::Path::new(&workspace.worktree_path),
             &repo.quick_actions,
@@ -816,8 +859,12 @@ impl CodeRuntime {
         .map_err(map_gh)
     }
 
-    async fn require_live_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
-        let workspace = self.get_workspace(id).await?;
+    async fn require_live_workspace(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let workspace = self.get_workspace(owner, id).await?;
         if workspace.status == CodeWorkspaceStatus::Archived {
             return Err(ServerError::conflict_kind(
                 "workspace_not_ready",
@@ -841,19 +888,20 @@ impl CodeRuntime {
 
     pub(crate) async fn create_session(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         permission_mode: CodePermissionMode,
         model: Option<String>,
     ) -> Result<CodeSession, ServerError> {
-        let workspace = self.get_workspace(workspace_id).await?;
+        let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
                 "workspace_not_ready",
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
-        let existing = list_sessions_for_workspace(&self.db, workspace_id).await?;
+        let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         if existing
             .iter()
             .any(|session| session.lifecycle != CodeSessionLifecycle::Ended)
@@ -900,6 +948,7 @@ impl CodeRuntime {
         }
         let session = CodeSession {
             id: CodeSessionId::new(),
+            owner: owner.clone(),
             workspace_id,
             harness_kind: harness,
             harness_version: probe.version.clone(),
@@ -918,8 +967,12 @@ impl CodeRuntime {
         self.attach_and_spawn_worker(session).await
     }
 
-    pub(crate) async fn get_session(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
-        get_session(&self.db, id)
+    pub(crate) async fn get_session(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+    ) -> Result<CodeSession, ServerError> {
+        get_session(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("session {id} not found")))
     }
@@ -973,12 +1026,13 @@ impl CodeRuntime {
 
     pub(crate) async fn submit_turn(
         &self,
+        owner: &OwnerId,
         id: CodeSessionId,
         message: String,
         model: Option<String>,
         attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        let mut session = self.get_session(id).await?;
+        let mut session = self.get_session(owner, id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "session_fenced",
@@ -1014,7 +1068,7 @@ impl CodeRuntime {
         // follow-up. This does not consult mid_turn_steering — that cap
         // gates the separate /steer route only.
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
-            || get_open_turn(&self.db, id).await?.is_some();
+            || get_open_turn(&self.db, owner, id).await?.is_some();
         if in_flight {
             if !queue_follow_up(&handle, message, session.model.clone(), attachments) {
                 return Err(ServerError::conflict_kind(
@@ -1055,8 +1109,12 @@ impl CodeRuntime {
             .map_err(map_worker)
     }
 
-    pub(crate) async fn reap(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
-        let session = self.get_session(id).await?;
+    pub(crate) async fn reap(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+    ) -> Result<CodeSession, ServerError> {
+        let session = self.get_session(owner, id).await?;
         if session.lifecycle != CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "not_fenced",
@@ -1070,7 +1128,7 @@ impl CodeRuntime {
             // moving. Wait for it, then reap the row as it stands now.
             Some(handle) => {
                 Self::shut_down_worker(id, handle).await;
-                self.get_session(id).await?
+                self.get_session(owner, id).await?
             }
             None => session,
         };
@@ -1082,18 +1140,23 @@ impl CodeRuntime {
 
     pub(crate) async fn set_attention(
         &self,
+        owner: &OwnerId,
         id: CodeSessionId,
         clear: bool,
         note: Option<String>,
     ) -> Result<CodeSession, ServerError> {
-        let _ = self.get_session(id).await?;
-        super::attention::user_set_attention(&self.db, &self.bus, id, clear, note)
+        let _ = self.get_session(owner, id).await?;
+        super::attention::user_set_attention(&self.db, &self.bus, owner, id, clear, note)
             .await
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn mark_session_viewed(&self, id: CodeSessionId) -> Result<(), ServerError> {
-        super::attention::mark_viewed(&self.db, &self.bus, id)
+    pub(crate) async fn mark_session_viewed(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+    ) -> Result<(), ServerError> {
+        super::attention::mark_viewed(&self.db, &self.bus, owner, id)
             .await
             .map_err(ServerError::from)
     }
@@ -1106,28 +1169,34 @@ impl CodeRuntime {
         *self.stall_sweep.lock().expect("stall sweep") = Some(guard);
     }
 
-    pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
-        Ok(list_sessions(&self.db).await?)
+    pub(crate) async fn list_sessions(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<CodeSession>, ServerError> {
+        Ok(list_sessions(&self.db, owner).await?)
     }
 
     pub(crate) async fn list_workspace_sessions(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<CodeSession>, ServerError> {
-        let _ = self.get_workspace(workspace_id).await?;
-        Ok(list_sessions_for_workspace(&self.db, workspace_id).await?)
+        let _ = self.get_workspace(owner, workspace_id).await?;
+        Ok(list_sessions_for_workspace(&self.db, owner, workspace_id).await?)
     }
 
     pub(crate) async fn list_session_turns(
         &self,
+        owner: &OwnerId,
         session_id: CodeSessionId,
     ) -> Result<Vec<CodeTurn>, ServerError> {
-        let _ = self.get_session(session_id).await?;
-        Ok(list_turns(&self.db, session_id).await?)
+        let _ = self.get_session(owner, session_id).await?;
+        Ok(list_turns(&self.db, owner, session_id).await?)
     }
 
     pub(crate) async fn session_debug(
         &self,
+        owner: &OwnerId,
         session_id: CodeSessionId,
     ) -> Result<
         (
@@ -1137,19 +1206,20 @@ impl CodeRuntime {
         ),
         ServerError,
     > {
-        let session = self.get_session(session_id).await?;
-        let turns = list_turns(&self.db, session_id).await?;
-        let events = list_events(&self.db, session_id, 0).await?;
+        let session = self.get_session(owner, session_id).await?;
+        let turns = list_turns(&self.db, owner, session_id).await?;
+        let events = list_events(&self.db, owner, session_id, 0).await?;
         Ok((session, turns, events))
     }
 
     pub(crate) async fn workspace_tree(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         query: &str,
         limit: Option<u32>,
     ) -> Result<(Vec<String>, bool), ServerError> {
-        let workspace = self.get_workspace(workspace_id).await?;
+        let workspace = self.get_workspace(owner, workspace_id).await?;
         worktree::list_tree_paths(
             std::path::Path::new(&workspace.worktree_path),
             query,
@@ -1161,13 +1231,14 @@ impl CodeRuntime {
 
     pub(crate) async fn workspace_search(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         query: &str,
         include: &str,
         exclude: &str,
         limit: Option<u32>,
     ) -> Result<(Vec<worktree::WorktreeSearchMatch>, bool), ServerError> {
-        let workspace = self.require_live_workspace(workspace_id).await?;
+        let workspace = self.require_live_workspace(owner, workspace_id).await?;
         worktree::search_worktree_contents(
             std::path::Path::new(&workspace.worktree_path),
             query,
@@ -1181,10 +1252,11 @@ impl CodeRuntime {
 
     pub(crate) async fn workspace_files(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         turn_id: Option<CodeTurnId>,
     ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
-        let workspace = self.get_workspace(workspace_id).await?;
+        let workspace = self.get_workspace(owner, workspace_id).await?;
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
@@ -1196,10 +1268,11 @@ impl CodeRuntime {
 
     pub(crate) async fn workspace_blob(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         path: &str,
     ) -> Result<worktree::WorktreeBlob, ServerError> {
-        let workspace = self.require_live_workspace(workspace_id).await?;
+        let workspace = self.require_live_workspace(owner, workspace_id).await?;
         worktree::read_worktree_file(std::path::Path::new(&workspace.worktree_path), path)
             .await
             .map_err(map_worktree)
@@ -1207,11 +1280,12 @@ impl CodeRuntime {
 
     pub(crate) async fn workspace_diff(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         turn_id: Option<CodeTurnId>,
         file: Option<&str>,
     ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
-        let workspace = self.get_workspace(workspace_id).await?;
+        let workspace = self.get_workspace(owner, workspace_id).await?;
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
@@ -1222,19 +1296,24 @@ impl CodeRuntime {
     }
 
     async fn sweep_orphaned_checkpoints(&self) -> Result<(), ServerError> {
-        for repo in list_repos(&self.db).await? {
-            self.sweep_repo_checkpoint_refs(std::path::Path::new(&repo.root_path), repo.id)
-                .await?;
+        for repo in list_repos_all_owners(&self.db).await? {
+            self.sweep_repo_checkpoint_refs(
+                &repo.owner,
+                std::path::Path::new(&repo.root_path),
+                repo.id,
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn sweep_repo_checkpoint_refs(
         &self,
+        owner: &OwnerId,
         repo_root: &std::path::Path,
         repo_id: RepoId,
     ) -> Result<(), ServerError> {
-        let live: Vec<WorkspaceId> = list_workspaces(&self.db, Some(repo_id))
+        let live: Vec<WorkspaceId> = list_workspaces(&self.db, owner, Some(repo_id))
             .await?
             .into_iter()
             .filter(|workspace| workspace.status != CodeWorkspaceStatus::Archived)
@@ -1248,13 +1327,14 @@ impl CodeRuntime {
 
     async fn refuse_running_sessions(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         allow_running: bool,
     ) -> Result<(), ServerError> {
         if allow_running {
             return Ok(());
         }
-        let sessions = list_sessions_for_workspace(&self.db, workspace_id).await?;
+        let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         if sessions
             .iter()
             .any(|session| session.lifecycle == CodeSessionLifecycle::Running)
@@ -1267,8 +1347,12 @@ impl CodeRuntime {
         Ok(())
     }
 
-    async fn end_workspace_sessions(&self, workspace_id: WorkspaceId) -> Result<(), ServerError> {
-        let sessions = list_sessions_for_workspace(&self.db, workspace_id).await?;
+    async fn end_workspace_sessions(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), ServerError> {
+        let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         for mut session in sessions {
             if session.lifecycle == CodeSessionLifecycle::Ended {
                 continue;
@@ -1291,7 +1375,7 @@ impl CodeRuntime {
             }
             // The outgoing worker still holds this epoch, so a persist during
             // the wait can overwrite Ended. Re-assert from a fresh load.
-            let mut current = self.get_session(session.id).await?;
+            let mut current = self.get_session(owner, session.id).await?;
             current.lifecycle = CodeSessionLifecycle::Ended;
             current.child_pid = None;
             current.fence_reason = None;
@@ -1335,7 +1419,9 @@ impl CodeRuntime {
         &self,
         session: CodeSession,
     ) -> Result<CodeSession, ServerError> {
-        let workspace = self.get_workspace(session.workspace_id).await?;
+        let workspace = self
+            .get_workspace(&session.owner, session.workspace_id)
+            .await?;
         let adapter = self.adapter(session.harness_kind)?;
         // Cached, so the probe `create_session` already paid for is not paid
         // again on the way into the worker.
@@ -1365,6 +1451,7 @@ impl CodeRuntime {
         let sink = super::session_worker::sink_for(
             self.db.clone(),
             self.bus.clone(),
+            session.owner.clone(),
             session.id,
             attached.spawn_epoch,
             None,
@@ -1421,6 +1508,7 @@ impl CodeRuntime {
             .insert(session.id, handle);
         let pending = list_approvals(
             &self.db,
+            &attached.owner,
             Some(CodeApprovalState::Pending),
             Some(attached.id),
         )
@@ -1485,27 +1573,30 @@ impl CodeRuntime {
 
     pub(crate) async fn list_approvals(
         &self,
+        owner: &OwnerId,
         state: Option<CodeApprovalState>,
         session_id: Option<CodeSessionId>,
     ) -> Result<Vec<CodeApproval>, ServerError> {
-        Ok(list_approvals(&self.db, state, session_id).await?)
+        Ok(list_approvals(&self.db, owner, state, session_id).await?)
     }
 
     pub(crate) async fn get_approval(
         &self,
+        owner: &OwnerId,
         id: CodeApprovalId,
     ) -> Result<CodeApproval, ServerError> {
-        get_approval(&self.db, id)
+        get_approval(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))
     }
 
     pub(crate) async fn decide_approval(
         &self,
+        owner: &OwnerId,
         id: CodeApprovalId,
         decision: ApprovalDecision,
     ) -> Result<CodeApproval, ServerError> {
-        let mut approval = self.get_approval(id).await?;
+        let mut approval = self.get_approval(owner, id).await?;
         if approval.state != CodeApprovalState::Pending {
             return Err(ServerError::conflict_kind(
                 "approval_already_decided",
@@ -1549,13 +1640,14 @@ impl CodeRuntime {
             }
         }
         approval.decided_at = Some(now);
-        if !save_approval(&self.db, &approval).await? {
+        if !save_approval(&self.db, owner, &approval).await? {
             return Err(ServerError::not_found(format!("approval {id} not found")));
         }
-        let session = self.get_session(approval.session_id).await?;
+        let session = self.get_session(owner, approval.session_id).await?;
         journal_event(
             &self.db,
             &self.bus,
+            owner,
             approval.session_id,
             session.spawn_epoch,
             CodeEvent::ApprovalResolved {
@@ -1572,6 +1664,7 @@ impl CodeRuntime {
         .map_err(|err| ServerError::internal(err.to_string()))?;
         let still_pending = list_approvals(
             &self.db,
+            owner,
             Some(CodeApprovalState::Pending),
             Some(approval.session_id),
         )
@@ -1580,6 +1673,7 @@ impl CodeRuntime {
             let _ = super::attention::apply_attention(
                 &self.db,
                 &self.bus,
+                owner,
                 approval.session_id,
                 Attention::working(AttentionSource::Lifecycle),
                 false,

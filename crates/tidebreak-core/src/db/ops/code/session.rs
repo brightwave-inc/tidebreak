@@ -8,14 +8,17 @@ use crate::code::{
     CodeSessionLifecycle, FenceReason, HarnessKind, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::acquire_code_session_write_lock;
 
-/// Insert a session row.
+/// Insert a session row. The row belongs to `session.owner`, denormalized
+/// from the workspace it runs in.
 pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()> {
     entities::code_session::ActiveModel {
         id: Set(session.id.0),
+        owner: Set(session.owner.as_str().to_owned()),
         workspace_id: Set(session.workspace_id.0),
         harness_kind: Set(session.harness_kind.as_str().to_owned()),
         harness_version: Set(session.harness_version.clone()),
@@ -40,8 +43,35 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
     Ok(())
 }
 
-/// Load a session by id.
-pub async fn get_session(store: &DbStore, id: CodeSessionId) -> Result<Option<CodeSession>> {
+/// Load one of the owner's sessions by id.
+///
+/// Another owner's session is indistinguishable from a missing one.
+pub async fn get_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeSessionId,
+) -> Result<Option<CodeSession>> {
+    let Some(row) = entities::code_session::Entity::find_by_id(id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(session_from_row(row)?))
+}
+
+/// Load a session by id, whatever owner it belongs to.
+///
+/// A system path, not a request path: a session worker re-reads the row it
+/// was spawned against after bumping the spawn epoch, and the id it holds
+/// was authorized when the worker was created. Nothing reachable from a
+/// route may call it.
+pub async fn get_session_all_owners(
+    store: &DbStore,
+    id: CodeSessionId,
+) -> Result<Option<CodeSession>> {
     let Some(row) = entities::code_session::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
@@ -99,9 +129,10 @@ pub async fn bump_spawn_epoch(
     Ok(next)
 }
 
-/// Every session, most recently created first.
-pub async fn list_sessions(store: &DbStore) -> Result<Vec<CodeSession>> {
+/// The owner's sessions, most recently created first.
+pub async fn list_sessions(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -111,12 +142,14 @@ pub async fn list_sessions(store: &DbStore) -> Result<Vec<CodeSession>> {
         .collect()
 }
 
-/// Sessions belonging to one workspace, most recently created first.
+/// The owner's sessions in one workspace, most recently created first.
 pub async fn list_sessions_for_workspace(
     store: &DbStore,
+    owner: &OwnerId,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_session::Column::WorkspaceId.eq(workspace_id.0))
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
@@ -127,8 +160,29 @@ pub async fn list_sessions_for_workspace(
         .collect()
 }
 
-/// Sessions in one lifecycle state.
-pub async fn list_sessions_by_lifecycle(
+/// Every session on the machine, most recently created first.
+///
+/// A system path, not a request path: boot recovery re-attaches a worker to
+/// each live session regardless of who owns it. Nothing reachable from a
+/// route may call it.
+pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<CodeSession>> {
+    entities::code_session::Entity::find()
+        .order_by_desc(entities::code_session::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(session_from_row)
+        .collect()
+}
+
+/// Sessions in one lifecycle state, across every owner.
+///
+/// A system path, not a request path: boot recovery and the stall sweep act
+/// on the whole machine's sessions, the way the chat side's unscoped store
+/// handle serves turn workers and retirement scans. Nothing reachable from a
+/// route may call it.
+pub async fn list_sessions_by_lifecycle_all_owners(
     store: &DbStore,
     lifecycle: CodeSessionLifecycle,
 ) -> Result<Vec<CodeSession>> {
@@ -150,6 +204,7 @@ pub async fn list_sessions_by_lifecycle(
 pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool> {
     let mut predicate = Condition::all()
         .add(entities::code_session::Column::Id.eq(session.id.0))
+        .add(entities::code_session::Column::Owner.eq(session.owner.as_str()))
         .add(entities::code_session::Column::SpawnEpoch.lte(session.spawn_epoch));
     if session.lifecycle != CodeSessionLifecycle::Ended {
         predicate = predicate.add(
@@ -216,7 +271,7 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
     if result.rows_affected != 1 {
         // Rare, and invisible without a word: distinguish a superseded writer
         // from a row that is simply gone.
-        if let Some(current) = get_session(store, session.id).await? {
+        if let Some(current) = get_session(store, &session.owner, session.id).await? {
             tracing::warn!(
                 session = %session.id,
                 attempted_epoch = session.spawn_epoch,
@@ -267,6 +322,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
     };
     Ok(CodeSession {
         id: CodeSessionId(row.id),
+        owner: OwnerId::new(&row.owner)?,
         workspace_id: WorkspaceId(row.workspace_id),
         harness_kind,
         harness_version: row.harness_version,

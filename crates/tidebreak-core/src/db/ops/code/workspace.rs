@@ -2,13 +2,16 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrde
 
 use crate::code::{CodeWorkspace, CodeWorkspaceStatus, PullRequestDigest, RepoId, WorkspaceId};
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 
-/// Insert a workspace.
+/// Insert a workspace. The row belongs to `workspace.owner`, denormalized
+/// from the repository it was created against.
 pub async fn insert_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Result<()> {
     entities::code_workspace::ActiveModel {
         id: Set(workspace.id.0),
+        owner: Set(workspace.owner.as_str().to_owned()),
         repo_id: Set(workspace.repo_id.0),
         title: Set(workspace.title.clone()),
         worktree_path: Set(workspace.worktree_path.clone()),
@@ -28,9 +31,16 @@ pub async fn insert_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Res
     Ok(())
 }
 
-/// Load a workspace by id.
-pub async fn get_workspace(store: &DbStore, id: WorkspaceId) -> Result<Option<CodeWorkspace>> {
+/// Load one of the owner's workspaces by id.
+///
+/// Another owner's workspace is indistinguishable from a missing one.
+pub async fn get_workspace(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: WorkspaceId,
+) -> Result<Option<CodeWorkspace>> {
     let Some(row) = entities::code_workspace::Entity::find_by_id(id.0)
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -40,13 +50,15 @@ pub async fn get_workspace(store: &DbStore, id: WorkspaceId) -> Result<Option<Co
     Ok(Some(workspace_from_row(row)?))
 }
 
-/// Workspaces of one repo, or every workspace when `repo_id` is `None`.
-/// Most recently created first.
+/// The owner's workspaces in one repo, or all of them when `repo_id` is
+/// `None`. Most recently created first.
 pub async fn list_workspaces(
     store: &DbStore,
+    owner: &OwnerId,
     repo_id: Option<RepoId>,
 ) -> Result<Vec<CodeWorkspace>> {
-    let mut query = entities::code_workspace::Entity::find();
+    let mut query = entities::code_workspace::Entity::find()
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()));
     if let Some(repo_id) = repo_id {
         query = query.filter(entities::code_workspace::Column::RepoId.eq(repo_id.0));
     }
@@ -95,6 +107,7 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
             sea_orm::sea_query::Expr::value(workspace.archived_at),
         )
         .filter(entities::code_workspace::Column::Id.eq(workspace.id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(workspace.owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -108,6 +121,7 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
 /// else, no matter when the write lands. Returns whether the row changed.
 pub async fn set_workspace_title_if(
     store: &DbStore,
+    owner: &OwnerId,
     id: WorkspaceId,
     expected: &str,
     title: &str,
@@ -118,6 +132,7 @@ pub async fn set_workspace_title_if(
             sea_orm::sea_query::Expr::value(title.to_owned()),
         )
         .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_workspace::Column::Title.eq(expected))
         .exec(&store.conn)
         .await
@@ -126,8 +141,10 @@ pub async fn set_workspace_title_if(
 }
 
 /// Delete a workspace row. Used to roll back a failed create that left no checkout.
-pub async fn delete_workspace(store: &DbStore, id: WorkspaceId) -> Result<bool> {
-    let result = entities::code_workspace::Entity::delete_by_id(id.0)
+pub async fn delete_workspace(store: &DbStore, owner: &OwnerId, id: WorkspaceId) -> Result<bool> {
+    let result = entities::code_workspace::Entity::delete_many()
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -150,6 +167,7 @@ pub(super) fn workspace_from_row(row: entities::code_workspace::Model) -> Result
     };
     Ok(CodeWorkspace {
         id: WorkspaceId(row.id),
+        owner: OwnerId::new(&row.owner)?,
         repo_id: RepoId(row.repo_id),
         title: row.title,
         worktree_path: row.worktree_path,

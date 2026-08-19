@@ -497,6 +497,10 @@ pub enum CodeApprovalKind {
 pub struct CodeRepo {
     /// Stable id.
     pub id: RepoId,
+    /// Principal this repository belongs to. Repositories are never shared
+    /// across owners: two users may register or clone the same remote and
+    /// each gets a checkout of their own.
+    pub owner: crate::OwnerId,
     /// Canonical git toplevel.
     pub root_path: String,
     /// Display name.
@@ -520,6 +524,8 @@ pub struct CodeRepo {
 pub struct CodeWorkspace {
     /// Stable id.
     pub id: WorkspaceId,
+    /// Principal this workspace belongs to, denormalized from its repo.
+    pub owner: crate::OwnerId,
     /// Owning repo.
     pub repo_id: RepoId,
     /// Display title.
@@ -545,6 +551,8 @@ pub struct CodeWorkspace {
 pub struct CodeSession {
     /// Stable id.
     pub id: CodeSessionId,
+    /// Principal this session belongs to, denormalized from its workspace.
+    pub owner: crate::OwnerId,
     /// Owning workspace.
     pub workspace_id: WorkspaceId,
     /// Engine this session is bound to.

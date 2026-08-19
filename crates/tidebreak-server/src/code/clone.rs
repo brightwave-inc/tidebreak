@@ -14,7 +14,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use tidebreak_core::{RepoId, Store};
+use tidebreak_core::{OwnerId, RepoId, Store};
 
 use super::bus::{CloneProgress, CodeLiveUpdate};
 use super::gh::{self, resolve_github_clone_url};
@@ -76,6 +76,43 @@ impl CloneJob {
     }
 }
 
+/// Directory a given owner's clones land in, under the deployment's shared
+/// clone parent.
+///
+/// The parent directory is one deployment-wide setting, so without a per-owner
+/// segment two users cloning the same remote would both target
+/// `<parent>/<name>` and the second would be refused — or worse, adopt the
+/// first user's checkout. The local profile keeps cloning straight into the
+/// parent, because there is exactly one owner and its paths are the ones users
+/// already have.
+///
+/// Owner keys are visible ASCII and may contain characters that are not safe
+/// in a path segment, so everything outside a conservative set is replaced.
+pub(crate) fn owner_clone_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
+    if owner.is_local() {
+        return parent.to_path_buf();
+    }
+    let segment: String = owner
+        .as_str()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // A key of only separators must not resolve to the parent itself, and
+    // must never climb out of it.
+    let segment = segment.trim_matches('.').to_owned();
+    if segment.is_empty() {
+        parent.join("owner")
+    } else {
+        parent.join(segment)
+    }
+}
+
 /// Body fields after the route has rejected an empty or mixed source.
 pub(crate) struct CloneRequest {
     pub url: Option<String>,
@@ -105,6 +142,7 @@ impl CodeRuntime {
     /// Validate, remember the parent, return a job id, and spawn the clone.
     pub(crate) async fn start_clone(
         self: &std::sync::Arc<Self>,
+        owner: &OwnerId,
         request: CloneRequest,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
         let parent = PathBuf::from(request.parent_dir.trim());
@@ -128,7 +166,7 @@ impl CodeRuntime {
                 "name must be a single path segment",
             ));
         }
-        let target = parent.join(&name);
+        let target = owner_clone_dir(&parent, owner).join(&name);
         if target.exists() {
             return Err(ServerError::conflict_kind(
                 "clone_target_exists",
@@ -147,18 +185,25 @@ impl CodeRuntime {
             repo_id: None,
         };
         self.clone_jobs.insert(job.clone());
-        self.publish_clone(&job);
+        self.publish_clone(owner, &job);
 
         let runtime = std::sync::Arc::clone(self);
+        let owner = owner.clone();
         tokio::spawn(async move {
-            runtime.run_clone(id, source, target).await;
+            runtime.run_clone(&owner, id, source, target).await;
         });
         Ok(job.to_snapshot())
     }
 
-    async fn run_clone(self: std::sync::Arc<Self>, id: Uuid, url: String, target: PathBuf) {
+    async fn run_clone(
+        self: std::sync::Arc<Self>,
+        owner: &OwnerId,
+        id: Uuid,
+        url: String,
+        target: PathBuf,
+    ) {
         match clone_into(&url, &target, |phase, percent| {
-            self.touch_clone(id, |job| {
+            self.touch_clone(owner, id, |job| {
                 job.phase = phase.to_owned();
                 job.percent = Some(percent);
             });
@@ -166,11 +211,11 @@ impl CodeRuntime {
         .await
         {
             Ok(()) => match self
-                .register_repo(target, None, None, None, None, None)
+                .register_repo(owner, target, super::runtime::RepoRegistration::default())
                 .await
             {
                 Ok(repo) => {
-                    self.touch_clone(id, |job| {
+                    self.touch_clone(owner, id, |job| {
                         job.phase = "done".into();
                         job.percent = Some(100);
                         job.done = true;
@@ -178,38 +223,40 @@ impl CodeRuntime {
                     });
                 }
                 Err(error) => {
-                    self.fail_clone(id, error.message());
+                    self.fail_clone(owner, id, error.message());
                 }
             },
-            Err(error) => self.fail_clone(id, error),
+            Err(error) => self.fail_clone(owner, id, error),
         }
     }
 
-    fn touch_clone(&self, id: Uuid, update: impl FnOnce(&mut CloneJob)) {
+    fn touch_clone(&self, owner: &OwnerId, id: Uuid, update: impl FnOnce(&mut CloneJob)) {
         if let Some(job) = self.clone_jobs.apply(id, update) {
-            self.publish_clone(&job);
+            self.publish_clone(owner, &job);
         }
     }
 
-    fn fail_clone(&self, id: Uuid, error: impl Into<String>) {
+    fn fail_clone(&self, owner: &OwnerId, id: Uuid, error: impl Into<String>) {
         let error = bound_stderr(&error.into());
-        self.touch_clone(id, |job| {
+        self.touch_clone(owner, id, |job| {
             job.phase = "failed".into();
             job.done = true;
             job.error = Some(error);
         });
     }
 
-    fn publish_clone(&self, job: &CloneJob) {
-        self.bus
-            .publish_update(CodeLiveUpdate::CloneProgress(CloneProgress {
+    fn publish_clone(&self, owner: &OwnerId, job: &CloneJob) {
+        self.bus.publish_update(
+            owner,
+            CodeLiveUpdate::CloneProgress(CloneProgress {
                 job: job.id.to_string(),
                 phase: job.phase.clone(),
                 percent: job.percent,
                 done: job.done,
                 error: job.error.clone(),
                 repo_id: job.repo_id,
-            }));
+            }),
+        );
     }
 
     fn gh_search_path(&self) -> Option<String> {

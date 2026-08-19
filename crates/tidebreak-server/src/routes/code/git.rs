@@ -1,14 +1,12 @@
 //! Commit, push, pull-request, and quick-action routes for a workspace.
 
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::state::AppState;
 
-use super::require_code;
 use super::types::{
     CodeActionSnapshot, CodeCommitSnapshot, CodePrCommentsSnapshot, CodePrMergeMethod,
     CodePushSnapshot, CodeWorkspacePrSnapshot, CommitWorkspaceBody, CreatePullRequestBody,
@@ -18,58 +16,50 @@ use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, Wo
 use tidebreak_core::WorkspaceId;
 
 pub async fn commit_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<CommitWorkspaceBody>,
 ) -> Result<Json<CodeCommitSnapshot>, ServerError> {
-    let outcome = require_code(&state)?
-        .commit_workspace(id, body.message)
-        .await?;
+    let outcome = code.commit_workspace(id, body.message).await?;
     Ok(Json(commit_snapshot(outcome)))
 }
 
 pub async fn push_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodePushSnapshot>, ServerError> {
-    let outcome = require_code(&state)?.push_workspace(id).await?;
+    let outcome = code.push_workspace(id).await?;
     Ok(Json(push_snapshot(outcome)))
 }
 
 pub async fn create_pull_request(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<CreatePullRequestBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let snapshot = require_code(&state)?
-        .create_workspace_pr(id, body.title, body.body)
-        .await?;
+    let snapshot = code.create_workspace_pr(id, body.title, body.body).await?;
     Ok((StatusCode::CREATED, Json(pr_snapshot(snapshot))))
 }
 
 pub async fn get_workspace_pr(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
-    Ok(Json(pr_snapshot(
-        require_code(&state)?.workspace_pr(id).await?,
-    )))
+    Ok(Json(pr_snapshot(code.workspace_pr(id).await?)))
 }
 
 pub async fn refresh_workspace_pr(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
-    Ok(Json(pr_snapshot(
-        require_code(&state)?.refresh_workspace_pr(id).await?,
-    )))
+    Ok(Json(pr_snapshot(code.refresh_workspace_pr(id).await?)))
 }
 
 pub async fn get_workspace_pr_comments(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodePrCommentsSnapshot>, ServerError> {
-    let comments = require_code(&state)?.workspace_pr_comments(id).await?;
+    let comments = code.workspace_pr_comments(id).await?;
     Ok(Json(CodePrCommentsSnapshot {
         number: comments.number,
         comments: comments.comments,
@@ -77,7 +67,7 @@ pub async fn get_workspace_pr_comments(
 }
 
 pub async fn merge_workspace_pr(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<MergeCodePrBody>,
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
@@ -87,19 +77,15 @@ pub async fn merge_workspace_pr(
         CodePrMergeMethod::Rebase => MergeMethod::Rebase,
     };
     Ok(Json(pr_snapshot(
-        require_code(&state)?
-            .merge_workspace_pr(id, method, body.auto)
-            .await?,
+        code.merge_workspace_pr(id, method, body.auto).await?,
     )))
 }
 
 pub async fn run_workspace_action(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path((id, name)): Path<(WorkspaceId, String)>,
 ) -> Result<Json<CodeActionSnapshot>, ServerError> {
-    let outcome = require_code(&state)?
-        .run_workspace_action(id, &name)
-        .await?;
+    let outcome = code.run_workspace_action(id, &name).await?;
     Ok(Json(action_snapshot(outcome)))
 }
 

@@ -10,11 +10,12 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     count_turns, get_session, get_workspace, latest_event_created_at, latest_turn, list_approvals,
-    list_sessions, list_sessions_by_lifecycle, list_sessions_for_workspace, save_session,
+    list_sessions, list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace,
+    save_session,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnStatus, DbStore, WorkspaceId,
+    CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -65,11 +66,12 @@ pub(crate) async fn persist_session(
 pub(crate) async fn apply_attention(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     next: Attention,
     from_user: bool,
 ) -> Result<Option<Attention>, tidebreak_core::AgentError> {
-    let Some(mut session) = get_session(db, session_id).await? else {
+    let Some(mut session) = get_session(db, owner, session_id).await? else {
         return Ok(None);
     };
     if !replace_attention(&mut session, next, from_user) {
@@ -112,7 +114,13 @@ pub(crate) async fn compute_attention(
             ));
         }
     }
-    let pending = list_approvals(db, Some(CodeApprovalState::Pending), Some(session.id)).await?;
+    let pending = list_approvals(
+        db,
+        &session.owner,
+        Some(CodeApprovalState::Pending),
+        Some(session.id),
+    )
+    .await?;
     if !pending.is_empty() {
         return Ok(Attention::needs_you(
             "an approval is waiting",
@@ -130,7 +138,7 @@ pub(crate) async fn compute_attention(
         }
         return Ok(Attention::working(AttentionSource::Lifecycle));
     }
-    match latest_turn(db, session.id).await? {
+    match latest_turn(db, &session.owner, session.id).await? {
         Some(turn) if turn.status == CodeTurnStatus::Failed => Ok(Attention::needs_you(
             "the engine turn failed",
             AttentionSource::Lifecycle,
@@ -151,9 +159,10 @@ pub(crate) async fn compute_attention(
 pub(crate) async fn mark_viewed(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
 ) -> Result<(), tidebreak_core::AgentError> {
-    let Some(session) = get_session(db, session_id).await? else {
+    let Some(session) = get_session(db, owner, session_id).await? else {
         return Ok(());
     };
     if !matches!(session.attention.state, AttentionState::DoneUnreviewed) {
@@ -162,6 +171,7 @@ pub(crate) async fn mark_viewed(
     let _ = apply_attention(
         db,
         bus,
+        owner,
         session_id,
         Attention::working(AttentionSource::Lifecycle),
         false,
@@ -175,11 +185,12 @@ pub(crate) async fn mark_viewed(
 pub(crate) async fn user_set_attention(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     clear: bool,
     note: Option<String>,
 ) -> Result<CodeSession, tidebreak_core::AgentError> {
-    let Some(mut session) = get_session(db, session_id).await? else {
+    let Some(mut session) = get_session(db, owner, session_id).await? else {
         return Err(tidebreak_core::AgentError::Store(format!(
             "session {session_id} not found"
         )));
@@ -209,7 +220,7 @@ pub(crate) async fn sweep_stalled(
     idle_secs: u32,
 ) -> Result<(), tidebreak_core::AgentError> {
     let now = Utc::now();
-    let running = list_sessions_by_lifecycle(db, CodeSessionLifecycle::Running).await?;
+    let running = list_sessions_by_lifecycle_all_owners(db, CodeSessionLifecycle::Running).await?;
     for session in running {
         let last = last_activity_at(db, &session).await?;
         let idle = now.signed_duration_since(last).num_seconds().max(0) as u32;
@@ -220,7 +231,7 @@ pub(crate) async fn sweep_stalled(
             AttentionState::Stalled { idle_secs: idle },
             AttentionSource::Heuristic,
         );
-        let _ = apply_attention(db, bus, session.id, next, false).await?;
+        let _ = apply_attention(db, bus, &session.owner, session.id, next, false).await?;
     }
     Ok(())
 }
@@ -229,9 +240,10 @@ pub(crate) async fn sweep_stalled(
 pub(crate) async fn note_activity(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
 ) -> Result<(), tidebreak_core::AgentError> {
-    let Some(session) = get_session(db, session_id).await? else {
+    let Some(session) = get_session(db, owner, session_id).await? else {
         return Ok(());
     };
     if session.lifecycle != CodeSessionLifecycle::Running {
@@ -243,6 +255,7 @@ pub(crate) async fn note_activity(
     let _ = apply_attention(
         db,
         bus,
+        owner,
         session_id,
         Attention::working(AttentionSource::Lifecycle),
         false,
@@ -253,7 +266,9 @@ pub(crate) async fn note_activity(
 
 pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &CodeSession) {
     match build_digest(db, session).await {
-        Ok(digest) => bus.publish_update(CodeLiveUpdate::Digest(Box::new(digest))),
+        Ok(digest) => {
+            bus.publish_update(&session.owner, CodeLiveUpdate::Digest(Box::new(digest)));
+        }
         Err(err) => warn!(
             session = %session.id,
             error = %err,
@@ -265,9 +280,10 @@ pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Code
 pub(crate) async fn emit_workspace_digests(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     workspace_id: WorkspaceId,
 ) {
-    match list_sessions_for_workspace(db, workspace_id).await {
+    match list_sessions_for_workspace(db, owner, workspace_id).await {
         Ok(sessions) => {
             for session in sessions {
                 emit_digest(db, bus, &session).await;
@@ -281,11 +297,15 @@ pub(crate) async fn emit_workspace_digests(
     }
 }
 
+/// The owner's live session digests, restated on every `/code/updates`
+/// connect. Scoped: a subscriber never learns that another owner's session
+/// exists.
 pub(crate) async fn list_digests(
     db: &DbStore,
+    owner: &OwnerId,
 ) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
     let mut out = Vec::new();
-    for session in list_sessions(db).await? {
+    for session in list_sessions(db, owner).await? {
         if session.lifecycle == CodeSessionLifecycle::Ended {
             continue;
         }
@@ -298,7 +318,7 @@ async fn build_digest(
     db: &DbStore,
     session: &CodeSession,
 ) -> Result<SessionDigest, tidebreak_core::AgentError> {
-    let workspace = get_workspace(db, session.workspace_id)
+    let workspace = get_workspace(db, &session.owner, session.workspace_id)
         .await?
         .ok_or_else(|| {
             tidebreak_core::AgentError::Store(format!(
@@ -306,7 +326,7 @@ async fn build_digest(
                 session.workspace_id, session.id
             ))
         })?;
-    let turn_count = count_turns(db, session.id).await?;
+    let turn_count = count_turns(db, &session.owner, session.id).await?;
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -322,10 +342,10 @@ async fn last_activity_at(
     db: &DbStore,
     session: &CodeSession,
 ) -> Result<DateTime<Utc>, tidebreak_core::AgentError> {
-    if let Some(at) = latest_event_created_at(db, session.id).await? {
+    if let Some(at) = latest_event_created_at(db, &session.owner, session.id).await? {
         return Ok(at);
     }
-    if let Some(turn) = latest_turn(db, session.id).await? {
+    if let Some(turn) = latest_turn(db, &session.owner, session.id).await? {
         return Ok(turn.started_at);
     }
     Ok(session.created_at)
@@ -381,6 +401,7 @@ mod tests {
     fn session_with(attention: Attention) -> CodeSession {
         CodeSession {
             id: CodeSessionId::new(),
+            owner: tidebreak_core::OwnerId::local(),
             workspace_id: WorkspaceId::new(),
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,

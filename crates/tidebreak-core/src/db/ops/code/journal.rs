@@ -5,6 +5,7 @@ use sea_orm::{
 
 use crate::code::{CodeEvent, CodeSessionId, SequencedCodeEvent};
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::{acquire_code_session_write_lock, CodeJournalError};
@@ -17,6 +18,7 @@ use super::{acquire_code_session_write_lock, CodeJournalError};
 /// worker cannot corrupt the stream.
 pub async fn append_event(
     store: &DbStore,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
     event: &CodeEvent,
@@ -26,6 +28,7 @@ pub async fn append_event(
         return Err(CodeJournalError::SessionNotFound { session_id });
     }
     let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -40,6 +43,7 @@ pub async fn append_event(
         });
     }
     let last = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .order_by_desc(entities::code_event::Column::Seq)
         .one(&transaction)
@@ -53,6 +57,7 @@ pub async fn append_event(
             ))
         })?;
     entities::code_event::ActiveModel {
+        owner: Set(owner.as_str().to_owned()),
         session_id: Set(session_id.0),
         seq: Set(seq),
         event: Set(serde_json::to_value(event).map_err(AgentError::from)?),
@@ -68,9 +73,11 @@ pub async fn append_event(
 /// Created-at of the newest journal row, if the session has any.
 pub async fn latest_event_created_at(
     store: &DbStore,
+    owner: &OwnerId,
     session_id: CodeSessionId,
 ) -> Result<Option<chrono::DateTime<Utc>>> {
     Ok(entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .order_by_desc(entities::code_event::Column::Seq)
         .one(&store.conn)
@@ -79,13 +86,15 @@ pub async fn latest_event_created_at(
         .map(|model| model.created_at))
 }
 
-/// Events for a session with `seq > after`, in order.
+/// Events for one of the owner's sessions with `seq > after`, in order.
 pub async fn list_events(
     store: &DbStore,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     after: i64,
 ) -> Result<Vec<SequencedCodeEvent>> {
     entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .filter(entities::code_event::Column::Seq.gt(after))
         .order_by_asc(entities::code_event::Column::Seq)

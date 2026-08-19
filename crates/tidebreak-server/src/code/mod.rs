@@ -12,6 +12,7 @@ pub(crate) mod clone;
 pub(crate) mod gh;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
+pub(crate) mod scoped;
 pub(crate) mod session_worker;
 pub(crate) mod setup_script;
 pub(crate) mod terminal;
@@ -19,3 +20,4 @@ pub(crate) mod titling;
 pub(crate) mod worktree;
 
 pub(crate) use runtime::CodeRuntime;
+pub(crate) use scoped::ScopedCode;

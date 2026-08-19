@@ -1,5 +1,5 @@
-//! In-memory live fan-out for one code-mode session plus the install-wide
-//! updates channel.
+//! In-memory live fan-out for one code-mode session plus the per-owner
+//! updates channels.
 //!
 //! The journal is the durable record a client replays on connect; this bus is
 //! the live tail. The session worker appends each event to the journal and
@@ -7,13 +7,21 @@
 //!
 //! `/code/updates` is unsequenced: a dropped notice costs nothing because the
 //! full digest is restated on every connect.
+//!
+//! Updates are keyed by owner rather than filtered on the way out. There is
+//! one broadcast channel per principal, so a subscriber's receiver carries
+//! only its own owner's notices and another owner's digest is not something
+//! the socket could drop — it never reaches it. Filtering published notices
+//! in the route, or in the client, would leave the cross-owner event on the
+//! wire for anyone who skipped the filter; decision 47 names that the wrong
+//! implementation.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tidebreak_core::{
-    Attention, CodeSessionId, CodeSessionLifecycle, PullRequestDigest, RepoId, SequencedCodeEvent,
-    WorkspaceId,
+    Attention, CodeSessionId, CodeSessionLifecycle, OwnerId, PullRequestDigest, RepoId,
+    SequencedCodeEvent, WorkspaceId,
 };
 use tokio::sync::broadcast;
 
@@ -53,19 +61,18 @@ pub(crate) enum CodeLiveUpdate {
     CloneProgress(CloneProgress),
 }
 
-/// Per-session broadcast channels for live journal events, plus the
-/// install-wide digest channel.
+/// Per-session broadcast channels for live journal events, plus one digest
+/// channel per owner.
 pub(crate) struct CodeEventBus {
     channels: Mutex<HashMap<CodeSessionId, broadcast::Sender<SequencedCodeEvent>>>,
-    updates: broadcast::Sender<CodeLiveUpdate>,
+    updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
 }
 
 impl Default for CodeEventBus {
     fn default() -> Self {
-        let (updates, _) = broadcast::channel(UPDATES_BUFFER);
         Self {
             channels: Mutex::new(HashMap::new()),
-            updates,
+            updates: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -91,11 +98,24 @@ impl CodeEventBus {
         let _ = self.sender(session).send(event);
     }
 
-    pub(crate) fn subscribe_updates(&self) -> broadcast::Receiver<CodeLiveUpdate> {
-        self.updates.subscribe()
+    fn updates_sender(&self, owner: &OwnerId) -> broadcast::Sender<CodeLiveUpdate> {
+        self.updates
+            .lock()
+            .expect("code updates bus lock")
+            .entry(owner.clone())
+            .or_insert_with(|| broadcast::channel(UPDATES_BUFFER).0)
+            .clone()
     }
 
-    pub(crate) fn publish_update(&self, update: CodeLiveUpdate) {
-        let _ = self.updates.send(update);
+    /// Subscribe to one owner's updates. The receiver is the only view of the
+    /// channel a `/code/updates` socket gets, and it carries nothing else.
+    pub(crate) fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
+        self.updates_sender(owner).subscribe()
+    }
+
+    /// Publish a notice to one owner. Publishers name the owner the notice
+    /// belongs to; there is no channel that reaches everyone.
+    pub(crate) fn publish_update(&self, owner: &OwnerId, update: CodeLiveUpdate) {
+        let _ = self.updates_sender(owner).send(update);
     }
 }

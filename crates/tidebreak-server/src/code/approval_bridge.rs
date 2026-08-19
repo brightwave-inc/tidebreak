@@ -204,7 +204,12 @@ async fn handle_tools_call(
             }),
         ));
     }
-    let session = runtime.get_session(session_id).await?;
+    // Reached by a single-use capability token minted for this session, not
+    // by a bearer credential, so there is no principal to scope against here.
+    // The token is the authorization, and it names one session.
+    let session = tidebreak_core::db::code::get_session_all_owners(&runtime.db, session_id)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("session {session_id} not found")))?;
     if session.lifecycle == CodeSessionLifecycle::Ended {
         return Err(ServerError::conflict_kind(
             "session_ended",
