@@ -95,26 +95,23 @@ export function CodeSubscriptionUsage() {
         side="right"
         align="end"
         sideOffset={8}
-        className="flex max-h-[min(640px,calc(100vh-24px))] w-[min(430px,calc(100vw-24px))] flex-col gap-0 overflow-hidden p-0"
+        className="flex max-h-[min(560px,calc(100vh-24px))] w-[min(390px,calc(100vw-24px))] flex-col gap-0 overflow-hidden p-0"
       >
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b px-4 py-3.5">
-          <div className="min-w-0">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2.5">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold">Subscription usage</h2>
+              <h2 className="truncate text-[13px] font-semibold">Subscription usage</h2>
               {report && (
-                <span className="text-muted-foreground rounded-sm bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+                <span className="text-muted-foreground shrink-0 text-[10px] font-medium">
                   {sourceLabel(report.source)}
                 </span>
               )}
             </div>
-            <p className="text-muted-foreground mt-0.5 text-xs">
-              Provider limits and reset times for coding harnesses.
-            </p>
           </div>
           <button
             type="button"
             className={cn(
-              "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1.5",
+              "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1",
               FOCUS_RING,
             )}
             aria-label="Refresh subscription usage"
@@ -125,14 +122,14 @@ export function CodeSubscriptionUsage() {
           </button>
         </div>
 
-        <div className="min-h-0 overflow-y-auto px-4 py-3">
+        <div className="min-h-0 overflow-y-auto px-3 py-2.5">
           {error && <p className="text-critical text-xs">{error}</p>}
           {!report && !error && <UsageSkeleton />}
           {report && report.providers.length === 0 && (
             <UnavailableUsage diagnostics={report.diagnostics} />
           )}
           {report && report.providers.length > 0 && (
-            <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-3">
               {report.diagnostics.length > 0 && (
                 <p className="text-muted-foreground text-[11px]">
                   {report.diagnostics[0]}
@@ -180,48 +177,63 @@ function ProviderUsage({
       ? own
       : provider.accounts.slice(0, 1);
   return (
-    <section className="flex flex-col gap-2.5">
-      <div className="flex items-center gap-2">
-        <span className="border-border/70 bg-muted/50 grid size-7 place-items-center rounded-md border">
-          <Icon className="size-3.5" />
+    <section className="flex flex-col gap-1.5">
+      <div className="flex min-h-6 items-center gap-1.5">
+        <span className="border-border/70 bg-muted/50 grid size-6 place-items-center rounded border">
+          <Icon className="size-3" />
         </span>
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-medium">{provider.label}</h3>
+        <div className="flex min-w-0 flex-1 items-baseline justify-between gap-2">
+          <h3 className="truncate text-xs font-semibold">{provider.label}</h3>
           {provider.accounts.length > shown.length && (
-            <p className="text-muted-foreground text-[10px]">
+            <span className="text-muted-foreground shrink-0 text-[9px]">
               {provider.accounts.length - shown.length} shared hidden
-            </p>
+            </span>
           )}
         </div>
       </div>
-      <div className="flex flex-col gap-3 pl-9">
-        {shown.map((account) => (
-          <AccountUsage key={account.id} account={account} />
+      <div className="flex flex-col pl-[30px]">
+        {shown.map((account, index) => (
+          <AccountUsage key={account.id} account={account} separated={index > 0} />
         ))}
       </div>
     </section>
   );
 }
 
-function AccountUsage({ account }: { account: CodeSubscriptionUsageAccount }) {
+function AccountUsage({
+  account,
+  separated,
+}: {
+  account: CodeSubscriptionUsageAccount;
+  separated: boolean;
+}) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="truncate text-xs font-medium">{account.label}</span>
-        <span className={cn("shrink-0 text-[10px]", accountStateClass(account.state))}>
-          {accountStateLabel(account.state)}
+    <div
+      className={cn(
+        "flex flex-col gap-1.5 py-1",
+        separated && "border-border/60 mt-1 border-t pt-2",
+      )}
+    >
+      <div className="flex min-w-0 items-baseline justify-between gap-2">
+        <span className="min-w-0 truncate text-[11px] font-medium">{account.label}</span>
+        <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-[9px] tabular-nums">
+          {account.state !== "available" && (
+            <span className={accountStateClass(account.state)}>
+              {accountStateLabel(account.state)}
+            </span>
+          )}
+          {account.updated_at_unix_seconds && (
+            <span title={`Updated ${formatAge(account.updated_at_unix_seconds)}`}>
+              {formatAge(account.updated_at_unix_seconds)}
+            </span>
+          )}
         </span>
       </div>
-      <div className="flex flex-col gap-2.5">
+      <div className="flex flex-col gap-1">
         {account.windows.map((window) => (
           <UsageWindowRow key={`${account.id}-${window.key}`} window={window} />
         ))}
       </div>
-      {account.updated_at_unix_seconds && (
-        <span className="text-muted-foreground text-[10px] tabular-nums">
-          Updated {formatAge(account.updated_at_unix_seconds)}
-        </span>
-      )}
     </div>
   );
 }
@@ -229,27 +241,42 @@ function AccountUsage({ account }: { account: CodeSubscriptionUsageAccount }) {
 function UsageWindowRow({ window }: { window: CodeSubscriptionUsageWindow }) {
   const percent = Math.max(0, window.used_percent);
   const tone = usageTone(percent, window.status);
+  const reset = window.resets_at_unix_seconds
+    ? formatReset(window.resets_at_unix_seconds)
+    : null;
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between gap-3 text-[11px]">
-        <span className="text-muted-foreground min-w-0 truncate" title={window.label}>
-          {window.label}
-        </span>
-        <span className={cn("shrink-0 font-medium tabular-nums", tone.text)}>
-          {formatPercent(percent)}
-        </span>
-      </div>
-      <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+    <div className="grid min-h-5 grid-cols-[minmax(72px,0.9fr)_minmax(52px,1.1fr)_auto_auto] items-center gap-x-2 text-[10px]">
+      <span className="text-muted-foreground min-w-0 truncate" title={window.label}>
+        {window.label}
+      </span>
+      <div
+        className="bg-muted h-1 overflow-hidden rounded-full"
+        role="progressbar"
+        aria-label={`${window.label} usage`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.min(100, percent)}
+        aria-valuetext={formatPercent(percent)}
+      >
         <div
           className={cn("h-full rounded-full transition-[width] duration-300", tone.bar)}
           style={{ width: `${Math.min(100, percent)}%` }}
         />
       </div>
-      {window.resets_at_unix_seconds && (
-        <span className="text-muted-foreground text-[10px] tabular-nums">
-          {formatReset(window.resets_at_unix_seconds)}
-        </span>
-      )}
+      <span
+        className={cn("w-8 shrink-0 text-right font-medium tabular-nums", tone.text)}
+        title={formatPercent(percent)}
+      >
+        {formatPercentCompact(percent)}
+      </span>
+      <span
+        className="text-muted-foreground w-11 shrink-0 text-right tabular-nums"
+        title={reset ?? "Reset time unavailable"}
+      >
+        {window.resets_at_unix_seconds
+          ? formatResetCompact(window.resets_at_unix_seconds)
+          : "—"}
+      </span>
     </div>
   );
 }
@@ -379,11 +406,23 @@ function formatPercent(percent: number): string {
   return `${rounded}% used`;
 }
 
+function formatPercentCompact(percent: number): string {
+  const rounded = Math.round(percent * 10) / 10;
+  return `${rounded}%`;
+}
+
 function formatReset(timestamp: number): string {
   const seconds = timestamp - Date.now() / 1000;
   if (seconds < -30) return "Reset time passed";
   if (seconds <= 30) return "Resets now";
   return `Resets in ${formatDuration(seconds)}`;
+}
+
+function formatResetCompact(timestamp: number): string {
+  const seconds = timestamp - Date.now() / 1000;
+  if (seconds < -30) return "passed";
+  if (seconds <= 30) return "now";
+  return formatDuration(seconds);
 }
 
 function formatAge(timestamp: number): string {

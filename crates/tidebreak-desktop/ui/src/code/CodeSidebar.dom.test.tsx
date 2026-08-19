@@ -169,7 +169,15 @@ describe("CodeSidebar", () => {
     expect(await screen.findByText("Subscription usage")).toBeInTheDocument();
     expect(screen.getByText("Model Gateway")).toBeInTheDocument();
     expect(screen.getByText("Weekly (Fable)")).toBeInTheDocument();
-    expect(screen.getByText("91% used")).toBeInTheDocument();
+    expect(screen.getByTitle("91% used")).toHaveTextContent("91%");
+    expect(screen.getByRole("progressbar", { name: "Weekly (Fable) usage" })).toHaveAttribute(
+      "aria-valuenow",
+      "91",
+    );
+    expect(screen.getByRole("progressbar", { name: "Weekly (Fable) usage" })).toHaveAttribute(
+      "aria-valuetext",
+      "91% used",
+    );
   });
 
   it("opens the workspace context menu from the keyboard and gives focus back", async () => {
