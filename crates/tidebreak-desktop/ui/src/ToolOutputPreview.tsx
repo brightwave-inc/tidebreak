@@ -17,6 +17,11 @@ type ToolOutputPreviewProps = {
    * "· · · N more lines" instead of "Show N more lines".
    */
   bare?: boolean;
+  /**
+   * The reader expanded or collapsed the block. Hosts that follow the tail of
+   * a transcript use it to stop, so the block stays where it was clicked.
+   */
+  onToggle?: () => void;
 };
 
 /**
@@ -34,6 +39,7 @@ export function ToolOutputPreview({
   collapsedLines = DEFAULT_COLLAPSED_LINES,
   label = "Output",
   bare = false,
+  onToggle,
 }: ToolOutputPreviewProps) {
   const [expanded, setExpanded] = useState(false);
   const bodyId = useId();
@@ -76,10 +82,13 @@ export function ToolOutputPreview({
       {hiddenCount > 0 && (
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground text-[11px]"
+          className="text-muted-foreground hover:text-foreground ring-offset-background focus-visible:ring-ring cursor-pointer rounded-sm text-[11px] focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none motion-safe:transition-colors motion-safe:duration-[140ms] motion-safe:ease-out"
           aria-expanded={expanded}
           aria-controls={bodyId}
-          onClick={() => setExpanded((current) => !current)}
+          onClick={() => {
+            onToggle?.();
+            setExpanded((current) => !current);
+          }}
         >
           {expanded
             ? "Show less"

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useCodeUiStore } from "./CodeUiStore";
+import { HOVER_TINT } from "./interactive";
 import { TerminalPane } from "./TerminalPane";
 
 export const DEFAULT_TERMINAL_DRAWER_HEIGHT = 240;
@@ -123,7 +124,10 @@ export function TerminalDrawer({
           aria-valuemin={MIN_TERMINAL_DRAWER_HEIGHT}
           aria-valuemax={MAX_TERMINAL_DRAWER_HEIGHT}
           aria-valuenow={height}
-          className="hover:bg-muted focus-visible:bg-muted flex h-1.5 shrink-0 cursor-ns-resize items-center justify-center focus-visible:outline-none"
+          className={cn(
+            "hover:bg-muted focus-visible:bg-muted flex h-1.5 shrink-0 cursor-ns-resize items-center justify-center focus-visible:outline-none",
+            HOVER_TINT,
+          )}
           onPointerDown={(event) => {
             event.preventDefault();
             dragRef.current = { startY: event.clientY, startHeight: height };

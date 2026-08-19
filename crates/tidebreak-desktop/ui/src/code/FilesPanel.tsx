@@ -12,6 +12,7 @@ import {
   filterPaths,
   type FileTreeNode,
 } from "./fileTree";
+import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { useLiveResource } from "./useLiveContent";
 
 const TREE_PAGE = 5000;
@@ -190,7 +191,11 @@ export function FilesPanel({
         ) : (
           <button
             type="button"
-            className="text-muted-foreground hover:text-foreground self-start text-[11px]"
+            className={cn(
+              "text-muted-foreground hover:text-foreground cursor-pointer self-start rounded-sm text-[11px]",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
             onClick={() => setFiltersOpen(true)}
           >
             Include / exclude
@@ -266,7 +271,9 @@ function TreeRow({
         aria-current={current ? true : undefined}
         style={{ paddingLeft: 8 + depth * 12 }}
         className={cn(
-          "flex w-full items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
+          "flex w-full cursor-pointer items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
           current && "bg-muted/60",
           !current && "hover:bg-muted/40",
         )}
@@ -278,7 +285,7 @@ function TreeRow({
         {node.kind === "dir" ? (
           <ChevronRight
             className={cn(
-              "text-muted-foreground size-3 shrink-0 transition-transform",
+              "text-muted-foreground size-3 shrink-0 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
               open && "rotate-90",
             )}
             aria-hidden

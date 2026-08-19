@@ -34,6 +34,7 @@ import { CodeModeSwitch } from "./CodeModeSwitch";
 import { useCodeUiStore } from "./CodeUiStore";
 import { connectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { HARNESS_ICONS } from "./HarnessPicker";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import {
   useWorkspaceCardCommands,
@@ -114,7 +115,11 @@ export function CodeSidebar() {
         <SidebarSectionTitle className="px-0">Repos</SidebarSectionTitle>
         <button
           type="button"
-          className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
           aria-label="Add repo"
           onClick={() => setAddRepoOpen(true)}
         >
@@ -154,7 +159,11 @@ export function CodeSidebar() {
         <div className="flex items-center">
           <button
             type="button"
-            className="cursor-pointer rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+            className={cn(
+              "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md px-1.5 py-1 text-[11px] font-medium",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
             aria-label={`Sort workspaces: ${sortLabel}. Activate to cycle.`}
             onClick={() => setSortMode(nextWorkspaceSortMode(sortMode))}
           >
@@ -162,7 +171,11 @@ export function CodeSidebar() {
           </button>
           <button
             type="button"
-            className="cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            className={cn(
+              "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
             aria-label="New workspace"
             onClick={() => startNewWorkspace()}
           >
@@ -288,7 +301,11 @@ function WorkspaceCard({
           aria-current={active ? "page" : undefined}
           data-active={active || undefined}
           title={attentionTitle}
-          className="flex w-full cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left ring-offset-background motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none data-[active]:bg-muted"
+          className={cn(
+            "hover:bg-muted flex w-full cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left data-[active]:bg-muted",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
           onClick={onOpen}
         >
           <span className="flex min-w-0 items-center gap-1.5">

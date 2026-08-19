@@ -3,12 +3,14 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { RouteFrame } from "@/RouteFrame";
 import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { WORKSPACE_STATUS_LABELS } from "./labels";
 
 /**
@@ -75,7 +77,11 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
           <li key={workspace.id}>
             <button
               type="button"
-              className="hover:bg-muted flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm"
+              className={cn(
+                "hover:bg-muted flex w-full cursor-pointer items-center justify-between rounded-md px-3 py-2 text-left text-sm",
+                FOCUS_RING,
+                HOVER_TINT,
+              )}
               onClick={() =>
                 void navigate({
                   to: "/code/w/$workspaceId",

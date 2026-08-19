@@ -7,6 +7,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { formatTokenCount } from "@/ContextUsage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 
 /**
  * What a turn came to, at the seam where it ended.
@@ -156,7 +157,11 @@ function TurnDiffstat({
   return (
     <button
       type="button"
-      className="focus-visible:ring-ring rounded-full focus-visible:ring-2 focus-visible:outline-none"
+      className={cn(
+        "hover:bg-muted cursor-pointer rounded-full",
+        FOCUS_RING,
+        HOVER_TINT,
+      )}
       aria-label="Review this turn's changes"
       onClick={() => onOpenTurnDiff(turnId)}
     >
@@ -175,10 +180,35 @@ export function DiffstatBadge({ stat }: { stat: Diffstat }) {
   );
 }
 
-/** How long the turn ran, at the precision the seam can carry. */
+/**
+ * How long the turn ran, at the precision the seam can carry.
+ *
+ * A sub-second turn rounded to "0s" reads as a broken clock rather than a fast
+ * engine, so anything under a second is "<1s" and the first ten seconds carry
+ * a tenth. Past that the tenth is noise and whole seconds, then minutes, say
+ * it better.
+ */
 export function formatTurnDuration(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
-  const seconds = Math.round(ms / 1_000);
+  if (ms < 1_000) return "<1s";
+  const tenths = Math.round(ms / 100) / 10;
+  if (tenths < 10) return `${tenths.toFixed(1)}s`;
+  return coarseDuration(Math.round(ms / 1_000));
+}
+
+/**
+ * The same clock for a counter that ticks once a second.
+ *
+ * A live elapsed label reads its own tenth as jitter — it changes on a
+ * schedule the reader can see — so it stays on whole seconds throughout.
+ */
+export function formatElapsedDuration(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1_000) return "<1s";
+  return coarseDuration(Math.floor(ms / 1_000));
+}
+
+function coarseDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;

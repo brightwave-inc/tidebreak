@@ -71,7 +71,7 @@ describe("CodeTranscript", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Command run")).toBeInTheDocument();
     expect(screen.getByText("ls")).toBeInTheDocument();
-    expect(screen.getByText("1s")).toBeInTheDocument();
+    expect(screen.getByText("1.2s")).toBeInTheDocument();
     expect(screen.queryByLabelText("Output")).toBeNull();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
@@ -113,7 +113,33 @@ describe("CodeTranscript", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("Turn failed");
     expect(alert).toHaveTextContent("claude exited with status 1");
-    expect(alert).toHaveTextContent("4s");
+    expect(alert).toHaveTextContent("4.0s");
+  });
+
+  it("falls back to the tool name when the engine sends no target", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-bare",
+            turnId: "t1",
+            callId: "c4",
+            name: "Read",
+            // Harnesses open a call before its arguments finish streaming, so
+            // the path can arrive empty and never be restated.
+            detail: { kind: "file_read", path: "" },
+            status: "running",
+            preview: "",
+            startedAt: null,
+            durationMs: null,
+          },
+        ]}
+      />,
+    );
+    const line = screen.getByRole("button", { name: /File read/ });
+    expect(line).toHaveTextContent("File read");
+    expect(line).toHaveTextContent("Read");
   });
 
   it("holds the transcript's shape until the session hydrates", () => {
@@ -130,13 +156,15 @@ describe("CodeTranscript", () => {
     ).toBeInTheDocument();
   });
 
-  it("expands a failed tool and clamps long output", async () => {
+  it("expands a failed tool, clamps long output, and stops the transcript following", async () => {
     const preview = Array.from(
       { length: 13 },
       (_, index) => `line ${index + 1}`,
     ).join("\n");
+    const reveals: number[] = [];
     render(
       <CodeTranscript
+        onReveal={() => reveals.push(1)}
         items={[
           {
             kind: "tool",
@@ -163,6 +191,9 @@ describe("CodeTranscript", () => {
       screen.getByRole("button", { name: "· · · 1 more line" }),
     );
     expect(screen.getByLabelText("Output").textContent).toContain("line 13");
+    // Growing the column under the reader's cursor must not drag them to the
+    // tail, so every reveal reaches the host that owns the scroll.
+    expect(reveals).toHaveLength(1);
   });
 
   it("keeps a successful call closed and names a denial with the constant verb", () => {

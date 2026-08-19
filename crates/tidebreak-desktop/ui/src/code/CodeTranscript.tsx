@@ -24,7 +24,12 @@ import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
-import { formatTurnDuration, TurnReviewCard } from "./TurnReviewCard";
+import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import {
+  formatElapsedDuration,
+  formatTurnDuration,
+  TurnReviewCard,
+} from "./TurnReviewCard";
 
 /**
  * The code-session transcript: the reader's prompts, markdown for assistant
@@ -48,6 +53,7 @@ export function CodeTranscript({
   streamStalled = false,
   animateStreaming = true,
   onOpenTurnDiff,
+  onReveal,
   scrollRef,
   contentRef,
   onScroll,
@@ -71,6 +77,14 @@ export function CodeTranscript({
   animateStreaming?: boolean;
   /** Scope the review sidebar to one turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /**
+   * The reader opened or closed something inline.
+   *
+   * A reveal grows the column under the row they clicked, and a transcript
+   * still following the tail would answer that by scrolling — moving the row
+   * out from under them. The host stops following instead.
+   */
+  onReveal?: () => void;
   scrollRef?: RefCallback<HTMLDivElement>;
   contentRef?: RefCallback<HTMLDivElement>;
   onScroll?: () => void;
@@ -116,6 +130,7 @@ export function CodeTranscript({
               }
               onDecide={onDecide}
               onOpenTurnDiff={onOpenTurnDiff}
+              onReveal={onReveal}
             />,
           ),
         )}
@@ -188,6 +203,7 @@ function TranscriptItem({
   approvalError,
   onDecide,
   onOpenTurnDiff,
+  onReveal,
 }: {
   item: CodeTranscriptItem;
   animateStreaming: boolean;
@@ -200,6 +216,7 @@ function TranscriptItem({
     feedback?: string,
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
+  onReveal?: () => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -223,7 +240,7 @@ function TranscriptItem({
         />
       );
     case "file_activity":
-      return <FileActivityRow files={item.files} />;
+      return <FileActivityRow files={item.files} onReveal={onReveal} />;
     case "assistant":
       return (
         <article className="message message-assistant" aria-label="Assistant">
@@ -249,6 +266,7 @@ function TranscriptItem({
           preview={item.preview}
           startedAt={item.startedAt}
           durationMs={item.durationMs}
+          onReveal={onReveal}
         />
       );
     case "notice":
@@ -263,6 +281,7 @@ function TranscriptItem({
           approval={approval}
           deciding={deciding}
           error={approvalError}
+          onReveal={onReveal}
           onDecide={(decision, feedback) =>
             onDecide?.(item.approvalId, decision, feedback)
           }
@@ -295,6 +314,7 @@ export function CodeToolCard({
   preview,
   startedAt = null,
   durationMs = null,
+  onReveal,
 }: {
   name: string;
   detail: ToolDetail;
@@ -302,6 +322,7 @@ export function CodeToolCard({
   preview: string;
   startedAt?: string | null;
   durationMs?: number | null;
+  onReveal?: () => void;
 }) {
   const [expanded, setExpanded] = useState(
     status === "failed" || status === "denied",
@@ -330,10 +351,17 @@ export function CodeToolCard({
     >
       <button
         type="button"
-        className="flex w-full items-center gap-2 py-0.5 text-left text-[13.5px]"
+        className={cn(
+          "-mx-1.5 flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-[13.5px] hover:bg-muted/50",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
+        )}
         aria-expanded={expanded || showTail}
         aria-controls={hasOutput ? bodyId : undefined}
-        onClick={() => setExpanded((current) => !current)}
+        onClick={() => {
+          onReveal?.();
+          setExpanded((current) => !current);
+        }}
       >
         <span className="text-muted-foreground shrink-0 [&>svg]:size-3.5">
           {toolIcon(detail)}
@@ -341,7 +369,9 @@ export function CodeToolCard({
         <span className="shrink-0 font-semibold">{verb}</span>
         <MiddleTruncate
           text={subject}
-          className="text-muted-foreground min-w-0 font-mono"
+          // The subject is the line's whole point, so it takes the free space
+          // and keeps a floor: a narrow column truncates it, never erases it.
+          className="text-muted-foreground min-w-[6ch] flex-1 font-mono"
         />
         <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
           {status === "running" ? elapsed : duration}
@@ -365,7 +395,12 @@ export function CodeToolCard({
       )}
       {showExpanded && (
         <div id={bodyId}>
-          <ToolOutputPreview text={preview} collapsedLines={12} bare />
+          <ToolOutputPreview
+            text={preview}
+            collapsedLines={12}
+            bare
+            onToggle={onReveal}
+          />
         </div>
       )}
     </div>
@@ -458,7 +493,8 @@ function useElapsedLabel(startedAt: string | null, active: boolean): string | nu
   if (!startedAt) return null;
   const start = Date.parse(startedAt);
   if (!Number.isFinite(start)) return null;
-  return formatTurnDuration(Math.max(0, now - start));
+  // A counter that ticks once a second has no business showing tenths.
+  return formatElapsedDuration(Math.max(0, now - start));
 }
 
 function parseExitCode(preview: string): number | null {
@@ -468,17 +504,24 @@ function parseExitCode(preview: string): number | null {
   return Number.isFinite(code) ? code : null;
 }
 
+/**
+ * What the call was aimed at: the command, the path, the query.
+ *
+ * A harness that starts a call before its arguments have finished streaming
+ * sends an empty subject, and a line reading "File read" with nothing after it
+ * tells the reader less than the tool's own name does. The name is the floor.
+ */
 function toolSubject(detail: ToolDetail, name: string): string {
   switch (detail.kind) {
     case "command":
-      return detail.cmd;
+      return detail.cmd.trim() || name;
     case "file_read":
     case "file_edit":
-      return detail.path;
+      return detail.path.trim() || name;
     case "search":
-      return detail.query;
+      return detail.query.trim() || name;
     case "other":
-      return detail.summary || name;
+      return detail.summary.trim() || name;
   }
 }
 
@@ -490,8 +533,10 @@ function StatusGlyph({
   switch (status) {
     case "running":
       return (
+        // The one animation reduced motion keeps: it is the progress signal,
+        // and a frozen spinner reads as a hung call.
         <Loader2
-          className="text-info-foreground size-3.5 animate-spin motion-reduce:animate-none"
+          className="text-info-foreground size-3.5 animate-spin"
           aria-hidden="true"
         />
       );
@@ -572,8 +617,10 @@ function fileActivityTotals(
 
 function FileActivityRow({
   files,
+  onReveal,
 }: {
   files: Record<string, { kind: FileChangeKind; diffstat: Diffstat }>;
+  onReveal?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const { count, insertions, deletions } = fileActivityTotals(files);
@@ -583,8 +630,15 @@ function FileActivityRow({
       <button
         type="button"
         aria-expanded={open}
-        className="text-left"
-        onClick={() => setOpen((current) => !current)}
+        className={cn(
+          "-mx-1.5 cursor-pointer rounded-md px-1.5 py-0.5 text-left hover:text-foreground",
+          FOCUS_RING_TIGHT,
+          HOVER_TINT,
+        )}
+        onClick={() => {
+          onReveal?.();
+          setOpen((current) => !current);
+        }}
       >
         {count} {noun} changed ·{" "}
         <span className="text-success-foreground-muted tabular-nums">

@@ -7,6 +7,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { formatMessageTimestamp } from "@/MessageFooter";
 import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "@/ScrollableContainer";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 
 /**
  * Parked engine approval. The normalized kind leads so the reader can decide;
@@ -19,11 +20,14 @@ export function CodeApprovalCard({
   deciding,
   error,
   onDecide,
+  onReveal,
 }: {
   approval: CodeApprovalSnapshot;
   deciding?: boolean;
   error?: string;
   onDecide: (decision: "approve" | "deny", feedback?: string) => void;
+  /** The reader opened the payload disclosure, which grows the card. */
+  onReveal?: () => void;
 }) {
   const [denying, setDenying] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -58,9 +62,16 @@ export function CodeApprovalCard({
       <div>
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground text-[11px]"
+          className={cn(
+            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
           aria-expanded={payloadOpen}
-          onClick={() => setPayloadOpen((current) => !current)}
+          onClick={() => {
+            onReveal?.();
+            setPayloadOpen((current) => !current);
+          }}
         >
           Harness payload
         </button>
