@@ -1786,12 +1786,6 @@ fn env_api_key(kind: ProviderKind) -> Option<String> {
     }
 }
 
-/// Resolve the Anthropic API key (stored / legacy / env). Thin wrapper kept for
-/// call sites that are Anthropic-specific.
-pub async fn resolve_anthropic_api_key(secrets: &dyn SecretProvider) -> Option<String> {
-    resolve_api_key(secrets, ProviderKind::Anthropic).await
-}
-
 /// Map a server [`ProviderKind`] to the router's [`tidebreak_router::RouteKind`].
 pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
     match kind {
@@ -2000,34 +1994,34 @@ pub async fn collect_routes(
     routes
 }
 
-/// One-shot boot migration: if Anthropic has no stored config yet but a key is
-/// available (legacy secret or `ANTHROPIC_API_KEY` env), enable it.
+/// One-shot boot migration for authentication that can outlive provider config.
 ///
-/// Preserves pre-providers behavior where an env key alone was enough to run
-/// turns. An explicit `enabled: false` written later wins; this only fills in
-/// a missing row.
-pub async fn migrate_legacy_anthropic(
+/// Anthropic keys predate provider rows, and a ChatGPT OAuth session lives in
+/// the OS credential store independently of the settings database. If either
+/// credential is present while its provider row is missing after an update,
+/// restore the same enabled state that saving the key or completing sign-in
+/// would have written. An explicit `enabled: false` still wins because a
+/// present row is never changed.
+pub async fn migrate_legacy_provider_enablement(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
 ) -> Result<()> {
-    if store
-        .get_setting(&ProviderKind::Anthropic.setting_key())
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-    if resolve_anthropic_api_key(secrets).await.is_some() {
-        write_config(
-            store,
-            ProviderKind::Anthropic,
-            &ProviderConfig {
-                enabled: true,
-                base_url: None,
-                models: Vec::new(),
-            },
-        )
-        .await?;
+    for kind in [ProviderKind::Anthropic, ProviderKind::Openai] {
+        if store.get_setting(&kind.setting_key()).await?.is_some() {
+            continue;
+        }
+        if has_credential(secrets, kind).await {
+            write_config(
+                store,
+                kind,
+                &ProviderConfig {
+                    enabled: true,
+                    base_url: None,
+                    models: Vec::new(),
+                },
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -2300,6 +2294,124 @@ mod tests {
         .await
         .unwrap();
         (store, directory)
+    }
+
+    async fn store_chatgpt_session(secrets: &TestSecrets) {
+        write_credential(secrets, ProviderKind::Openai, &ProviderCredential::Oauth {})
+            .await
+            .unwrap();
+        secrets
+            .set_secret(
+                crate::connectors::CHATGPT_SECRET_KEY,
+                &serde_json::json!({
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "account_id": "acct-test",
+                    "expires_at_unix": 4_102_444_800_u64,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrade_enables_missing_provider_rows_for_existing_authentication() {
+        let (store, _directory) = provider_test_store().await;
+        let secrets = TestSecrets::default();
+        store_chatgpt_session(&secrets).await;
+        secrets
+            .set_secret(LEGACY_ANTHROPIC_API_KEY, "legacy-anthropic-key")
+            .await
+            .unwrap();
+
+        assert!(store
+            .get_setting(&ProviderKind::Openai.setting_key())
+            .await
+            .unwrap()
+            .is_none());
+
+        migrate_legacy_provider_enablement(&store, &secrets)
+            .await
+            .unwrap();
+
+        assert!(
+            read_config(&store, ProviderKind::Openai)
+                .await
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            read_config(&store, ProviderKind::Anthropic)
+                .await
+                .unwrap()
+                .enabled
+        );
+        let policy = crate::managed_policy::resolve(
+            &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+            &crate::managed_policy::NoOsPolicy,
+        )
+        .unwrap();
+        assert!(
+            provider_is_usable(&store, &secrets, ProviderKind::Openai, &policy)
+                .await
+                .unwrap()
+        );
+        assert!(catalog_models(&store, &secrets, &policy)
+            .await
+            .unwrap()
+            .iter()
+            .any(|model| model.policy.id == "gpt-5.6-sol" && model.available));
+    }
+
+    #[tokio::test]
+    async fn upgrade_preserves_an_explicitly_disabled_openai_provider() {
+        let (store, _directory) = provider_test_store().await;
+        let secrets = TestSecrets::default();
+        store_chatgpt_session(&secrets).await;
+        write_config(&store, ProviderKind::Openai, &ProviderConfig::disabled())
+            .await
+            .unwrap();
+
+        migrate_legacy_provider_enablement(&store, &secrets)
+            .await
+            .unwrap();
+
+        assert!(
+            !read_config(&store, ProviderKind::Openai)
+                .await
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_does_not_enable_openai_for_orphaned_oauth_tokens() {
+        let (store, _directory) = provider_test_store().await;
+        let secrets = TestSecrets::default();
+        secrets
+            .set_secret(
+                crate::connectors::CHATGPT_SECRET_KEY,
+                &serde_json::json!({
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "account_id": "acct-test",
+                    "expires_at_unix": 4_102_444_800_u64,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+
+        migrate_legacy_provider_enablement(&store, &secrets)
+            .await
+            .unwrap();
+
+        assert!(store
+            .get_setting(&ProviderKind::Openai.setting_key())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
