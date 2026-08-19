@@ -158,7 +158,8 @@ automatic.
    search index, sitemap, assets, and canonical metadata, and only then
    promotes that immutable deployment to `tidebreak-docs.vercel.app`. The
    `docs-production` environment supplies the only required secret,
-   `VERCEL_TOKEN`; its project and organization identifiers are non-secret
+   `VERCEL_TOKEN`, a team access token. Publication calls that send the token
+   also send `teamId`. The project and organization identifiers are non-secret
    workflow constants. A failed build or smoke test leaves the previous docs
    deployment serving production.
 6. The workflow first checks whether that exact tag, commit, and

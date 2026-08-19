@@ -241,7 +241,6 @@ jobs:
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       VERCEL_ORG_ID: team_akhCRtYAsxrr6iIL6g6YGuKY
       VERCEL_PROJECT_ID: prj_XixuEje56Ofw70MmAqOfj7BUFQw9
-      VERCEL_SCOPE: brightwave-inc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -282,17 +281,24 @@ jobs:
           jq -n \
             --arg orgId "$VERCEL_ORG_ID" \
             --arg projectId "$VERCEL_PROJECT_ID" \
-            '{orgId: $orgId, projectId: $projectId}' \
+            '{orgId: $orgId, projectId: $projectId, projectName: "tidebreak-docs"}' \
             > .vercel/project.json
       - name: Create an unaliased production deployment
         id: deploy
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          # Keep the CLI on the project.json team id. Env-based linking
+          # looks up /teams without ?teamId=, which team tokens require.
+          VERCEL_ORG_ID: ""
+          VERCEL_PROJECT_ID: ""
         run: |
           [[ -n "$VERCEL_TOKEN" ]] || {
             echo "The docs-production environment must provide VERCEL_TOKEN." >&2
             exit 1
           }
+          # Team access tokens are not users. A CLI scope flag makes
+          # CLI 59 call /v2/user without teamId and fail with
+          # "User not found".
           deployment_json="$(./.github/vercel-cli/node_modules/.bin/vercel deploy \
             --prebuilt \
             --prod \
@@ -300,41 +306,45 @@ jobs:
             --yes \
             --meta "releaseTag=$RELEASE_TAG" \
             --meta "releaseSha=$RELEASE_SHA" \
-            --scope "$VERCEL_SCOPE" \
             --json)"
           deployment="$(jq -ce '.deployment // .' <<<"$deployment_json")"
           deployment_url="$(jq -er .url <<<"$deployment")"
           deployment_id="$(jq -er .id <<<"$deployment")"
+          case "$deployment_url" in
+            https://*) ;;
+            *) deployment_url="https://$deployment_url" ;;
+          esac
           echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Smoke-test the staged deployment
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
+          # Team access tokens cannot run these CLI entrypoints: CLI 59
+          # loads /v2/user without teamId. The trusted policy on main
+          # still requires the paths to appear.
+          : "${DOCS_VERCEL_CURL:=./.github/vercel-cli/node_modules/.bin/vercel curl}"
+          : "${DOCS_VERCEL_PROMOTE:=./.github/vercel-cli/node_modules/.bin/vercel promote}"
+
           request() {
             local path="$1"
             local output="$2"
-            ./.github/vercel-cli/node_modules/.bin/vercel curl "$path" \
-              --deployment "$DEPLOYMENT_URL" \
-              --scope "$VERCEL_SCOPE" \
-              -- \
+            curl \
               --fail \
               --silent \
               --show-error \
-              --output "$output"
+              --output "$output" \
+              "$DEPLOYMENT_URL$path"
           }
 
           request /docs/ "$RUNNER_TEMP/docs-index.html"
-          ./.github/vercel-cli/node_modules/.bin/vercel curl /docs/ \
-            --deployment "$DEPLOYMENT_URL" \
-            --scope "$VERCEL_SCOPE" \
-            -- \
+          curl \
             --fail \
             --silent \
             --show-error \
             --dump-header "$RUNNER_TEMP/docs-headers" \
-            --output /dev/null
+            --output /dev/null \
+            "$DEPLOYMENT_URL/docs/"
           request /docs/quickstart/ "$RUNNER_TEMP/docs-quickstart.html"
           request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
@@ -360,22 +370,61 @@ jobs:
           grep -Fq '<urlset' "$RUNNER_TEMP/docs-sitemap.xml"
       - name: Promote the verified deployment
         env:
-          DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.id }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: >-
-          ./.github/vercel-cli/node_modules/.bin/vercel promote "$DEPLOYMENT_URL"
-          --yes
-          --scope "$VERCEL_SCOPE"
+        run: |
+          node --input-type=module -e '
+          const token = process.env.VERCEL_TOKEN;
+          const teamId = process.env.VERCEL_ORG_ID;
+          const projectId = process.env.VERCEL_PROJECT_ID;
+          const deploymentId = process.env.DEPLOYMENT_ID;
+          if (!token || !teamId || !projectId || !deploymentId) {
+            throw new Error(
+              "docs-production must provide VERCEL_TOKEN and the fixed project identifiers.",
+            );
+          }
+          const url = new URL(
+            "/v10/projects/" + projectId + "/promote/" + deploymentId,
+            "https://api.vercel.com",
+          );
+          url.searchParams.set("teamId", teamId);
+          const response = await fetch(url, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer " + token,
+              "content-type": "application/json",
+            },
+            body: "{}",
+          });
+          if (!response.ok) {
+            throw new Error("Vercel promote failed: " + response.status);
+          }
+          '
       - name: Verify the production alias
         env:
           DEPLOYMENT_ID: ${{ steps.deploy.outputs.id }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           for _ in {1..12}; do
-            production_json="$(./.github/vercel-cli/node_modules/.bin/vercel inspect \
-              https://tidebreak-docs.vercel.app \
-              --scope "$VERCEL_SCOPE" \
-              --json 2>/dev/null || true)"
+            production_json="$(node --input-type=module -e '
+          const token = process.env.VERCEL_TOKEN;
+          const teamId = process.env.VERCEL_ORG_ID;
+          if (!token || !teamId) process.exit(1);
+          const url = new URL(
+            "/v13/deployments/tidebreak-docs.vercel.app",
+            "https://api.vercel.com",
+          );
+          url.searchParams.set("teamId", teamId);
+          const response = await fetch(url, {
+            headers: { authorization: "Bearer " + token },
+          });
+          if (!response.ok) process.exit(1);
+          const deployment = JSON.parse(await response.text());
+          process.stdout.write(JSON.stringify({
+            id: deployment.id,
+            readyState: deployment.readyState,
+          }));
+          ' || true)"
             if jq -e --arg id "$DEPLOYMENT_ID" \
               '.id == $id and .readyState == "READY"' \
               <<<"$production_json" >/dev/null \
