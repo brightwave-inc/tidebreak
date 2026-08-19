@@ -37,7 +37,7 @@ cap-std.workspace = true
 futures.workspace = true
 flate2 = "=1.1.9"
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
-tidebreak-core = { path = "../tidebreak-core", default-features = false }
+tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["keychain"] }
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
 tidebreak-server = { path = "../tidebreak-server" }
 reqwest = { workspace = true }

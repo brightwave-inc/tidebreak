@@ -216,7 +216,7 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     // A provision link is reachable by any webpage, and pairing spends an
     // OAuth code and stores the tokens it returns. Cleartext is only tolerated
     // for a gateway on this machine — a developer deployment on localhost.
-    if gateway.scheme() == "http" && !gateway_host_is_loopback(&gateway) {
+    if gateway.scheme() == "http" && !crate::remote::url_host_is_loopback(&gateway) {
         return Err("the gateway URL must use https unless it is on loopback".into());
     }
     if !gateway.username().is_empty() || gateway.password().is_some() {
@@ -228,21 +228,6 @@ fn provision_link(url: &tauri::Url) -> Result<ProvisionLink, String> {
     Ok(ProvisionLink {
         origin: gateway.origin().ascii_serialization(),
         gateway_url: value.into_owned(),
-    })
-}
-
-/// Whether a gateway URL's host is the local machine. `localhost` counts
-/// because the resolver is required to map it to a loopback address; other
-/// names do not, since what they resolve to is not knowable here. Mirrors the
-/// connectors-side check that holds the same line server-side.
-fn gateway_host_is_loopback(url: &tauri::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
     })
 }
 
