@@ -1558,9 +1558,9 @@ jobs:
           ref: ${{ needs.validate.outputs.sha }}
 
       - name: Install Linux packaging dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          scripts/install-linux-apt-packages.sh \
             build-essential \
             cmake \
             file \

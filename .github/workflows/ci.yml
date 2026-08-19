@@ -417,9 +417,9 @@ jobs:
         with:
           version: v0.16.0
       - name: Install system deps (Tauri)
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          scripts/install-linux-apt-packages.sh \
             cmake \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
@@ -471,9 +471,9 @@ jobs:
         with:
           version: v0.16.0
       - name: Install system deps (Tauri)
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          scripts/install-linux-apt-packages.sh \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -635,9 +635,9 @@ jobs:
         with:
           version: v0.16.0
       - name: Install headless system deps
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake mold
+          scripts/install-linux-apt-packages.sh cmake mold
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
