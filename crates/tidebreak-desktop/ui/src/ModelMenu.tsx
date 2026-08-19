@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { useGuidedMenu } from "./FirstTaskWalkthrough";
 import { cn } from "@/lib/utils";
 
 const CACHE_CHANGE_WARNING =
@@ -449,6 +450,7 @@ export function ModelMenu({
   // the model was chosen here or inherited from Settings.
   const pillModel = known ?? (isDefault ? usableDefault : null);
 
+  const guided = useGuidedMenu("model");
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
@@ -464,6 +466,7 @@ export function ModelMenu({
   const searching = query.length > 0;
 
   function openMenu(next: boolean) {
+    if (guided.guided && !next) return;
     if (next) {
       setQuery("");
       setActiveGroupId(
@@ -514,7 +517,11 @@ export function ModelMenu({
   }
 
   return (
-    <DropdownMenu open={open} onOpenChange={openMenu}>
+    <DropdownMenu
+      open={guided.open || open}
+      modal={guided.modal}
+      onOpenChange={openMenu}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -542,6 +549,8 @@ export function ModelMenu({
         side="top"
         collisionPadding={12}
         className="model-menu-content w-80 p-0"
+        data-first-task-target="model-menu"
+        onEscapeKeyDown={guided.onEscapeKeyDown}
         onKeyDownCapture={(event) => {
           if (event.target === searchInput.current) return;
           if (event.metaKey || event.ctrlKey || event.altKey) return;

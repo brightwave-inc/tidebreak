@@ -35,23 +35,22 @@ describe("WelcomeState", () => {
       screen.getByRole("heading", { name: "How can I help?" }),
     ).toBeInTheDocument();
     for (const label of [
-      "Write a report from files",
-      "Analyze a spreadsheet",
-      "Delegate work in parallel",
-      "Turn a folder into an app",
+      "Brief this week's AI news",
+      "Compare two public products",
+      "Build a local planner",
+      "Research in parallel",
     ]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: new RegExp(label) })).toBeInTheDocument();
     }
-    // Nothing on home offers to search sources any more.
-    expect(screen.queryByText(/search/i)).toBeNull();
 
-    // A prompt has to stand on its own before anything is attached: it asks
-    // for the input it is missing rather than assuming hidden context.
+    // A starter has to stand on its own: it names the work and starts, rather
+    // than asking what to attach or what the task is.
     fireEvent.click(
-      screen.getByRole("button", { name: "Write a report from files" }),
+      screen.getByRole("button", { name: /Brief this week's AI news/ }),
     );
     expect(onSelectPrompt).toHaveBeenCalledWith(
-      expect.stringMatching(/Tell me what to attach/),
+      expect.stringMatching(/Search the web/),
+      { enableInternet: true },
     );
   });
 

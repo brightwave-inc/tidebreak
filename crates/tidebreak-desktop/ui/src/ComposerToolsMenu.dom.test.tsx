@@ -5,12 +5,14 @@ import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ComposerToolsMenu } from "./ComposerToolsMenu";
+import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 
 vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  useFirstTaskGuide.getState().setSurface(null);
 });
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -144,4 +146,18 @@ it("keeps the plugins row off a surface with no library to reach", async () => {
 
   await open();
   expect(screen.queryByText("Plugins")).not.toBeInTheDocument();
+});
+
+it("opens when the first-task walkthrough is on the tools step", () => {
+  useFirstTaskGuide.getState().setSurface("tools");
+  render(
+    <ComposerToolsMenu
+      disabled={false}
+      attachFiles={{ attaching: false, onAttach: vi.fn() }}
+      network={{ value: { mode: "off" }, onChange: vi.fn() }}
+    />,
+  );
+
+  expect(screen.getByRole("menuitem", { name: "Attach files" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Network/ })).toBeInTheDocument();
 });

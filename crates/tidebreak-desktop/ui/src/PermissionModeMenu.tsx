@@ -18,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useGuidedMenu } from "./FirstTaskWalkthrough";
 import { cn } from "@/lib/utils";
 
 /**
@@ -161,8 +162,13 @@ export function PermissionModeMenu({
   const current = permissionModeOption(effective);
   const CurrentIcon = current.icon;
   const controlsDisabled = disabled || saving;
+  const guided = useGuidedMenu("permissions");
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      open={guided.open}
+      modal={guided.modal}
+      onOpenChange={guided.onOpenChange}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -177,7 +183,13 @@ export function PermissionModeMenu({
           <ChevronDown className="size-4 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="top" className="w-72">
+      <DropdownMenuContent
+        align="end"
+        side="top"
+        className="w-72"
+        data-first-task-target="permissions-menu"
+        onEscapeKeyDown={guided.onEscapeKeyDown}
+      >
         {PERMISSION_MODE_SCALE.map((option) => {
           const selected = current.value === option.value;
           const locked = overCeiling(option.value);

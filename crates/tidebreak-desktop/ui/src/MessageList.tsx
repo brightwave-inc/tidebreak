@@ -43,7 +43,7 @@ import {
   ToolActivityGroup,
   ToolActivityUnavailable,
 } from "./ToolActivityGroup";
-import { WelcomeState } from "./WelcomeState";
+import { WelcomeState, type StarterPromptOptions } from "./WelcomeState";
 import { isolatedCard } from "./PendingCard";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
@@ -266,7 +266,7 @@ type MessageListProps = {
     decision: OutputWritebackDecision,
   ) => void;
   onOutputWritebackCancel?: (callId: string, turnId: string) => void;
-  onSelectPrompt?: (prompt: string) => void;
+  onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
   /** Resend the failed turn. Offered only on the transcript's newest failure. */
   onRetryTurn?: (turn: RetryableTurn) => void;
   hydrated?: boolean;

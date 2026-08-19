@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ModelMenu } from "./ModelMenu";
+import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 import type { ModelInfo } from "./api";
 
 vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
@@ -12,6 +13,7 @@ vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  useFirstTaskGuide.getState().setSurface(null);
 });
 
 const MODELS: ModelInfo[] = [
@@ -170,4 +172,18 @@ it("splits a mixed gateway catalog into vendor tabs", async () => {
   expect(gatewayTab.querySelector(".lucide-network")).not.toBeNull();
   await user.click(gatewayTab);
   expect(screen.getByRole("menuitem", { name: "Mystery Model" })).toBeTruthy();
+});
+
+it("opens when the first-task walkthrough is on the model step", () => {
+  useFirstTaskGuide.getState().setSurface("model");
+  render(
+    <ModelMenu
+      models={MODELS}
+      value="anthropic::claude-sonnet-4"
+      onSetUpProvider={() => {}}
+      onChange={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("menuitem", { name: "Claude Sonnet 4" })).toBeInTheDocument();
 });

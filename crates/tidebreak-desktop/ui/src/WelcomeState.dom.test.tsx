@@ -55,7 +55,7 @@ describe("WelcomeState starters", () => {
     // step aside once the library has something to say.
     expect(screen.queryByText(/Retired brief/)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Write a report from files" }),
+      screen.queryByRole("button", { name: /Brief this week's AI news/ }),
     ).not.toBeInTheDocument();
 
     fireEvent.click(card);
@@ -77,12 +77,13 @@ describe("WelcomeState starters", () => {
     // Shown from the first paint, not after the catalog answers: an install
     // with no prompts must never see home flicker or empty out.
     const starter = screen.getByRole("button", {
-      name: "Write a report from files",
+      name: /Brief this week's AI news/,
     });
     await waitFor(() => expect(library.list).toHaveBeenCalled());
     fireEvent.click(starter);
     expect(onSelectPrompt).toHaveBeenCalledWith(
-      expect.stringContaining("written report"),
+      expect.stringContaining("Search the web"),
+      { enableInternet: true },
     );
   });
 });

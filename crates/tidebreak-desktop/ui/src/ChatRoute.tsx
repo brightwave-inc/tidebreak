@@ -791,8 +791,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             setComposerDraft(next);
             if (!next.trim()) voice.resetInputUsed();
           }}
-          onSelectPrompt={(prompt) => {
+          onSelectPrompt={(prompt, options) => {
             setComposerDraft(prompt);
+            if (options?.enableInternet) {
+              void onNetworkPolicyChange({ mode: "open" });
+            }
             voice.resetInputUsed();
           }}
           onSend={onSend}
