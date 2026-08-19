@@ -87,7 +87,7 @@ function makeClient(): Pick<
   };
 }
 
-it("keeps the PR action bar visible on Files and Source control", async () => {
+it("leaves quick PR actions to the workspace header", async () => {
   render(
     <CodeInspector
       client={makeClient() as never}
@@ -97,23 +97,14 @@ it("keeps the PR action bar visible on Files and Source control", async () => {
     />,
   );
 
-  const bar = screen.getByTestId("pr-action-bar");
-  expect(bar).toHaveTextContent("#41");
-  expect(bar).toHaveTextContent("Draft");
-  expect(bar).toHaveTextContent("2 checks");
-  expect(screen.getByRole("button", { name: "Merge" })).toBeInTheDocument();
+  expect(screen.queryByTestId("pr-action-bar")).not.toBeInTheDocument();
 
   await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
-  expect(screen.getByTestId("pr-action-bar")).toBeInTheDocument();
+  expect(screen.queryByTestId("pr-action-bar")).not.toBeInTheDocument();
   await userEvent.setup().click(
     screen.getByRole("tab", { name: "Source control" }),
   );
-  expect(screen.getByTestId("pr-action-bar")).toBeInTheDocument();
-
-  await userEvent.setup().click(screen.getByRole("button", { name: "Merge" }));
-  expect(useCodeUiStore.getState().pendingComposerPrompt).toMatch(
-    /Merge pull request #41/,
-  );
+  expect(screen.queryByTestId("pr-action-bar")).not.toBeInTheDocument();
 });
 
 it("shows PR state, checks, comments, and holds merge for a draft", async () => {
@@ -131,7 +122,6 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   await screen.findByText("Fix login flow");
 
   // Draft wins over the open state token, and holds the tab merge buttons.
-  // The inspector bar also says Draft; its Merge writes a prompt instead.
   expect(screen.getAllByText("Draft").length).toBeGreaterThan(0);
   expect(screen.getByText("Changes requested")).toBeInTheDocument();
   expect(

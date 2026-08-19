@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { File, Search } from "lucide-react";
 
 import type { ApiClient } from "@/api/client";
@@ -22,11 +22,14 @@ export function CodeQuickOpen({
   workspaceId,
   contentRevision,
   onOpenFile,
+  openRequest = 0,
 }: {
   client: Pick<ApiClient, "listCodeWorkspaceTree">;
   workspaceId: string;
   contentRevision: number;
   onOpenFile: (path: string) => void;
+  /** Increment to open the picker from a visible New tab control. */
+  openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -36,18 +39,26 @@ export function CodeQuickOpen({
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const reveal = useCallback(() => {
+    setQuery("");
+    setActiveIndex(0);
+    setOpen(true);
+  }, []);
+
   useEffect(() => {
     function onQuickOpen(event: KeyboardEvent) {
       if (event.key.toLowerCase() !== "p") return;
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
       event.preventDefault();
-      setQuery("");
-      setActiveIndex(0);
-      setOpen(true);
+      reveal();
     }
     window.addEventListener("keydown", onQuickOpen);
     return () => window.removeEventListener("keydown", onQuickOpen);
-  }, []);
+  }, [reveal]);
+
+  useEffect(() => {
+    if (openRequest > 0) reveal();
+  }, [openRequest, reveal]);
 
   useEffect(() => {
     if (!open) return;

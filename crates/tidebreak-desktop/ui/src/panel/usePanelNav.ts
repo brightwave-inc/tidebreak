@@ -9,7 +9,16 @@ export function useLayoutState(): LayoutState {
   const search = useSearch({ strict: false }) as PanelSearch;
   return useMemo(
     () => layoutFromSearch(search),
-    [search.tabs, search.active, search.fullscreen, search.left, search.right],
+    [
+      search.tabs,
+      search.active,
+      search.fullscreen,
+      search.split,
+      search.splitActive,
+      search.splitFocused,
+      search.left,
+      search.right,
+    ],
   );
 }
 

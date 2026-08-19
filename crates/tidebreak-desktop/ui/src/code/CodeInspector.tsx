@@ -43,7 +43,6 @@ import { DiffOverview } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
-import { PrActionBar } from "./PrActionBar";
 import { PrCard } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
@@ -118,7 +117,6 @@ export function CodeInspector({
       aria-label="Workspace surfaces"
       data-testid="code-inspector"
     >
-      {pr && <PrActionBar pr={pr} />}
       <Tabs
         value={tab}
         onValueChange={(next) => setTab(next as InspectorTab)}

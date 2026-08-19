@@ -103,6 +103,9 @@ describe("layout URLs", () => {
       tabs: undefined,
       active: undefined,
       fullscreen: undefined,
+      split: undefined,
+      splitActive: undefined,
+      splitFocused: undefined,
       left: undefined,
       right: undefined,
     });
@@ -178,5 +181,35 @@ describe("layout URLs", () => {
       left: undefined,
       right: undefined,
     });
+  });
+
+  it("round-trips a focused code editor split without duplicating tabs", () => {
+    const layout = {
+      tabs: [{ type: "file" as const, path: "src/lib.rs" }],
+      activeIndex: 0,
+      fullscreen: false,
+      editorSplit: {
+        tabs: [
+          { type: "diff" as const, path: "src/main.rs" },
+          { type: "file" as const, path: "README.md" },
+        ],
+        activeIndex: 1,
+        focused: true,
+      },
+    };
+
+    expect(searchFromLayout(layout)).toMatchObject({
+      tabs: "file.src%2Flib.rs",
+      split: "diff.f.src%2Fmain.rs,file.README.md",
+      splitActive: "file.README.md",
+      splitFocused: "1",
+    });
+    expect(layoutFromSearch(searchFromLayout(layout))).toEqual(layout);
+    expect(
+      layoutFromSearch({
+        tabs: "file.src%2Flib.rs",
+        split: "file.src%2Flib.rs,file.README.md",
+      }).editorSplit?.tabs,
+    ).toEqual([{ type: "file", path: "README.md" }]);
   });
 });

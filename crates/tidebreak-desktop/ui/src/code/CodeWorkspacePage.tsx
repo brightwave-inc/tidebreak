@@ -14,7 +14,7 @@ import type {
   ModelInfo,
 } from "../api/types";
 import { useApp } from "@/AppContext";
-import { copyPlainText, scheduleCopyStateReset } from "@/ClipboardCopyButton";
+import { copyPlainText } from "@/ClipboardCopyButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,9 +45,13 @@ import {
   closeEditorTab,
   closeEditorTabsToRight,
   closeOtherEditorTabs,
+  type CodeEditorRegion,
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
+  mergeEditorSplit,
+  moveEditorTab,
+  openCodeEditor,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
@@ -57,6 +61,7 @@ import {
   CHAT_TAB_ID,
   CodeCenterTabs,
   EDITOR_PANEL_ID,
+  SPLIT_EDITOR_PANEL_ID,
 } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
 
@@ -71,6 +76,7 @@ import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import { CodeQuickOpen } from "./CodeQuickOpen";
+import { PrActionBar } from "./PrActionBar";
 import {
   acquireCodeSessionFromClient,
   releaseCodeSession,
@@ -78,7 +84,7 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { FOCUS_RING } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
@@ -88,7 +94,6 @@ import {
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
 } from "./workspaceActions";
-import { middleTruncate } from "./workspaceCards";
 import {
   createPermissionModes,
   fenceReasonText,
@@ -122,7 +127,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const catalog = useCodeCatalogStore();
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
-  const { setLayout, openPanel } = usePanelNav();
+  const { setLayout } = usePanelNav();
   const chrome = splitCodeChromeLayout(layout);
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore((state) => state.toggleReviewSidebar);
@@ -134,6 +139,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const [quickOpenRequest, setQuickOpenRequest] = useState(0);
+  const [quickOpenTarget, setQuickOpenTarget] =
+    useState<CodeEditorRegion>("primary");
+  const [draggedEditor, setDraggedEditor] = useState<{
+    region: CodeEditorRegion;
+    index: number;
+  } | null>(null);
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
   const [fileReveal, setFileReveal] = useState<{
@@ -242,6 +254,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
   const title = digest?.title ?? workspace?.title;
   const repoName = repo?.display_name;
+  const pr = digest?.pr_state ?? workspace?.pr;
   const headerCommands = workspace
     ? workspaceHeaderCommands({
         archived: workspace.status === "archived",
@@ -253,10 +266,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     : [];
 
   function openTurnDiff(turnId: string) {
-    openPanel({ type: "diff", turnId });
+    setLayout(openCodeEditor(layout, { type: "diff", turnId }));
   }
 
-  function openFile(path: string, line?: number) {
+  function openFile(
+    path: string,
+    line?: number,
+    preferredRegion?: CodeEditorRegion,
+  ) {
     setFileReveal((current) =>
       line === undefined
         ? null
@@ -266,11 +283,31 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             revision: (current?.revision ?? 0) + 1,
           },
     );
-    openPanel({ type: "file", path });
+    setLayout(
+      openCodeEditor(layout, { type: "file", path }, preferredRegion),
+    );
   }
 
   function openFileDiff(path: string) {
-    openPanel({ type: "diff", path });
+    setLayout(openCodeEditor(layout, { type: "diff", path }));
+  }
+
+  function requestNewTab(region: CodeEditorRegion) {
+    setQuickOpenTarget(region);
+    setQuickOpenRequest((request) => request + 1);
+  }
+
+  function dropDraggedEditor(region: CodeEditorRegion) {
+    if (!draggedEditor || draggedEditor.region === region) return;
+    setLayout(
+      moveEditorTab(
+        layout,
+        draggedEditor.region,
+        draggedEditor.index,
+        region,
+      ),
+    );
+    setDraggedEditor(null);
   }
 
   function copyEditorPath(path: string) {
@@ -285,119 +322,251 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const activeEditor = showingChat
     ? null
     : (editorTabs[chrome.editors.activeIndex] ?? null);
-  // With no editor tab there is no strip, so nothing names a panel and the
-  // conversation is just the page.
-  const stripped = editorTabs.length > 0;
+  const splitEditorTabs = chrome.splitEditors.tabs;
+  const activeSplitEditor =
+    splitEditorTabs[chrome.splitEditors.activeIndex] ?? null;
+  const hasEditorSplit = splitEditorTabs.length > 0;
 
-  const workspaceMain = (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+  function editorPanel(
+    panel: PanelContent,
+    region: CodeEditorRegion,
+    index: number,
+  ) {
+    const id =
+      region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
+    return (
+      <div
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        id={id}
+        role="tabpanel"
+        aria-labelledby={centerEditorTabId(index, region)}
+      >
+        {panel.type === "file" ? (
+          <Suspense fallback={<Skeleton className="h-full w-full" />}>
+            <FileViewer
+              client={client}
+              workspaceId={workspaceId}
+              path={panel.path}
+              contentRevision={contentRevision}
+              revealLine={
+                fileReveal?.path === panel.path ? fileReveal.line : undefined
+              }
+              revealRevision={fileReveal?.revision}
+            />
+          </Suspense>
+        ) : panel.type === "diff" ? (
+          <DiffPanel
+            client={client}
+            workspaceId={workspaceId}
+            turnId={panel.turnId}
+            file={panel.path}
+            contentRevision={contentRevision}
+            onOpenFile={(path) => openFile(path, undefined, region)}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  const primaryEditorGroup = (
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      data-testid="primary-editor-group"
+      onDragOver={(event) => {
+        if (draggedEditor?.region === "secondary") event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        dropDraggedEditor("primary");
+      }}
+    >
       <CodeCenterTabs
         editorTabs={editorTabs}
         editorActiveIndex={chrome.editors.activeIndex}
         conversationFocused={showingChat}
         onSelectChat={() => setLayout(focusConversation(layout))}
-        onSelectEditor={(index) => setLayout(focusEditorTab(layout, index))}
-        onCloseEditor={(index) => setLayout(closeEditorTab(layout, index))}
+        onSelectEditor={(index) =>
+          setLayout(focusEditorTab(layout, index, "primary"))
+        }
+        onCloseEditor={(index) =>
+          setLayout(closeEditorTab(layout, index, "primary"))
+        }
         onCloseAllEditors={() => setLayout(closeAllEditorTabs(layout))}
         onCloseOtherEditors={(index) =>
-          setLayout(closeOtherEditorTabs(layout, index))
+          setLayout(closeOtherEditorTabs(layout, index, "primary"))
         }
         onCloseEditorsToRight={(index) =>
-          setLayout(closeEditorTabsToRight(layout, index))
+          setLayout(closeEditorTabsToRight(layout, index, "primary"))
         }
         onCopyPath={copyEditorPath}
+        onNewTab={() => requestNewTab("primary")}
+        onMoveEditorToOtherGroup={(index) =>
+          setLayout(moveEditorTab(layout, "primary", index, "secondary"))
+        }
+        onSplitActive={() =>
+          setLayout(
+            moveEditorTab(
+              layout,
+              "primary",
+              chrome.editors.activeIndex,
+              "secondary",
+            ),
+          )
+        }
+        onDragEditorStart={(index) =>
+          setDraggedEditor({ region: "primary", index })
+        }
+        onDragEditorEnd={() => setDraggedEditor(null)}
       />
       <div
         className={cn("min-h-0 flex-1", !showingChat && "hidden")}
-        id={stripped ? CHAT_PANEL_ID : undefined}
-        role={stripped ? "tabpanel" : undefined}
-        aria-labelledby={stripped ? CHAT_TAB_ID : undefined}
+        id={CHAT_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={CHAT_TAB_ID}
       >
-      <PanelLayout
-        layout={chrome.panels}
-        framed={false}
-        onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
-        onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
-        renderChat={(visible) => (
-          // The panel slot is a plain block. `.chat-pane` claims that height
-          // so `.message-view` can grow and the composer stays at the bottom,
-          // including on an empty transcript.
-          <div className="chat-pane" hidden={!visible || !showingChat}>
-            {fenced && session?.fence_reason && (
-              <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
-                <p>{fenceReasonText(session.fence_reason)}</p>
-                <Button type="button" size="sm" className="self-start" onClick={() => void reap()}>
-                  Reap
-                </Button>
-              </div>
-            )}
-            {!session && workspace?.status === "active" && (
-              <StartSessionPrompt
-                harnesses={doctorHarnesses}
-                starting={starting}
-                selectedMode={createMode}
-                onSelectMode={setCreateMode}
-                client={client}
-                catalogModels={models}
-                defaultModelKey={defaultModelKey}
-                onStart={(harness, mode, message, model) =>
-                  startSession(harness, mode, message, model)
-                }
-              />
-            )}
-            {session && (
-              <CodeSessionPane
-                key={session.id}
-                session={session}
-                workspaceId={workspaceId}
-                client={client}
-                catalogModels={models}
-                defaultModelKey={defaultModelKey}
-                disabled={fenced || workspace?.status !== "active"}
-                onOpenTurnDiff={openTurnDiff}
-              />
-            )}
+        <PanelLayout
+          layout={chrome.panels}
+          framed={false}
+          onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
+          onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
+          renderChat={(visible) => (
+            // The panel slot is a plain block. `.chat-pane` claims that height
+            // so `.message-view` can grow and the composer stays at the bottom,
+            // including on an empty transcript.
+            <div className="chat-pane" hidden={!visible || !showingChat}>
+              {fenced && session?.fence_reason && (
+                <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
+                  <p>{fenceReasonText(session.fence_reason)}</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="self-start"
+                    onClick={() => void reap()}
+                  >
+                    Reap
+                  </Button>
+                </div>
+              )}
+              {!session && workspace?.status === "active" && (
+                <StartSessionPrompt
+                  harnesses={doctorHarnesses}
+                  starting={starting}
+                  selectedMode={createMode}
+                  onSelectMode={setCreateMode}
+                  client={client}
+                  catalogModels={models}
+                  defaultModelKey={defaultModelKey}
+                  onStart={(harness, mode, message, model) =>
+                    startSession(harness, mode, message, model)
+                  }
+                />
+              )}
+              {session && (
+                <CodeSessionPane
+                  key={session.id}
+                  session={session}
+                  workspaceId={workspaceId}
+                  client={client}
+                  catalogModels={models}
+                  defaultModelKey={defaultModelKey}
+                  disabled={fenced || workspace?.status !== "active"}
+                  onOpenTurnDiff={openTurnDiff}
+                />
+              )}
+            </div>
+          )}
+          renderPanel={(panel) =>
+            renderCodePanel(panel, client, workspaceId)
+          }
+        />
+      </div>
+      {!showingChat &&
+        activeEditor &&
+        editorPanel(activeEditor, "primary", chrome.editors.activeIndex)}
+    </div>
+  );
+
+  const splitEditorGroup = activeSplitEditor ? (
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      data-testid="secondary-editor-group"
+      onDragOver={(event) => {
+        if (draggedEditor?.region === "primary") event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        dropDraggedEditor("secondary");
+      }}
+    >
+      <CodeCenterTabs
+        region="secondary"
+        showMainAgent={false}
+        editorTabs={splitEditorTabs}
+        editorActiveIndex={chrome.splitEditors.activeIndex}
+        conversationFocused={false}
+        onSelectChat={() => undefined}
+        onSelectEditor={(index) =>
+          setLayout(focusEditorTab(layout, index, "secondary"))
+        }
+        onCloseEditor={(index) =>
+          setLayout(closeEditorTab(layout, index, "secondary"))
+        }
+        onCloseAllEditors={() => setLayout(closeAllEditorTabs(layout))}
+        onCloseOtherEditors={(index) =>
+          setLayout(closeOtherEditorTabs(layout, index, "secondary"))
+        }
+        onCloseEditorsToRight={(index) =>
+          setLayout(closeEditorTabsToRight(layout, index, "secondary"))
+        }
+        onCopyPath={copyEditorPath}
+        onNewTab={() => requestNewTab("secondary")}
+        onMoveEditorToOtherGroup={(index) =>
+          setLayout(moveEditorTab(layout, "secondary", index, "primary"))
+        }
+        onCloseGroup={() => setLayout(mergeEditorSplit(layout))}
+        onDragEditorStart={(index) =>
+          setDraggedEditor({ region: "secondary", index })
+        }
+        onDragEditorEnd={() => setDraggedEditor(null)}
+      />
+      {editorPanel(
+        activeSplitEditor,
+        "secondary",
+        chrome.splitEditors.activeIndex,
+      )}
+    </div>
+  ) : null;
+
+  const workspaceMain = (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+        {hasEditorSplit ? (
+          <ResizablePanelGroup direction="horizontal" className="h-full min-h-0">
+            <ResizablePanel defaultSize={55} minSize={25} className="min-w-0">
+              {primaryEditorGroup}
+            </ResizablePanel>
+            <ResizableHandle />
+            <ResizablePanel defaultSize={45} minSize={25} className="min-w-0">
+              {splitEditorGroup}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          primaryEditorGroup
+        )}
+        {draggedEditor?.region === "primary" && !hasEditorSplit && (
+          <div
+            data-testid="split-drop-zone"
+            className="border-primary/50 bg-primary/8 text-primary absolute inset-y-3 right-3 z-10 grid w-[min(34%,18rem)] place-items-center rounded-lg border border-dashed text-xs font-medium shadow-sm backdrop-blur-sm"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              dropDraggedEditor("secondary");
+            }}
+          >
+            Drop to split right
           </div>
         )}
-        renderPanel={(panel) =>
-          renderCodePanel(panel, client, workspaceId)
-        }
-      />
       </div>
-      {!showingChat && activeEditor && (
-        <div
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-          id={EDITOR_PANEL_ID}
-          role="tabpanel"
-          aria-labelledby={centerEditorTabId(chrome.editors.activeIndex)}
-        >
-          {activeEditor.type === "file" ? (
-            <Suspense fallback={<Skeleton className="h-full w-full" />}>
-              <FileViewer
-                client={client}
-                workspaceId={workspaceId}
-                path={activeEditor.path}
-                contentRevision={contentRevision}
-                revealLine={
-                  fileReveal?.path === activeEditor.path
-                    ? fileReveal.line
-                    : undefined
-                }
-                revealRevision={fileReveal?.revision}
-              />
-            </Suspense>
-          ) : activeEditor.type === "diff" ? (
-            <DiffPanel
-              client={client}
-              workspaceId={workspaceId}
-              turnId={activeEditor.turnId}
-              file={activeEditor.path}
-              contentRevision={contentRevision}
-              onOpenFile={openFile}
-            />
-          ) : null}
-        </div>
-      )}
       {chrome.terminal && (
         <TerminalDrawer
           client={client}
@@ -416,17 +585,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         client={client}
         workspaceId={workspaceId}
         contentRevision={contentRevision}
-        onOpenFile={openFile}
+        onOpenFile={(path) => openFile(path, undefined, quickOpenTarget)}
+        openRequest={quickOpenRequest}
       />
-      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
         <div className="min-w-0 flex-1">
-          <h1 className="flex min-w-0 items-center gap-2 text-sm font-medium">
+          <h1 className="flex min-w-0 items-center text-sm font-medium">
             {title ? (
-              // The title takes the free space and yields it first: the repo
-              // name and the worktree path are short, fixed facts, and a long
-              // title that squeezed them out would cost the reader the two
-              // things that say which checkout this is.
-              <span className="min-w-0 flex-1 truncate" title={title}>
+              <span
+                className="min-w-0 flex-1 truncate"
+                title={
+                  [title, repoName, workspace?.worktree_path]
+                    .filter(Boolean)
+                    .join(" · ")
+                }
+              >
                 {title}
               </span>
             ) : error ? null : (
@@ -438,19 +611,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 <Skeleton className="h-3 w-16" />
               </span>
             )}
-            {repoName && (
-              <span
-                className="text-muted-foreground max-w-32 shrink-0 truncate text-xs font-normal"
-                title={repoName}
-              >
-                {repoName}
-              </span>
-            )}
-            {workspace && (
-              <WorktreePathChip path={workspace.worktree_path} />
-            )}
           </h1>
         </div>
+        {pr && (
+          <div className="flex min-w-0 flex-1 justify-center">
+            <PrActionBar pr={pr} variant="header" />
+          </div>
+        )}
         <div className="flex shrink-0 items-center gap-2">
           {session && (
             <>
@@ -507,6 +674,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           {workspace && (
             <WorkspaceOverflowMenu
               commands={headerCommands}
+              context={{
+                repoName: repoName ?? undefined,
+                worktreePath: workspace.worktree_path,
+              }}
               onCommand={(command) =>
                 run(command.id, {
                   workspace,
@@ -657,61 +828,6 @@ function SessionLifecycleMark({
   );
 }
 
-function WorktreePathChip({ path }: { path: string }) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
-    "idle",
-  );
-
-  useEffect(() => {
-    if (copyState === "idle") return;
-    return scheduleCopyStateReset(() => setCopyState("idle"));
-  }, [copyState]);
-
-  async function onCopy() {
-    try {
-      await copyPlainText(path);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-  }
-
-  const label =
-    copyState === "copied"
-      ? "Copied"
-      : copyState === "failed"
-        ? "Copy failed"
-        : path;
-
-  return (
-    <>
-      <WithTooltip label={label}>
-        <button
-          type="button"
-          className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground max-w-44 shrink-0 cursor-pointer truncate rounded-md px-1.5 py-0.5 font-mono text-[11px]",
-            FOCUS_RING,
-            HOVER_TINT,
-          )}
-          aria-label={
-            copyState === "idle" ? `Copy worktree path ${path}` : label
-          }
-          onClick={() => void onCopy()}
-        >
-          {middleTruncate(path, 24)}
-        </button>
-      </WithTooltip>
-      <span className="sr-only" role="status" aria-live="polite">
-        {copyState === "copied"
-          ? "Worktree path copied to clipboard."
-          : copyState === "failed"
-            ? "Worktree path could not be copied."
-            : ""}
-      </span>
-    </>
-  );
-}
-
 function PendingApprovalBadge({
   sessionId,
   client,
@@ -809,8 +925,27 @@ function CodeSessionPane({
       session.harness_kind,
       defaultModelKey,
     );
-    return gateway.length > 0 ? gateway : (cachedModels ?? []);
-  }, [cachedModels, catalogModels, defaultModelKey, session.harness_kind]);
+    const listed = gateway.length > 0 ? gateway : (cachedModels ?? []);
+    if (!session.model || listed.some((option) => option.id === session.model)) {
+      return listed;
+    }
+    // Historical or engine-default sessions can name a model that is hidden
+    // from today's catalog. Keep that truthful current model visible instead
+    // of silently labeling the session as whichever row is now default.
+    return [
+      ...harnessCodeModels(
+        [{ id: session.model, label: session.model }],
+        session.harness_kind,
+      ),
+      ...listed,
+    ];
+  }, [
+    cachedModels,
+    catalogModels,
+    defaultModelKey,
+    session.harness_kind,
+    session.model,
+  ]);
   const inferred = modelOptions.find((option) => option.default)?.id;
   const [model, setModel] = useState(session.model ?? inferred);
 

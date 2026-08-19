@@ -19,6 +19,11 @@ import {
 } from "@tanstack/react-router";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import type {
+  CodeSessionSnapshot,
+  CodeWorkspaceSnapshot,
+  PullRequestDigest,
+} from "@/api/types";
 import type { PanelSearch } from "@/panel/panelUrl";
 import { toast } from "sonner";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -74,7 +79,7 @@ vi.mock("react-resizable-panels", () => ({
   PanelResizeHandle: () => <div />,
 }));
 
-const WORKSPACE = {
+const WORKSPACE: CodeWorkspaceSnapshot = {
   id: "ws-1",
   repo_id: "repo-1",
   title: "Fix login",
@@ -95,7 +100,7 @@ const REPO = {
   created_at: "2026-08-15T00:00:00.000Z",
 };
 
-const SESSION = {
+const SESSION: CodeSessionSnapshot = {
   id: "sess-1",
   workspace_id: "ws-1",
   harness_kind: "claude_code" as const,
@@ -125,6 +130,20 @@ const TURN = {
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
   },
+};
+
+const PR: PullRequestDigest = {
+  number: 41,
+  state: "open" as const,
+  title: "Fix login flow",
+  url: "https://github.com/acme/app/pull/41",
+  draft: true,
+  head_branch: "tidebreak/fix-login",
+  base_branch: "main",
+  checks: [
+    { name: "ci / rust", bucket: "pass" as const },
+    { name: "ci / ui", bucket: "pending" as const },
+  ],
 };
 
 function makeClient() {
@@ -192,7 +211,7 @@ function makeClient() {
         }) as unknown as WebSocket,
     ),
     listCodeWorkspaceTree: vi.fn(async () => ({
-      paths: [],
+      paths: [] as string[],
       truncated: false,
     })),
     listCodeWorkspaceFiles: vi.fn(async () => ({
@@ -303,6 +322,13 @@ async function mountWorkspace(
       active: typeof search.active === "string" ? search.active : undefined,
       fullscreen:
         typeof search.fullscreen === "string" ? search.fullscreen : undefined,
+      split: typeof search.split === "string" ? search.split : undefined,
+      splitActive:
+        typeof search.splitActive === "string" ? search.splitActive : undefined,
+      splitFocused:
+        typeof search.splitFocused === "string"
+          ? search.splitFocused
+          : undefined,
       left: typeof search.left === "string" ? search.left : undefined,
       right: typeof search.right === "string" ? search.right : undefined,
     }),
@@ -336,6 +362,7 @@ afterEach(() => {
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({ reviewSidebarOpen: true, inspectorScope: null });
+  useCodeUiStore.setState({ pendingComposerPrompt: null });
 });
 
 describe("CodeWorkspacePage", () => {
@@ -414,6 +441,31 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
+  it("shows the Codex session model even before its native catalog loads", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([
+      {
+        ...SESSION,
+        harness_kind: "codex",
+        model: "gpt-5.6-luna",
+      },
+    ]);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: "codex",
+      models: [],
+    } as never);
+    await mountWorkspace(client);
+
+    const model = await screen.findByRole("button", {
+      name: "Model: GPT 5.6 Luna",
+    });
+    expect(model).toBeDisabled();
+    expect(model).toHaveAttribute(
+      "title",
+      "Model: GPT 5.6 Luna (set when this session started)",
+    );
+  });
+
   it("toggles the review sidebar from the header control", async () => {
     const client = makeClient();
     const user = userEvent.setup();
@@ -445,13 +497,9 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /Fix login/ })).toHaveTextContent(
-        "app",
-      ),
-    );
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    expect(await screen.findByRole("menu")).toHaveTextContent("app");
     await user.click(await screen.findByRole("menuitem", { name: "Run: lint" }));
 
     await waitFor(() =>
@@ -463,6 +511,31 @@ describe("CodeWorkspacePage", () => {
         action: expect.objectContaining({ label: "View output" }),
       }),
     );
+  });
+
+  it("puts compact PR status and quick commands in the workspace header", async () => {
+    const client = makeClient();
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const bar = await screen.findByTestId("pr-action-bar");
+    expect(bar).toHaveAttribute("data-variant", "header");
+    expect(bar.closest("header")).not.toBeNull();
+    expect(bar).toHaveTextContent("#41");
+    expect(bar).toHaveTextContent("Draft");
+    expect(bar).toHaveTextContent("2 checks");
+
+    await user.click(within(bar).getByRole("button", { name: "Merge" }));
+    expect(
+      (screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
+        .value,
+    ).toMatch(/Merge pull request #41/);
+
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("app");
+    expect(menu).toHaveTextContent(WORKSPACE.worktree_path);
   });
 
   it("leaves the archived workspace for its repo", async () => {
@@ -578,7 +651,9 @@ describe("CodeWorkspacePage", () => {
       await screen.findByRole("button", { name: "Review this turn's changes" }),
     );
 
-    expect(await screen.findByRole("tab", { name: "Chat" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("tab", { name: "Main agent" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Turn diff" })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -602,7 +677,7 @@ describe("CodeWorkspacePage", () => {
     );
 
     const diff = await screen.findByRole("tab", { name: "Turn diff" });
-    const chat = screen.getByRole("tab", { name: "Chat" });
+    const chat = screen.getByRole("tab", { name: "Main agent" });
     // One tab stop for the strip, and the panel a tab opens says which tab
     // named it — otherwise the content below is orphaned from the control.
     expect(diff).toHaveAttribute("tabindex", "0");
@@ -678,14 +753,103 @@ describe("CodeWorkspacePage", () => {
       }),
     );
 
-    const chatTab = screen.getByRole("tab", { name: "Chat" });
+    const chatTab = screen.getByRole("tab", { name: "Main agent" });
     fireEvent.contextMenu(chatTab);
     await user.click(
       await screen.findByRole("menuitem", { name: "Close other tabs" }),
     );
     expect(
-      screen.queryByRole("tablist", { name: "Workspace center" }),
+      screen.getByRole("tablist", { name: "Workspace center" }),
+    ).toBeInTheDocument();
+    expect(chatTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("starts on the main-agent tab and opens a file from the visible new-tab control", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceTree.mockResolvedValue({
+      paths: ["README.md", "src/lib.rs"],
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const mainAgent = await screen.findByRole("tab", { name: "Main agent" });
+    expect(mainAgent).toHaveAttribute("aria-selected", "true");
+    const mainPanel = document.getElementById(
+      mainAgent.getAttribute("aria-controls") ?? "",
+    );
+    expect(mainPanel).toHaveAttribute("role", "tabpanel");
+    expect(mainPanel).toHaveAttribute("aria-labelledby", mainAgent.id);
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    const picker = await screen.findByRole("textbox", {
+      name: "Search files by name",
+    });
+    expect(picker).toHaveFocus();
+    await user.click(await screen.findByRole("button", { name: "src/lib.rs" }));
+
+    expect(await screen.findByRole("tab", { name: "lib.rs" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("file-viewer")).toHaveTextContent("src/lib.rs");
+  });
+
+  it("moves and drags file tabs into a reloadable split group", async () => {
+    const client = makeClient();
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=file.src%252Flib.rs,file.src%252Fmain.rs&active=file.src%252Fmain.rs",
+    );
+
+    const mainTab = await screen.findByRole("tab", { name: "main.rs" });
+    fireEvent.contextMenu(mainTab);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Move to split right" }),
+    );
+
+    const splitStrip = await screen.findByRole("tablist", {
+      name: "Workspace split",
+    });
+    expect(
+      within(splitStrip).getByRole("tab", { name: "main.rs" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "file.src%2Flib.rs",
+        split: "file.src%2Fmain.rs",
+        splitFocused: "1",
+      }),
+    );
+
+    await user.click(
+      within(splitStrip).getByRole("button", {
+        name: "Move split tabs to main group",
+      }),
+    );
+    expect(
+      screen.queryByRole("tablist", { name: "Workspace split" }),
     ).not.toBeInTheDocument();
+
+    const libTab = screen.getByRole("tab", { name: "lib.rs" });
+    const dataTransfer = {
+      effectAllowed: "none",
+      setData: vi.fn(),
+    };
+    fireEvent.dragStart(libTab, { dataTransfer });
+    const dropZone = await screen.findByTestId("split-drop-zone");
+    fireEvent.dragOver(dropZone, { dataTransfer });
+    fireEvent.drop(dropZone, { dataTransfer });
+
+    expect(
+      await screen.findByRole("tablist", { name: "Workspace split" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        split: "file.src%2Flib.rs",
+      }),
+    );
   });
 
   it("keeps the jump-to-latest pill out of the tab order until it is on screen", async () => {

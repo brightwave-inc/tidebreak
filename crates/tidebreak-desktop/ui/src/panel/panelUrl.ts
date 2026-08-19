@@ -149,6 +149,12 @@ export type PanelSearch = {
   active?: string;
   /** `"1"` when the region has taken the whole window. */
   fullscreen?: string;
+  /** Code workspace: file/diff tabs in the right editor group. */
+  split?: string;
+  /** Code workspace: the tab showing in the right editor group. */
+  splitActive?: string;
+  /** `"1"` when the right editor group most recently received focus. */
+  splitFocused?: string;
   /**
    * The retired pair-of-slots grammar. Read on the way in so older links and
    * already-open windows still land somewhere; never written back out.
@@ -184,14 +190,39 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
     seen.add(key);
     tabs.push(panel);
   }
-  if (tabs.length === 0) return EMPTY_LAYOUT;
+
+  const splitTabs: PanelContent[] = [];
+  for (const segment of search.split?.split(TAB_SEPARATOR) ?? []) {
+    const panel = parsePanelSegment(segment.trim());
+    if (!panel || (panel.type !== "file" && panel.type !== "diff")) continue;
+    const key = panelKey(panel);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    splitTabs.push(panel);
+  }
+  if (tabs.length === 0 && splitTabs.length === 0) return EMPTY_LAYOUT;
 
   return {
     tabs,
-    activeIndex: activeIndexFromSearch(search, tabs),
+    activeIndex: tabs.length > 0 ? activeIndexFromSearch(search, tabs) : 0,
     fullscreen: isFullscreenParam(search),
     conversationFocused: search.active === "chat" || undefined,
+    editorSplit:
+      splitTabs.length > 0
+        ? {
+            tabs: splitTabs,
+            activeIndex: namedIndex(search.splitActive, splitTabs),
+            focused: search.splitFocused === "1" || undefined,
+          }
+        : undefined,
   };
+}
+
+function namedIndex(segment: string | undefined, tabs: PanelContent[]): number {
+  const named = segment ? parsePanelSegment(segment) : null;
+  if (!named) return 0;
+  const index = tabs.findIndex((tab) => panelKey(tab) === panelKey(named));
+  return index < 0 ? 0 : index;
 }
 
 function activeIndexFromSearch(search: PanelSearch, tabs: PanelContent[]): number {
@@ -224,13 +255,27 @@ function isFullscreenParam(search: PanelSearch): boolean {
  */
 export function searchFromLayout(layout: LayoutState): PanelSearch {
   const cleared = { left: undefined, right: undefined };
-  if (layout.tabs.length === 0) {
-    return { ...cleared, tabs: undefined, active: undefined, fullscreen: undefined };
+  const split = layout.editorSplit;
+  const splitTabs = split?.tabs ?? [];
+  if (layout.tabs.length === 0 && splitTabs.length === 0) {
+    return {
+      ...cleared,
+      tabs: undefined,
+      active: undefined,
+      fullscreen: undefined,
+      split: undefined,
+      splitActive: undefined,
+      splitFocused: undefined,
+    };
   }
   const active = layout.tabs[layout.activeIndex];
+  const splitActive = splitTabs[split?.activeIndex ?? 0];
   return {
     ...cleared,
-    tabs: layout.tabs.map(encodePanelSegment).join(TAB_SEPARATOR),
+    tabs:
+      layout.tabs.length > 0
+        ? layout.tabs.map(encodePanelSegment).join(TAB_SEPARATOR)
+        : undefined,
     // The first tab is the default, so naming it would only lengthen the URL.
     // `chat` keeps file/diff tabs open while the conversation is showing.
     active: layout.conversationFocused
@@ -239,5 +284,14 @@ export function searchFromLayout(layout: LayoutState): PanelSearch {
         ? encodePanelSegment(active)
         : undefined,
     fullscreen: layout.fullscreen ? "1" : undefined,
+    split:
+      splitTabs.length > 0
+        ? splitTabs.map(encodePanelSegment).join(TAB_SEPARATOR)
+        : undefined,
+    splitActive:
+      split && split.activeIndex > 0 && splitActive
+        ? encodePanelSegment(splitActive)
+        : undefined,
+    splitFocused: split?.focused ? "1" : undefined,
   };
 }

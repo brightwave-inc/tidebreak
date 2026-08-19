@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SequencedCodeEventFrame } from "../api/types";
 import {
   acquireCodeSession,
@@ -23,6 +23,7 @@ class FakeSocket {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   resetCodeSessionRegistry();
 });
 
@@ -205,5 +206,68 @@ describe("CodeSessionRegistry", () => {
       attachments: [],
     });
     expect(calls).toBe(2);
+  });
+
+  it("coalesces a large journal replay into one store publication", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const store = acquireCodeSession("s1", openSocket);
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    for (let index = 0; index < 200; index += 1) {
+      sockets[0]?.emit({
+        seq: index + 1,
+        replayed: true,
+        event: { type: "assistant_delta", text: "x" },
+      });
+    }
+
+    // Replay is withheld until one scheduled flush rather than forcing React
+    // through one external-store render for every historical token.
+    expect(store.getState().lastSeq).toBe(0);
+    await vi.runAllTimersAsync();
+    expect(store.getState().lastSeq).toBe(200);
+    expect(store.getState().assistantBuffer).toHaveLength(200);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushes queued replay before the first live frame", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const store = acquireCodeSession("s1", openSocket);
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    sockets[0]?.emit({
+      seq: 1,
+      replayed: true,
+      event: { type: "assistant_delta", text: "old" },
+    });
+    sockets[0]?.emit({
+      seq: 2,
+      event: { type: "assistant_delta", text: "live" },
+    });
+
+    expect(store.getState().lastSeq).toBe(2);
+    expect(store.getState().assistantBuffer).toBe("oldlive");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

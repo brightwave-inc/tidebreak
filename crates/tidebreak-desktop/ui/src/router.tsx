@@ -45,6 +45,9 @@ function panelSearchFrom(search: Record<string, unknown>): PanelSearch {
     tabs: text(search.tabs),
     active: text(search.active),
     fullscreen: text(search.fullscreen),
+    split: text(search.split),
+    splitActive: text(search.splitActive),
+    splitFocused: text(search.splitFocused),
     left: text(search.left),
     right: text(search.right),
   };

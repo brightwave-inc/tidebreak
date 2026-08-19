@@ -79,12 +79,12 @@ export function acquireCodeSession(
   const controller = new CodeSessionController({
     openSocket,
     getAfter: () => store.getState().lastSeq,
-    onEvent: (frame) => {
+    onEvents: (frames) => {
       // A turn the socket announces has no prompt bubble yet: submit answers
       // only when the turn ends, and a queued follow-up is never answered
       // with a turn at all. Pull the snapshot so the transcript shows what
       // the engine is working on while it works.
-      for (const effect of store.getState().applyEvent(frame, deps)) {
+      for (const effect of store.getState().applyEvents(frames, deps)) {
         if (effect.type === "turn_began") fillPrompt(effect.turnId);
       }
     },

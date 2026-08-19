@@ -10,6 +10,9 @@ import {
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
+  mergeEditorSplit,
+  moveEditorTab,
+  openCodeEditor,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
@@ -35,6 +38,7 @@ describe("code chrome layout", () => {
     expect(splitCodeChromeLayout(layout)).toEqual({
       panels: EMPTY_LAYOUT,
       editors: EMPTY_LAYOUT,
+      splitEditors: EMPTY_LAYOUT,
       terminal: { type: "terminal" },
     });
   });
@@ -46,6 +50,9 @@ describe("code chrome layout", () => {
       { type: "agents" },
     ]);
     expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual([]);
+    expect(splitCodeChromeLayout(foldersTerminalAgents).splitEditors.tabs).toEqual(
+      [],
+    );
   });
 
   it("leaves a terminal-only layout as the conversation plus a drawer", () => {
@@ -58,6 +65,7 @@ describe("code chrome layout", () => {
     ).toEqual({
       panels: EMPTY_LAYOUT,
       editors: EMPTY_LAYOUT,
+      splitEditors: EMPTY_LAYOUT,
       terminal: { type: "terminal" },
     });
   });
@@ -181,5 +189,60 @@ describe("code chrome layout", () => {
       activeIndex: 0,
       conversationFocused: undefined,
     });
+  });
+
+  it("moves editor tabs into a durable secondary group and back", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+    };
+
+    const split = moveEditorTab(layout, "primary", 0, "secondary");
+    expect(split.tabs).toEqual([
+      { type: "diff", path: "src/main.rs" },
+      { type: "terminal" },
+    ]);
+    expect(split.editorSplit).toEqual({
+      tabs: [{ type: "file", path: "src/lib.rs" }],
+      activeIndex: 0,
+      focused: true,
+    });
+    expect(splitCodeChromeLayout(split).splitEditors.tabs).toEqual([
+      { type: "file", path: "src/lib.rs" },
+    ]);
+
+    expect(moveEditorTab(split, "secondary", 0, "primary").editorSplit).toBe(
+      undefined,
+    );
+    expect(mergeEditorSplit(split).tabs.filter((tab) => tab.type === "file")).toEqual([
+      { type: "file", path: "src/lib.rs" },
+    ]);
+  });
+
+  it("opens new editors in the group that last received focus", () => {
+    const split = moveEditorTab(
+      {
+        tabs: [{ type: "file", path: "src/lib.rs" }],
+        activeIndex: 0,
+        fullscreen: false,
+      },
+      "primary",
+      0,
+      "secondary",
+    );
+    const opened = openCodeEditor(split, {
+      type: "file",
+      path: "src/main.rs",
+    });
+    expect(opened.editorSplit?.tabs).toEqual([
+      { type: "file", path: "src/lib.rs" },
+      { type: "file", path: "src/main.rs" },
+    ]);
+    expect(opened.editorSplit?.activeIndex).toBe(1);
   });
 });
