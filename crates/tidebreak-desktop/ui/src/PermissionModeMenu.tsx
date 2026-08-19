@@ -176,7 +176,6 @@ export function PermissionModeMenu({
           disabled={controlsDisabled}
           aria-label={`Permissions: ${current.label}`}
           aria-busy={saving}
-          data-first-task-target="permissions"
         >
           <CurrentIcon className="size-4 text-foreground" />
           {current.label}
@@ -203,6 +202,9 @@ export function PermissionModeMenu({
                 void selectMode(option.value);
               }}
               className="flex flex-col items-start gap-0.5 py-3"
+              data-first-task-target={
+                option.value === "ask" ? "permissions-ask" : undefined
+              }
             >
               <div className="flex w-full items-center justify-between">
                 <span className="flex items-center gap-2 font-medium">

@@ -79,6 +79,7 @@ describe("WelcomeState starters", () => {
     const starter = screen.getByRole("button", {
       name: /Brief this week's AI news/,
     });
+    expect(starter).toHaveAttribute("data-first-task-target", "starter-choice");
     await waitFor(() => expect(library.list).toHaveBeenCalled());
     fireEvent.click(starter);
     expect(onSelectPrompt).toHaveBeenCalledWith(

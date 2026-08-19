@@ -165,6 +165,9 @@ it("opens when the first-task walkthrough is on the permissions step", () => {
     <PermissionModeMenu scopeKey="chat-1" value="ask" onChange={vi.fn()} />,
   );
 
-  expect(screen.getByRole("menuitem", { name: /Ask/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Ask/ })).toHaveAttribute(
+    "data-first-task-target",
+    "permissions-ask",
+  );
   expect(screen.getByRole("menuitem", { name: /Plan/ })).toBeInTheDocument();
 });

@@ -15,10 +15,12 @@ export type FirstTaskSurface = "model" | "tools" | "permissions" | null;
 type WalkthroughStep = {
   id: string;
   surface: FirstTaskSurface;
-  /** Opened menu content, preferred once the surface has mounted. */
-  target: string;
-  /** Trigger still in the bar, used before the menu portal exists. */
-  fallbackTarget: string;
+  /**
+   * Boxes that appear for this step, most specific first. The trigger in the
+   * composer bar is not a candidate: it is already on screen, and locking onto
+   * it hides the row the copy is talking about.
+   */
+  targets: readonly string[];
   title: string;
   body: string;
 };
@@ -27,40 +29,35 @@ const STEPS: readonly WalkthroughStep[] = [
   {
     id: "model",
     surface: "model",
-    target: "model-menu",
-    fallbackTarget: "model",
+    targets: ["model-choice", "model-menu"],
     title: "Choose a model",
     body: "The model menu is open. Models differ in speed, reasoning, and the inputs they understand. The current default is a good place to start.",
   },
   {
     id: "internet",
     surface: "tools",
-    target: "tools-menu",
-    fallbackTarget: "tools",
+    targets: ["network", "tools-menu"],
     title: "Set internet access",
     body: "The Tools menu is open. Network is this chat's internet setting. Internet access is what web search and current information need. Leave it off when Tidebreak should use only your message and attachments.",
   },
   {
     id: "permissions",
     surface: "permissions",
-    target: "permissions-menu",
-    fallbackTarget: "permissions",
+    targets: ["permissions-ask", "permissions-menu"],
     title: "Choose a permission level",
     body: "The permission menu is open. Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a balanced place to start.",
   },
   {
     id: "attachments",
     surface: "tools",
-    target: "tools-menu",
-    fallbackTarget: "tools",
+    targets: ["attach-files", "attach-folder", "tools-menu"],
     title: "Add attachments",
     body: "Attach files or a folder from this menu when the task needs your documents. Desktop Tidebreak can read what you attach.",
   },
   {
     id: "starters",
     surface: null,
-    target: "starters",
-    fallbackTarget: "starters",
+    targets: ["starter-choice", "starters"],
     title: "Start a real task",
     body: "These prompts are complete. Pick one and send it to watch Tidebreak search, write, or build. You do not need to attach anything first.",
   },
@@ -129,10 +126,16 @@ function targetSelector(target: string): string {
 }
 
 function resolveTarget(step: WalkthroughStep): HTMLElement | null {
-  return (
-    document.querySelector<HTMLElement>(targetSelector(step.target)) ??
-    document.querySelector<HTMLElement>(targetSelector(step.fallbackTarget))
-  );
+  for (const target of step.targets) {
+    const element = document.querySelector<HTMLElement>(targetSelector(target));
+    if (element) return element;
+  }
+  return null;
+}
+
+function isPreferredTarget(step: WalkthroughStep, element: HTMLElement): boolean {
+  const preferred = step.targets[0];
+  return preferred != null && element.matches(targetSelector(preferred));
 }
 
 function focusComposer(): void {
@@ -228,16 +231,28 @@ export function FirstTaskWalkthrough({
       if (cancelled) return;
       const next = resolveTarget(step);
       if (!next) {
+        if (target) {
+          observer.disconnect();
+          target = null;
+        }
         setRect(null);
         if (frames++ < 30) {
           window.requestAnimationFrame(find);
         }
         return;
       }
-      target = next;
-      next.scrollIntoView({ block: "nearest", inline: "nearest" });
-      measure(next);
-      observer.observe(next);
+      if (target !== next) {
+        if (target) observer.unobserve(target);
+        target = next;
+        next.scrollIntoView({ block: "nearest", inline: "nearest" });
+        measure(next);
+        observer.observe(next);
+      }
+      // The menu portal can land after a fallback row. Keep looking for the
+      // specific box until it mounts or the retry budget runs out.
+      if (!isPreferredTarget(step, next) && frames++ < 30) {
+        window.requestAnimationFrame(find);
+      }
     };
     find();
 
@@ -349,6 +364,7 @@ export function FirstTaskWalkthrough({
             style={{ clipPath: clipPathFor(rect, inset) }}
           />
           <div
+            data-first-task-ring
             className="absolute rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
             style={{
               top: rect.top - inset,
