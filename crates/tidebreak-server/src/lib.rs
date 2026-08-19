@@ -1265,19 +1265,19 @@ async fn bind_inner(
     // below would read the unmigrated profile as unmanaged and clear the
     // very session the import exists to preserve.
     managed_policy::import_legacy_setting(&*provisioned_policy, &*store).await?;
-    // The legacy Anthropic auto-enable is gated on one policy read. A resolution
+    // Legacy credential auto-enable is gated on one policy read. A resolution
     // `Err` is
     // deliberately swallowed as "not allowed": an unreadable policy fails
     // closed to no BYOK arming while boot still proceeds, so the profile can
     // surface the error and be repaired instead of bricking.
     let boot_policy = managed_policy::resolve(&*provisioned_policy, &*os_policy);
     let byok_boot_allowed = matches!(&boot_policy, Ok(policy) if !policy.managed);
-    // Pre-providers installs may only have an env/legacy key — enable Anthropic
-    // so `KeyedResolver`'s enabled check doesn't fail-closed on upgrade. Never
-    // on a managed profile: auto-enabling a BYOK provider would fight the
-    // lockdown.
+    // Credentials can outlive provider settings across an update: legacy
+    // Anthropic keys and ChatGPT OAuth sessions should retain the enabled state
+    // that saving/signing in originally established. Never do this on a managed
+    // profile: auto-enabling a BYOK provider would fight the lockdown.
     if byok_boot_allowed {
-        providers::migrate_legacy_anthropic(&*store, &*secrets).await?;
+        providers::migrate_legacy_provider_enablement(&*store, &*secrets).await?;
     }
     // The additive gateway configuration is retired: carry a managed row's
     // model snapshot forward once, name the remedy for a legacy unmanaged
