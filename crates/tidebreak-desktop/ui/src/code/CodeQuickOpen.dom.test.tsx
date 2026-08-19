@@ -85,4 +85,94 @@ describe("CodeQuickOpen", () => {
     ).toHaveFocus();
     expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(1);
   });
+
+  it("reuses the file list until the worktree revision changes", async () => {
+    const user = userEvent.setup();
+    const client = {
+      listCodeWorkspaceTree: vi.fn(async () => ({
+        paths: ["src/main.rs"],
+        truncated: false,
+      })),
+    };
+    const { rerender } = render(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-1"
+        contentRevision={0}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    expect(
+      await screen.findByRole("button", { name: "src/main.rs" }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    expect(
+      await screen.findByRole("button", { name: "src/main.rs" }),
+    ).toBeInTheDocument();
+    expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(1);
+    await user.keyboard("{Escape}");
+
+    rerender(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-1"
+        contentRevision={1}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    await waitFor(() =>
+      expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("drops filenames when the workspace changes", async () => {
+    let resolveSecond:
+      | ((value: { paths: string[]; truncated: boolean }) => void)
+      | undefined;
+    const client = {
+      listCodeWorkspaceTree: vi
+        .fn()
+        .mockResolvedValueOnce({ paths: ["old.ts"], truncated: false })
+        .mockImplementationOnce(
+          () =>
+            new Promise<{ paths: string[]; truncated: boolean }>((resolve) => {
+              resolveSecond = resolve;
+            }),
+        ),
+    };
+    const { rerender } = render(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-1"
+        contentRevision={0}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    expect(
+      await screen.findByRole("button", { name: "old.ts" }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <CodeQuickOpen
+        client={client}
+        workspaceId="ws-2"
+        contentRevision={0}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    expect(screen.queryByRole("button", { name: "old.ts" })).not.toBeInTheDocument();
+    resolveSecond?.({ paths: ["new.ts"], truncated: false });
+    expect(
+      await screen.findByRole("button", { name: "new.ts" }),
+    ).toBeInTheDocument();
+  });
 });

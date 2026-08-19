@@ -32,18 +32,22 @@ export function CodeQuickOpen({
   openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const [openWorkspaceId, setOpenWorkspaceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const loadedKeyRef = useRef<string | null>(null);
+  const treeKey = `${workspaceId}:${contentRevision}`;
 
   const reveal = useCallback(() => {
     setQuery("");
     setActiveIndex(0);
+    setOpenWorkspaceId(workspaceId);
     setOpen(true);
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     function onQuickOpen(event: KeyboardEvent) {
@@ -61,7 +65,24 @@ export function CodeQuickOpen({
   }, [openRequest, reveal]);
 
   useEffect(() => {
-    if (!open) return;
+    loadedKeyRef.current = null;
+    setPaths([]);
+    setLoading(false);
+    setError(null);
+    setQuery("");
+    setActiveIndex(0);
+    setOpenWorkspaceId(null);
+    setOpen(false);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      openWorkspaceId !== workspaceId ||
+      loadedKeyRef.current === treeKey
+    ) {
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -70,6 +91,7 @@ export function CodeQuickOpen({
       .then((tree) => {
         if (cancelled) return;
         setPaths(tree.paths);
+        loadedKeyRef.current = treeKey;
         setLoading(false);
       })
       .catch((caught) => {
@@ -80,7 +102,7 @@ export function CodeQuickOpen({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceId, open, contentRevision]);
+  }, [client, workspaceId, open, openWorkspaceId, treeKey]);
 
   const results = useMemo(
     () => rankQuickOpenPaths(paths, query).slice(0, VISIBLE_RESULTS),
@@ -98,7 +120,13 @@ export function CodeQuickOpen({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setOpenWorkspaceId(null);
+      }}
+    >
       <DialogContent
         withCloseButton={false}
         className="top-1/2 max-w-2xl gap-0 overflow-hidden rounded-xl p-0 shadow-2xl"
