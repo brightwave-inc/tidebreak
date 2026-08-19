@@ -62,6 +62,7 @@ export function StartSessionPrompt({
   const [picked, setPicked] = useState<HarnessKind | null>(null);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
+  const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const ensureHarnessModels = useCodeCatalogStore((state) => state.ensureHarnessModels);
   const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
@@ -82,6 +83,7 @@ export function StartSessionPrompt({
     if (!selectedKind) {
       setModelOptions([]);
       setModel(undefined);
+      setModelLoading(false);
       return;
     }
     const gateway = gatewayCodeModels(
@@ -92,18 +94,24 @@ export function StartSessionPrompt({
     if (gateway.length > 0) {
       setModelOptions(gateway);
       setModel(gateway.find((option) => option.default)?.id ?? gateway[0]?.id);
+      setModelLoading(false);
       return;
     }
     if (!client) {
       setModelOptions([]);
       setModel(undefined);
+      setModelLoading(false);
       return;
     }
+    setModelOptions([]);
+    setModel(undefined);
+    setModelLoading(true);
     let cancelled = false;
     void ensureHarnessModels(client, selectedKind).then((listed) => {
       if (cancelled) return;
       setModelOptions(listed);
       setModel(listed.find((option) => option.default)?.id ?? listed[0]?.id);
+      setModelLoading(false);
     });
     return () => {
       cancelled = true;
@@ -130,7 +138,12 @@ export function StartSessionPrompt({
           harnesses={harnesses}
           value={selected?.kind ?? null}
           disabled={starting}
-          onChange={setPicked}
+          onChange={(next) => {
+            setModelOptions([]);
+            setModel(undefined);
+            setModelLoading(true);
+            setPicked(next);
+          }}
         />
         {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
           <p className="text-muted-foreground text-xs">{UNSUPERVISED_AUTO_NOTE}</p>
@@ -148,6 +161,7 @@ export function StartSessionPrompt({
           harness={selected?.kind}
           model={model}
           modelOptions={modelOptions}
+          modelLoading={modelLoading}
           onModelChange={setModel}
           onModeChange={onSelectMode}
           onSend={async (message) => {

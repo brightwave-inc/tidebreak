@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, screen } from "@testing-library/react";
+import { act, cleanup, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -82,6 +82,14 @@ function entry(
     stderr: "",
     unrecognized_event_count: 0,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe("StartSessionPrompt", () => {
@@ -211,6 +219,61 @@ describe("StartSessionPrompt", () => {
       "list the files",
       "claude-opus-5",
     );
+  });
+
+  it("never carries a model across a harness switch", async () => {
+    const user = userEvent.setup();
+    const codex = deferred<{
+      kind: "codex";
+      models: { id: string; label: string; default: boolean }[];
+    }>();
+    const client = {
+      listCodeHarnessModels: vi.fn((kind: HarnessDoctorEntry["kind"]) =>
+        kind === "codex"
+          ? codex.promise
+          : Promise.resolve({
+              kind: "claude_code" as const,
+              models: [{ id: "sonnet", label: "Sonnet", default: true }],
+            }),
+      ),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          harnesses={[entry("claude_code", {}), entry("codex", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+          client={client}
+        />,
+      ),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Sonnet" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
+
+    expect(
+      screen.queryByRole("button", { name: "Model: Sonnet" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Loading models" }),
+    ).toBeDisabled();
+
+    await act(async () => {
+      codex.resolve({
+        kind: "codex",
+        models: [
+          { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
+        ],
+      });
+    });
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Luna" }),
+    ).toBeInTheDocument();
   });
 
   it("narrows to a picked mode", async () => {

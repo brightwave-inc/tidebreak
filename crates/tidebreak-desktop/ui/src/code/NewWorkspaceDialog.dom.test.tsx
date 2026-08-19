@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -120,6 +120,14 @@ function app(client: Partial<AppContextValue["client"]>): AppContextValue {
     }),
     restartForUpdate: async () => {},
   } as AppContextValue;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe("NewWorkspaceDialog", () => {
@@ -245,6 +253,61 @@ describe("NewWorkspaceDialog", () => {
       "Model",
       "Permission mode",
     ]);
+  });
+
+  it("drops the previous harness model while the next catalog loads", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code"), harness("codex")],
+        notices: [],
+      } as never,
+    });
+    const codex = deferred<{
+      kind: "codex";
+      models: { id: string; label: string; default: boolean }[];
+    }>();
+    const listCodeHarnessModels = vi.fn((kind: HarnessKind) =>
+      kind === "codex"
+        ? codex.promise
+        : Promise.resolve({
+            kind: "claude_code" as const,
+            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+          }),
+    );
+    await renderWithRouter(
+      <AppContextProvider value={app({ listCodeHarnessModels })}>
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    expect(
+      await screen.findByRole("button", { name: "Model: Sonnet" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
+
+    expect(
+      screen.queryByRole("button", { name: "Model: Sonnet" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Loading models" }),
+    ).toBeDisabled();
+
+    await act(async () => {
+      codex.resolve({
+        kind: "codex",
+        models: [
+          { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
+        ],
+      });
+    });
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Luna" }),
+    ).toBeEnabled();
   });
 
   it("keeps the repo picker enabled when opened from a repo", async () => {

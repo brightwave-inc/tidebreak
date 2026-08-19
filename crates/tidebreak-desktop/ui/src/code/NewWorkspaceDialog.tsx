@@ -123,6 +123,7 @@ export function NewWorkspaceDialog({
   const [creating, setCreating] = useState(false);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
+  const [modelLoading, setModelLoading] = useState(false);
   const repoTrigger = useRef<HTMLButtonElement>(null);
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
 
@@ -153,6 +154,8 @@ export function NewWorkspaceDialog({
     setPickedHarness(null);
     setPermissionMode(null);
     setModel(undefined);
+    setModelOptions([]);
+    setModelLoading(false);
     // Reset against the dialog opening, not against catalog refreshes
     // mid-open — a workspace created elsewhere must not move this form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -188,13 +191,18 @@ export function NewWorkspaceDialog({
     if (gateway.length > 0) {
       setModelOptions(gateway);
       setModel(pick(gateway));
+      setModelLoading(false);
       return;
     }
+    setModelOptions([]);
+    setModel(undefined);
+    setModelLoading(true);
     let cancelled = false;
     void ensureHarnessModels(client, harness).then((listed) => {
       if (cancelled) return;
       setModelOptions(listed);
       setModel(pick(listed));
+      setModelLoading(false);
     });
     return () => {
       cancelled = true;
@@ -317,7 +325,12 @@ export function NewWorkspaceDialog({
             <HarnessPicker
               harnesses={allHarnesses}
               value={harness}
-              onChange={setPickedHarness}
+              onChange={(next) => {
+                setModelOptions([]);
+                setModel(undefined);
+                setModelLoading(true);
+                setPickedHarness(next);
+              }}
               disabled={creating}
             />
           </div>
@@ -328,6 +341,7 @@ export function NewWorkspaceDialog({
               options={modelOptions}
               value={model}
               onChange={setModel}
+              loading={modelLoading}
               disabled={creating}
               variant="field"
             />
