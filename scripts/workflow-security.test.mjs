@@ -473,6 +473,40 @@ test("PR lanes are scope-gated, never label-gated", () => {
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
 
+test("engineering approval is a trusted base-branch check", () => {
+  const workflow = workflows["engineering-approval.yml"];
+  const approval = workflowJob(workflow, "approval");
+
+  assert.match(
+    workflow,
+    /^on:\n(?:  #.*\n)+  pull_request_target:\n    types:\n/m,
+  );
+  assert.match(workflow, /^  pull_request_review:\n    types: /m);
+  assert.match(workflow, /^  merge_group:\n/m);
+  assert.match(workflow, /^permissions:\n  contents: read\n/m);
+  assert.doesNotMatch(workflow, /secrets\./);
+  assert.doesNotMatch(workflow, /^\s*pull_request:\n/m);
+  assert.match(
+    approval,
+    /github\.event_name == 'pull_request_target' \|\| github\.event_name == 'pull_request_review' \|\| github\.event_name == 'merge_group'/,
+  );
+  assert.match(approval, /ref: \$\{\{ github\.workflow_sha \}\}/);
+  assert.doesNotMatch(
+    approval,
+    /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/,
+  );
+  assert.match(
+    approval,
+    /PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/,
+  );
+  assert.match(approval, /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/);
+  assert.match(approval, /node scripts\/check-engineering-approval\.mjs/);
+  assert.match(
+    approval,
+    /echo "Merge groups reuse the pull request approval check\."/,
+  );
+});
+
 test("merge queue groups re-run required CI", () => {
   const ci = workflows["ci.yml"];
   const changes = workflowJob(ci, "changes");

@@ -1,0 +1,48 @@
+name: Engineering approval
+
+on:
+  # Trusted default-branch workflow. Forks cannot delete this job. Checkout is
+  # the commit that contains this workflow file, never the pull request head.
+  pull_request_target:
+    types:
+      [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted, dismissed, edited]
+  # Required checks must report on speculative merge groups or the queue stalls.
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engineering-approval-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+jobs:
+  approval:
+    name: engineering approval
+    if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'pull_request_review' || github.event_name == 'merge_group' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Accept merge groups already gated on the pull request
+        if: ${{ github.event_name == 'merge_group' }}
+        run: echo "Merge groups reuse the pull request approval check."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ github.event_name != 'merge_group' }}
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require a writer approval for non-maintainers
+        if: ${{ github.event_name != 'merge_group' }}
+        env:
+          CANONICAL_REPOSITORY: brightwave-inc/tidebreak
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/check-engineering-approval.mjs

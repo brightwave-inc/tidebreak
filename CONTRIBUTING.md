@@ -133,6 +133,10 @@ queue or enable auto-merge. GitHub groups ready pull requests, runs the
 required checks on that combined tree, and squash-merges the group if those
 checks pass.
 
+A pull request whose author cannot write to the repository needs an approving
+review from someone who can, on the current head commit, before it can enter
+the queue. Maintainers can enable auto-merge without a second review.
+
 You do not need to rebase onto `main` first. If the group fails, GitHub
 removes the pull request that broke it. Rebase, fix, and queue it again.
 
