@@ -36,6 +36,7 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { CodeTurnSubmission } from "./parsers";
+import { useCodeUiStore } from "./CodeUiStore";
 import {
   codeModelVendor,
   groupCodeModelOptions,
@@ -529,6 +530,20 @@ export function CodeComposer({
           loadPromptBody: async (name: string) => `/${name}`,
         }
       : undefined;
+
+  const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
+
+  useEffect(() => {
+    if (!pendingPrompt) return;
+    const text = useCodeUiStore.getState().takeComposerPrompt();
+    if (!text) return;
+    setDraft(text);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+        ?.focus();
+    });
+  }, [pendingPrompt]);
 
   useEffect(() => {
     if (model) setSelectedModel(model);

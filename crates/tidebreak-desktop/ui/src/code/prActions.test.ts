@@ -1,0 +1,82 @@
+import { describe, expect, it } from "vitest";
+
+import type { PullRequestDigest } from "../api/types";
+import { prBarModel, prBarPrompt, prHasConflicts } from "./prActions";
+
+function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
+  return {
+    number: 41,
+    state: "open",
+    ...partial,
+  };
+}
+
+describe("prBarModel", () => {
+  it("offers merge when the PR is open and clean", () => {
+    const model = prBarModel(
+      pr({
+        checks: [{ name: "ci", bucket: "pass" }],
+      }),
+    );
+    expect(model.status).toBe("Ready to merge");
+    expect(model.actions[0]).toBe("merge");
+    expect(model.actions).toEqual([
+      "merge",
+      "fix_errors",
+      "resolve_conflicts",
+    ]);
+    expect(model.checks).toEqual({
+      passing: 1,
+      pending: 0,
+      failing: 0,
+      total: 1,
+    });
+  });
+
+  it("leads with fix errors when a check is failing", () => {
+    const model = prBarModel(
+      pr({
+        checks: [
+          { name: "ci / rust", bucket: "fail" },
+          { name: "ci / ui", bucket: "pass" },
+        ],
+      }),
+    );
+    expect(model.status).toBe("1 check failing");
+    expect(model.actions[0]).toBe("fix_errors");
+  });
+
+  it("leads with resolve conflicts when the host reports a conflict", () => {
+    const model = prBarModel(pr({ mergeable: "CONFLICTING" }));
+    expect(prHasConflicts(pr({ mergeable: "CONFLICTING" }))).toBe(true);
+    expect(model.status).toBe("Conflicts");
+    expect(model.actions[0]).toBe("resolve_conflicts");
+  });
+
+  it("names a draft even when checks are still pending", () => {
+    const model = prBarModel(
+      pr({
+        draft: true,
+        checks: [{ name: "ci", bucket: "pending" }],
+      }),
+    );
+    expect(model.status).toBe("Draft");
+    expect(model.actions[0]).toBe("merge");
+  });
+
+  it("hides actions on a merged PR", () => {
+    const model = prBarModel(pr({ state: "merged", merged: true }));
+    expect(model.status).toBe("Merged");
+    expect(model.actions).toEqual([]);
+  });
+});
+
+describe("prBarPrompt", () => {
+  it("names the PR and the base branch", () => {
+    const digest = pr({ base_branch: "main", title: "Fix login" });
+    expect(prBarPrompt("merge", digest)).toMatch(/#41/);
+    expect(prBarPrompt("merge", digest)).toMatch(/main/);
+    expect(prBarPrompt("fix_errors", digest)).toMatch(/failing checks/);
+    expect(prBarPrompt("resolve_conflicts", digest)).toMatch(/conflicts/);
+  });
+});

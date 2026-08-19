@@ -11,12 +11,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeComposer } from "./CodeComposer";
+import { useCodeUiStore } from "./CodeUiStore";
 import { HttpError } from "../api/client";
 import { useUiStore } from "../UiStore";
 
 afterEach(() => {
   cleanup();
   useUiStore.setState({ activeTurnSendMode: "queue" });
+  useCodeUiStore.setState({ pendingComposerPrompt: null });
 });
 
 const QUEUED = {
@@ -25,6 +27,23 @@ const QUEUED = {
 };
 
 describe("CodeComposer", () => {
+  it("inserts a pending inspector prompt into the draft", async () => {
+    useCodeUiStore.getState().offerComposerPrompt("Merge pull request #41.");
+    render(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "Merge pull request #41.",
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
   it("states the session's mode in the composer", () => {
     render(
       <CodeComposer

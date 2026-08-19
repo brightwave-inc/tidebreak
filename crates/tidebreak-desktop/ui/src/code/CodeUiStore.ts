@@ -168,6 +168,13 @@ export type CodeUiStore = {
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
   setTerminalDrawerHeight: (workspaceId: string, height: number) => void;
+  /**
+   * Prompt waiting for the code composer. The inspector bar writes; the
+   * composer takes and clears so a remount cannot insert twice.
+   */
+  pendingComposerPrompt: string | null;
+  offerComposerPrompt: (prompt: string) => void;
+  takeComposerPrompt: () => string | null;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set) => ({
@@ -179,6 +186,14 @@ export const useCodeUiStore = create<CodeUiStore>()((set) => ({
   workspaceSortMode: readStoredWorkspaceSort(),
   lastCreate: readStoredCreateDefaults(),
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
+  pendingComposerPrompt: null,
+  offerComposerPrompt: (prompt) => set({ pendingComposerPrompt: prompt }),
+  takeComposerPrompt: () => {
+    const prompt = useCodeUiStore.getState().pendingComposerPrompt;
+    if (!prompt) return null;
+    set({ pendingComposerPrompt: null });
+    return prompt;
+  },
   startNewWorkspace: (repoId) => {
     const { repos } = useCodeCatalogStore.getState();
     if (repos.length === 0) {
