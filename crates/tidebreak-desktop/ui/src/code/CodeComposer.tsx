@@ -13,6 +13,7 @@ import { Composer } from "../Composer";
 import { IMAGE_MEDIA_TYPES } from "../ImageAttachments";
 import { useImageAttachments } from "../useImageAttachments";
 import { reasoningEffortOptions } from "../ModelMenu";
+import { familyForModelId } from "../modelFamilies";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import {
   ClaudeIcon,
@@ -102,7 +103,7 @@ const HARNESS_ICONS: Record<
   grok: XaiIcon,
 };
 
-/** The mark for one picker row: its vendor, or the engine's own mark. */
+/** The mark for one picker row: vendor, then open-model family, then the engine. */
 function CodeModelMark({
   harness,
   option,
@@ -113,9 +114,13 @@ function CodeModelMark({
   className?: string;
 }) {
   const vendor = codeModelVendor(option);
-  if (vendor) {
+  if (vendor || familyForModelId(option.id)) {
     return (
-      <ProviderIcon provider={vendor} modelId={option.id} className={className} />
+      <ProviderIcon
+        provider={vendor ?? "model_gateway"}
+        modelId={option.id}
+        className={className}
+      />
     );
   }
   const Icon = HARNESS_ICONS[harness];

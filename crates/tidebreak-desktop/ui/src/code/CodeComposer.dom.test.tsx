@@ -11,11 +11,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import { CodeComposer } from "./CodeComposer";
+import { CodeComposer, HarnessModelMenu } from "./CodeComposer";
 import { useCodeUiStore } from "./CodeUiStore";
 import { HttpError } from "../api/client";
 import { useComposerDrafts } from "../ComposerDrafts";
+import { OpenAIIcon, ProviderIcon } from "../ProviderIcons";
 import { useUiStore } from "../UiStore";
 
 function app(): AppContextValue {
@@ -570,6 +572,37 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe("HarnessModelMenu", () => {
+  it("brands an open-model row by its family, not the engine", () => {
+    const option = {
+      id: "deepseek-v4-flash-0731",
+      label: "DeepSeek V4 Flash 0731",
+      source: "Codex CLI",
+    };
+    const markup = renderToStaticMarkup(
+      <HarnessModelMenu
+        harness="codex"
+        options={[option]}
+        value={option.id}
+        onChange={() => {}}
+        variant="field"
+      />,
+    );
+    expect(markup).toContain(
+      renderToStaticMarkup(
+        <ProviderIcon
+          provider="model_gateway"
+          modelId={option.id}
+          className="size-4 shrink-0"
+        />,
+      ),
+    );
+    expect(markup).not.toContain(
+      renderToStaticMarkup(<OpenAIIcon className="size-4 shrink-0" />),
+    );
   });
 });
 
