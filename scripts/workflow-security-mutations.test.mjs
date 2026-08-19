@@ -515,6 +515,16 @@ const mutations = [
         "Tidebreak-macos-legacy.dmg",
       ),
   },
+  {
+    name: "engineering approval checks out the pull request head",
+    file: ".github/workflows/engineering-approval.yml",
+    expected: "engineering approval is a trusted base-branch check",
+    mutate: (source) =>
+      source.replace(
+        "ref: ${{ github.event.pull_request.base.sha }}",
+        "ref: ${{ github.event.pull_request.head.sha }}",
+      ),
+  },
 ];
 
 test("workflow-security controls fail closed under targeted mutations", async (t) => {
