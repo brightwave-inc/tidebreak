@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot } from "../api/types";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,7 @@ export function CodeApprovalCard({
   const [denying, setDenying] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [payloadOpen, setPayloadOpen] = useState(false);
+  const payloadId = useId();
   const decided = approval.state !== "pending";
 
   useEffect(() => {
@@ -68,6 +69,7 @@ export function CodeApprovalCard({
             HOVER_TINT,
           )}
           aria-expanded={payloadOpen}
+          aria-controls={payloadOpen ? payloadId : undefined}
           onClick={() => {
             onReveal?.();
             setPayloadOpen((current) => !current);
@@ -82,7 +84,10 @@ export function CodeApprovalCard({
             wrapping asked for here never applied and a single long JSON line
             scrolled sideways instead.
           */}
-          <ScrollableContainer className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-[11px] break-words whitespace-pre-wrap">
+          <ScrollableContainer
+            id={payloadId}
+            className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-[11px] break-words whitespace-pre-wrap"
+          >
             {prettyRaw(approval.harness_raw_json)}
           </ScrollableContainer>
         </Reveal>

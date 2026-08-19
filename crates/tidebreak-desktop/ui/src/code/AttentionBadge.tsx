@@ -35,6 +35,10 @@ export function AttentionBadge({
           tone === "info" && "bg-info-foreground-muted",
           className,
         )}
+        // A dot with no text is only a state if something says which one. On a
+        // bare `span` the label would be dropped; `img` is the role that takes
+        // a name and has no children to read.
+        role="img"
         aria-label={label}
         title={tooltip}
         data-attention={attention.state.type}

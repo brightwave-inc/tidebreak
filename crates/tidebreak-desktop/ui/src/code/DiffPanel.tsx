@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
@@ -152,65 +152,77 @@ function FileDiffSection({
 }) {
   const large = group.lines.length > DIFF_COLLAPSE_LINE_THRESHOLD;
   const [expanded, setExpanded] = useState(!large);
+  const bodyId = useId();
   const { insertions, deletions } = fileDiffstat(group.lines);
 
   return (
     <section className="border-b last:border-b-0">
-      <header className="bg-background sticky top-0 z-10">
-        <button
-          type="button"
-          className={cn(
-            "hover:bg-muted/40 flex w-full cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left",
-            FOCUS_RING_TIGHT,
-            HOVER_TINT,
-          )}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          <ChevronRight
+      {/*
+        The disclosure and "Open" are two controls, not one nested in the
+        other: a button inside a button is neither reachable nor announceable,
+        and the disclosure's name swallowed the word "Open" along with the
+        counts. They sit side by side and read as one row.
+      */}
+      <header className="bg-background sticky top-0 z-10 flex items-center gap-1.5 pr-3">
+        {/*
+          The heading wraps the disclosure rather than sitting inside it: a
+          heading is how a reader jumps between files, and a button is how they
+          open one. Nesting either in the other loses one of the two.
+        */}
+        <h3 className="min-w-0 flex-1">
+          <button
+            type="button"
             className={cn(
-              "text-muted-foreground size-3 shrink-0 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
-              expanded && "rotate-90",
+              "hover:bg-muted/40 flex w-full min-w-0 cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left",
+              FOCUS_RING_TIGHT,
+              HOVER_TINT,
             )}
-            aria-hidden="true"
-          />
-          <h3
-            className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs"
-            title={group.path}
+            aria-expanded={expanded}
+            aria-controls={expanded ? bodyId : undefined}
+            onClick={() => setExpanded((current) => !current)}
           >
-            {group.path}
-          </h3>
-          {onOpenFile && (
-            <span
-              role="link"
-              tabIndex={0}
+            <ChevronRight
               className={cn(
-                "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm text-[11px] underline-offset-2 hover:underline",
-                FOCUS_RING_TIGHT,
-                HOVER_TINT,
+                "text-muted-foreground size-3 shrink-0 transition-transform duration-[140ms] ease-out motion-reduce:transition-none",
+                expanded && "rotate-90",
               )}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenFile(group.path);
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenFile(group.path);
-              }}
+              aria-hidden="true"
+            />
+            <span
+              className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs"
+              title={group.path}
             >
-              Open
+              {group.path}
             </span>
-          )}
-          <span className="shrink-0 font-mono text-[11px] tabular-nums">
-            <span className="text-success">+{insertions}</span>{" "}
-            <span className="text-critical">−{deletions}</span>
-          </span>
-        </button>
+          </button>
+        </h3>
+        {onOpenFile && (
+          <button
+            type="button"
+            // The visible word is enough beside its own file name; a reader
+            // tabbing or listing controls gets one "Open" per file and needs
+            // the path to tell them apart.
+            aria-label={`Open ${group.path}`}
+            className={cn(
+              "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm text-[11px] underline-offset-2 hover:underline",
+              FOCUS_RING_TIGHT,
+              HOVER_TINT,
+            )}
+            onClick={() => onOpenFile(group.path)}
+          >
+            Open
+          </button>
+        )}
+        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+          <span className="text-success">+{insertions}</span>{" "}
+          <span className="text-critical">−{deletions}</span>
+        </span>
       </header>
       {expanded ? (
-        <pre className="overflow-x-auto py-1 font-mono text-xs leading-5">
+        <pre
+          id={bodyId}
+          className="overflow-x-auto py-1 font-mono text-xs leading-5"
+        >
           {group.lines.map((line, index) => (
             <DiffLineRow
               key={`${group.path}:${index}`}
@@ -221,6 +233,7 @@ function FileDiffSection({
       ) : large ? (
         <button
           type="button"
+          aria-label={`Show diff for ${group.path}`}
           className={cn(
             "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm px-3 py-2 text-xs",
             FOCUS_RING_TIGHT,

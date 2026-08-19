@@ -129,6 +129,11 @@ describe("TerminalPane", () => {
     expect(await screen.findByTestId("terminal-truncated")).toHaveTextContent(
       "Output was truncated.",
     );
+    // xterm owns everything inside the host, so the host is the only place
+    // that can name the surface. A label on a bare div names nothing.
+    expect(screen.getByRole("group", { name: "Terminal output" })).toBe(
+      screen.getByTestId("terminal-host"),
+    );
   });
 
   it("says the shell is opening until it answers, then gets out of the way", async () => {

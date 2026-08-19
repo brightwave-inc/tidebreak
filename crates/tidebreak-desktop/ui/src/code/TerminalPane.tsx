@@ -411,6 +411,10 @@ export function TerminalPane({
           ref={hostRef}
           className="h-full"
           data-testid="terminal-host"
+          // xterm builds its own tree inside this host; the host itself is a
+          // plain div, so it needs a role that takes a name before the label
+          // reaches anyone.
+          role="group"
           aria-label="Terminal output"
         />
         {!attached && !error && (

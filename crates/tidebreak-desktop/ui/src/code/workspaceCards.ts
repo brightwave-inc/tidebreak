@@ -1,9 +1,10 @@
 import type {
+  Attention,
   CodeRepoSnapshot,
   CodeSessionDigest,
   CodeWorkspaceSnapshot,
 } from "../api/types";
-import { LIFECYCLE_LABELS } from "./labels";
+import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
 
 /**
  * Pure presentation logic for workspace cards: grouping by repo, the state
@@ -243,6 +244,35 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
     default:
       return LIFECYCLE_LABELS[digest.lifecycle];
   }
+}
+
+/**
+ * The whole card as one line, for readers who get the name and nothing else.
+ *
+ * A card is a title, a state, and two identifiers spread across three rows and
+ * a glyph rail. Left to compose itself the button would announce only its
+ * title — the state glyphs are the point of the rail, and a triage read that
+ * cannot hear "needs you" is not a triage read. Order follows the card: what
+ * it is, then what it wants, then which checkout it is.
+ */
+export function workspaceCardLabel(input: {
+  title: string;
+  repoName: string;
+  branchName: string;
+  attention?: Attention;
+  pr?: { number: number; state: string; draft?: boolean };
+  terminalOpen?: boolean;
+}): string {
+  const parts = [input.title];
+  if (input.attention && input.attention.state.type !== "working") {
+    parts.push(attentionLabel(input.attention));
+  }
+  if (input.pr) {
+    parts.push(`Pull request #${input.pr.number} ${prToneLabel(input.pr)}`);
+  }
+  if (input.terminalOpen) parts.push("Terminal open");
+  parts.push(input.repoName, input.branchName);
+  return parts.join(" · ");
 }
 
 /**

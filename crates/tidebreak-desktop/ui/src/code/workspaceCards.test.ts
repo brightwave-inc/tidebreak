@@ -12,6 +12,7 @@ import {
   groupWorkspacesByRepo,
   middleTruncate,
   prChipTone,
+  workspaceCardLabel,
   workspaceStatusRank,
 } from "./workspaceCards";
 
@@ -267,5 +268,40 @@ describe("formatCompactAge", () => {
     expect(formatCompactAge("2026-08-18T11:48:00.000Z", now)).toBe("12m");
     expect(formatCompactAge("2026-08-18T09:00:00.000Z", now)).toBe("3h");
     expect(formatCompactAge("2026-08-16T12:00:00.000Z", now)).toBe("2d");
+  });
+});
+
+describe("workspaceCardLabel", () => {
+  it("carries the state the glyph rail shows, in card order", () => {
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: {
+          state: {
+            type: "needs_you",
+            prompt: "Run this command?",
+            source: "structured",
+          },
+          source: "structured",
+        },
+        pr: { number: 12, state: "open" },
+        terminalOpen: true,
+      }),
+    ).toBe(
+      "Fix login · Run this command? · Pull request #12 Open · Terminal open · app · tidebreak/fix-login",
+    );
+  });
+
+  it("says nothing about state a working session does not have", () => {
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: { state: { type: "working" }, source: "lifecycle" },
+      }),
+    ).toBe("Fix login · app · tidebreak/fix-login");
   });
 });

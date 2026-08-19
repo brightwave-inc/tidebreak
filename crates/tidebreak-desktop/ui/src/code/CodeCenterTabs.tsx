@@ -1,8 +1,20 @@
+import { useRef, type KeyboardEvent } from "react";
 import { FileCode, FileDiff, MessageSquare, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+
+/** Ids the strip and the two center panels agree on, so tabs name panels. */
+export const CHAT_TAB_ID = "code-center-tab-chat";
+export const CHAT_PANEL_ID = "code-center-panel-chat";
+export const EDITOR_PANEL_ID = "code-center-panel-editor";
+const editorTabId = (index: number) => `code-center-tab-editor-${index}`;
+
+/** Which tab labels the editor panel right now. */
+export function centerEditorTabId(index: number): string {
+  return editorTabId(index);
+}
 
 /**
  * Center strip: Chat is always first and cannot close. File and diff tabs
@@ -23,7 +35,38 @@ export function CodeCenterTabs({
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;
 }) {
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
   if (editorTabs.length === 0) return null;
+
+  /**
+   * The tabs pattern: one tab stop for the strip, arrows to move between
+   * tabs. Selection follows focus here because both are cheap — moving to a
+   * tab is what opening it means.
+   */
+  function select(position: number) {
+    const last = editorTabs.length;
+    const wrapped = position < 0 ? last : position > last ? 0 : position;
+    if (wrapped === 0) onSelectChat();
+    else onSelectEditor(wrapped - 1);
+    tabRefs.current[wrapped]?.focus();
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, position: number) {
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      select(position + 1);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      select(position - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      select(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      select(editorTabs.length);
+    }
+  }
 
   return (
     <div
@@ -34,7 +77,13 @@ export function CodeCenterTabs({
       <button
         type="button"
         role="tab"
+        id={CHAT_TAB_ID}
         aria-selected={conversationFocused}
+        aria-controls={CHAT_PANEL_ID}
+        tabIndex={conversationFocused ? 0 : -1}
+        ref={(node) => {
+          tabRefs.current[0] = node;
+        }}
         className={cn(
           "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
           FOCUS_RING_TIGHT,
@@ -44,6 +93,7 @@ export function CodeCenterTabs({
             : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
         )}
         onClick={onSelectChat}
+        onKeyDown={(event) => onKeyDown(event, 0)}
       >
         <MessageSquare className="size-3.5" />
         Chat
@@ -53,8 +103,12 @@ export function CodeCenterTabs({
         const { name, suffix } = centerTabParts(panel);
         const label = suffix ? `${name} ${suffix}` : name;
         return (
+          // A tablist owns tabs. The close control is a second control on the
+          // same row, so the box that pairs them has to be transparent to
+          // assistive tech rather than a stray group inside the list.
           <div
             key={panelKey(panel)}
+            role="presentation"
             className={cn(
               "flex min-w-0 shrink-0 items-center rounded-md pr-1",
               HOVER_TINT,
@@ -64,7 +118,13 @@ export function CodeCenterTabs({
             <button
               type="button"
               role="tab"
+              id={editorTabId(index)}
               aria-selected={active}
+              aria-controls={EDITOR_PANEL_ID}
+              tabIndex={active ? 0 : -1}
+              ref={(node) => {
+                tabRefs.current[index + 1] = node;
+              }}
               className={cn(
                 "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
                 FOCUS_RING_TIGHT,
@@ -72,6 +132,7 @@ export function CodeCenterTabs({
                 active ? "text-foreground" : "text-muted-foreground",
               )}
               onClick={() => onSelectEditor(index)}
+              onKeyDown={(event) => onKeyDown(event, index + 1)}
             >
               {panel.type === "diff" ? (
                 <FileDiff className="size-3.5 shrink-0" />

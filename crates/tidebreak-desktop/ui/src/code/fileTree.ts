@@ -69,6 +69,43 @@ function sortTree(nodes: FileTreeNode[]): void {
   }
 }
 
+/** One row the explorer currently draws, with what arrow keys need to move. */
+export type VisibleTreeRow = {
+  node: FileTreeNode;
+  depth: number;
+  /** Owning directory path, or null at the root. */
+  parent: string | null;
+  expanded: boolean;
+};
+
+/**
+ * The tree as the reader sees it: one entry per drawn row, in document order.
+ *
+ * Arrow-key navigation moves between rows rather than between siblings, so it
+ * needs the collapsed subtrees already gone and each row's depth and parent
+ * carried alongside. Deriving that here keeps the key handler free of the
+ * recursion the renderer does.
+ */
+export function flattenVisibleTree(
+  nodes: readonly FileTreeNode[],
+  isOpen: (path: string) => boolean,
+): VisibleTreeRow[] {
+  const rows: VisibleTreeRow[] = [];
+  const walk = (
+    list: readonly FileTreeNode[],
+    depth: number,
+    parent: string | null,
+  ) => {
+    for (const node of list) {
+      const expanded = node.kind === "dir" && isOpen(node.path);
+      rows.push({ node, depth, parent, expanded });
+      if (expanded && node.children) walk(node.children, depth + 1, node.path);
+    }
+  };
+  walk(nodes, 0, null);
+  return rows;
+}
+
 /** Keep paths that match include (if set) and miss every exclude pattern. */
 export function filterPaths(
   paths: readonly string[],

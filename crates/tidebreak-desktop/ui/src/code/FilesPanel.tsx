@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+} from "react";
+
 import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
 import type { ApiClient } from "../api/client";
 import { SearchInput } from "@/components/SearchInput";
@@ -10,10 +19,11 @@ import {
   ancestorPaths,
   buildFileTree,
   filterPaths,
+  flattenVisibleTree,
   treeIndentPx,
   type FileTreeNode,
 } from "./fileTree";
-import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { useLiveResource } from "./useLiveContent";
 
 const TREE_PAGE = 5000;
@@ -45,8 +55,10 @@ export function FilesPanel({
   const [searchHits, setSearchHits] = useState<string[] | null>(null);
   const [searchTruncated, setSearchTruncated] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef(new Map<string, HTMLLIElement>());
 
   const loadTree = useCallback(
     () => client.listCodeWorkspaceTree(workspaceId, { limit: TREE_PAGE }),
@@ -113,6 +125,24 @@ export function FilesPanel({
     return openDirs.has(path);
   }
 
+  // The drawn rows, in document order: what the arrow keys walk.
+  const rows = useMemo(
+    () =>
+      flattenVisibleTree(nodes, (path) => {
+        if (forcedOpen.has(path)) return true;
+        if (!path.includes("/")) return !closedTop.has(path);
+        return openDirs.has(path);
+      }),
+    [nodes, forcedOpen, closedTop, openDirs],
+  );
+  // Tab reaches the tree once; the arrows move inside it. The tab stop follows
+  // the reader, and falls back to the first row whenever the row they left is
+  // no longer drawn (a search, a collapsed parent, a refreshed worktree).
+  const tabStop =
+    rows.find((row) => row.node.path === focusedPath)?.node.path ??
+    rows[0]?.node.path ??
+    null;
+
   function toggleDir(path: string) {
     if (!path.includes("/")) {
       setClosedTop((current) => {
@@ -150,6 +180,65 @@ export function FilesPanel({
   const truncated = Boolean(tree?.truncated || searchTruncated);
   const empty = ready && nodes.length === 0 && !error;
   const busy = refreshing || searching;
+
+  function focusRow(path: string | undefined) {
+    if (!path) return;
+    setFocusedPath(path);
+    rowRefs.current.get(path)?.focus();
+  }
+
+  function activate(node: FileTreeNode) {
+    if (node.kind === "dir") toggleDir(node.path);
+    else onOpenFile(node.path);
+  }
+
+  /**
+   * The tree pattern's keys.
+   *
+   * Right and Left are the two that make a tree a tree: on a closed folder
+   * Right opens it and on an open one it steps in, and Left mirrors that by
+   * closing or climbing out. Everything else is list movement.
+   */
+  function onTreeKeyDown(event: ReactKeyboardEvent<HTMLUListElement>) {
+    const index = rows.findIndex((row) => row.node.path === tabStop);
+    const row = rows[index];
+    if (!row) return;
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        focusRow(rows[index + 1]?.node.path);
+        return;
+      case "ArrowUp":
+        event.preventDefault();
+        focusRow(rows[index - 1]?.node.path);
+        return;
+      case "ArrowRight":
+        event.preventDefault();
+        if (row.node.kind !== "dir") return;
+        if (!row.expanded) toggleDir(row.node.path);
+        else focusRow(rows[index + 1]?.node.path);
+        return;
+      case "ArrowLeft":
+        event.preventDefault();
+        if (row.node.kind === "dir" && row.expanded) toggleDir(row.node.path);
+        else focusRow(row.parent ?? undefined);
+        return;
+      case "Home":
+        event.preventDefault();
+        focusRow(rows[0]?.node.path);
+        return;
+      case "End":
+        event.preventDefault();
+        focusRow(rows[rows.length - 1]?.node.path);
+        return;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        activate(row.node);
+        return;
+      default:
+    }
+  }
 
   return (
     <div
@@ -231,6 +320,7 @@ export function FilesPanel({
           className="min-h-0 flex-1 overflow-y-auto px-1 pb-4 pt-2"
           role="tree"
           aria-label="Workspace files"
+          onKeyDown={onTreeKeyDown}
         >
           {nodes.map((node) => (
             <TreeRow
@@ -238,9 +328,11 @@ export function FilesPanel({
               node={node}
               depth={0}
               selected={selected}
+              tabStop={tabStop}
+              rowRefs={rowRefs}
               isOpen={isOpen}
-              onToggle={toggleDir}
-              onOpenFile={onOpenFile}
+              onFocusRow={setFocusedPath}
+              onActivate={activate}
             />
           ))}
         </ul>
@@ -299,20 +391,33 @@ function FilesEmpty({
   );
 }
 
+/**
+ * One row of the explorer tree.
+ *
+ * The row itself is the `treeitem`, not a button inside one: the tree pattern
+ * puts focus and the arrow keys on the item, and a nested button would take
+ * both and announce itself as a button in a tree. `aria-label` restates the
+ * name a sighted reader sees because a treeitem otherwise draws its name from
+ * everything it contains — for an open folder, that is the whole subtree.
+ */
 function TreeRow({
   node,
   depth,
   selected,
+  tabStop,
+  rowRefs,
   isOpen,
-  onToggle,
-  onOpenFile,
+  onFocusRow,
+  onActivate,
 }: {
   node: FileTreeNode;
   depth: number;
   selected?: string;
+  tabStop: string | null;
+  rowRefs: RefObject<Map<string, HTMLLIElement>>;
   isOpen: (path: string) => boolean;
-  onToggle: (path: string) => void;
-  onOpenFile: (file: string) => void;
+  onFocusRow: (path: string) => void;
+  onActivate: (node: FileTreeNode) => void;
 }) {
   const open = node.kind === "dir" && isOpen(node.path);
   const current = node.kind === "file" && selected === node.path;
@@ -320,22 +425,38 @@ function TreeRow({
     node.kind === "dir" ? (open ? FolderOpen : Folder) : File;
 
   return (
-    <li role="treeitem" aria-expanded={node.kind === "dir" ? open : undefined}>
-      <button
-        type="button"
-        aria-current={current ? true : undefined}
+    <li
+      role="treeitem"
+      aria-label={node.name}
+      aria-level={depth + 1}
+      aria-expanded={node.kind === "dir" ? open : undefined}
+      aria-current={current ? true : undefined}
+      tabIndex={tabStop === node.path ? 0 : -1}
+      ref={(element) => {
+        if (element) rowRefs.current.set(node.path, element);
+        else rowRefs.current.delete(node.path);
+      }}
+      className="group/row focus-visible:outline-none"
+      onFocus={(event) => {
+        if (event.target === event.currentTarget) onFocusRow(node.path);
+      }}
+      onClick={(event) => {
+        // Only the row that was clicked acts; the click still bubbles up
+        // through every ancestor row on its way to the tree.
+        event.stopPropagation();
+        onFocusRow(node.path);
+        onActivate(node);
+      }}
+    >
+      <div
         style={{ paddingLeft: treeIndentPx(depth) }}
         className={cn(
-          "flex w-full cursor-pointer items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
-          FOCUS_RING_TIGHT,
+          "ring-offset-background flex w-full cursor-pointer items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
+          "group-focus-visible/row:ring-ring group-focus-visible/row:ring-2 group-focus-visible/row:ring-offset-0",
           HOVER_TINT,
           current && "bg-muted/60",
           !current && "hover:bg-muted/40",
         )}
-        onClick={() => {
-          if (node.kind === "dir") onToggle(node.path);
-          else onOpenFile(node.path);
-        }}
       >
         {node.kind === "dir" ? (
           <ChevronRight
@@ -352,7 +473,7 @@ function TreeRow({
         <span className="min-w-0 truncate" title={node.path}>
           {node.name}
         </span>
-      </button>
+      </div>
       {open && node.children && (
         <ul role="group">
           {node.children.map((child) => (
@@ -361,9 +482,11 @@ function TreeRow({
               node={child}
               depth={depth + 1}
               selected={selected}
+              tabStop={tabStop}
+              rowRefs={rowRefs}
               isOpen={isOpen}
-              onToggle={onToggle}
-              onOpenFile={onOpenFile}
+              onFocusRow={onFocusRow}
+              onActivate={onActivate}
             />
           ))}
         </ul>

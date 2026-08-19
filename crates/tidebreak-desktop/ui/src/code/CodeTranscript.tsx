@@ -10,7 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { memo, useEffect, useId, useState, type RefCallback } from "react";
+import { memo, useEffect, useId, useRef, useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
@@ -144,8 +144,62 @@ export function CodeTranscript({
         {shouldShowCodeWorking(items, busy, streamStalled) && (
           <AssistantWorkingIndicator />
         )}
+        <TurnLifecycleAnnouncer text={codeTurnAnnouncement(items, busy)} />
       </div>
     </div>
+  );
+}
+
+/**
+ * What a screen reader hears about the turn, and nothing else.
+ *
+ * Streaming text, tool output, and file activity all change many times a
+ * second; announcing any of them turns the transcript into a firehose that
+ * drowns the one thing a supervisor has to hear — whether the engine is still
+ * working, and how the turn ended. A failed turn is not announced here because
+ * `TurnReviewCard` already raises it as an alert, and a fact said twice is
+ * worse than a fact said once.
+ */
+export function codeTurnAnnouncement(
+  items: readonly CodeTranscriptItem[],
+  busy: boolean,
+): string {
+  if (busy) return "Turn running";
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind !== "turn_boundary") continue;
+    if (item.status === "failed") return "";
+    const duration = formatTurnDuration(item.durationMs);
+    const label =
+      item.status === "interrupted" ? "Turn interrupted" : "Turn finished";
+    return duration ? `${label} · ${duration}` : label;
+  }
+  return "";
+}
+
+/**
+ * The one live region in the transcript.
+ *
+ * It is mounted empty and only fills in on a later change, so opening a
+ * finished session does not read its last turn's outcome out at the reader
+ * before they have asked for anything.
+ */
+function TurnLifecycleAnnouncer({ text }: { text: string }) {
+  const [announced, setAnnounced] = useState("");
+  const settled = useRef(false);
+
+  useEffect(() => {
+    if (!settled.current) {
+      settled.current = true;
+      return;
+    }
+    setAnnounced(text);
+  }, [text]);
+
+  return (
+    <span className="sr-only" role="status" data-testid="code-turn-announcer">
+      {announced}
+    </span>
   );
 }
 
@@ -360,11 +414,11 @@ export function CodeToolCard({
   const showExpanded = expanded && status !== "running" && hasOutput;
 
   return (
-    <div
-      className="max-w-prose [overflow-anchor:none]"
-      role="status"
-      aria-label={`${verb} ${status}`}
-    >
+    // Deliberately not a live region. A tool line changes on every streamed
+    // byte of its own output, and a transcript of thirty of them would announce
+    // each one atomically, over and over. The outcome rides the line's own name
+    // instead, and the turn announcer says when the work as a whole ends.
+    <div className="max-w-prose [overflow-anchor:none]">
       <button
         type="button"
         className={cn(
@@ -394,6 +448,9 @@ export function CodeToolCard({
           {status !== "running" && exitCode !== null && (
             <span>exit {exitCode}</span>
           )}
+          {/* The glyph is the outcome for a sighted reader; this is the same
+              fact for everyone else, in the same place in the line. */}
+          <span className="sr-only">{STATUS_WORDS[status]}</span>
           <StatusGlyph status={status} />
           <ChevronDown
             className={cn(
@@ -485,12 +542,26 @@ function toolVerb(
   }
 }
 
+/** The outcome word, for the readers the status glyph does not reach. */
+const STATUS_WORDS: Record<
+  "running" | "succeeded" | "failed" | "denied",
+  string
+> = {
+  running: "running",
+  succeeded: "succeeded",
+  failed: "failed",
+  denied: "denied",
+};
+
 /** Last twelve lines, height-capped so a streaming tail does not grow the row. */
 function StreamingTail({ text }: { text: string }) {
   const lines = text.replace(/\n+$/, "").split("\n");
   const tail = lines.slice(-12).join("\n");
   return (
     <pre
+      // `pre` is a generic element, so a bare `aria-label` on it names nothing.
+      // The group role is what makes the label reach assistive tech.
+      role="group"
       aria-label="Output"
       className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13.5px] break-words whitespace-pre-wrap [overflow-anchor:none]"
     >
@@ -639,6 +710,7 @@ function FileActivityRow({
   onReveal?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const listId = useId();
   const { count, insertions, deletions } = fileActivityTotals(files);
   const noun = count === 1 ? "file" : "files";
   return (
@@ -646,6 +718,7 @@ function FileActivityRow({
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={listId}
         className={cn(
           "-mx-1.5 cursor-pointer rounded-md px-1.5 py-0.5 text-left hover:text-foreground",
           FOCUS_RING_TIGHT,
@@ -669,8 +742,13 @@ function FileActivityRow({
           "grid transition-[grid-template-rows] duration-[140ms] ease-out motion-reduce:transition-none",
           open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
         )}
+        // A zero-height row is still in the accessibility tree: `overflow`
+        // hides pixels, not semantics. Without this a screen reader reads every
+        // changed file of every turn as if the summary were always open.
+        aria-hidden={!open}
+        inert={!open ? true : undefined}
       >
-        <ul className="min-h-0 overflow-hidden">
+        <ul id={listId} className="min-h-0 overflow-hidden">
           {Object.entries(files).map(([path, file]) => (
             <li key={path} className="flex items-baseline gap-2 pt-0.5">
               <span
@@ -681,10 +759,13 @@ function FileActivityRow({
                   file.kind === "deleted" && "text-critical-foreground-muted",
                   file.kind === "renamed" && "text-warning-foreground-muted",
                 )}
-                aria-label={file.kind}
+                aria-hidden
               >
                 {FILE_KIND_LETTER[file.kind]}
               </span>
+              {/* "A" reads as the letter A. The word is what carries the
+                  change kind once the glyph is gone. */}
+              <span className="sr-only">{file.kind}</span>
               <PathLabel path={path} />
               <span className="ml-auto shrink-0 tabular-nums">
                 +{file.diffstat.insertions} −{file.diffstat.deletions}
