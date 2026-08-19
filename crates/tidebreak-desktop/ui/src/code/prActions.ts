@@ -1,7 +1,11 @@
 import type { PullRequestDigest } from "../api/types";
 import { prTone } from "./workspaceCards";
 
-export type PrBarAction = "merge" | "fix_errors" | "resolve_conflicts";
+export type PrBarAction =
+  | "watch_and_fix"
+  | "merge"
+  | "fix_errors"
+  | "resolve_conflicts";
 
 export type PrBarTone =
   | "ready"
@@ -83,6 +87,8 @@ export function prBarPrompt(
   const number = `#${pr.number}`;
   const base = pr.base_branch?.trim() || "the base branch";
   switch (action) {
+    case "watch_and_fix":
+      return `Watch pull request ${number} until it is mergeable. This watch runs in the current task, so stay on this workspace and branch. Repeatedly inspect required checks and actionable review feedback. Wait efficiently while work is pending. When a check fails or a reviewer requests a concrete change, diagnose it, make the smallest safe fix, run focused validation, commit, push, and keep watching. Enable auto-merge once required checks and automated reviews are green. Do not stop merely because checks are pending. Stop only when the pull request is merged or when a required human approval, missing permission, external outage, or product decision blocks progress; in that case report the exact blocker.`;
     case "merge":
       return `Merge pull request ${number} into ${base}. Use this workspace's existing merge path. Do not change the branch unless the merge requires it. Report the result.`;
     case "fix_errors":
@@ -94,6 +100,8 @@ export function prBarPrompt(
 
 export function prBarActionLabel(action: PrBarAction): string {
   switch (action) {
+    case "watch_and_fix":
+      return "Watch and fix";
     case "merge":
       return "Merge";
     case "fix_errors":
@@ -139,16 +147,17 @@ function barStatus(tone: PrBarTone, checks: PrCheckCounts): string {
 
 function barActions(tone: PrBarTone): PrBarAction[] {
   if (tone === "merged" || tone === "closed") return [];
-  const primary =
+  const contextual =
     tone === "conflict"
       ? "resolve_conflicts"
       : tone === "failing"
         ? "fix_errors"
         : "merge";
   return [
-    primary,
+    "watch_and_fix",
+    contextual,
     ...(["merge", "fix_errors", "resolve_conflicts"] as const).filter(
-      (action) => action !== primary,
+      (action) => action !== contextual,
     ),
   ];
 }

@@ -1,4 +1,4 @@
-import { ChevronDown, GitPullRequest } from "lucide-react";
+import { ChevronDown, CircleDotDashed, GitPullRequest } from "lucide-react";
 
 import type { PullRequestDigest } from "../api/types";
 import { Button } from "@/components/ui/button";
@@ -109,8 +109,16 @@ export function PrActionBar({
             type="button"
             size="sm"
             className={cn("h-6 px-2 text-[11px]", rest.length > 0 && "rounded-r-none")}
+            title={
+              primary === "watch_and_fix"
+                ? "Runs in this task. Closing Tidebreak or interrupting the task stops the watch."
+                : undefined
+            }
             onClick={() => insert(primary)}
           >
+            {primary === "watch_and_fix" && (
+              <CircleDotDashed className="size-3" aria-hidden="true" />
+            )}
             {prBarActionLabel(primary)}
           </Button>
           {rest.length > 0 && (

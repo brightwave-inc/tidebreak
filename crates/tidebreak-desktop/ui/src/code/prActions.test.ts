@@ -12,15 +12,16 @@ function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
 }
 
 describe("prBarModel", () => {
-  it("offers merge when the PR is open and clean", () => {
+  it("leads with watch and fix when the PR is open and clean", () => {
     const model = prBarModel(
       pr({
         checks: [{ name: "ci", bucket: "pass" }],
       }),
     );
     expect(model.status).toBe("Ready to merge");
-    expect(model.actions[0]).toBe("merge");
+    expect(model.actions[0]).toBe("watch_and_fix");
     expect(model.actions).toEqual([
+      "watch_and_fix",
       "merge",
       "fix_errors",
       "resolve_conflicts",
@@ -53,7 +54,7 @@ describe("prBarModel", () => {
     });
   });
 
-  it("leads with fix errors when a check is failing", () => {
+  it("keeps the contextual fix action directly after watch and fix", () => {
     const model = prBarModel(
       pr({
         checks: [
@@ -63,14 +64,17 @@ describe("prBarModel", () => {
       }),
     );
     expect(model.status).toBe("1 check failing");
-    expect(model.actions[0]).toBe("fix_errors");
+    expect(model.actions.slice(0, 2)).toEqual(["watch_and_fix", "fix_errors"]);
   });
 
-  it("leads with resolve conflicts when the host reports a conflict", () => {
+  it("keeps the contextual conflict action directly after watch and fix", () => {
     const model = prBarModel(pr({ mergeable: "CONFLICTING" }));
     expect(prHasConflicts(pr({ mergeable: "CONFLICTING" }))).toBe(true);
     expect(model.status).toBe("Conflicts");
-    expect(model.actions[0]).toBe("resolve_conflicts");
+    expect(model.actions.slice(0, 2)).toEqual([
+      "watch_and_fix",
+      "resolve_conflicts",
+    ]);
   });
 
   it("names a draft even when checks are still pending", () => {
@@ -81,7 +85,7 @@ describe("prBarModel", () => {
       }),
     );
     expect(model.status).toBe("Draft");
-    expect(model.actions[0]).toBe("merge");
+    expect(model.actions.slice(0, 2)).toEqual(["watch_and_fix", "merge"]);
   });
 
   it("hides actions on a merged PR", () => {
@@ -98,5 +102,9 @@ describe("prBarPrompt", () => {
     expect(prBarPrompt("merge", digest)).toMatch(/main/);
     expect(prBarPrompt("fix_errors", digest)).toMatch(/failing checks/);
     expect(prBarPrompt("resolve_conflicts", digest)).toMatch(/conflicts/);
+    const watch = prBarPrompt("watch_and_fix", digest);
+    expect(watch).toMatch(/keep watching/i);
+    expect(watch).toMatch(/Enable auto-merge/);
+    expect(watch).toMatch(/required human approval/);
   });
 });
