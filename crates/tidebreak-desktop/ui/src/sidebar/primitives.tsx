@@ -29,8 +29,8 @@ import {
 
 /**
  * Publish the expanded rail width onto the shell so the overlay titlebar can
- * size itself to it. Runs at the app-shell level rather than inside the rail
- * so the value stays current after a collapse unmounts it.
+ * size itself to the rail. Cleared on collapse: the titlebar unmounts with the
+ * rail, and the fallback 280px would otherwise paint leftover chrome.
  */
 export function useSyncSidebarWidthCssVar() {
   const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);

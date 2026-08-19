@@ -89,6 +89,7 @@ const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listInbox = vi.fn(async () => [] as unknown[]);
 const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
+const hasNativeHost = vi.hoisted(() => vi.fn(() => false));
 
 /** One waiting question, as the shell's cross-chat read returns it. */
 function parked(chatId: string, callId: string) {
@@ -155,10 +156,14 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("./host", () => ({
-  hasNativeHost: () => false,
+  hasNativeHost,
   hasMacOverlayTitlebar: () => false,
   requestUserAttention,
   onPairingChanged: () => () => undefined,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
 }));
 
 vi.mock("./updates", () => ({
@@ -324,6 +329,7 @@ beforeEach(() => {
     expandedProjectIds: [],
   });
   useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: SIDEBAR_DEFAULT_WIDTH });
+  hasNativeHost.mockReturnValue(false);
   // Module-level chrome state survives a render, so a test that collapsed or
   // filtered the list would otherwise decide the next one's rail.
   useChatsSectionState.setState({ collapsed: false, filtering: false, query: "" });
@@ -585,6 +591,34 @@ describe("app shell", () => {
 
     expect(useUiStore.getState().sidebarCollapsed).toBe(true);
     expect(window.localStorage.getItem("tidebreak.sidebar-collapsed")).toBe("true");
+  });
+
+  it("unmounts the titlebar with the rail, and Cmd/Ctrl+B brings both back", async () => {
+    // The leftover chrome only exists on the native host: the titlebar is
+    // `position: absolute; width: var(--sidebar-expanded-width)`, and that
+    // var falls back to 280px once collapse removes it.
+    hasNativeHost.mockReturnValue(true);
+    const user = userEvent.setup();
+    await mountApp();
+    await screen.findByText("Welcome to Tidebreak");
+
+    expect(document.querySelector("[data-sidebar]")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    expect(useUiStore.getState().sidebarCollapsed).toBe(true);
+    expect(document.querySelector("[data-sidebar]")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+
+    // Ctrl is the command modifier under jsdom's non-mac user agent.
+    await user.keyboard("{Control>}b{/Control}");
+
+    expect(useUiStore.getState().sidebarCollapsed).toBe(false);
+    expect(document.querySelector("[data-sidebar]")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Expand sidebar" })).not.toBeInTheDocument();
   });
 
   it("keeps watching for the agent's questions while settings is open", async () => {
