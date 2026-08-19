@@ -26,6 +26,11 @@
 server_info: hands the renderer the embedded server's address and per-launch token — the handshake that makes every HTTP route reachable, so it cannot itself be one.
 request_user_attention: native window attention hint when a parked question needs the user.
 
+# Attaching this client to a machine it does not host (ADR 0047)
+remote_machine_state: reports which machine this client is attached to, from shell-held state that exists before any machine is reachable.
+connect_remote_machine: stores the machine token in the OS credential store, which only the native shell can reach.
+disconnect_remote_machine: removes that stored token from the OS credential store.
+
 # OS pickers, drops, and save dialogs
 pick_code_directory: native directory picker for code-mode repo registration and clone destinations; grant-free — the path is handed to the server for validation (ADR 0030).
 attach_chat_files: opens the OS file picker; only the native shell can turn a user's file choice into readable paths.

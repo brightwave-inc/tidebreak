@@ -223,11 +223,51 @@ export type DocumentDetail = {
   content: string;
 };
 
+/**
+ * Which machine this client is attached to.
+ *
+ * `local` is the server the desktop app booted in its own process; `remote` is
+ * a server elsewhere that the user attached to with a URL and a token. Host
+ * authority — the folder broker, the client executor, native export, computer
+ * use — exists only on the local machine, so every caller that reaches the host
+ * branches on this rather than on the shape of the base URL.
+ */
+export type Attachment = "local" | "remote";
+
 /** Connection details from the Tauri host (`server_info` command). */
 export type ServerInfo = {
   baseUrl: string;
   token: string;
+  attachment: Attachment;
 };
+
+/** What the shell knows about the current attachment. */
+export type RemoteMachineState = {
+  attachment: Attachment;
+  /** The attached machine's base URL; absent when attached locally. */
+  baseUrl: string | null;
+};
+
+/**
+ * A refused connect attempt.
+ *
+ * `reason` is the whole contract — one stable string per distinct cause,
+ * following the precedent `output_writeback_authority_unavailable` set. The
+ * renderer owns the copy and switches on the reason; `detail` is the underlying
+ * transport or credential-store text, for logs and support, never for display.
+ */
+export type RemoteConnectError = {
+  reason: RemoteConnectReason;
+  detail: string | null;
+};
+
+export type RemoteConnectReason =
+  | "remote_machine_url_invalid"
+  | "remote_machine_requires_tls"
+  | "remote_machine_unreachable"
+  | "remote_machine_token_refused"
+  | "remote_machine_not_a_machine"
+  | "remote_machine_token_storage_failed";
 
 export type ProviderKind = WireProviderKind;
 /** Stable provider-scoped key used for new settings and chat overrides. */

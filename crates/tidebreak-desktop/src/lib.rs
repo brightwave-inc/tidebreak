@@ -34,17 +34,22 @@ mod office_install;
 mod office_pdf;
 #[cfg(target_os = "macos")]
 mod office_sandbox;
+mod remote;
 mod updater;
 mod voice_transcription;
 
-/// Connection details the webview needs to reach the in-process API.
+/// Connection details the webview needs to reach the API it is attached to.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     /// Base URL, e.g. `http://127.0.0.1:54321`.
     pub base_url: String,
-    /// Per-launch bearer token.
+    /// Bearer token for that base URL.
     pub token: String,
+    /// Which machine this is: the embedded server, or a remote one the user
+    /// attached to. Host authority exists only on the local machine, so every
+    /// caller that reaches the host branches on this.
+    pub attachment: remote::Attachment,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,7 @@ impl NativeServerInfo {
         ServerInfo {
             base_url: self.base_url.clone(),
             token: self.token.clone(),
+            attachment: remote::Attachment::Local,
         }
     }
 }
@@ -76,10 +82,54 @@ struct AppState {
     info_rx: watch::Receiver<Option<BootOutcome>>,
 }
 
-/// Return the bound server address and token (waits until bind completes).
+/// Return the API the renderer should use.
+///
+/// A remote attachment wins and does not wait for the embedded server: the
+/// whole point of attaching to another machine is that this one's server is
+/// not what the user is working on, and a local boot failure must not keep a
+/// remote client off a machine that is running fine.
 #[tauri::command]
-async fn server_info(state: tauri::State<'_, Arc<AppState>>) -> Result<ServerInfo, String> {
+async fn server_info(
+    state: tauri::State<'_, Arc<AppState>>,
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+) -> Result<ServerInfo, String> {
+    if let Some(attached) = attachment.current().await {
+        return Ok(ServerInfo {
+            base_url: attached.base_url,
+            token: attached.token,
+            attachment: remote::Attachment::Remote,
+        });
+    }
     Ok(wait_server_info(state.inner()).await?.renderer_info())
+}
+
+/// Report which machine this client is attached to.
+#[tauri::command]
+async fn remote_machine_state(
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+) -> Result<remote::RemoteMachineState, String> {
+    Ok(attachment.state().await)
+}
+
+/// Attach this client to a remote machine.
+///
+/// Refusals carry a stable reason the renderer branches on; see
+/// [`remote::RemoteConnectError`].
+#[tauri::command]
+async fn connect_remote_machine(
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+    base_url: String,
+    token: String,
+) -> Result<remote::RemoteMachineState, remote::RemoteConnectError> {
+    attachment.connect(&base_url, &token).await
+}
+
+/// Detach from the remote machine and forget its token.
+#[tauri::command]
+async fn disconnect_remote_machine(
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+) -> Result<remote::RemoteMachineState, String> {
+    Ok(attachment.disconnect().await)
 }
 
 /// Save MCP configuration through the native-only server surface. Command
@@ -595,6 +645,9 @@ pub fn run() {
         .manage(updater::UpdateManager::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
+            remote_machine_state,
+            connect_remote_machine,
+            disconnect_remote_machine,
             put_native_mcp_servers,
             request_user_attention,
             attachments::attach_chat_files,
@@ -652,6 +705,13 @@ pub fn run() {
             let home = home_dir(&handle)?;
             let host_access = host_access::HostAccess::new(handle.clone(), data.clone(), home)?;
             app.manage(host_access);
+            // Registered before the server boots: `server_info` consults the
+            // attachment first, and a remote client must not wait on a local
+            // boot it is not using.
+            app.manage(Arc::new(remote::RemoteAttachment::new(
+                &data,
+                channel::current().keychain_service(),
+            )));
 
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = boot_server(handle, &info_tx, store_tx, data.clone()).await {
@@ -912,6 +972,9 @@ mod server_info_tests {
         assert!(serialized.contains("renderer-bearer"));
         assert!(!serialized.contains("native-credential-sentinel"));
         assert!(!serialized.contains("executor"));
+        // The embedded server is always the local machine; the renderer reads
+        // host authority off this field.
+        assert!(serialized.contains(r#""attachment":"local""#));
     }
 
     #[test]
