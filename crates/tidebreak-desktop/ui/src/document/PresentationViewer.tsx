@@ -15,7 +15,7 @@ import { FileDownloadProgressIndicator } from "@/components/document/FileDownloa
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
-  LIGHT_DOCUMENT_SURFACE,
+  DOCUMENT_VIEWER_SURFACE,
   useSecureViewerLinks,
 } from "@/document/extendViewerSurface";
 import {
@@ -109,7 +109,7 @@ function DirectPresentationSurface({
       className={cn(
         "relative flex min-h-0 flex-col overflow-hidden",
         className,
-        LIGHT_DOCUMENT_SURFACE,
+        DOCUMENT_VIEWER_SURFACE,
       )}
     >
       {file.error ? (
@@ -128,7 +128,7 @@ function DirectPresentationSurface({
           </div>
         )
       ) : (
-        <div className="min-h-0 grow overflow-hidden rounded-md border bg-white shadow-xs">
+        <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
           <PptxViewerPreview
             className="h-full min-h-0"
             defaultThumbnailSidebarOpen
