@@ -32,7 +32,7 @@ body:
     attributes:
       label: Tidebreak version
       description: Find this in the app's About panel or release name.
-      placeholder: v0.43.0
+      placeholder: v0.x.y or commit SHA
     validations:
       required: true
   - type: dropdown
@@ -41,11 +41,13 @@ body:
       label: Platform
       options:
         - macOS (Apple Silicon)
-        - macOS (Intel, built from source)
-        - Windows (built from source or legacy package)
-        - Linux (built from source)
+        - macOS (Intel)
+        - Windows (x86_64)
+        - Windows (ARM64)
+        - Linux (x86_64)
+        - Linux (ARM64)
         - Headless / server
-        - Other
+        - Other / built from source
     validations:
       required: true
   - type: textarea
