@@ -6,7 +6,7 @@
 <h1 align="center">Tidebreak</h1>
 
 <p align="center">
-  <strong>A local-first agentic coworker you can configure without limit. Choose your files and model. Walk away with a spreadsheet, deck, or working app.
+  <strong>A local-first agentic coworker you can configure without limit. Choose your files and model. Walk away with a spreadsheet, deck, or working app.</strong>
 </p>
 
 <p align="center">
