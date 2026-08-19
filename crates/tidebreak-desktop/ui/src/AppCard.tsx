@@ -37,8 +37,8 @@ function AppCard({ entry }: { entry: ResultEntry }) {
   const appId = entry.targetId;
   return (
     <div className="bg-background flex max-w-full min-w-0 items-center gap-3 rounded-lg border px-4 py-3 text-left shadow-sm">
-      <span className="bg-muted rounded-md p-2" aria-hidden="true">
-        <LayoutGrid className="size-5" />
+      <span className="grid size-9 shrink-0 place-items-center" aria-hidden="true">
+        <LayoutGrid className="text-icon-blue size-5" />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="truncate text-sm font-semibold">{entry.label}</span>

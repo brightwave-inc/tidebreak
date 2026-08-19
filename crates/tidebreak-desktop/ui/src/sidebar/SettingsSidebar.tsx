@@ -45,7 +45,7 @@ export function SettingsSidebar({ onBack }: { onBack: () => void }) {
               // how many sections were browsed.
               onClick={() => void navigate({ to, replace: true })}
             >
-              <Icon />
+              <Icon className={active ? section.iconClass : undefined} />
               <span>{section.label}</span>
             </SidebarButton>
           );

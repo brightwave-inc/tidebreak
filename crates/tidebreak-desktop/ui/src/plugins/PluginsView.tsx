@@ -122,7 +122,7 @@ export function PluginsView({
           {isEmpty && (
             <Empty>
               <EmptyHeader>
-                <EmptyMedia variant="icon">
+                <EmptyMedia variant="icon" className="text-icon-violet">
                   <Puzzle />
                 </EmptyMedia>
                 <EmptyTitle>No plugins installed</EmptyTitle>

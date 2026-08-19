@@ -26,7 +26,7 @@ export function InboxButton() {
       className="data-[active]:bg-muted"
       onClick={() => void navigate({ to: "/inbox" })}
     >
-      <Inbox />
+      <Inbox className={active ? "text-icon-amber" : undefined} />
       <span>Inbox</span>
       {waiting > 0 && (
         <Badge

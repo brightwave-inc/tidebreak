@@ -23,32 +23,37 @@ import { useInbox } from "./Inbox";
 /** How each kind reads, and what it is answered by. */
 const KIND_PRESENTATION: Record<
   InboxItemKind,
-  { label: string; description: string; icon: LucideIcon }
+  { label: string; description: string; icon: LucideIcon; iconClass: string }
 > = {
   tool_approval: {
     label: "Approval",
     description: "An action is waiting for your decision.",
     icon: ShieldQuestion,
+    iconClass: "text-icon-rose",
   },
   question: {
     label: "Question",
     description: "The assistant asked you something before continuing.",
     icon: MessageCircleQuestion,
+    iconClass: "text-icon-cyan",
   },
   plan_review: {
     label: "Plan review",
     description: "A plan is waiting for you to accept or send back.",
     icon: ListChecks,
+    iconClass: "text-icon-violet",
   },
   folder_access: {
     label: "Folder access",
     description: "A folder needs connecting before the work can go on.",
     icon: FolderOpen,
+    iconClass: "text-icon-amber",
   },
   output_writeback: {
     label: "Save to folder",
     description: "A file is waiting for you to confirm the write.",
     icon: Save,
+    iconClass: "text-icon-green",
   },
 };
 
@@ -70,7 +75,7 @@ export function InboxView() {
     return (
       <Empty className="h-full">
         <EmptyHeader>
-          <EmptyMedia variant="icon">
+          <EmptyMedia variant="icon" className="text-success">
             <CircleCheck aria-hidden="true" />
           </EmptyMedia>
           <EmptyTitle>{loaded ? "Nothing is waiting" : "Loading…"}</EmptyTitle>
@@ -118,8 +123,8 @@ function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
       onClick={onOpen}
       className="hover:bg-muted flex w-full items-center gap-3 rounded-lg border p-3 text-left"
     >
-      <span className="bg-muted text-foreground flex size-8 shrink-0 items-center justify-center rounded-md">
-        <Icon aria-hidden="true" className="size-4" />
+      <span className="flex size-8 shrink-0 items-center justify-center">
+        <Icon aria-hidden="true" className={`${presentation.iconClass} size-5`} />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="flex min-w-0 items-center gap-2">

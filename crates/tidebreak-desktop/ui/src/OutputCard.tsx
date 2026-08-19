@@ -67,7 +67,7 @@ function OpenOutputCard({
 function OutputCardBody({ entry }: { entry: ResultEntry }) {
   return (
     <>
-      <span className="bg-muted rounded-md p-2" aria-hidden="true">
+      <span className="grid size-9 shrink-0 place-items-center" aria-hidden="true">
         <DocumentIcon mediaType={entry.mediaType} className="size-5" />
       </span>
       <span className="flex min-w-0 flex-col">

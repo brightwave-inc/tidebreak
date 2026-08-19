@@ -266,7 +266,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
         {nothingToShow && !error ? (
           <Empty>
             <EmptyHeader>
-              <EmptyMedia variant="icon">
+              <EmptyMedia variant="icon" className="text-icon-amber">
                 <FolderOpenIcon />
               </EmptyMedia>
               <EmptyTitle>No folders connected</EmptyTitle>

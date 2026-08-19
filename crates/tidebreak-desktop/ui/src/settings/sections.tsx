@@ -195,7 +195,8 @@ export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
   label: string;
-  icon: ComponentType<{ size?: number }>;
+  icon: ComponentType<{ size?: number; className?: string }>;
+  iconClass: string;
   Component: FunctionComponent;
   /** Search params this section addresses with, validated at the route so an
    * unknown value never reaches the panel. */
@@ -221,6 +222,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     path: "providers",
     label: "Providers",
     icon: KeyRound,
+    iconClass: "text-icon-amber",
     Component: ProvidersSection,
     validateSearch: providersSearch,
     managedHidden: true,
@@ -229,32 +231,60 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     path: "gateway",
     label: "Model Gateway",
     icon: Waypoints,
+    iconClass: "text-icon-cyan",
     Component: GatewaySection,
     unmanagedHidden: true,
   },
-  { path: "models", label: "Models", icon: Cpu, Component: ModelsSection },
+  {
+    path: "models",
+    label: "Models",
+    icon: Cpu,
+    iconClass: "text-icon-violet",
+    Component: ModelsSection,
+  },
   // Next to Models rather than in a section of its own: every number here is a
   // fraction of the selected model's context window, so a reader who has just
   // changed models is in the right place to reconsider them.
-  { path: "context", label: "Context", icon: Gauge, Component: CompactionSection },
-  { path: "agents", label: "Agents", icon: Bot, Component: AgentsSection },
+  {
+    path: "context",
+    label: "Context",
+    icon: Gauge,
+    iconClass: "text-icon-blue",
+    Component: CompactionSection,
+  },
+  {
+    path: "agents",
+    label: "Agents",
+    icon: Bot,
+    iconClass: "text-icon-violet",
+    Component: AgentsSection,
+  },
   {
     path: "voice-transcription",
     label: "Voice input",
     icon: Mic,
+    iconClass: "text-icon-rose",
     Component: VoiceTranscriptionSection,
   },
-  { path: "web-search", label: "Web search", icon: Globe, Component: WebSearchSection },
+  {
+    path: "web-search",
+    label: "Web search",
+    icon: Globe,
+    iconClass: "text-icon-cyan",
+    Component: WebSearchSection,
+  },
   {
     path: "code-execution",
     label: "Code execution",
     icon: SquareTerminal,
+    iconClass: "text-icon-green",
     Component: CodeExecutionSection,
   },
   {
     path: "coding-harnesses",
     label: "Coding harnesses",
     icon: Terminal,
+    iconClass: "text-icon-amber",
     Component: CodingHarnessesSection,
     codeModeOnly: true,
   },
@@ -262,22 +292,37 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     path: "connected-apps",
     label: "Connected apps",
     icon: Blocks,
+    iconClass: "text-icon-blue",
     Component: ConnectedAppsSection,
   },
   {
     path: "permissions",
     label: "Permissions",
     icon: ShieldCheck,
+    iconClass: "text-icon-green",
     Component: PermissionsSection,
   },
-  { path: "appearance", label: "Appearance", icon: Palette, Component: AppearanceSection },
+  {
+    path: "appearance",
+    label: "Appearance",
+    icon: Palette,
+    iconClass: "text-icon-rose",
+    Component: AppearanceSection,
+  },
   {
     path: "experimental",
     label: "Experimental",
     icon: FlaskConical,
+    iconClass: "text-icon-violet",
     Component: ExperimentalSection,
   },
-  { path: "updates", label: "Updates", icon: RefreshCw, Component: UpdatesSection },
+  {
+    path: "updates",
+    label: "Updates",
+    icon: RefreshCw,
+    iconClass: "text-icon-green",
+    Component: UpdatesSection,
+  },
 ];
 
 /**

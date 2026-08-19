@@ -94,7 +94,7 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
       <SidebarFooter className="flex flex-col gap-0.5">
         {updateReady && (
           <SidebarButton onClick={restartForUpdate}>
-            <RotateCw />
+            <RotateCw className="text-success" />
             <span>Restart to update</span>
             {updateState.version && (
               <span className="ml-auto text-xs text-muted-foreground">
@@ -107,7 +107,13 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
           aria-label={`Theme: ${themeMode}. Click to change.`}
           onClick={cycleTheme}
         >
-          {themeMode === "light" ? <Sun /> : themeMode === "dark" ? <Moon /> : <Monitor />}
+          {themeMode === "light" ? (
+            <Sun />
+          ) : themeMode === "dark" ? (
+            <Moon />
+          ) : (
+            <Monitor />
+          )}
           <span>Theme</span>
         </SidebarButton>
         <SidebarButton

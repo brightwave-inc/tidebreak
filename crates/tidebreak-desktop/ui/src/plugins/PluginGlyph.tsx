@@ -6,43 +6,28 @@ import type { PluginCategory } from "@/api";
 import { cn } from "@/lib/utils";
 
 /**
- * The library's signature mark: a small instrument tile.
+ * The library's signature mark: a compact, colored instrument mark.
  *
  * A plugin is something you pick up and hand to the agent — the glyph has to
- * read as a tool at a glance, not as a muted list bullet. Known bundles get a
- * fixed wash and a purpose-built mark; everything else falls back to its
- * category so a user-written bundle still has a face.
+ * read as a tool at a glance, not as a muted list bullet. Color belongs to the
+ * mark itself rather than a colored tile behind it; known bundles get a fixed
+ * tone and purpose-built mark, while user bundles fall back to their category.
  */
 
 type GlyphTone = {
-  /** Soft wash behind the mark. */
-  wash: string;
   /** Ink for the lucide / path mark. */
   ink: string;
 };
 
 const CATEGORY_TONES: Record<PluginCategory, GlyphTone> = {
-  documents: {
-    wash: "bg-sky-100 dark:bg-sky-400/15",
-    ink: "text-sky-700 dark:text-sky-300",
-  },
-  data: {
-    wash: "bg-emerald-100 dark:bg-emerald-400/15",
-    ink: "text-emerald-700 dark:text-emerald-300",
-  },
-  visualization: {
-    wash: "bg-violet-100 dark:bg-violet-400/15",
-    ink: "text-violet-700 dark:text-violet-300",
-  },
-  other: {
-    wash: "bg-zinc-100 dark:bg-zinc-400/12",
-    ink: "text-zinc-600 dark:text-zinc-300",
-  },
+  documents: { ink: "text-icon-blue" },
+  data: { ink: "text-icon-green" },
+  visualization: { ink: "text-icon-violet" },
+  other: { ink: "text-icon-cyan" },
 };
 
 const SKILL_TONE: GlyphTone = {
-  wash: "bg-amber-100 dark:bg-amber-400/15",
-  ink: "text-amber-700 dark:text-amber-300",
+  ink: "text-icon-amber",
 };
 
 const CATEGORY_FALLBACK: Record<PluginCategory, LucideIcon> = {
@@ -86,8 +71,7 @@ export function PluginGlyph({
   return (
     <span
       className={cn(
-        "grid shrink-0 place-items-center ring-1 ring-inset ring-black/5 dark:ring-white/8",
-        tone.wash,
+        "grid shrink-0 place-items-center",
         tone.ink,
         SIZE_CLASS[size],
         className,
@@ -110,8 +94,7 @@ export function SkillGlyph({
   return (
     <span
       className={cn(
-        "grid shrink-0 place-items-center ring-1 ring-inset ring-black/5 dark:ring-white/8",
-        SKILL_TONE.wash,
+        "grid shrink-0 place-items-center",
         SKILL_TONE.ink,
         SIZE_CLASS[size],
         className,

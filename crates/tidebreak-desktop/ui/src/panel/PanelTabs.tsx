@@ -48,26 +48,27 @@ function panelTabFallbackLabel(panel: PanelContent): string {
   }
 }
 
-function PanelTabIcon({ panel }: { panel: PanelContent }) {
+function PanelTabIcon({ panel, active }: { panel: PanelContent; active: boolean }) {
   const className = "size-3.5 shrink-0";
+  const tone = (activeTone: string) => cn(className, active && activeTone);
   switch (panel.type) {
     case "document":
-      return <FileText className={className} />;
+      return <FileText className={tone("text-icon-blue")} />;
     case "outputs":
-      return <Package className={className} />;
+      return <Package className={tone("text-icon-green")} />;
     case "folders":
-      return <FolderOpen className={className} />;
+      return <FolderOpen className={tone("text-icon-amber")} />;
     case "permissions":
-      return <Shield className={className} />;
+      return <Shield className={tone("text-icon-green")} />;
     case "agents":
     case "agent":
-      return <Bot className={className} />;
+      return <Bot className={tone("text-icon-violet")} />;
     case "terminal":
-      return <SquareTerminal className={className} />;
+      return <SquareTerminal className={tone("text-icon-green")} />;
     case "file":
-      return <FileCode className={className} />;
+      return <FileCode className={tone("text-icon-blue")} />;
     case "diff":
-      return <FileDiff className={className} />;
+      return <FileDiff className={tone("text-icon-violet")} />;
   }
 }
 
@@ -122,7 +123,7 @@ export function PanelTabs({
                 active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              <PanelTabIcon panel={panel} />
+              <PanelTabIcon panel={panel} active={active} />
               <span className="max-w-40 truncate">{label}</span>
             </button>
             <button

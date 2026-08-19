@@ -37,6 +37,7 @@ export type StarterPromptOptions = {
 
 type StarterPrompt = {
   icon: typeof Sparkles;
+  iconClass: string;
   label: string;
   description: string;
   prompt: string;
@@ -53,6 +54,7 @@ type StarterPrompt = {
 const STARTER_PROMPTS: StarterPrompt[] = [
   {
     icon: Globe,
+    iconClass: "text-icon-cyan",
     label: "Brief this week's AI news",
     description: "Search the web, then write a sourced briefing.",
     prompt:
@@ -61,6 +63,7 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: Scale,
+    iconClass: "text-icon-amber",
     label: "Compare two public products",
     description: "Search, tabulate, and recommend with citations.",
     prompt:
@@ -69,6 +72,7 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: AppWindow,
+    iconClass: "text-icon-blue",
     label: "Build a local planner",
     description: "Create a small app in this workspace.",
     prompt:
@@ -76,6 +80,7 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: GitBranch,
+    iconClass: "text-icon-violet",
     label: "Research in parallel",
     description: "Split a briefing across background tasks.",
     prompt:
@@ -97,7 +102,7 @@ export function promptTitle(name: string): string {
 }
 
 const CARD_CLASS =
-  "flex items-center gap-2.5 rounded-[10px] border border-border bg-background px-3.5 py-2.5 text-[0.85rem] font-medium text-left text-foreground transition-[background-color,border-color] duration-[120ms] ease-in-out hover:border-[color-mix(in_srgb,var(--ink)_22%,var(--line))] hover:bg-accent [&_svg]:flex-none [&_svg]:text-muted-foreground [&:hover_svg]:text-foreground";
+  "flex items-center gap-2.5 rounded-[10px] border border-border bg-background px-3.5 py-2.5 text-[0.85rem] font-medium text-left text-foreground transition-[background-color,border-color] duration-[120ms] ease-in-out hover:border-[color-mix(in_srgb,var(--ink)_22%,var(--line))] hover:bg-accent [&_svg]:flex-none";
 
 export function WelcomeState({
   onSelectPrompt,
@@ -210,7 +215,7 @@ export function WelcomeState({
               className={CARD_CLASS}
               onClick={() => insertLibraryPrompt(prompt.name)}
             >
-              <Sparkles size={16} />
+              <Sparkles size={16} className="text-muted-foreground" />
               <span className="min-w-0">
                 <span className="block">{promptTitle(prompt.name)}</span>
                 {prompt.description && (
@@ -226,7 +231,14 @@ export function WelcomeState({
       {onSelectPrompt && libraryPrompts.length === 0 && (
         <div className="welcome-prompts" data-first-task-target="starters">
           {STARTER_PROMPTS.map(
-            ({ icon: Icon, label, description, prompt, enableInternet }) => (
+            ({
+              icon: Icon,
+              iconClass,
+              label,
+              description,
+              prompt,
+              enableInternet,
+            }) => (
               <button
                 key={label}
                 type="button"
@@ -238,7 +250,7 @@ export function WelcomeState({
                   )
                 }
               >
-                <Icon size={16} />
+                <Icon size={16} className={iconClass} />
                 <span className="min-w-0">
                   <span className="block">{label}</span>
                   <span className="block text-[0.78rem] font-normal text-muted-foreground">

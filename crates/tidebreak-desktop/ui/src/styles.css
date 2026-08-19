@@ -78,6 +78,16 @@
   --citation-mark: var(--color-neutral-300);
   --citation-mark-active-ink: var(--foreground);
 
+  /* Categorical icon ink. The cool core follows the marketing site's indigo
+     and ice-blue palette; the warmer accents stay quieter so the system feels
+     branded rather than rainbow. Color lives on the glyph, never a tile. */
+  --icon-blue: oklch(0.555 0.232 263);
+  --icon-cyan: oklch(0.56 0.14 230);
+  --icon-violet: oklch(0.53 0.19 285);
+  --icon-amber: oklch(0.61 0.12 84);
+  --icon-rose: oklch(0.57 0.14 28);
+  --icon-green: oklch(0.53 0.12 162);
+
   --radius: 0.5rem;
 
   /* The app chrome is the page background; every content region is a card
@@ -181,6 +191,13 @@
   --citation-mark: var(--color-neutral-700);
   --citation-mark-active-ink: var(--background);
 
+  --icon-blue: oklch(0.75 0.17 263);
+  --icon-cyan: oklch(0.76 0.12 230);
+  --icon-violet: oklch(0.74 0.15 285);
+  --icon-amber: oklch(0.79 0.11 84);
+  --icon-rose: oklch(0.73 0.13 28);
+  --icon-green: oklch(0.74 0.11 162);
+
   --shadow-sm: 0 0px 8px 0px oklch(0 0 0 / 0.24);
   --shadow: 0 0px 8px 0px oklch(0 0 0 / 0.28);
   --shadow-lg: 0 0px 12px 0px oklch(0 0 0 / 0.32);
@@ -245,6 +262,13 @@
   --color-info-border: var(--info-border);
 
   --color-brand-accent: var(--brand-accent);
+
+  --color-icon-blue: var(--icon-blue);
+  --color-icon-cyan: var(--icon-cyan);
+  --color-icon-violet: var(--icon-violet);
+  --color-icon-amber: var(--icon-amber);
+  --color-icon-rose: var(--icon-rose);
+  --color-icon-green: var(--icon-green);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
