@@ -32,7 +32,13 @@ import { useUiStore } from "@/UiStore";
  * everywhere but settings, which has its own section list and no use for a
  * chat list beside it.
  */
-export function SidebarFrame({ children }: { children: ReactNode }) {
+export function SidebarFrame({
+  children,
+  footer,
+}: {
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
   const navigate = useNavigate();
   const { updateState, restartForUpdate } = useApp();
   const { mode: themeMode, cycle: cycleTheme } = useTheme();
@@ -92,6 +98,7 @@ export function SidebarFrame({ children }: { children: ReactNode }) {
       </SidebarContent>
 
       <SidebarFooter className="flex flex-col gap-0.5">
+        {footer}
         {updateReady && (
           <SidebarButton onClick={restartForUpdate}>
             <RotateCw className="text-success" />

@@ -98,6 +98,7 @@ import {
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
   type CodeCloneJobSnapshot,
+  type CodeSubscriptionUsage,
   type HarnessDoctorReport,
   type HarnessKind,
   type SequencedCodeEventFrame,
@@ -145,6 +146,7 @@ import {
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
   parseCodeUpdateNotice,
+  parseCodeSubscriptionUsage,
 } from "../code/parsers";
 
 const WS_HANDSHAKE = "tidebreak-v1";
@@ -1760,6 +1762,15 @@ export class ApiClient {
         await this.json("/code/harnesses", { headers: this.headers() }),
       ),
       "harness doctor",
+    );
+  }
+
+  async getCodeSubscriptionUsage(): Promise<CodeSubscriptionUsage> {
+    return requireParsed(
+      parseCodeSubscriptionUsage(
+        await this.json("/code/usage", { headers: this.headers() }),
+      ),
+      "subscription usage",
     );
   }
 
