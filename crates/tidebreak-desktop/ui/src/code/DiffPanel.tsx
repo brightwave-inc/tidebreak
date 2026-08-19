@@ -116,11 +116,31 @@ export function DiffPanel({
           />
         ))}
         {payload && groups.length === 0 && !error && (
-          <p className="text-muted-foreground px-3 py-6 text-sm">No diff.</p>
+          <p className="text-muted-foreground px-3 py-6 text-sm">
+            {emptyDiffText(file, turnId, turnLabel)}
+          </p>
         )}
       </div>
     </div>
   );
+}
+
+/**
+ * What an empty diff means, which depends entirely on what it was scoped to.
+ *
+ * The three cases are three different facts — this file is unchanged, this
+ * turn wrote nothing, the whole worktree matches its base — and a reader
+ * scoping the panel to a turn is asking exactly the question the middle one
+ * answers. One line of shared copy for all three ("No diff.") answers none.
+ */
+function emptyDiffText(
+  file?: string,
+  turnId?: string,
+  turnLabel?: string,
+): string {
+  if (file) return "No changes in this file.";
+  if (turnId) return `${turnLabel ?? "This turn"} changed no files.`;
+  return "The worktree matches its base branch.";
 }
 
 function FileDiffSection({

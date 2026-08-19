@@ -148,9 +148,10 @@ export function CodeSidebar() {
           );
         })}
         {repos.length === 0 && (
-          <p className="px-2 py-1 text-xs text-muted-foreground">
-            No repos registered
-          </p>
+          <SidebarEmptyAction
+            label="Add a repo"
+            onClick={() => setAddRepoOpen(true)}
+          />
         )}
       </div>
 
@@ -236,11 +237,18 @@ export function CodeSidebar() {
             })}
           </div>
         ))}
-        {groups.every((group) => group.workspaces.length === 0) && (
-          <p className="px-2 py-1 text-xs text-muted-foreground">
-            No workspaces yet
-          </p>
-        )}
+        {/*
+          With no repo registered there is nothing to open a workspace on, and
+          the line above already says so. Two dead-end lines stacked read as a
+          broken rail.
+        */}
+        {repos.length > 0 &&
+          groups.every((group) => group.workspaces.length === 0) && (
+            <SidebarEmptyAction
+              label="New workspace"
+              onClick={() => startNewWorkspace()}
+            />
+          )}
       </div>
 
       {dialogs}
@@ -252,6 +260,36 @@ export function CodeSidebar() {
       />
       <AddRepoPalette open={addRepoOpen} onOpenChange={setAddRepoOpen} />
     </SidebarFrame>
+  );
+}
+
+/**
+ * A rail section with nothing in it yet.
+ *
+ * The empty slot is where the reader is already looking, and the section's own
+ * `+` is a 14px target beside a heading. Making the line itself the control
+ * answers "what now?" where the question is asked, and adds no chrome: it
+ * replaces the label that was there.
+ */
+function SidebarEmptyAction({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md px-2 py-1 text-left text-xs",
+        FOCUS_RING,
+        HOVER_TINT,
+      )}
+      onClick={onClick}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -342,7 +380,7 @@ function WorkspaceCard({
               <span className="truncate">{repoName}</span>
             </span>
             <span
-              className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground/90"
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/90"
               title={workspace.branch_name}
             >
               {branchShown}

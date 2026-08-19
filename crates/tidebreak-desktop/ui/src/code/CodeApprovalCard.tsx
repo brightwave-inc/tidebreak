@@ -76,8 +76,14 @@ export function CodeApprovalCard({
           Harness payload
         </button>
         <Reveal open={payloadOpen}>
-          <ScrollableContainer className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 text-[11px] break-words whitespace-pre-wrap">
-            <pre className="font-mono">{prettyRaw(approval.harness_raw_json)}</pre>
+          {/*
+            One `pre`, not two: the scroll container is itself a `pre`, and a
+            nested one carried the browser's own `white-space: pre`, so the
+            wrapping asked for here never applied and a single long JSON line
+            scrolled sideways instead.
+          */}
+          <ScrollableContainer className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-[11px] break-words whitespace-pre-wrap">
+            {prettyRaw(approval.harness_raw_json)}
           </ScrollableContainer>
         </Reveal>
       </div>
@@ -274,10 +280,25 @@ function approvalTitle(approval: CodeApprovalSnapshot): string {
   }
 }
 
+/** Past this, the payload is a file, not something a reader scrolls. */
+export const MAX_PAYLOAD_CHARS = 20_000;
+
+/**
+ * The harness payload, pretty-printed and capped.
+ *
+ * An engine can attach an entire file's contents to one approval. Rendering
+ * that verbatim puts megabytes of text in the transcript's DOM, which the
+ * reader pays for on every later render of the card and never reads. The cap
+ * is stated rather than silent, so nobody mistakes the tail for the end.
+ */
 function prettyRaw(raw: string): string {
+  let text = raw;
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    text = JSON.stringify(JSON.parse(raw), null, 2);
   } catch {
-    return raw;
+    // Not JSON: show what the engine sent, under the same cap.
   }
+  if (text.length <= MAX_PAYLOAD_CHARS) return text;
+  const dropped = text.length - MAX_PAYLOAD_CHARS;
+  return `${text.slice(0, MAX_PAYLOAD_CHARS)}\n… ${dropped.toLocaleString()} more characters not shown.`;
 }

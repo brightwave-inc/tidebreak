@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CodeApprovalCard } from "./CodeApprovalCard";
+import { CodeApprovalCard, MAX_PAYLOAD_CHARS } from "./CodeApprovalCard";
 import type { CodeApprovalSnapshot } from "../api/types";
 
 afterEach(() => {
@@ -77,6 +77,22 @@ describe("CodeApprovalCard", () => {
       "deny",
       "no — use the fixtures directory instead",
     );
+  });
+
+  it("caps a payload an engine sent a whole file in", () => {
+    const huge = "x".repeat(MAX_PAYLOAD_CHARS * 2);
+    render(
+      <CodeApprovalCard
+        approval={{
+          ...pendingWrite,
+          harness_raw_json: JSON.stringify({ content: huge }),
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Harness payload" }));
+    const shown = screen.getByText(/more characters not shown/);
+    expect(shown.textContent!.length).toBeLessThan(MAX_PAYLOAD_CHARS + 200);
   });
 
   it("tones an approved card as success and stamps both times", () => {

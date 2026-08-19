@@ -10,7 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useId, useState, type RefCallback } from "react";
+import { memo, useEffect, useId, useState, type RefCallback } from "react";
 
 import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
@@ -96,9 +96,16 @@ export function CodeTranscript({
     return (
       <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
         {hydrated ? (
-          <p className="text-muted-foreground text-sm">
-            Send a message to start a turn.
-          </p>
+          // The engine, mode, and model are already chosen by the time a
+          // reader gets here, so this is not a welcome screen — it is the one
+          // instruction left, plus what it will produce.
+          <div className="flex max-w-sm flex-col items-center gap-1 text-center text-balance">
+            <p className="text-sm font-medium">Send a message to start a turn.</p>
+            <p className="text-muted-foreground text-[13.5px] leading-relaxed">
+              The engine's replies, the tools it runs, and the files it changes
+              all land here.
+            </p>
+          </div>
         ) : (
           <div className="messages-column">
             <TranscriptSkeleton />
@@ -195,7 +202,16 @@ function itemSignature(
   }
 }
 
-function TranscriptItem({
+/**
+ * One transcript row.
+ *
+ * Memoized on its props, and the reducer keeps every untouched item object
+ * identical across an update, so a streamed delta re-renders the row it
+ * changed rather than all of them. That is what keeps a long session's
+ * transcript honest without virtualization — but it only holds while the
+ * host passes stable callbacks, which `CodeWorkspacePage` does.
+ */
+const TranscriptItem = memo(function TranscriptItem({
   item,
   animateStreaming,
   approval,
@@ -299,7 +315,7 @@ function TranscriptItem({
     case "turn_boundary":
       return <TurnReviewCard turn={item} onOpenTurnDiff={onOpenTurnDiff} />;
   }
-}
+});
 
 /**
  * One engine action as a boxless line. The verb is a constant; the muted mono

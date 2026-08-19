@@ -131,6 +131,47 @@ describe("TerminalPane", () => {
     );
   });
 
+  it("says the shell is opening until it answers, then gets out of the way", async () => {
+    let answer: (page: unknown) => void = () => {};
+    const client = {
+      listCodeTerminals: vi.fn().mockResolvedValue([]),
+      createCodeTerminal: vi.fn().mockResolvedValue({
+        id: "term-1",
+        workspace_id: "ws-1",
+        cols: 80,
+        rows: 24,
+        ended: false,
+        created_at: "2026-08-15T12:00:00.000Z",
+      }),
+      readCodeTerminal: vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            answer = resolve;
+          }),
+      ),
+      writeCodeTerminal: vi.fn(),
+      resizeCodeTerminal: vi.fn(),
+    };
+    render(<TerminalPane client={client} workspaceId="ws-1" />);
+    expect(await screen.findByTestId("terminal-starting")).toHaveTextContent(
+      "Opening a shell in the worktree…",
+    );
+
+    // A shell that answers with nothing is a cleared screen, not a pending one.
+    answer({
+      id: "term-1",
+      workspace_id: "ws-1",
+      bytes: "",
+      cursor: 0,
+      overflow: false,
+      truncated: false,
+      ended: false,
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("terminal-starting")).toBeNull(),
+    );
+  });
+
   it("renders the ended-shell state", async () => {
     const client = {
       listCodeTerminals: vi.fn().mockResolvedValue([]),

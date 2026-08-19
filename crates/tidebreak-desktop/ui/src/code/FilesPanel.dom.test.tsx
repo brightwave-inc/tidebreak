@@ -81,6 +81,23 @@ describe("FilesPanel", () => {
     );
   });
 
+  it("names the search that found nothing and offers the way back", async () => {
+    const client = makeClient();
+    render(
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
+    );
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+    await userEvent
+      .setup()
+      .type(screen.getByRole("searchbox", { name: "Search files" }), "zzz");
+    expect(await screen.findByText("zzz")).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Clear search and filters" }));
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+  });
+
   it("focuses search on Cmd+F and filters by include and exclude", async () => {
     const client = makeClient();
     render(
