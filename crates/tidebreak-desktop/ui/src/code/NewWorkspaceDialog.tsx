@@ -216,33 +216,45 @@ export function NewWorkspaceDialog({
     if (!canCreate) return;
     setCreating(true);
     try {
-      const workspace = await client.createCodeWorkspace({
-        repo_id: repoId,
-        title: title.trim() || undefined,
-        base_ref: baseRef.trim() || undefined,
-      });
+      let workspace: CodeWorkspaceSnapshot;
+      try {
+        workspace = await client.createCodeWorkspace({
+          repo_id: repoId,
+          title: title.trim() || undefined,
+          base_ref: baseRef.trim() || undefined,
+        });
+      } catch (error) {
+        toast.error(
+          friendlyErrorMessage(error, "Could not create the workspace"),
+        );
+        return;
+      }
       upsertWorkspace(workspace);
-      const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-      const listed =
-        gateway.length > 0
-          ? gateway
-          : await ensureHarnessModels(client, harness);
-      const posted =
-        model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
-      const session = await client.createCodeSession(workspace.id, {
-        harness,
-        permission_mode: postedMode,
-        model: posted,
-      });
-      rememberSession(session);
-      rememberCreate({ repoId, harness, model: posted });
+      try {
+        const gateway = gatewayCodeModels(models, harness, defaultModelKey);
+        const listed =
+          gateway.length > 0
+            ? gateway
+            : await ensureHarnessModels(client, harness);
+        const posted =
+          model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
+        const session = await client.createCodeSession(workspace.id, {
+          harness,
+          permission_mode: postedMode,
+          model: posted,
+        });
+        rememberSession(session);
+        rememberCreate({ repoId, harness, model: posted });
+      } catch (error) {
+        toast.error(
+          `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
+        );
+      }
       onOpenChange(false);
       await navigate({
         to: "/code/w/$workspaceId",
         params: { workspaceId: workspace.id },
       });
-    } catch (error) {
-      toast.error(friendlyErrorMessage(error, "Could not create the workspace"));
     } finally {
       setCreating(false);
     }

@@ -16,10 +16,18 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 
+const toastError = vi.hoisted(() => vi.fn());
+vi.mock("sonner", () => ({
+  toast: {
+    error: toastError,
+  },
+}));
+
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
   useCodeUiStore.setState({ lastCreate: null });
+  toastError.mockReset();
 });
 
 const CAPS = {
@@ -341,6 +349,64 @@ describe("NewWorkspaceDialog", () => {
     const repoField = screen.getByRole("combobox", { name: "Repo" });
     expect(repoField).toHaveTextContent("legacy");
     expect(repoField).toBeEnabled();
+  });
+
+  it("opens a created workspace when its first session cannot start", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("codex")],
+        notices: [],
+      } as never,
+    });
+    const created = workspace(
+      "ws-recover",
+      "repo-new",
+      "2026-08-19T00:00:00.000Z",
+    );
+    const onOpenChange = vi.fn();
+    const createCodeSession = vi.fn(async () => {
+      throw new Error("Codex sign-in expired");
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () => created),
+          createCodeSession,
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "codex" as const,
+            models: [
+              { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
+            ],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog
+          open
+          onOpenChange={onOpenChange}
+          repos={repos}
+        />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-recover"),
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(useCodeCatalogStore.getState().workspaces).toContainEqual(created);
+    expect(
+      useCodeCatalogStore.getState().sessionsByWorkspace[created.id],
+    ).toBeUndefined();
+    expect(toastError).toHaveBeenCalledWith(
+      "Workspace created, but the session could not start. Codex sign-in expired",
+    );
   });
 
   it("lets the reader search the model list", async () => {
