@@ -277,7 +277,7 @@ if [ "$1" = pr ] && [ "$2" = create ]; then
   exit 0
 fi
 if [ "$1" = pr ] && [ "$2" = view ]; then
-  echo '{{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN"}}'
+  echo '{{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}}'
   exit 0
 fi
 if [ "$1" = pr ] && [ "$2" = checks ]; then
