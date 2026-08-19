@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { useGuidedMenu } from "./FirstTaskWalkthrough";
 
 export type ComposerNetwork = {
   value: NetworkPolicy;
@@ -77,6 +78,7 @@ export function ComposerToolsMenu({
   // the menu, and a dialog rendered inside the menu's content would be torn
   // down with it before it could open.
   const [networkOpen, setNetworkOpen] = useState(false);
+  const guided = useGuidedMenu("tools");
 
   const hasAttachments = Boolean(attachFiles || attachFolder);
   const hasSettings = Boolean(network || reasoning);
@@ -89,7 +91,11 @@ export function ComposerToolsMenu({
 
   return (
     <>
-      <DropdownMenu>
+      <DropdownMenu
+        open={guided.open}
+        modal={guided.modal}
+        onOpenChange={guided.onOpenChange}
+      >
         <WithTooltip label="Tools">
           <DropdownMenuTrigger asChild>
             <Button
@@ -104,7 +110,13 @@ export function ComposerToolsMenu({
             </Button>
           </DropdownMenuTrigger>
         </WithTooltip>
-        <DropdownMenuContent align="start" side="top" className="w-60">
+        <DropdownMenuContent
+          align="start"
+          side="top"
+          className="w-60"
+          data-first-task-target="tools-menu"
+          onEscapeKeyDown={guided.onEscapeKeyDown}
+        >
           {attachFiles && (
             <DropdownMenuItem
               disabled={disabled || attachFiles.attaching}
@@ -146,6 +158,9 @@ export function ComposerToolsMenu({
             <DropdownMenuItem
               disabled={disabled || network.disabled}
               onSelect={() => {
+                // The walkthrough holds this menu open, so a second overlay
+                // would sit under the spotlight and trap focus.
+                if (guided.guided) return;
                 // Opened once the menu has actually gone. Raising the dialog in
                 // the same commit leaves two overlays each claiming focus and
                 // hiding the other from assistive tech.

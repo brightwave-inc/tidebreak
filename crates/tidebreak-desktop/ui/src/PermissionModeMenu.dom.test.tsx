@@ -6,12 +6,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { ManagedPolicy, PermissionMode } from "./api";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { PermissionModeMenu } from "./PermissionModeMenu";
+import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  useFirstTaskGuide.getState().setSurface(null);
 });
 
 /**
@@ -155,4 +157,14 @@ it("does not toast a failed write after keyed chat navigation unmounts it", asyn
   expect(
     screen.getByRole("button", { name: "Permissions: Ask" }),
   ).toBeEnabled();
+});
+
+it("opens when the first-task walkthrough is on the permissions step", () => {
+  useFirstTaskGuide.getState().setSurface("permissions");
+  render(
+    <PermissionModeMenu scopeKey="chat-1" value="ask" onChange={vi.fn()} />,
+  );
+
+  expect(screen.getByRole("menuitem", { name: /Ask/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Plan/ })).toBeInTheDocument();
 });

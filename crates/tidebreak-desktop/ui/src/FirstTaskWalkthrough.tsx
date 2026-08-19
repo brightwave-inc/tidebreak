@@ -1,22 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { create } from "zustand";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
 
 export const FIRST_TASK_WALKTHROUGH_KEY =
-  "tidebreak.first-task-walkthrough.v1";
+  "tidebreak.first-task-walkthrough.v2";
 
 export type FirstTaskWalkthroughOutcome = "completed" | "skipped";
 
+/** Composer surface the walkthrough opens so the spotlight has something real to show. */
+export type FirstTaskSurface = "model" | "tools" | "permissions" | null;
+
 type WalkthroughStep = {
   id: string;
+  surface: FirstTaskSurface;
+  /** Opened menu content, preferred once the surface has mounted. */
   target: string;
+  /** Trigger still in the bar, used before the menu portal exists. */
+  fallbackTarget: string;
   title: string;
   body: string;
 };
@@ -24,27 +26,43 @@ type WalkthroughStep = {
 const STEPS: readonly WalkthroughStep[] = [
   {
     id: "model",
-    target: "model",
+    surface: "model",
+    target: "model-menu",
+    fallbackTarget: "model",
     title: "Choose a model",
-    body: "Models differ in speed, reasoning, and the inputs they understand. The current default is a good place to start.",
+    body: "The model menu is open. Models differ in speed, reasoning, and the inputs they understand. The current default is a good place to start.",
   },
   {
     id: "internet",
-    target: "tools",
+    surface: "tools",
+    target: "tools-menu",
+    fallbackTarget: "tools",
     title: "Set internet access",
-    body: "Open Tools and choose Network when the task needs websites or current information. Leave it off when Tidebreak should use only your message and attachments.",
+    body: "The Tools menu is open. Network is this chat's internet setting. Internet access is what web search and current information need. Leave it off when Tidebreak should use only your message and attachments.",
   },
   {
     id: "permissions",
-    target: "permissions",
+    surface: "permissions",
+    target: "permissions-menu",
+    fallbackTarget: "permissions",
     title: "Choose a permission level",
-    body: "Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a balanced place to start.",
+    body: "The permission menu is open. Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a balanced place to start.",
   },
   {
     id: "attachments",
-    target: "tools",
+    surface: "tools",
+    target: "tools-menu",
+    fallbackTarget: "tools",
     title: "Add attachments",
-    body: "Open Tools to attach files from your computer. This option appears in the desktop app when local file access is available.",
+    body: "Attach files or a folder from this menu when the task needs your documents. Desktop Tidebreak can read what you attach.",
+  },
+  {
+    id: "starters",
+    surface: null,
+    target: "starters",
+    fallbackTarget: "starters",
+    title: "Start a real task",
+    body: "These prompts are complete. Pick one and send it to watch Tidebreak search, write, or build. You do not need to attach anything first.",
   },
 ] as const;
 
@@ -56,6 +74,38 @@ type ElementRect = {
   width: number;
   height: number;
 };
+
+type FirstTaskGuideState = {
+  surface: FirstTaskSurface;
+  setSurface: (surface: FirstTaskSurface) => void;
+};
+
+export const useFirstTaskGuide = create<FirstTaskGuideState>((set) => ({
+  surface: null,
+  setSurface: (surface) => set({ surface }),
+}));
+
+/**
+ * Controlled open state for a composer menu the walkthrough is allowed to
+ * force open. While that surface is active the menu stays open and is not
+ * modal, so the walkthrough card can keep keyboard focus.
+ */
+export function useGuidedMenu(surface: Exclude<FirstTaskSurface, null>) {
+  const guided = useFirstTaskGuide((state) => state.surface === surface);
+  const [open, setOpen] = useState(false);
+  return {
+    guided,
+    open: guided || open,
+    modal: !guided,
+    onOpenChange: (next: boolean) => {
+      if (guided) return;
+      setOpen(next);
+    },
+    onEscapeKeyDown: (event: { preventDefault: () => void }) => {
+      if (guided) event.preventDefault();
+    },
+  };
+}
 
 export function shouldOfferFirstTaskWalkthrough(): boolean {
   try {
@@ -78,12 +128,44 @@ function targetSelector(target: string): string {
   return `[data-first-task-target="${CSS.escape(target)}"]`;
 }
 
+function resolveTarget(step: WalkthroughStep): HTMLElement | null {
+  return (
+    document.querySelector<HTMLElement>(targetSelector(step.target)) ??
+    document.querySelector<HTMLElement>(targetSelector(step.fallbackTarget))
+  );
+}
+
 function focusComposer(): void {
   window.requestAnimationFrame(() => {
     document
       .querySelector<HTMLTextAreaElement>("[data-composer-input]")
       ?.focus();
   });
+}
+
+function focusableIn(root: HTMLElement): HTMLElement[] {
+  return [
+    ...root.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ];
+}
+
+function clipPathFor(rect: ElementRect, inset: number): string {
+  const left = rect.left - inset;
+  const top = rect.top - inset;
+  const right = rect.left + rect.width + inset;
+  const bottom = rect.top + rect.height + inset;
+  return `polygon(
+    0% 0%, 0% 100%, 100% 100%, 100% 0%,
+    0% 0%,
+    ${left}px ${top}px,
+    ${left}px ${bottom}px,
+    ${right}px ${bottom}px,
+    ${right}px ${top}px,
+    ${left}px ${top}px,
+    0% 0%
+  )`;
 }
 
 export function FirstTaskWalkthrough({
@@ -95,25 +177,30 @@ export function FirstTaskWalkthrough({
 }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [rect, setRect] = useState<ElementRect | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const setSurface = useFirstTaskGuide((state) => state.setSurface);
   const step = STEPS[stepIndex];
 
   useEffect(() => {
     if (!open) {
       setStepIndex(0);
       setRect(null);
+      setSurface(null);
       return;
     }
+    setSurface(step.surface);
+  }, [open, setSurface, step.surface]);
 
-    const target = document.querySelector<HTMLElement>(
-      targetSelector(step.target),
-    );
-    if (!target) {
-      setRect(null);
-      return;
-    }
+  useEffect(() => {
+    if (!open) return;
 
-    target.scrollIntoView({ block: "nearest", inline: "nearest" });
-    const update = () => {
+    let cancelled = false;
+    let frames = 0;
+    let target: HTMLElement | null = null;
+    const observer = new ResizeObserver(() => {
+      if (!target || cancelled) return;
       const next = target.getBoundingClientRect();
       setRect({
         top: next.top,
@@ -123,22 +210,112 @@ export function FirstTaskWalkthrough({
         width: next.width,
         height: next.height,
       });
-    };
-    update();
+    });
 
-    const observer = new ResizeObserver(update);
-    observer.observe(target);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+    const measure = (element: HTMLElement) => {
+      const next = element.getBoundingClientRect();
+      setRect({
+        top: next.top,
+        left: next.left,
+        right: next.right,
+        bottom: next.bottom,
+        width: next.width,
+        height: next.height,
+      });
     };
-  }, [open, step.target]);
+
+    const find = () => {
+      if (cancelled) return;
+      const next = resolveTarget(step);
+      if (!next) {
+        setRect(null);
+        if (frames++ < 30) {
+          window.requestAnimationFrame(find);
+        }
+        return;
+      }
+      target = next;
+      next.scrollIntoView({ block: "nearest", inline: "nearest" });
+      measure(next);
+      observer.observe(next);
+    };
+    find();
+
+    const onViewport = () => {
+      if (target) measure(target);
+    };
+    window.addEventListener("resize", onViewport);
+    window.addEventListener("scroll", onViewport, true);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      window.removeEventListener("resize", onViewport);
+      window.removeEventListener("scroll", onViewport, true);
+    };
+  }, [open, step]);
+
+  useEffect(() => {
+    if (!open) return;
+    cardRef.current?.focus();
+  }, [open, stepIndex]);
+
+  useEffect(() => {
+    if (!open) return;
+    const cycleFocus = (event: KeyboardEvent) => {
+      const card = cardRef.current;
+      if (!card) return;
+      const focusable = focusableIn(card);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        card.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || !card.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+        return;
+      }
+      if (active === last || !card.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        storeOutcome("skipped");
+        setSurface(null);
+        onCloseRef.current("skipped");
+        focusComposer();
+        return;
+      }
+      if (event.key === "Tab") cycleFocus(event);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const card = cardRef.current;
+      if (!card) return;
+      const target = event.target;
+      if (target instanceof Node && card.contains(target)) return;
+      const focusable = focusableIn(card);
+      (focusable[0] ?? card).focus();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn);
+    };
+  }, [open, setSurface]);
 
   function finish(outcome: FirstTaskWalkthroughOutcome) {
     storeOutcome(outcome);
+    setSurface(null);
     onClose(outcome);
     focusComposer();
   }
@@ -161,33 +338,35 @@ export function FirstTaskWalkthrough({
       ? rect.top - 12
       : rect.bottom + 12
     : window.innerHeight / 2;
+  const inset = 4;
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) finish("skipped");
-      }}
-    >
-      {rect && createPortal(
-        <div
-          className="pointer-events-none fixed z-[101] rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
-          aria-hidden="true"
-          style={{
-            top: rect.top - 4,
-            left: rect.left - 4,
-            width: rect.width + 8,
-            height: rect.height + 8,
-            boxShadow: "0 0 0 9999px rgb(0 0 0 / 0.01)",
-          }}
-        />,
-        document.body,
+  return createPortal(
+    <>
+      {rect && (
+        <div className="pointer-events-none fixed inset-0 z-[100]" aria-hidden="true">
+          <div
+            className="pointer-events-auto absolute inset-0 bg-black/50"
+            style={{ clipPath: clipPathFor(rect, inset) }}
+          />
+          <div
+            className="absolute rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
+            style={{
+              top: rect.top - inset,
+              left: rect.left - inset,
+              width: rect.width + inset * 2,
+              height: rect.height + inset * 2,
+            }}
+          />
+        </div>
       )}
-      <DialogContent
-        withCloseButton={false}
-        onInteractOutside={(event) => event.preventDefault()}
-        overlayClassName="z-[100] bg-black/45"
-        className="z-[102] block max-w-none translate-x-0 translate-y-0 gap-0 rounded-xl border-border bg-popover p-4 text-popover-foreground shadow-xl duration-0 data-[state=closed]:animate-none data-[state=open]:animate-none"
+      <div
+        ref={cardRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="first-task-walkthrough-title"
+        aria-describedby="first-task-walkthrough-body"
+        tabIndex={-1}
+        className="fixed z-[102] max-w-none rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-xl outline-none"
         style={{
           top: dialogTop,
           left: dialogLeft,
@@ -206,12 +385,18 @@ export function FirstTaskWalkthrough({
               {stepIndex + 1} of {STEPS.length}
             </span>
           </div>
-          <DialogTitle className="mt-3 text-base tracking-[-0.01em]">
+          <h2
+            id="first-task-walkthrough-title"
+            className="mt-3 text-base font-semibold tracking-[-0.01em]"
+          >
             {step.title}
-          </DialogTitle>
-          <DialogDescription className="mt-1.5 leading-relaxed">
+          </h2>
+          <p
+            id="first-task-walkthrough-body"
+            className="text-muted-foreground mt-1.5 text-sm leading-relaxed"
+          >
             {step.body}
-          </DialogDescription>
+          </p>
         </div>
         <div className="mt-4 flex items-center gap-2">
           <Button
@@ -247,7 +432,8 @@ export function FirstTaskWalkthrough({
             {stepIndex === STEPS.length - 1 ? "Done" : "Next"}
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </>,
+    document.body,
   );
 }

@@ -29,6 +29,7 @@ import { ComposerPrompt } from "./ComposerPrompt";
 import { ChatUsageDialog } from "./ChatUsageDialog";
 import type { ComposerNetwork, ComposerReasoning } from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
+import type { StarterPromptOptions } from "./WelcomeState";
 import { revealPendingCall } from "./TranscriptFocus";
 import { useTranscriptVisible } from "./TranscriptVisibility";
 import { useFolderAccessRequests } from "./useFolderAccessRequests";
@@ -85,7 +86,7 @@ export type ChatViewProps = {
   nativeDropTarget?: ReactNode;
   attachError: string | null;
   onDraftChange: (value: string) => void;
-  onSelectPrompt: (prompt: string) => void;
+  onSelectPrompt: (prompt: string, options?: StarterPromptOptions) => void;
   onSend: () => Promise<void>;
   /** Queue the draft to run after the active turn; absent disables queueing. */
   onQueue?: () => Promise<void>;

@@ -146,7 +146,9 @@ export function HomeRoute() {
   const [walkthroughAvailable, setWalkthroughAvailable] = useState(
     shouldOfferFirstTaskWalkthrough,
   );
-  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
+  const [walkthroughOpen, setWalkthroughOpen] = useState(
+    shouldOfferFirstTaskWalkthrough,
+  );
   const newChat = useNewChatSettings();
   // What the pickers show and the created chat will get: this visit's picks
   // over the server's sticky defaults. Only the explicit picks are sent; the
@@ -378,11 +380,16 @@ export function HomeRoute() {
           {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
               fills the composer rather than sending, the way it does in a chat.
-              Home's starters come from the installed prompt library when it has
-              any; otherwise the built-in openers stand. */}
+              Web starters also turn internet access on so the turn can search
+              without another click. Home's starters come from the installed
+              prompt library when it has any; otherwise the built-in openers
+              stand. */}
           <WelcomeState
-            onSelectPrompt={(prompt) => {
+            onSelectPrompt={(prompt, options) => {
               setDraft(prompt);
+              if (options?.enableInternet) {
+                newChat.setNetworkPolicy({ mode: "open" });
+              }
               voice.resetInputUsed();
             }}
             executionConfigClient={client}
@@ -394,7 +401,7 @@ export function HomeRoute() {
                 : undefined
             }
             onStartWalkthrough={
-              walkthroughAvailable
+              walkthroughAvailable && !walkthroughOpen
                 ? () => setWalkthroughOpen(true)
                 : undefined
             }

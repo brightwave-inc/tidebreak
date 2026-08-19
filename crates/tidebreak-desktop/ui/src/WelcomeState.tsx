@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   AppWindow,
-  ChartColumn,
-  FileText,
+  GitBranch,
+  Globe,
+  Scale,
   Sparkles,
-  Users,
 } from "lucide-react";
 import type {
   ApiClient,
@@ -30,44 +30,57 @@ export type PromptLibraryApis = Pick<PluginsApis, "list" | "promptBody">;
 /** How many library prompts home offers before it stops listing them. */
 const MAX_LIBRARY_PROMPTS = 6;
 
+/** Optional setup applied when a built-in starter is picked. */
+export type StarterPromptOptions = {
+  enableInternet?: boolean;
+};
+
 type StarterPrompt = {
   icon: typeof Sparkles;
   label: string;
+  description: string;
   prompt: string;
+  enableInternet?: boolean;
 };
 
 /**
  * The starters home falls back to with no prompt library installed.
  *
- * Each one names a finished result rather than a chat behavior, and each
- * prompt stands on its own before anything is attached: it says which input
- * is missing and what to do first, so a card that is clicked and sent
- * immediately still starts a real conversation.
+ * Each prompt is complete: it names the work, the tools to use, and the
+ * finished artifact, so a card that is clicked and sent starts a turn the
+ * reader can watch without attaching files or answering a follow-up.
  */
 const STARTER_PROMPTS: StarterPrompt[] = [
   {
-    icon: FileText,
-    label: "Write a report from files",
+    icon: Globe,
+    label: "Brief this week's AI news",
+    description: "Search the web, then write a sourced briefing.",
     prompt:
-      "I want a written report I can share, built from my own files. Tell me what to attach and which sections you would cover, then draft it once the files are in.",
+      "Search the web for the most important AI model and product news from the past seven days. Write a one-page briefing with sources. Cover what shipped, why it matters, and what to watch next. Start now. Do not ask me what to include.",
+    enableInternet: true,
   },
   {
-    icon: ChartColumn,
-    label: "Analyze a spreadsheet",
+    icon: Scale,
+    label: "Compare two public products",
+    description: "Search, tabulate, and recommend with citations.",
     prompt:
-      "I want a spreadsheet analyzed and the findings charted. Tell me what to attach, then walk the data, call out what actually changed, and build the charts that show it.",
-  },
-  {
-    icon: Users,
-    label: "Delegate work in parallel",
-    prompt:
-      "I have work that could run several ways at once. Ask me what the work is, then split it into background tasks you can run in parallel and report back on each.",
+      "Search the web for current public pricing and specs for a cloud NVIDIA H100 versus H200 GPU instance from at least two providers. Build a comparison table covering price, memory, availability notes, and who each is for. Recommend when to pick which, and cite sources. Start now. Do not ask me for more requirements.",
+    enableInternet: true,
   },
   {
     icon: AppWindow,
-    label: "Turn a folder into an app",
+    label: "Build a local planner",
+    description: "Create a small app in this workspace.",
     prompt:
-      "I want a small private app that runs on my own machine over a folder of files. Ask me which folder and what it should do, then build it.",
+      "Build a small local web app I can open on this machine: a personal weekly planner with add, edit, and complete for tasks. No login, single page, clean UI. Create the files in this workspace and tell me how to open it. Start now. Do not wait for a folder or more product direction.",
+  },
+  {
+    icon: GitBranch,
+    label: "Research in parallel",
+    description: "Split a briefing across background tasks.",
+    prompt:
+      "Search the web and split this into parallel background tasks: (1) EU AI Act enforcement developments this year, (2) US state AI bills that passed or advanced this year, (3) policy responses published by major AI labs. Synthesize a one-page brief with sources. Start now. Do not ask me to pick a region or angle.",
+    enableInternet: true,
   },
 ];
 
@@ -94,7 +107,7 @@ export function WelcomeState({
   description = "Ask a question, work through your files, or start a task.",
   onStartWalkthrough,
 }: {
-  onSelectPrompt?: (prompt: string) => void;
+  onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
   executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
   heading?: string;
   description?: string;
@@ -189,7 +202,7 @@ export function WelcomeState({
         </Button>
       )}
       {onSelectPrompt && libraryPrompts.length > 0 && (
-        <div className="welcome-prompts">
+        <div className="welcome-prompts" data-first-task-target="starters">
           {libraryPrompts.map((prompt) => (
             <button
               key={prompt.name}
@@ -211,18 +224,30 @@ export function WelcomeState({
         </div>
       )}
       {onSelectPrompt && libraryPrompts.length === 0 && (
-        <div className="welcome-prompts">
-          {STARTER_PROMPTS.map(({ icon: Icon, label, prompt }) => (
-            <button
-              key={label}
-              type="button"
-              className={CARD_CLASS}
-              onClick={() => onSelectPrompt(prompt)}
-            >
-              <Icon size={16} />
-              <span>{label}</span>
-            </button>
-          ))}
+        <div className="welcome-prompts" data-first-task-target="starters">
+          {STARTER_PROMPTS.map(
+            ({ icon: Icon, label, description, prompt, enableInternet }) => (
+              <button
+                key={label}
+                type="button"
+                className={CARD_CLASS}
+                onClick={() =>
+                  onSelectPrompt(
+                    prompt,
+                    enableInternet ? { enableInternet: true } : undefined,
+                  )
+                }
+              >
+                <Icon size={16} />
+                <span className="min-w-0">
+                  <span className="block">{label}</span>
+                  <span className="block text-[0.78rem] font-normal text-muted-foreground">
+                    {description}
+                  </span>
+                </span>
+              </button>
+            ),
+          )}
         </div>
       )}
     </section>
