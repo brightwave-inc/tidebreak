@@ -8,7 +8,7 @@ import {
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
 import {
-  LIGHT_DOCUMENT_SURFACE,
+  DOCUMENT_VIEWER_SURFACE,
   useSecureViewerLinks,
 } from "@/document/extendViewerSurface";
 import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
@@ -103,7 +103,7 @@ export function PdfViewer({
       className={className}
       {...restProps}
     >
-      <div className="min-h-0 grow overflow-hidden rounded-md border bg-white shadow-xs">
+      <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
         <ExtendPdfViewer
           ref={viewerRef}
           className="h-full min-h-0"
@@ -129,7 +129,7 @@ const ViewerShell = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
       className={cn(
         "relative flex min-h-0 flex-col overflow-hidden",
         className,
-        LIGHT_DOCUMENT_SURFACE,
+        DOCUMENT_VIEWER_SURFACE,
       )}
       {...props}
     />

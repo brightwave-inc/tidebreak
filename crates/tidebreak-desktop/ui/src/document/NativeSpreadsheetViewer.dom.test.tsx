@@ -4,6 +4,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setThemeMode } from "@/theme";
+
 const xlsxMocks = vi.hoisted(() => {
   const controller = {
     activeCellAddress: "B7",
@@ -77,12 +79,16 @@ const source: FileBytesSource = {
 
 describe("NativeSpreadsheetViewer", () => {
   beforeEach(() => {
+    setThemeMode("light");
     xlsxMocks.useXlsxViewerController.mockClear();
     xlsxMocks.xlsxViewer.mockClear();
     xlsxMocks.controller.selectRange.mockClear();
     xlsxMocks.controller.setActiveTabIndex.mockClear();
   });
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    setThemeMode("system");
+  });
 
   it("preserves cached Excel results and exposes a read-only canvas", async () => {
     render(
@@ -142,6 +148,13 @@ describe("NativeSpreadsheetViewer", () => {
     expect(
       viewerProps.getCellStyle({ ...context, value: "Launch thesis" }),
     ).toBeUndefined();
+
+    setThemeMode("dark");
+    await waitFor(() =>
+      expect(xlsxMocks.xlsxViewer).toHaveBeenLastCalledWith(
+        expect.objectContaining({ isDark: true }),
+      ),
+    );
   });
 
   it("selects a cited A1 range on the cited sheet", async () => {

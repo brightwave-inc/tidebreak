@@ -4,12 +4,13 @@ import { useRef } from "react";
 import { DocxViewerPreview } from "@/components/extend/docx-viewer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import {
-  LIGHT_DOCUMENT_SURFACE,
+  DOCUMENT_VIEWER_SURFACE,
   useSecureViewerLinks,
 } from "@/document/extendViewerSurface";
 import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
 import type { FileBytesSource } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/theme";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
   source: FileBytesSource;
@@ -25,6 +26,7 @@ export default function DocxViewer({
   className,
   ...restProps
 }: Props) {
+  const { resolved: resolvedTheme } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const file = useLocalDocumentUrl(source);
   useSecureViewerLinks(containerRef);
@@ -35,7 +37,7 @@ export default function DocxViewer({
       className={cn(
         "relative flex min-h-0 flex-col overflow-hidden",
         className,
-        LIGHT_DOCUMENT_SURFACE,
+        DOCUMENT_VIEWER_SURFACE,
       )}
       {...restProps}
     >
@@ -48,12 +50,12 @@ export default function DocxViewer({
           <ViewerMessage>Loading document…</ViewerMessage>
         )
       ) : (
-        <div className="min-h-0 grow overflow-hidden rounded-md border bg-white shadow-xs">
+        <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
           <DocxViewerPreview
             className="h-full min-h-0"
             defaultZoom={50}
             fileName="document.docx"
-            isDark={false}
+            isDark={resolvedTheme === "dark"}
             onIsDarkChange={() => undefined}
             showDownload={false}
             showToolbar

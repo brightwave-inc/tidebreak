@@ -42,6 +42,7 @@ import {
   type FileBytesSource,
 } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/theme";
 
 // Make the parser asset an application resource. The viewer's default loader
 // can discover its package-relative WASM in a browser build, but an explicit
@@ -56,8 +57,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 }
 
 const MAX_WORKBOOK_BYTES = 16 * 1024 * 1024;
-const LIGHT_WORKBOOK_SURFACE =
-  "bg-white text-zinc-950 [color-scheme:light] [--accent:#f4f4f5] [--accent-foreground:#18181b] [--background:#fff] [--border:#e4e4e7] [--foreground:#09090b] [--muted:#f4f4f5] [--muted-foreground:#71717a]";
+const WORKBOOK_SURFACE = "bg-background text-foreground";
 const LARGE_MERGED_VALUE_PATTERN =
   /^(?:[$€£¥]\s*)?\(?-?\d[\d,\s]*(?:\.\d+)?%?\)?$/;
 
@@ -74,12 +74,13 @@ export default function NativeSpreadsheetViewer({
   className,
   ...restProps
 }: Props) {
+  const { resolved: resolvedTheme } = useTheme();
   const fileDownload = useFileDownload(source, { parseAs: "arrayBuffer" });
 
   if (fileDownload.isLoading) {
     return (
       <div
-        className={cn(LIGHT_WORKBOOK_SURFACE, "relative min-h-0", className)}
+        className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
         {fileDownload.progress ? (
@@ -94,7 +95,7 @@ export default function NativeSpreadsheetViewer({
   if (fileDownload.error || fileDownload.data === null) {
     return (
       <div
-        className={cn(LIGHT_WORKBOOK_SURFACE, "relative min-h-0", className)}
+        className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
         <ViewerMessage>This workbook could not be loaded.</ViewerMessage>
@@ -106,6 +107,7 @@ export default function NativeSpreadsheetViewer({
     <LoadedWorkbook
       key={source.cacheKey}
       data={fileDownload.data}
+      dark={resolvedTheme === "dark"}
       mediaType={mediaType}
       highlightRange={highlightRange}
       className={className}
@@ -116,12 +118,14 @@ export default function NativeSpreadsheetViewer({
 
 interface LoadedWorkbookProps extends HTMLAttributes<HTMLDivElement> {
   data: ArrayBuffer;
+  dark: boolean;
   mediaType: string;
   highlightRange?: SheetHighlightRange;
 }
 
 function LoadedWorkbook({
   data,
+  dark,
   mediaType,
   highlightRange,
   className,
@@ -132,7 +136,7 @@ function LoadedWorkbook({
   if (projection.error) {
     return (
       <div
-        className={cn(LIGHT_WORKBOOK_SURFACE, "relative min-h-0", className)}
+        className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
         <ViewerMessage>This workbook could not be prepared.</ViewerMessage>
@@ -143,7 +147,7 @@ function LoadedWorkbook({
   if (!projection.value) {
     return (
       <div
-        className={cn(LIGHT_WORKBOOK_SURFACE, "relative min-h-0", className)}
+        className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
         <ViewerMessage spinner>Preparing workbook…</ViewerMessage>
@@ -154,6 +158,7 @@ function LoadedWorkbook({
   return (
     <RenderedWorkbook
       data={projection.value.data}
+      dark={dark}
       conditionalStylesBySheet={projection.value.conditionalStylesBySheet}
       formulasBySheet={projection.value.formulasBySheet}
       mediaType={mediaType}
@@ -174,6 +179,7 @@ interface RenderedWorkbookProps extends LoadedWorkbookProps {
 
 function RenderedWorkbook({
   data,
+  dark,
   conditionalStylesBySheet,
   formulasBySheet,
   mediaType,
@@ -229,7 +235,7 @@ function RenderedWorkbook({
   return (
     <div
       className={cn(
-        LIGHT_WORKBOOK_SURFACE,
+        WORKBOOK_SURFACE,
         "min-h-0 overflow-hidden",
         className,
       )}
@@ -249,7 +255,7 @@ function RenderedWorkbook({
         )}
         experimentalCanvas
         getCellStyle={getCellStyle}
-        isDark={false}
+        isDark={dark}
         loadingState={
           <ViewerMessage spinner>Reading workbook…</ViewerMessage>
         }

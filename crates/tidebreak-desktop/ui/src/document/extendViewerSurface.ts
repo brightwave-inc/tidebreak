@@ -4,12 +4,11 @@ import { useEffect } from "react";
 import { openExternal } from "@/host";
 
 /**
- * Office documents are authored against a paper-like light canvas. Keep the
- * embedded viewer controls on the same palette even when Tidebreak's app chrome
- * is dark; this also keeps DOCX and PPTX rendering independent of app theme.
+ * The viewer chrome follows Tidebreak's live palette. Individual pages and
+ * slides may still keep their authored paper/slide colors, but controls and
+ * the surrounding canvas should never require a reload after a theme change.
  */
-export const LIGHT_DOCUMENT_SURFACE =
-  "bg-white text-zinc-950 [color-scheme:light] [--accent:#f4f4f5] [--accent-foreground:#18181b] [--background:#fff] [--border:#e4e4e7] [--card:#fafafa] [--card-foreground:#18181b] [--destructive:#dc2626] [--destructive-foreground:#fff] [--foreground:#09090b] [--input:#e4e4e7] [--muted:#f4f4f5] [--muted-foreground:#71717a] [--popover:#fff] [--popover-foreground:#27272a] [--primary:#18181b] [--primary-foreground:#fafafa] [--ring:#a1a1aa] [--secondary:#f4f4f5] [--secondary-foreground:#52525b]";
+export const DOCUMENT_VIEWER_SURFACE = "bg-background text-foreground";
 
 /**
  * Document engines may materialize hyperlinks after their initial render. Keep
