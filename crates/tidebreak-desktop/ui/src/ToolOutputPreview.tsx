@@ -58,6 +58,10 @@ export function ToolOutputPreview({
       <div className="group relative w-full">
         <pre
           id={bodyId}
+          // A bare `aria-label` on a `pre` names nothing: the element is
+          // generic. The group role is what carries the label — and the copy
+          // control beside it uses the same word.
+          role="group"
           aria-label={label}
           className={
             bare

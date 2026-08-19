@@ -66,14 +66,77 @@ describe("CodeTranscript", () => {
   it("renders assistant text, a tool card, and a harness notice", () => {
     render(<CodeTranscript items={items} />);
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
+    // The line's outcome belongs to its own name. It is deliberately not a
+    // live region: see the streaming test below.
     expect(
-      screen.getByRole("status", { name: "Command run succeeded" }),
+      screen.getByRole("button", { name: /Command run.*succeeded/ }),
     ).toBeInTheDocument();
     expect(screen.getByText("Command run")).toBeInTheDocument();
     expect(screen.getByText("ls")).toBeInTheDocument();
     expect(screen.getByText("1.2s")).toBeInTheDocument();
     expect(screen.queryByLabelText("Output")).toBeNull();
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
+  });
+
+  it("announces the turn's lifecycle and nothing that streams", () => {
+    // A tool line changes on every streamed byte. Wrapping it in a live region
+    // reads the whole session out, over and over, and buries the one thing a
+    // supervisor has to hear. The turn's start and end go through one region;
+    // the output goes through none.
+    const running: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "tool",
+        id: "tool-live",
+        turnId: "t1",
+        callId: "c9",
+        name: "Bash",
+        detail: { kind: "command", cmd: "seq 3", cwd: "/tmp" },
+        status: "running",
+        preview: "line 1\nline 2",
+        startedAt: "2026-08-15T12:00:00.000Z",
+        durationMs: null,
+      },
+    ];
+    // The region is mounted empty, so reopening a finished session does not
+    // read its last outcome at the reader before they ask for anything.
+    const { rerender } = render(<CodeTranscript items={[items[0]]} />);
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent("");
+
+    rerender(<CodeTranscript items={running} busy />);
+    expect(
+      screen
+        .getByLabelText("Output")
+        .closest('[aria-live], [role="status"], [role="alert"]'),
+    ).toBeNull();
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent(
+      "Turn running",
+    );
+
+    rerender(<CodeTranscript items={items} />);
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent(
+      "Turn finished · 2m 14s",
+    );
+  });
+
+  it("leaves a failed turn to its alert rather than saying it twice", () => {
+    const failed: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "turn_boundary",
+        id: "b3",
+        turnId: "t1",
+        status: "failed",
+        durationMs: 4_000,
+        usage: null,
+        error: "claude exited with status 1",
+        diffstat: null,
+      },
+    ];
+    const { rerender } = render(<CodeTranscript items={[items[0]]} busy />);
+    rerender(<CodeTranscript items={failed} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Turn failed");
+    expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent("");
   });
 
   it("renders the prompt as markdown with a timestamped footer", () => {
@@ -194,6 +257,14 @@ describe("CodeTranscript", () => {
     // Growing the column under the reader's cursor must not drag them to the
     // tail, so every reveal reaches the host that owns the scroll.
     expect(reveals).toHaveLength(1);
+
+    // Collapsing the line leaves the reader on the line they collapsed: the
+    // toggle is the row itself, so there is nothing for focus to fall out of.
+    const line = screen.getByRole("button", { name: /Command run.*failed/ });
+    expect(line).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(line);
+    expect(line).toHaveAttribute("aria-expanded", "false");
+    expect(line).toHaveFocus();
   });
 
   it("keeps a successful call closed and names a denial with the constant verb", () => {

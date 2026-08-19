@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -113,11 +113,14 @@ describe("CodeSidebar", () => {
     expect(screen.getByRole("radio", { name: "Chat" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "app" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Fix login" })).toBeInTheDocument();
+    // The card's name carries what the glyph rail shows, not just the title.
+    expect(
+      screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New workspace" })).toBeInTheDocument();
   });
 
-  it("opens the workspace context menu with a destructive Archive item", async () => {
+  it("opens the workspace context menu from the keyboard and gives focus back", async () => {
     await renderWithRouter(
       <AppContextProvider value={app}>
         <CodeSidebar />
@@ -125,10 +128,16 @@ describe("CodeSidebar", () => {
       { initialUrl: "/code" },
     );
 
-    const card = await screen.findByRole("button", { name: "Fix login" });
+    const card = await screen.findByRole("button", { name: /^Fix login/ });
+    card.focus();
+    // Shift+F10 and the Menu key reach the card as a plain `contextmenu`
+    // event with no pointer position — the same event this fires.
     fireEvent.contextMenu(card);
     const archive = await screen.findByRole("menuitem", { name: "Archive" });
     expect(archive).toBeInTheDocument();
     expect(archive.className).toContain("text-destructive");
+
+    fireEvent.keyDown(archive, { key: "Escape" });
+    await waitFor(() => expect(card).toHaveFocus());
   });
 });

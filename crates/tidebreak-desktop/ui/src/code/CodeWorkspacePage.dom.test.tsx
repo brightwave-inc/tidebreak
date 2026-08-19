@@ -573,4 +573,51 @@ describe("CodeWorkspacePage", () => {
       }),
     );
   });
+
+  it("moves between center tabs with the arrows and names the panel each opens", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Review this turn's changes" }),
+    );
+
+    const diff = await screen.findByRole("tab", { name: "Turn diff" });
+    const chat = screen.getByRole("tab", { name: "Chat" });
+    // One tab stop for the strip, and the panel a tab opens says which tab
+    // named it — otherwise the content below is orphaned from the control.
+    expect(diff).toHaveAttribute("tabindex", "0");
+    expect(chat).toHaveAttribute("tabindex", "-1");
+    const panel = document.getElementById(
+      diff.getAttribute("aria-controls") ?? "",
+    );
+    expect(panel).not.toBeNull();
+    expect(panel).toHaveAttribute("role", "tabpanel");
+    expect(panel).toHaveAttribute("aria-labelledby", diff.id);
+
+    diff.focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(chat).toHaveAttribute("aria-selected", "true");
+    expect(chat).toHaveFocus();
+    const chatPanel = document.getElementById(
+      chat.getAttribute("aria-controls") ?? "",
+    );
+    expect(chatPanel).toHaveAttribute("aria-labelledby", chat.id);
+  });
+
+  it("keeps the jump-to-latest pill out of the tab order until it is on screen", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    await mountWorkspace(client);
+
+    await screen.findByRole("button", { name: "Review this turn's changes" });
+    // The pill is the keyboard path back to the tail. It is a real button, so
+    // it must leave the tab order rather than sit there invisibly focusable.
+    const pill = screen.getByLabelText("Scroll to latest");
+    expect(pill.tagName).toBe("BUTTON");
+    expect(pill).toHaveAttribute("aria-hidden", "true");
+    expect(pill).toHaveAttribute("tabindex", "-1");
+  });
 });

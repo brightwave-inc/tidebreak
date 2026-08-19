@@ -18,6 +18,9 @@ const Spinner = React.forwardRef<
   return (
     <Loader2
       className={cn("size-4 animate-spin text-muted-foreground", className)}
+      // An `svg` is not an element that takes a name, so a caller's
+      // `aria-label` would be dropped without a role that does.
+      role={props["aria-label"] ? "img" : undefined}
       ref={ref}
       {...props}
     />

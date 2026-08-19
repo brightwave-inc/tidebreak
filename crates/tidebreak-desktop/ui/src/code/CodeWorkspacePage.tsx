@@ -48,7 +48,13 @@ import {
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
-import { CodeCenterTabs } from "./CodeCenterTabs";
+import {
+  centerEditorTabId,
+  CHAT_PANEL_ID,
+  CHAT_TAB_ID,
+  CodeCenterTabs,
+  EDITOR_PANEL_ID,
+} from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
 
 const FileViewer = lazy(async () => {
@@ -255,6 +261,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const activeEditor = showingChat
     ? null
     : (editorTabs[chrome.editors.activeIndex] ?? null);
+  // With no editor tab there is no strip, so nothing names a panel and the
+  // conversation is just the page.
+  const stripped = editorTabs.length > 0;
 
   const workspaceMain = (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -266,7 +275,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onSelectEditor={(index) => setLayout(focusEditorTab(layout, index))}
         onCloseEditor={(index) => setLayout(closeEditorTab(layout, index))}
       />
-      <div className={cn("min-h-0 flex-1", !showingChat && "hidden")}>
+      <div
+        className={cn("min-h-0 flex-1", !showingChat && "hidden")}
+        id={stripped ? CHAT_PANEL_ID : undefined}
+        role={stripped ? "tabpanel" : undefined}
+        aria-labelledby={stripped ? CHAT_TAB_ID : undefined}
+      >
       <PanelLayout
         layout={chrome.panels}
         framed={false}
@@ -319,7 +333,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       />
       </div>
       {!showingChat && activeEditor && (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          id={EDITOR_PANEL_ID}
+          role="tabpanel"
+          aria-labelledby={centerEditorTabId(chrome.editors.activeIndex)}
+        >
           {activeEditor.type === "file" ? (
             <Suspense fallback={<Skeleton className="h-full w-full" />}>
               <FileViewer
@@ -567,11 +586,23 @@ function SessionLifecycleMark({
   });
   return (
     <WithTooltip label={tooltip}>
-      <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
+      {/*
+        The tooltip carries the engine version and the dropped-event warning,
+        and neither is anywhere else on the page. A span cannot be tabbed to,
+        so without a tab stop the whole explanation is hover-only.
+      */}
+      <span
+        tabIndex={0}
+        className={cn(
+          "text-muted-foreground inline-flex items-center gap-1.5 rounded-sm text-xs",
+          FOCUS_RING,
+        )}
+      >
         {unrecognizedEventCount > 0 && (
           <span
             data-testid="unrecognized-event-dot"
             className="bg-warning-foreground-muted inline-block size-2 shrink-0 rounded-full"
+            role="img"
             aria-label={`${unrecognizedEventCount} unread engine ${unrecognizedEventCount === 1 ? "event" : "events"}`}
           />
         )}
@@ -653,10 +684,14 @@ function PendingApprovalBadge({
       ).length,
   );
   if (pending === 0) return null;
+  const noun = pending === 1 ? "approval" : "approvals";
   return (
     <button
       type="button"
       data-testid="pending-approval-badge"
+      // The count alone names a state, not a control. This button scrolls the
+      // transcript to the first parked approval, so its name says so.
+      aria-label={`Jump to ${pending} pending ${noun}`}
       className={cn(
         "cursor-pointer rounded-full border-0 bg-transparent p-0",
         FOCUS_RING,
@@ -671,7 +706,7 @@ function PendingApprovalBadge({
       }}
     >
       <Badge variant="warning" size="sm" className="tabular-nums">
-        {pending} {pending === 1 ? "approval" : "approvals"}
+        {pending} {noun}
       </Badge>
     </button>
   );

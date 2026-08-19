@@ -51,6 +51,7 @@ import {
   prTone,
   repoAccentClass,
   sessionRowLabel,
+  workspaceCardLabel,
   WORKSPACE_SORT_MODE_LABELS,
 } from "./workspaceCards";
 
@@ -335,7 +336,17 @@ function WorkspaceCard({
       <ContextMenuTrigger asChild>
         <button
           type="button"
-          aria-label={title}
+          // The card's own text names the workspace; the glyph rail names its
+          // state. One explicit label carries both, in the order the card
+          // reads, so nothing on the rail is pointer-only information.
+          aria-label={workspaceCardLabel({
+            title,
+            repoName,
+            branchName: workspace.branch_name,
+            attention: digest?.attention,
+            pr,
+            terminalOpen,
+          })}
           aria-current={active ? "page" : undefined}
           data-active={active || undefined}
           title={attentionTitle}
@@ -351,20 +362,14 @@ function WorkspaceCard({
             <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5">
               {title}
             </span>
-            <span className="flex shrink-0 items-center gap-1">
+            <span className="flex shrink-0 items-center gap-1" aria-hidden>
               {pr && <PrGlyph pr={pr} />}
               {terminalOpen && (
-                <SquareTerminal
-                  className="size-3 text-muted-foreground"
-                  aria-label="Terminal open"
-                />
+                <SquareTerminal className="size-3 text-muted-foreground" />
               )}
               {digest?.attention.state.type === "needs_you" &&
                 digest.attention.state.source === "structured" && (
-                  <CircleAlert
-                    className="size-3 text-critical"
-                    aria-label="Pending approval"
-                  />
+                  <CircleAlert className="size-3 text-critical" />
                 )}
             </span>
           </span>
@@ -436,13 +441,12 @@ function WorkspaceMenuItem({
   );
 }
 
-/** PR-state mark. The number and title live on the tooltip. */
+/** PR-state mark. The card's own label carries the number and state. */
 function PrGlyph({ pr }: { pr: PullRequestDigest }) {
   const tone = prTone(pr);
   return (
     <GitPullRequest
       className={cn("size-3", PR_ICON_TONE_CLASSES[tone])}
-      aria-label={pr.title ? `PR #${pr.number} ${pr.title}` : `PR #${pr.number}`}
       data-pr-state={tone}
     />
   );

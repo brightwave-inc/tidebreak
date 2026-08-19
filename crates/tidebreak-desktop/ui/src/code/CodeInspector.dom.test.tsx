@@ -138,6 +138,12 @@ it("exposes a tablist and passes the scoped turn into files and source", async (
     "aria-selected",
     "true",
   );
+  // Icon-only tabs, so each carries its own name; the panel it opens is
+  // linked back to it.
+  const source = screen.getByRole("tab", { name: "Source control" });
+  const panel = screen.getByRole("tabpanel");
+  expect(source).toHaveAttribute("aria-controls", panel.id);
+  expect(panel).toHaveAttribute("aria-labelledby", source.id);
   expect(
     screen.getByRole("button", { name: "Clear Turn 4 scope" }),
   ).toBeInTheDocument();
@@ -184,6 +190,12 @@ it("gives the active inspector tab a selected fill idle tabs do not share", asyn
   expect(source).toHaveClass("bg-foreground/10");
   expect(files).not.toHaveClass("bg-foreground/10");
   expect(pr).not.toHaveClass("bg-foreground/10");
+
+  // Radix drives the arrows; this pins that the inspector still gets them.
+  source.focus();
+  await userEvent.setup().keyboard("{ArrowRight}");
+  expect(pr).toHaveAttribute("data-state", "active");
+  expect(pr).toHaveFocus();
 });
 
 it("labels a turn by its ordinal among user items", () => {

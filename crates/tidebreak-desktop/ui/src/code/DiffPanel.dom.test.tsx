@@ -89,14 +89,45 @@ describe("DiffPanel", () => {
     };
     render(<DiffPanel client={client} workspaceId="ws-1" />);
     expect(await screen.findByText("big.ts")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show diff" })).toBeInTheDocument();
+    // The expander names the file it belongs to: a screen reader listing a
+    // multi-file diff's controls would otherwise get a column of "Show diff".
+    expect(
+      screen.getByRole("button", { name: "Show diff for big.ts" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("+line 0")).not.toBeInTheDocument();
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Show diff" }));
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Show diff for big.ts" }));
     expect(screen.getByText("+line 0")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Show diff" }),
+      screen.queryByRole("button", { name: /^Show diff/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps the file disclosure and its Open control side by side", async () => {
+    const client = {
+      getCodeWorkspaceDiff: vi.fn().mockResolvedValue({
+        diff: DIFF,
+        truncated: false,
+        stat: { files: 1, insertions: 1, deletions: 1, truncated: false },
+      }),
+    };
+    const onOpenFile = vi.fn();
+    render(
+      <DiffPanel client={client} workspaceId="ws-1" onOpenFile={onOpenFile} />,
+    );
+
+    // A control nested inside another control is reachable by neither.
+    const disclosure = await screen.findByRole("button", { name: "src/lib.rs" });
+    const open = screen.getByRole("button", { name: "Open src/lib.rs" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(disclosure.contains(open)).toBe(false);
+
+    await userEvent.setup().click(open);
+    expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs");
+    // Opening the file must not also collapse the section under the reader.
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
   });
 
   it("says which scope came back empty", async () => {

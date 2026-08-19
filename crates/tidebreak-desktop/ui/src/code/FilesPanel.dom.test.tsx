@@ -75,10 +75,48 @@ describe("FilesPanel", () => {
       />,
     );
     expect(await screen.findByText("lib.rs")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "lib.rs" })).toHaveAttribute(
+    expect(screen.getByRole("treeitem", { name: "lib.rs" })).toHaveAttribute(
       "aria-current",
       "true",
     );
+  });
+
+  it("walks the tree with the arrow keys and opens a file from the keyboard", async () => {
+    const onOpenFile = vi.fn();
+    const client = makeClient();
+    render(
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={onOpenFile} />,
+    );
+    expect(await screen.findByText("lib.rs")).toBeInTheDocument();
+
+    // One tab stop for the whole tree: the first row. The arrows do the rest.
+    const src = screen.getByRole("treeitem", { name: "src" });
+    expect(src).toHaveAttribute("tabindex", "0");
+    expect(src).toHaveAttribute("aria-level", "1");
+    expect(screen.getByRole("treeitem", { name: "lib.rs" })).toHaveAttribute(
+      "aria-level",
+      "2",
+    );
+    src.focus();
+
+    // Left closes an open folder; Right opens it again, and Right from an open
+    // folder steps into it.
+    fireEvent.keyDown(src, { key: "ArrowLeft" });
+    expect(screen.queryByText("lib.rs")).not.toBeInTheDocument();
+    expect(src).toHaveAttribute("aria-expanded", "false");
+    fireEvent.keyDown(src, { key: "ArrowRight" });
+    expect(screen.getByText("lib.rs")).toBeInTheDocument();
+    fireEvent.keyDown(src, { key: "ArrowRight" });
+    expect(screen.getByRole("treeitem", { name: "code" })).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement!, { key: "End" });
+    const last = screen.getByRole("treeitem", { name: "README.md" });
+    expect(last).toHaveFocus();
+    fireEvent.keyDown(last, { key: "Enter" });
+    expect(onOpenFile).toHaveBeenCalledWith("README.md");
+
+    fireEvent.keyDown(last, { key: "Home" });
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveFocus();
   });
 
   it("names the search that found nothing and offers the way back", async () => {
