@@ -48,6 +48,7 @@ export type WorkspaceCommandId =
   | "rename"
   | "copy-branch"
   | "copy-worktree"
+  | "copy-debug-json"
   | "open-pr"
   | "toggle-terminal"
   | "pin-attention"
@@ -96,6 +97,7 @@ export function workspaceCommands(input: {
         ? { id: "clear-attention", label: "Clear attention" }
         : { id: "pin-attention", label: "Pin attention" },
     );
+    items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
   }
   if (!input.archived) {
     items.push({
@@ -125,6 +127,7 @@ export function workspaceHeaderCommands(input: {
         ? { id: "clear-attention", label: "Clear attention" }
         : { id: "pin-attention", label: "Pin attention" },
     );
+    items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
   }
   if (!input.archived) {
     for (const action of input.quickActions) {
@@ -328,6 +331,24 @@ export function useWorkspaceCardCommands(): {
           .then(() => toast.success("Worktree path copied"))
           .catch(() => toast.error("Could not copy worktree path"));
         return;
+      case "copy-debug-json": {
+        if (!context.session) return;
+        void client
+          .getCodeSessionDebug(context.session.id)
+          .then((bundle) =>
+            copyPlainText(JSON.stringify(bundle, null, 2)),
+          )
+          .then(() =>
+            toast.success("Debug JSON copied", {
+              description:
+                "Includes the session, turns, and journal events. Review it before sharing.",
+            }),
+          )
+          .catch((error) =>
+            toast.error(friendlyErrorMessage(error, "Could not copy debug JSON")),
+          );
+        return;
+      }
       case "open-pr": {
         const url = context.pr?.url;
         if (!url) {

@@ -299,6 +299,7 @@ describe("hydrate then replay", () => {
       turnId: "t1",
       text: "list the files",
       createdAt: NOW,
+      attachments: [],
     });
     expect(hydrated.items[1]).toMatchObject({
       kind: "turn_boundary",
@@ -306,6 +307,7 @@ describe("hydrate then replay", () => {
       status: "completed",
       durationMs: 2500,
     });
+    expect(hydrated.lastUsage).toBeNull();
 
     const replayed = play(
       [
@@ -327,10 +329,73 @@ describe("hydrate then replay", () => {
     expect(
       replayed.state.items.filter((item) => item.kind === "turn_boundary"),
     ).toHaveLength(1);
+    expect(replayed.state.items.map((item) => item.kind)).toEqual([
+      "user",
+      "assistant",
+      "turn_boundary",
+    ]);
     expect(replayed.state.items.find((item) => item.kind === "assistant")).toMatchObject({
       text: "README.md",
     });
     expect(replayed.state.lifecycle).toBe("idle");
+  });
+
+  it("does not reprint an assistant snapshot after tools", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "assistant_delta", text: "On it — checking." },
+      {
+        type: "tool_started",
+        call_id: "c1",
+        name: "Grep",
+        detail: { kind: "search", query: "image" },
+      },
+      {
+        type: "assistant_message",
+        text: "On it — checking.",
+      },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+    expect(state.items.filter((item) => item.kind === "assistant")).toHaveLength(1);
+    expect(state.items.map((item) => item.kind)).toEqual([
+      "assistant",
+      "tool",
+      "turn_boundary",
+    ]);
+  });
+
+  it("keeps a later turn's seam from capturing an earlier turn's replay", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+      { ...SNAPSHOT_TURN, id: "t2", user_input: "?" },
+    ]);
+    const replayed = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "assistant_delta", text: "first" },
+        { type: "turn_completed", usage: NO_USAGE },
+        { type: "turn_started", turn_id: "t2" },
+        { type: "assistant_delta", text: "second" },
+        { type: "turn_completed", usage: NO_USAGE },
+      ],
+      hydrated,
+    );
+    expect(replayed.state.items.map((item) => item.kind)).toEqual([
+      "user",
+      "assistant",
+      "turn_boundary",
+      "user",
+      "assistant",
+      "turn_boundary",
+    ]);
+    expect(replayed.state.items[1]).toMatchObject({
+      kind: "assistant",
+      text: "first",
+    });
+    expect(replayed.state.items[4]).toMatchObject({
+      kind: "assistant",
+      text: "second",
+    });
   });
 
   it("shows prompts from a snapshot that includes usage", () => {
@@ -347,6 +412,7 @@ describe("hydrate then replay", () => {
       turnId: "t1",
       usage: NO_USAGE,
     });
+    expect(hydrated.lastUsage).toEqual(NO_USAGE);
   });
 
   it("places an accepted user item above that turn's already-streamed reply", () => {

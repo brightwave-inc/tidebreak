@@ -62,6 +62,16 @@ export async function publishChatImage(
   );
 }
 
+export async function publishCodeImage(
+  sessionId: string,
+  file: Blob,
+): Promise<PublishedImage> {
+  const contentBase64 = encodeBase64(await file.arrayBuffer());
+  return parseHostPublishedImage(
+    await invoke("publish_code_image", { request: { sessionId, contentBase64 } }),
+  );
+}
+
 /**
  * Base64 in chunks, because spreading 16 MB of bytes into one call to
  * `String.fromCharCode` overflows the argument stack.

@@ -106,6 +106,7 @@ describe("CodeSessionRegistry", () => {
       turnId: "t1",
       text: "list the files",
       createdAt: "2026-08-15T12:00:00.000Z",
+      attachments: [],
     });
     expect(sockets[0]?.after).toBe(0);
 
@@ -201,6 +202,7 @@ describe("CodeSessionRegistry", () => {
       turnId: "t2",
       text: "and run the tests",
       createdAt: "2026-08-15T12:00:03.000Z",
+      attachments: [],
     });
     expect(calls).toBe(2);
   });

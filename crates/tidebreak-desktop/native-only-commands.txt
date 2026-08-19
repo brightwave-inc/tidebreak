@@ -66,6 +66,7 @@ restart_for_update: relaunches the app to apply a staged native update.
 # set. Each should become a server route with a CLI client; until then they are
 # listed so the gate stays honest about what is already owed.
 publish_chat_image: TODO(record 7) — publishes pasted image bytes from the renderer; no native shell involvement, belongs on the ingest routes.
+publish_code_image: TODO(record 7) — same as publish_chat_image for a code session; desktop mounts the publish route behind the executor token.
 list_connected_folders: TODO(record 7) — broker read with no native UI; headless consumers need the same listing.
 list_approved_folders: TODO(record 7) — broker read with no native UI.
 list_capability_consents: TODO(record 7) — broker read with no native UI; the consent projection should be a route.

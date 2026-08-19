@@ -716,6 +716,7 @@ done
             .run_turn(TurnInput {
                 text: "first turn".into(),
                 model: None,
+                images: Vec::new(),
             })
             .await
             .unwrap();

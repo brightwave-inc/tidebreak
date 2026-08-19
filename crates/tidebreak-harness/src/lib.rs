@@ -179,6 +179,26 @@ pub struct TurnInput {
     pub text: String,
     /// Model for this turn, when the engine takes one per child.
     pub model: Option<String>,
+    /// Images already published to the blob store and hydrated for this turn.
+    pub images: Vec<TurnImage>,
+}
+
+/// One image on a turn's machine-readable input. Debug prints size, not pixels.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnImage {
+    /// IANA media type, already sniffed at publish (`image/png`, …).
+    pub media_type: String,
+    /// Pixel bytes. Never journaled.
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for TurnImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnImage")
+            .field("media_type", &self.media_type)
+            .field("byte_len", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// How the engine process behind one turn ended.

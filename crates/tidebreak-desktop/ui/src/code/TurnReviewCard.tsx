@@ -1,10 +1,8 @@
 import type { ReactNode } from "react";
 import { Check, CircleSlash, TriangleAlert } from "lucide-react";
 
-import type { CodeUsage, Diffstat } from "../api/types";
+import type { Diffstat } from "../api/types";
 import { Badge } from "@/components/ui/badge";
-import { WithTooltip } from "@/components/ui/tooltip";
-import { formatTokenCount } from "@/ContextUsage";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
@@ -89,7 +87,6 @@ export function TurnReviewCard({
       {duration && <span className="tabular-nums">· {duration}</span>}
       {narrative}
       {diffstat}
-      <TurnUsage usage={turn.usage} />
     </SeamRow>
   );
 }
@@ -115,26 +112,6 @@ function SeamRow({
     >
       {children}
     </div>
-  );
-}
-
-/**
- * The turn's token cost at the scale people quote it, with the exact counts —
- * cache reads and writes included — behind the tooltip.
- */
-function TurnUsage({ usage }: { usage: CodeUsage | null }) {
-  if (!usage) return null;
-  const summary = `${formatTokenCount(usage.input_tokens)} in / ${formatTokenCount(usage.output_tokens)} out`;
-  const detail = [
-    `${usage.input_tokens.toLocaleString()} input`,
-    `${usage.output_tokens.toLocaleString()} output`,
-    `${usage.cache_read_input_tokens.toLocaleString()} cache read`,
-    `${usage.cache_creation_input_tokens.toLocaleString()} cache write`,
-  ].join(" · ");
-  return (
-    <WithTooltip label={detail}>
-      <span className="ml-auto tabular-nums">{summary}</span>
-    </WithTooltip>
   );
 }
 

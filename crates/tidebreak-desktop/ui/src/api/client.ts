@@ -1895,6 +1895,13 @@ export class ApiClient {
     );
   }
 
+  async getCodeSessionDebug(sessionId: string): Promise<unknown> {
+    return this.json(
+      `/code/sessions/${encodeURIComponent(sessionId)}/debug`,
+      { headers: this.headers() },
+    );
+  }
+
   async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
     const body = await this.json<unknown>(
       `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
@@ -1915,6 +1922,7 @@ export class ApiClient {
     sessionId: string,
     message: string,
     model?: string,
+    attachments?: readonly { blob_id: string; media_type: string }[],
   ): Promise<CodeTurnSubmission> {
     return requireParsed(
       parseCodeTurnSubmission(
@@ -1926,11 +1934,23 @@ export class ApiClient {
             body: JSON.stringify({
               message,
               ...(model ? { model } : {}),
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
             }),
           },
         ),
       ),
       "code turn",
+    );
+  }
+
+  getCodeSessionImage(
+    sessionId: string,
+    blobId: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    return this.blob(
+      `/code/sessions/${encodeURIComponent(sessionId)}/attachments/images/${encodeURIComponent(blobId)}`,
+      signal,
     );
   }
 

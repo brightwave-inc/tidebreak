@@ -447,11 +447,12 @@ export function imageAttachmentRefusal(kind: string): string {
  */
 export function uploadImageAttachment(
   server: { baseUrl: string; token: string },
-  chatId: string,
+  targetId: string,
   file: File,
   options: {
     onProgress: (uploadedBytes: number) => void;
     signal: AbortSignal;
+    path?: (id: string) => string;
   },
 ): Promise<PublishedImage> {
   return new Promise((resolve, reject) => {
@@ -460,10 +461,9 @@ export function uploadImageAttachment(
       return;
     }
     const request = new XMLHttpRequest();
-    request.open(
-      "POST",
-      `${server.baseUrl}/chats/${chatId}/attachments/images`,
-    );
+    const path =
+      options.path?.(targetId) ?? `/chats/${targetId}/attachments/images`;
+    request.open("POST", `${server.baseUrl}${path}`);
     request.setRequestHeader("Authorization", `Bearer ${server.token}`);
     request.setRequestHeader("Content-Type", file.type);
     request.upload.onprogress = (event) => {

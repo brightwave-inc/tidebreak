@@ -501,13 +501,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let handle = crate::code::session_worker::spawn_session_worker(
-            store.clone(),
-            bus.clone(),
-            session,
-            engine,
-            sink,
-        );
+        let handle = crate::code::session_worker::spawn_session_worker(session, engine, sink, None);
         let (reply, _turn) = tokio::sync::oneshot::channel();
         handle
             .commands

@@ -28,6 +28,7 @@ describe("submitAcceptedTurn", () => {
         turnId: "turn-1",
         text: "list the files",
         createdAt: "2026-08-15T12:00:00.000Z",
+        attachments: [],
       },
     ]);
   });

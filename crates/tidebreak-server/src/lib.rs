@@ -232,6 +232,11 @@ pub fn app(state: AppState) -> Router {
             "/chats/{chat_id}/attachments/images",
             post(routes::publish_chat_image_attachment)
                 .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
+        )
+        .route(
+            "/code/sessions/{id}/attachments/images",
+            post(routes::code::publish_session_image)
+                .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
         );
 
     let client_executor_api = Router::new()
@@ -778,6 +783,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::submit_turn).get(routes::code::list_session_turns),
         )
         .route(
+            "/code/sessions/{id}/attachments/images/{blob_id}",
+            get(routes::code::get_session_image),
+        )
+        .route(
             "/code/sessions/{id}/steer",
             post(routes::code::steer_session),
         )
@@ -786,6 +795,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::interrupt_session),
         )
         .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
+        .route(
+            "/code/sessions/{id}/debug",
+            get(routes::code::get_session_debug),
+        )
         .route(
             "/code/sessions/{id}/attention",
             post(routes::code::set_attention),

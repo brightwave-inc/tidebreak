@@ -600,6 +600,7 @@ pub fn run() {
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,
+            image_attachments::publish_code_image,
             documents::export_library_document,
             deliverables::export_deliverable,
             chat_debug::copy_chat_debug_bundle,

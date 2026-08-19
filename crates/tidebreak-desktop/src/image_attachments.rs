@@ -175,6 +175,23 @@ pub(crate) async fn publish_chat_image(
     publish_image_bytes(app_state.inner(), &host_access, request.chat_id, bytes).await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PublishCodeImageRequest {
+    session_id: Uuid,
+    content_base64: String,
+}
+
+/// Publish a pasted or dropped image onto a code session.
+#[tauri::command]
+pub(crate) async fn publish_code_image(
+    app_state: State<'_, Arc<AppState>>,
+    request: PublishCodeImageRequest,
+) -> Result<PublishedImageAttachment, String> {
+    let bytes = decode_image_payload(&request.content_base64)?;
+    publish_code_image_bytes(app_state.inner(), request.session_id, bytes).await
+}
+
 /// The longest base64 payload that could still decode to an attachable image.
 ///
 /// Checked before decoding so an oversized paste is refused without first
@@ -236,6 +253,45 @@ pub(crate) async fn publish_image_bytes(
         .json::<PublishedImageAttachment>()
         .await
         .map_err(|_| "Attaching the image returned an invalid response".to_owned())
+}
+
+async fn publish_code_image_bytes(
+    app_state: &Arc<AppState>,
+    session_id: Uuid,
+    bytes: Vec<u8>,
+) -> Result<PublishedImageAttachment, String> {
+    let info = wait_server_info(app_state).await?;
+    let declared = declared_media_type(&bytes)
+        .ok_or_else(|| "Attach a PNG, JPEG, WebP, or GIF image".to_owned())?;
+    let response = crate::documents::native_auth(
+        crate::documents::local_client().post(format!(
+            "{}{}",
+            info.base_url,
+            code_image_attachments_path(session_id)
+        )),
+        &info,
+    )
+    .header(reqwest::header::CONTENT_TYPE, declared)
+    .body(bytes)
+    .send()
+    .await
+    .map_err(|_| "Could not attach the selected image".to_owned())?;
+    if !response.status().is_success() {
+        let kind = response
+            .json::<ServerErrorBody>()
+            .await
+            .map(|error| error.kind)
+            .unwrap_or_default();
+        return Err(refusal_message(&kind));
+    }
+    response
+        .json::<PublishedImageAttachment>()
+        .await
+        .map_err(|_| "Attaching the image returned an invalid response".to_owned())
+}
+
+fn code_image_attachments_path(session_id: Uuid) -> String {
+    format!("/code/sessions/{session_id}/attachments/images")
 }
 
 /// Whether this file should be attached as an image rather than imported as a

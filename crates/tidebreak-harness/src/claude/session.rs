@@ -83,9 +83,14 @@ impl ClaudeSession {
         }
     }
 
-    fn compose_plan_for(&self, turn_model: Option<&str>) -> Result<LaunchPlan, HarnessError> {
+    fn compose_plan_for(
+        &self,
+        turn_model: Option<&str>,
+        stream_json_input: bool,
+    ) -> Result<LaunchPlan, HarnessError> {
         // Prompt travels on stdin (`claude -p` with no prompt argument) so a
-        // user message cannot trip the bypass-flag denylist.
+        // user message cannot trip the bypass-flag denylist. Images ride the
+        // same pipe as stream-json user content (decision 0046).
         let mut argv = vec![
             self.spec.binary.to_string_lossy().into_owned(),
             "-p".into(),
@@ -94,6 +99,9 @@ impl ClaudeSession {
             "--verbose".into(),
             "--include-partial-messages".into(),
         ];
+        if stream_json_input {
+            argv.extend(["--input-format".into(), "stream-json".into()]);
+        }
         argv.extend(permission_mode_flags(self.spec.permission_mode));
         if let Some(model) = turn_model.or(self.spec.model.as_deref()) {
             argv.push("--model".into());
@@ -137,7 +145,7 @@ impl ClaudeSession {
 #[async_trait]
 impl HarnessSession for ClaudeSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        let plan = self.compose_plan_for(input.model.as_deref())?;
+        let plan = self.compose_plan_for(input.model.as_deref(), !input.images.is_empty())?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -168,9 +176,9 @@ impl HarnessSession for ClaudeSession {
         self.pid.set(child.id());
         *self.child.lock().await = Some(child);
 
-        let prompt = input.text.clone();
+        let prompt = encode_turn_stdin(&input);
         let stdin_task = tokio::spawn(async move {
-            let _ = stdin.write_all(prompt.as_bytes()).await;
+            let _ = stdin.write_all(&prompt).await;
             let _ = stdin.shutdown().await;
         });
         let stderr_task = tokio::spawn(async move { drain_capped(stderr, MAX_STDERR_BYTES).await });
@@ -330,6 +338,85 @@ where
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Plain text when there are no images; otherwise one stream-json user line.
+pub(crate) fn encode_turn_stdin(input: &TurnInput) -> Vec<u8> {
+    if input.images.is_empty() {
+        return input.text.as_bytes().to_vec();
+    }
+    let mut content = Vec::new();
+    if !input.text.is_empty() {
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": input.text,
+        }));
+    }
+    for image in &input.images {
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.media_type,
+                "data": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &image.bytes,
+                ),
+            },
+        }));
+    }
+    let mut encoded = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": content,
+        },
+    }))
+    .unwrap_or_else(|_| input.text.as_bytes().to_vec());
+    encoded.push(b'\n');
+    encoded
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+    use crate::TurnImage;
+
+    #[test]
+    fn text_only_stays_plain_bytes() {
+        let encoded = encode_turn_stdin(&TurnInput {
+            text: "hello".into(),
+            model: None,
+            images: Vec::new(),
+        });
+        assert_eq!(encoded, b"hello");
+    }
+
+    #[test]
+    fn images_ride_stream_json_user_content() {
+        let encoded = encode_turn_stdin(&TurnInput {
+            text: "look".into(),
+            model: None,
+            images: vec![TurnImage {
+                media_type: "image/png".into(),
+                bytes: b"pixels".to_vec(),
+            }],
+        });
+        let line = String::from_utf8(encoded).unwrap();
+        assert!(line.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["type"], "user");
+        assert_eq!(value["message"]["content"][0]["text"], "look");
+        assert_eq!(value["message"]["content"][1]["type"], "image");
+        assert_eq!(
+            value["message"]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(
+            value["message"]["content"][1]["source"]["data"],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"pixels")
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -377,6 +464,7 @@ mod tests {
         let run = session.run_turn(TurnInput {
             text: "hello".into(),
             model: None,
+            images: Vec::new(),
         });
         let observe = async {
             tokio::time::sleep(Duration::from_millis(50)).await;

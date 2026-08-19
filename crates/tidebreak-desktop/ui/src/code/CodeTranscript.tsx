@@ -22,6 +22,8 @@ import { ThinkingAccordion } from "@/ThinkingAccordion";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
+import { useApp } from "@/AppContext";
+import { TranscriptImageAttachments } from "@/TranscriptImageAttachments";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
@@ -54,6 +56,7 @@ export function CodeTranscript({
   streamStalled = false,
   animateStreaming = true,
   onOpenTurnDiff,
+  sessionId,
   onReveal,
   scrollRef,
   contentRef,
@@ -78,6 +81,7 @@ export function CodeTranscript({
   animateStreaming?: boolean;
   /** Scope the review sidebar to one turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  sessionId?: string;
   /**
    * The reader opened or closed something inline.
    *
@@ -139,6 +143,7 @@ export function CodeTranscript({
               }
               onDecide={onDecide}
               onOpenTurnDiff={onOpenTurnDiff}
+              sessionId={sessionId}
               onReveal={onReveal}
             />,
           ),
@@ -254,7 +259,8 @@ function parksTheCallAbove(
  * The data a row draws on, reduced to what decides whether it can render, so a
  * row that threw on a half-written result is retried when the result lands
  * rather than staying broken for the life of the transcript.
- */function itemSignature(
+ */
+function itemSignature(
   item: CodeTranscriptItem,
   decidingId?: string | null,
   approvalError?: string,
@@ -296,6 +302,7 @@ const TranscriptItem = memo(function TranscriptItem({
   approvalError,
   onDecide,
   onOpenTurnDiff,
+  sessionId,
   onReveal,
 }: {
   item: CodeTranscriptItem;
@@ -311,6 +318,7 @@ const TranscriptItem = memo(function TranscriptItem({
     feedback?: string,
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
+  sessionId?: string;
   onReveal?: () => void;
 }) {
   switch (item.kind) {
@@ -320,6 +328,11 @@ const TranscriptItem = memo(function TranscriptItem({
           text={item.text}
           createdAt={item.createdAt}
           anchorId={item.id}
+          leading={
+            sessionId && item.attachments && item.attachments.length > 0 ? (
+              <CodeTurnImages sessionId={sessionId} attachments={item.attachments} />
+            ) : undefined
+          }
         />
       );
     case "steer":
@@ -793,6 +806,33 @@ function PathLabel({ path }: { path: string }) {
       <span className="min-w-0 truncate">{path.slice(0, slash + 1)}</span>
       <span className="shrink-0">{path.slice(slash + 1)}</span>
     </span>
+  );
+}
+
+function CodeTurnImages({
+  sessionId,
+  attachments,
+}: {
+  sessionId: string;
+  attachments: readonly import("../generated/wire").CodeTurnAttachment[];
+}) {
+  const { client } = useApp();
+  return (
+    <TranscriptImageAttachments
+      client={{
+        getChatImageAttachment: (_chatId, attachmentId, signal) =>
+          client.getCodeSessionImage(sessionId, attachmentId, signal),
+      }}
+      chatId={sessionId}
+      images={attachments.map((item) => ({
+        attachmentId: item.blob_id,
+        mediaType: item.media_type.startsWith("image/")
+          ? item.media_type
+          : `image/${item.media_type}`,
+        width: 0,
+        height: 0,
+      }))}
+    />
   );
 }
 

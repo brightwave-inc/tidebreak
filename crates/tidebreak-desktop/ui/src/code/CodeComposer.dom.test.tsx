@@ -8,17 +8,64 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ReactElement } from "react";
+import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeUiStore } from "./CodeUiStore";
 import { HttpError } from "../api/client";
+import { useComposerDrafts } from "../ComposerDrafts";
 import { useUiStore } from "../UiStore";
+
+function app(): AppContextValue {
+  return {
+    client: {} as never,
+    models: [],
+    defaultModelKey: null,
+    providers: [],
+    refreshCatalog: async () => {},
+    refreshChats: async () => {},
+    status: "",
+    setStatus: () => {},
+    newChat: () => {},
+    deleteChat: () => {},
+    startRename: () => {},
+    commitRename: () => {},
+    cancelRename: () => {},
+    newProject: async () => false,
+    deleteProject: () => {},
+    startProjectRename: () => {},
+    commitProjectRename: () => {},
+    cancelProjectRename: () => {},
+    newChatInProject: () => {},
+    moveChatToProject: () => {},
+    updateState: { status: "idle", version: null, error: null, enabled: false },
+    updateUpToDate: false,
+    checkForUpdate: async () => ({
+      status: "idle",
+      version: null,
+      error: null,
+      enabled: false,
+    }),
+    restartForUpdate: async () => {},
+  };
+}
+
+function renderComposer(ui: ReactElement) {
+  return render(<AppContextProvider value={app()}>{ui}</AppContextProvider>);
+}
+
+beforeEach(() => {
+  URL.createObjectURL = vi.fn((): string => "blob:preview");
+  URL.revokeObjectURL = vi.fn();
+});
 
 afterEach(() => {
   cleanup();
   useUiStore.setState({ activeTurnSendMode: "queue" });
   useCodeUiStore.setState({ pendingComposerPrompt: null });
+  useComposerDrafts.setState({ attachments: {} });
 });
 
 const QUEUED = {
@@ -29,7 +76,7 @@ const QUEUED = {
 describe("CodeComposer", () => {
   it("inserts a pending inspector prompt into the draft", async () => {
     useCodeUiStore.getState().offerComposerPrompt("Merge pull request #41.");
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -45,7 +92,7 @@ describe("CodeComposer", () => {
   });
 
   it("states the session's mode in the composer", () => {
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -57,9 +104,34 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
   });
 
+  it("shows the chat context meter from the last turn's usage", () => {
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        contextUsage={{
+          usage: {
+            input_tokens: 11_000,
+            output_tokens: 12,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+          contextWindow: 200_000,
+          modelName: "Sonnet",
+        }}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Context: 6% of 200k tokens used" }),
+    ).toBeInTheDocument();
+  });
+
   it("explains why the session permission mode cannot change", async () => {
     const user = userEvent.setup();
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -78,7 +150,7 @@ describe("CodeComposer", () => {
 
   it("queues a follow-up written while a turn is running", async () => {
     const onSend = vi.fn().mockResolvedValue(QUEUED);
-    render(
+    renderComposer(
       <CodeComposer
         running
         permissionMode="ask"
@@ -101,7 +173,7 @@ describe("CodeComposer", () => {
 
   it("clears the queued pill when the next turn begins", async () => {
     const onSend = vi.fn().mockResolvedValue(QUEUED);
-    const { rerender } = render(
+    const { rerender } = renderComposer(
       <CodeComposer
         running
         permissionMode="ask"
@@ -117,13 +189,15 @@ describe("CodeComposer", () => {
     expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
 
     rerender(
-      <CodeComposer
-        running
-        permissionMode="ask"
-        lastTurnBeganId="t2"
-        onSend={onSend}
-        onInterrupt={vi.fn()}
-      />,
+      <AppContextProvider value={app()}>
+        <CodeComposer
+          running
+          permissionMode="ask"
+          lastTurnBeganId="t2"
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+        />
+      </AppContextProvider>,
     );
     expect(screen.queryByText("1 follow-up queued")).toBeNull();
   });
@@ -132,7 +206,7 @@ describe("CodeComposer", () => {
     useUiStore.setState({ activeTurnSendMode: "steer" });
     const onSteer = vi.fn().mockResolvedValue(undefined);
     const onSend = vi.fn();
-    render(
+    renderComposer(
       <CodeComposer
         running
         permissionMode="ask"
@@ -156,7 +230,7 @@ describe("CodeComposer", () => {
   it("queues mid-turn when steering is unsupported", async () => {
     useUiStore.setState({ activeTurnSendMode: "steer" });
     const onSend = vi.fn().mockResolvedValue(QUEUED);
-    render(
+    renderComposer(
       <CodeComposer
         running
         permissionMode="ask"
@@ -175,7 +249,7 @@ describe("CodeComposer", () => {
 
   it("submits free-typed slash text verbatim when the engine lists no commands", async () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -198,7 +272,7 @@ describe("CodeComposer", () => {
       .mockRejectedValue(
         new HttpError(409, "409: a follow-up is already queued", "queue_full"),
       );
-    render(
+    renderComposer(
       <CodeComposer
         running
         permissionMode="ask"
@@ -221,7 +295,7 @@ describe("CodeComposer", () => {
 
   it("keeps the draft when send is refused", async () => {
     const onSend = vi.fn().mockRejectedValue(new Error("session is fenced"));
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="plan"
@@ -239,7 +313,7 @@ describe("CodeComposer", () => {
   it("changes the selected harness model", async () => {
     const user = userEvent.setup();
     const onModelChange = vi.fn();
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -266,7 +340,7 @@ describe("CodeComposer", () => {
   });
 
   it("shows reasoning effort next to a model that accepts levels", () => {
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -293,7 +367,7 @@ describe("CodeComposer", () => {
   });
 
   it("hides reasoning effort when the model accepts none", () => {
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
@@ -317,10 +391,12 @@ describe("CodeComposer", () => {
   });
 
   it("claims an image paste and leaves a text paste alone", () => {
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
+        sessionId="sess-1"
+        imageInput
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
@@ -335,11 +411,6 @@ describe("CodeComposer", () => {
     expect(image.defaultPrevented).toBe(true);
     expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
     expect(screen.getByText("shot.png")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Code turns cannot carry images yet. Attached images stay in the composer.",
-      ),
-    ).toBeInTheDocument();
 
     const text = pasteOn(box, []);
     expect(text.defaultPrevented).toBe(false);
@@ -347,10 +418,12 @@ describe("CodeComposer", () => {
 
   it("opens the image picker from the tools menu", async () => {
     const user = userEvent.setup();
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
+        sessionId="sess-1"
+        imageInput
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
@@ -366,12 +439,14 @@ describe("CodeComposer", () => {
     expect(click).toHaveBeenCalled();
   });
 
-  it("sends the text only and keeps attached images in the composer", async () => {
+  it("does not send while an attached image has not published", async () => {
     const onSend = vi.fn();
-    render(
+    renderComposer(
       <CodeComposer
         running={false}
         permissionMode="ask"
+        sessionId="sess-1"
+        imageInput
         onSend={onSend}
         onInterrupt={vi.fn()}
       />,
@@ -384,10 +459,10 @@ describe("CodeComposer", () => {
       }),
     ]);
     fireEvent.change(box, { target: { value: "what is in this" } });
+    expect(await screen.findAllByText("shot.png")).not.toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith("what is in this"));
-    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+    expect(onSend).not.toHaveBeenCalled();
   });
 });
 

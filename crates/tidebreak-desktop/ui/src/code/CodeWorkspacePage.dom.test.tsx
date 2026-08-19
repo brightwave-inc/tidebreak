@@ -112,6 +112,12 @@ const TURN = {
   started_at: "2026-08-15T00:00:00.000Z",
   ended_at: "2026-08-15T00:02:14.000Z",
   diffstat: { files: 2, insertions: 42, deletions: 7, truncated: false },
+  usage: {
+    input_tokens: 11_000,
+    output_tokens: 12,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  },
 };
 
 function makeClient() {
@@ -351,6 +357,10 @@ describe("CodeWorkspacePage", () => {
     const seam = await screen.findByRole("group", { name: "Turn finished" });
     expect(seam).toHaveTextContent("2m 14s");
     expect(seam).toHaveTextContent("2 files +42 −7");
+    expect(seam).not.toHaveTextContent("in /");
+    expect(
+      screen.getByRole("button", { name: /Context: 11,012 tokens used/ }),
+    ).toBeInTheDocument();
   });
 
   it("pins the composer to the bottom of a full-height column on an empty start", async () => {
