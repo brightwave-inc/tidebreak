@@ -159,7 +159,7 @@ export function BackgroundAgentPanel({
         </div>
       ) : (
         <p className="p-4 text-sm text-muted-foreground" role="status">
-          This agent run is not part of this chat.
+          This agent run is not part of this work.
         </p>
       )}
     </PanelFrame>

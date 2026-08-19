@@ -24,11 +24,11 @@ import {
 import { cn } from "@/lib/utils";
 import { RecentChatRow } from "./RecentChatRow";
 
-/** Case-insensitive match on the title, with untitled chats matching "new chat". */
+/** Case-insensitive match on the title, with untitled work matching "new work". */
 export function matchesChatSearch(chat: Chat, query: string): boolean {
   const trimmed = query.trim().toLowerCase();
   if (!trimmed) return true;
-  const title = chat.title?.trim() || "New chat";
+  const title = chat.title?.trim() || "New work";
   return title.toLowerCase().includes(trimmed);
 }
 
@@ -144,7 +144,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           onClick={toggleCollapsed}
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
-          <span>Chats</span>
+          <span>Work</span>
           <ChevronRight
             aria-hidden="true"
             className={cn("size-3.5 transition-transform", !collapsed && "rotate-90")}
@@ -152,8 +152,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           {hiddenAttention && (
             <span
               className="text-warning ml-auto shrink-0"
-              aria-label="A chat needs attention"
-              title="A chat needs attention"
+              aria-label="Work needs attention"
+              title="Work needs attention"
             >
               <CircleAlert aria-hidden="true" size={15} />
             </span>
@@ -164,7 +164,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
             <button
               type="button"
               className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              aria-label="Chat list options"
+              aria-label="Work list options"
             >
               <Ellipsis size={15} />
             </button>
@@ -172,14 +172,14 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           <DropdownMenuContent align="start">
             <DropdownMenuItem onSelect={() => setFiltering(!filtering)}>
               <ListFilter />
-              {filtering ? "Hide filter" : "Filter chats"}
+              {filtering ? "Hide filter" : "Filter work"}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <button
           type="button"
           className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          aria-label={creatingChat ? "Starting…" : "New chat"}
+          aria-label={creatingChat ? "Starting…" : "New work"}
           disabled={creatingChat || deletingChatId !== null}
           onClick={newChat}
         >
@@ -191,8 +191,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
         <div ref={filterRef} className="shrink-0 px-1 pt-1 pb-1.5">
           <SearchInput
             size="sm"
-            placeholder="Filter chats"
-            aria-label="Filter chats"
+            placeholder="Filter work"
+            aria-label="Filter work"
             value={query}
             onValueChange={setQuery}
           />
@@ -202,7 +202,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
       {!collapsed && (
         <div
           className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto"
-          aria-label="Chats"
+          aria-label="Work list"
         >
           {listed.map((chat) => (
             <RecentChatRow
@@ -226,7 +226,7 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           ))}
           {listed.length === 0 && query.trim() && (
             <p className="px-2 py-1 text-xs text-muted-foreground">
-              No chat title contains that.
+              No work title contains that.
             </p>
           )}
         </div>

@@ -222,7 +222,7 @@ describe("toolApprovalPresentation", () => {
     });
     expect(toolApprovalPresentation("exec_may_run_networked_command")).toEqual({
       summary:
-        "Allow Tidebreak to run a command that leaves the chat workspace and may reach the network?",
+        "Allow Tidebreak to run a command that leaves this work's workspace and may reach the network?",
       canApprove: true,
       canRemember: true,
     });

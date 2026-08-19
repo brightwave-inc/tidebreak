@@ -204,9 +204,9 @@ export function levelLabel(
       : `Everything in project ${shortOpaqueId(statement.level.project_id)}`;
   }
   if (isMissingSubject(statement, known)) {
-    return `Deleted chat ${shortOpaqueId(statement.level.chat_id)}`;
+    return `Deleted work ${shortOpaqueId(statement.level.chat_id)}`;
   }
-  return title || `Chat ${shortOpaqueId(statement.level.chat_id)}`;
+  return title || `Work ${shortOpaqueId(statement.level.chat_id)}`;
 }
 
 /** Statements that reach one conversation: its own grants plus project grants. */
@@ -505,7 +505,7 @@ export function PermissionsPanel({
         !error && (
           <p className="text-sm text-muted-foreground">
             {chat
-              ? "Nothing saved for this chat yet. When you answer an approval with “always allow” or connect a folder, it appears here."
+              ? "Nothing saved for this work yet. When you answer an approval with “always allow” or connect a folder, it appears here."
               : "Nothing saved yet. When you answer an approval with “always allow” or connect a folder, it appears here."}
           </p>
         )}
@@ -527,7 +527,7 @@ export function PermissionsPanel({
       {unreadableFolders.length > 0 && (
         <SettingsSection
           title="Revoked folder access"
-          description="These folders are still connected to this chat, but the agent cannot read them. Grant read access to make one usable again — the host asks you to confirm."
+          description="These folders are still connected to this work, but the agent cannot read them. Grant read access to make one usable again — the host asks you to confirm."
         >
           <div className="flex flex-col gap-4">
             {unreadableFolders.map((folder) => (
@@ -560,7 +560,7 @@ export function PermissionsPanel({
         <div>
           <h2 className="text-sm font-medium">Permissions</h2>
           <p className="text-muted-foreground mt-1 text-sm">
-            What this chat can do without asking. Project-wide approvals that
+            What this work can do without asking. Project-wide approvals that
             reach it are included. Revoke anything to be asked again.
           </p>
         </div>

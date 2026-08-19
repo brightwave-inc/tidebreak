@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from "react";
 import {
   AlertDialog,
@@ -18,7 +19,7 @@ import {
 
 export type ConfirmOptions = {
   title: string;
-  description?: string;
+  description?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;

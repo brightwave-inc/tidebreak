@@ -61,15 +61,15 @@ const ROLES: {
 }[] = [
   {
     role: "chat",
-    title: "Chat",
+    title: "Work",
     hint: "New conversations start on this model, and each one can still override it.",
   },
   {
     role: "utility",
     title: "Background work",
-    hint: "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the cheapest model your configured providers serve; with none available, that work is skipped rather than moved onto your chat model.",
+    hint: "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the cheapest model your configured providers serve; with none available, that work is skipped rather than moved onto your work model.",
     managedHint:
-      "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the smallest model your gateway serves; with none available, that work is skipped rather than moved onto your chat model.",
+      "Work Tidebreak does on its own — compacting a long conversation, for instance — runs here, so it is not billed at your conversation model. Left automatic, it picks the smallest model your gateway serves; with none available, that work is skipped rather than moved onto your work model.",
   },
 ];
 
@@ -528,7 +528,7 @@ function contextWindowSuffix(model: ModelInfo): string {
   const context = model.context_window
     ? ` — ${formatTokenCount(model.context_window)} context`
     : "";
-  return `${context}${model.supports_tools ? "" : " — chat only"}`;
+  return `${context}${model.supports_tools ? "" : " — conversation only"}`;
 }
 
 /**

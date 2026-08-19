@@ -185,7 +185,7 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Search mode"
-            description="Which search a chat gets. Automatic uses your model provider's built-in search when the chat's model supports it, and the provider configured below otherwise."
+            description="Which search work gets. Automatic uses your model provider's built-in search when the selected model supports it, and the provider configured below otherwise."
           >
             <SettingsField
               label="Search mode"
@@ -335,7 +335,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
     return {
       kind: "disabled",
       label: "Off",
-      description: "No chat can search the web.",
+      description: "Work cannot search the web.",
     };
   }
   if (config?.mode === "vendor") {
@@ -343,7 +343,7 @@ function webSearchState(config: WebSearchConfigInfo | null): {
       kind: "ready",
       label: "Built-in search",
       description:
-        "Chats search through the model provider. A model without built-in search cannot search at all.",
+        "Work searches through the model provider. A model without built-in search cannot search at all.",
     };
   }
   if (!config?.provider) {

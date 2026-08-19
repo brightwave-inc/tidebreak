@@ -339,10 +339,10 @@ describe("permissions labeling and chat filter", () => {
   it("names a missing chat subject as deleted", () => {
     expect(
       levelLabel(execStatement, { chatIds: new Set() }),
-    ).toBe("Deleted chat 222222…2222");
+    ).toBe("Deleted work 222222…2222");
     // shortOpaqueId keeps first 6 and last 4 for long ids.
     expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
-      "Deleted chat 222222…2222",
+      "Deleted work 222222…2222",
     );
   });
 

@@ -115,7 +115,7 @@ export function AppsView({
               <EmptyDescription>
                 Ask Tidebreak to build a mini app in a conversation. What it
                 creates lives here — reopen it any time without re-running the
-                chat.
+                work.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

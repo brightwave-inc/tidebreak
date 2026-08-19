@@ -37,7 +37,7 @@ export type ShellShortcutMode = "chat" | "code";
 /** The heading a shortcut sits under in the help dialog. */
 export type ShellShortcutGroup =
   | "Navigation"
-  | "Chat"
+  | "Work"
   | "Code"
   | "View"
   | "Help";
@@ -45,7 +45,7 @@ export type ShellShortcutGroup =
 /** Group headings in the order the help dialog lists them. */
 export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
   "Navigation",
-  "Chat",
+  "Work",
   "Code",
   "View",
   "Help",
@@ -136,8 +136,8 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     id: "new-chat",
     codes: ["KeyN"],
     mod: true,
-    description: "Start a new chat",
-    group: "Chat",
+    description: "Start new work",
+    group: "Work",
     scope: "chat",
     allowInEditable: true,
   },
@@ -186,7 +186,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyK"],
     mod: true,
     description: "Focus the message composer",
-    group: "Chat",
+    group: "Work",
     allowInEditable: true,
   },
   {

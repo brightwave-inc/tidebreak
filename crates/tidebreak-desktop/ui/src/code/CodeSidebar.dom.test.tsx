@@ -138,7 +138,7 @@ describe("CodeSidebar", () => {
     );
 
     expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Work" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "app" })).toBeInTheDocument();
     // The card's name carries what the glyph rail shows, not just the title.

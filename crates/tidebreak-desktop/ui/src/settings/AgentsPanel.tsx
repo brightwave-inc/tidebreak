@@ -154,7 +154,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       </SettingsSection>
       <SettingsSection>
         <SettingsField
-          label="Active background agents per chat"
+          label="Active background agents per work"
           hint="A spawn beyond this limit fails immediately and can be retried after wait_for_agents returns."
         >
           <Input

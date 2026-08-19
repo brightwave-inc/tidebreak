@@ -11,6 +11,17 @@ const idle: DesktopUpdateState = {
 };
 
 describe("UpdatesPanel", () => {
+  it("warns that pre-v1 updates may wipe local data", () => {
+    const markup = renderToStaticMarkup(
+      <UpdatesPanel state={idle} onCheck={vi.fn()} onRestart={vi.fn()} />,
+    );
+
+    expect(markup).toContain("Pre-v1 data warning");
+    expect(markup).toContain(
+      "any update may wipe all Tidebreak data on this device",
+    );
+  });
+
   it("keeps update checks disabled outside supported packaged builds", () => {
     const markup = renderToStaticMarkup(
       <UpdatesPanel

@@ -31,13 +31,13 @@ export type SlashCommandName = "usage" | "compact";
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: "usage",
-    description: "Show this chat's context and token usage.",
+    description: "Show this work's context and token usage.",
     takesArgument: false,
   },
   {
     name: "compact",
     description:
-      "Summarize the earlier part of this chat now. Add what to keep: /compact the API design",
+      "Summarize the earlier part of this work now. Add what to keep: /compact the API design",
     takesArgument: true,
   },
 ];

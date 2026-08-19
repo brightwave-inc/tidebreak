@@ -192,7 +192,7 @@ export function WelcomeState({
   }
 
   return (
-    <section className="welcome" aria-label="Start a chat">
+    <section className="welcome" aria-label="Start work">
       <span className="welcome-mark" aria-hidden="true">
         <Logomark />
       </span>

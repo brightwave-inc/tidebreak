@@ -60,7 +60,7 @@ const PERMISSION_MODE_SCALE: {
   {
     value: "allow",
     label: "Allow all",
-    description: "Everything runs without asking, in this chat only.",
+    description: "Everything runs without asking, in this work only.",
     icon: ShieldOff,
   },
 ];

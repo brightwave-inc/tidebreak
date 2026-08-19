@@ -239,7 +239,7 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
           </div>
 
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Local execution confines writes to private chat scratch and routes
+            Local execution confines writes to private work scratch and routes
             any granted network access through a loopback broker. E2B and
             Daytona run commands in managed cloud sandboxes and reuse their
             workspace while it is alive. Docker runs them in a container on

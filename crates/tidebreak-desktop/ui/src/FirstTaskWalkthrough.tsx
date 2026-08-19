@@ -38,14 +38,14 @@ const STEPS: readonly WalkthroughStep[] = [
     surface: "tools",
     targets: ["network", "tools-menu"],
     title: "Set internet access",
-    body: "The Tools menu is open. Network is this chat's internet setting. Internet access is what web search and current information need. Leave it off when Tidebreak should use only your message and attachments.",
+    body: "The Tools menu is open. Network is this work's internet setting. Internet access is what web search and current information need. Leave it off when Tidebreak should use only your message and attachments.",
   },
   {
     id: "permissions",
     surface: "permissions",
     targets: ["permissions-ask", "permissions-menu"],
     title: "Choose a permission level",
-    body: "The permission menu is open. Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this chat. Ask is a balanced place to start.",
+    body: "The permission menu is open. Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this work. Ask is a balanced place to start.",
   },
   {
     id: "attachments",
