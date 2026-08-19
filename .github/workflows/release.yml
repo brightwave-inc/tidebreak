@@ -346,7 +346,7 @@ jobs:
             --output /dev/null \
             "$DEPLOYMENT_URL/docs/"
           request /docs/quickstart/ "$RUNNER_TEMP/docs-quickstart.html"
-          request /docs/api/search "$RUNNER_TEMP/docs-search-index.json"
+          request /docs/search-index.json "$RUNNER_TEMP/docs-search-index.json"
           request /docs/sitemap.xml "$RUNNER_TEMP/docs-sitemap.xml"
 
           grep -Fq 'https://www.tidebreak.io/docs/' "$RUNNER_TEMP/docs-index.html"
