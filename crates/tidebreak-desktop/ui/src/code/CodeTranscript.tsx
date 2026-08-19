@@ -450,7 +450,7 @@ export function CodeToolCard({
           )}
           {/* The glyph is the outcome for a sighted reader; this is the same
               fact for everyone else, in the same place in the line. */}
-          <span className="sr-only">{STATUS_WORDS[status]}</span>
+          <span className="sr-only">{status}</span>
           <StatusGlyph status={status} />
           <ChevronDown
             className={cn(
@@ -541,17 +541,6 @@ function toolVerb(
       return "Search";
   }
 }
-
-/** The outcome word, for the readers the status glyph does not reach. */
-const STATUS_WORDS: Record<
-  "running" | "succeeded" | "failed" | "denied",
-  string
-> = {
-  running: "running",
-  succeeded: "succeeded",
-  failed: "failed",
-  denied: "denied",
-};
 
 /** Last twelve lines, height-capped so a streaming tail does not grow the row. */
 function StreamingTail({ text }: { text: string }) {
