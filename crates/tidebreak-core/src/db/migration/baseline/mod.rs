@@ -30,8 +30,8 @@ pub(super) const SEED_STATEMENTS: &[&str] = &[
 
 /// A table and the named indexes that belong to it. Implicit indexes come
 /// from the primary-key and unique column definitions in the table itself.
-pub(super) struct BaselineTable {
-    pub(super) table: TableCreateStatement,
+pub(crate) struct BaselineTable {
+    pub(crate) table: TableCreateStatement,
     pub(super) indexes: Vec<IndexCreateStatement>,
 }
 
@@ -39,6 +39,11 @@ pub(super) struct BaselineTable {
 /// already exist — and, on Postgres, only at unique constraints or unique
 /// indexes that already exist, which is why each table's indexes are created
 /// with it rather than in a second pass. `down` drops them in reverse.
+#[cfg(test)]
+pub(crate) fn tables_for_test() -> Vec<BaselineTable> {
+    tables()
+}
+
 pub(super) fn tables() -> Vec<BaselineTable> {
     vec![
         // Chats and their history.

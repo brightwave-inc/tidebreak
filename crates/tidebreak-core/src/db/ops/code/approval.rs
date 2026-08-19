@@ -4,13 +4,19 @@ use crate::code::{
     CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeSessionId, CodeTurnId,
 };
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 
-/// Insert an approval row.
-pub async fn insert_approval(store: &DbStore, approval: &CodeApproval) -> Result<()> {
+/// Insert an approval row under its session's owner.
+pub async fn insert_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    approval: &CodeApproval,
+) -> Result<()> {
     entities::code_approval::ActiveModel {
         id: Set(approval.id.0),
+        owner: Set(owner.as_str().to_owned()),
         session_id: Set(approval.session_id.0),
         turn_id: Set(approval.turn_id.0),
         kind: Set(serde_json::to_value(&approval.kind)?),
@@ -26,9 +32,14 @@ pub async fn insert_approval(store: &DbStore, approval: &CodeApproval) -> Result
     Ok(())
 }
 
-/// Load an approval by id.
-pub async fn get_approval(store: &DbStore, id: CodeApprovalId) -> Result<Option<CodeApproval>> {
+/// Load one of the owner's approvals by id.
+pub async fn get_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeApprovalId,
+) -> Result<Option<CodeApproval>> {
     let Some(row) = entities::code_approval::Entity::find_by_id(id.0)
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -39,7 +50,11 @@ pub async fn get_approval(store: &DbStore, id: CodeApprovalId) -> Result<Option<
 }
 
 /// Persist a decision or other mutation. Returns whether a row was updated.
-pub async fn save_approval(store: &DbStore, approval: &CodeApproval) -> Result<bool> {
+pub async fn save_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    approval: &CodeApproval,
+) -> Result<bool> {
     let result = entities::code_approval::Entity::update_many()
         .col_expr(
             entities::code_approval::Column::State,
@@ -54,19 +69,22 @@ pub async fn save_approval(store: &DbStore, approval: &CodeApproval) -> Result<b
             sea_orm::sea_query::Expr::value(approval.decided_at),
         )
         .filter(entities::code_approval::Column::Id.eq(approval.id.0))
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
     Ok(result.rows_affected == 1)
 }
 
-/// List approvals, optionally filtered by state and session.
+/// The owner's approvals, optionally filtered by state and session.
 pub async fn list_approvals(
     store: &DbStore,
+    owner: &OwnerId,
     state: Option<CodeApprovalState>,
     session_id: Option<CodeSessionId>,
 ) -> Result<Vec<CodeApproval>> {
-    let mut query = entities::code_approval::Entity::find();
+    let mut query = entities::code_approval::Entity::find()
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()));
     if let Some(state) = state {
         query = query.filter(entities::code_approval::Column::State.eq(state.as_str().to_owned()));
     }

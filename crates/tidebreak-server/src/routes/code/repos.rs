@@ -1,71 +1,58 @@
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use std::path::PathBuf;
-use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::code::runtime::RepoRegistration;
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
-use crate::state::AppState;
 
-use super::require_code;
 use super::types::{
     CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CreateRepoBody,
     PatchRepoBody,
 };
 use tidebreak_core::RepoId;
 
-fn require_code_arc(state: &AppState) -> Result<Arc<crate::code::CodeRuntime>, ServerError> {
-    state
-        .code
-        .clone()
-        .ok_or_else(|| ServerError::internal("code mode is not configured on this server"))
-}
-
 pub async fn create_repo(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Json(body): Json<CreateRepoBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let runtime = require_code(&state)?;
-    let repo = runtime
+    let repo = code
         .register_repo(
             PathBuf::from(body.path),
-            body.display_name,
-            body.default_base_ref,
-            body.branch_prefix,
-            body.setup_script,
-            body.archive_script,
+            RepoRegistration {
+                display_name: body.display_name,
+                default_base_ref: body.default_base_ref,
+                branch_prefix: body.branch_prefix,
+                setup_script: body.setup_script,
+                archive_script: body.archive_script,
+            },
         )
         .await?;
     Ok((StatusCode::CREATED, Json(CodeRepoSnapshot::from(repo))))
 }
 
-pub async fn list_repos(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<CodeRepoSnapshot>>, ServerError> {
-    let runtime = require_code(&state)?;
-    let repos = runtime.list_repos().await?;
+pub async fn list_repos(code: ScopedCode) -> Result<Json<Vec<CodeRepoSnapshot>>, ServerError> {
+    let repos = code.list_repos().await?;
     Ok(Json(
         repos.into_iter().map(CodeRepoSnapshot::from).collect(),
     ))
 }
 
 pub async fn get_repo(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<RepoId>,
 ) -> Result<Json<CodeRepoSnapshot>, ServerError> {
-    let runtime = require_code(&state)?;
-    Ok(Json(CodeRepoSnapshot::from(runtime.get_repo(id).await?)))
+    Ok(Json(CodeRepoSnapshot::from(code.get_repo(id).await?)))
 }
 
 pub async fn patch_repo(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<RepoId>,
     Json(body): Json<PatchRepoBody>,
 ) -> Result<Json<CodeRepoSnapshot>, ServerError> {
-    let runtime = require_code(&state)?;
-    let mut repo = runtime.get_repo(id).await?;
+    let mut repo = code.get_repo(id).await?;
     if let Some(name) = body.display_name {
         let name = name.trim().to_owned();
         if name.is_empty() {
@@ -95,30 +82,27 @@ pub async fn patch_repo(
     if let Some(script) = body.archive_script {
         repo.archive_script = script.filter(|value| !value.trim().is_empty());
     }
-    runtime.save_repo(&repo).await?;
+    code.save_repo(&repo).await?;
     Ok(Json(CodeRepoSnapshot::from(repo)))
 }
 
 pub async fn delete_repo(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<RepoId>,
 ) -> Result<StatusCode, ServerError> {
-    require_code(&state)?.delete_repo(id).await?;
+    code.delete_repo(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn clone_defaults(
-    State(state): State<AppState>,
-) -> Result<Json<CodeCloneDefaults>, ServerError> {
-    Ok(Json(require_code(&state)?.clone_defaults().await?))
+pub async fn clone_defaults(code: ScopedCode) -> Result<Json<CodeCloneDefaults>, ServerError> {
+    Ok(Json(code.clone_defaults().await?))
 }
 
 pub async fn start_clone(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Json(body): Json<CloneRepoBody>,
 ) -> Result<(StatusCode, Json<CodeCloneJobSnapshot>), ServerError> {
-    let runtime = require_code_arc(&state)?;
-    let job = runtime
+    let job = code
         .start_clone(crate::code::clone::CloneRequest {
             url: body.url,
             github: body.github,
@@ -130,8 +114,8 @@ pub async fn start_clone(
 }
 
 pub async fn get_clone_job(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(job): Path<Uuid>,
 ) -> Result<Json<CodeCloneJobSnapshot>, ServerError> {
-    Ok(Json(require_code(&state)?.get_clone_job(job)?))
+    Ok(Json(code.get_clone_job(job)?))
 }

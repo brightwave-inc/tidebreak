@@ -720,6 +720,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
         store,
         &CodeRepo {
             id: repo_id,
+            owner: crate::OwnerId::local(),
             root_path: format!("/tmp/code-turn-{}", blob.id),
             display_name: "example".into(),
             default_base_ref: "main".into(),
@@ -737,6 +738,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
         store,
         &CodeWorkspace {
             id: workspace_id,
+            owner: crate::OwnerId::local(),
             repo_id,
             title: "first".into(),
             worktree_path: format!("/tmp/code-turn-wt-{}", blob.id),
@@ -755,6 +757,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
         store,
         &CodeSession {
             id: session_id,
+            owner: crate::OwnerId::local(),
             workspace_id,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("scripted".into()),
@@ -774,6 +777,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     .unwrap();
     insert_turn(
         store,
+        &crate::OwnerId::local(),
         &CodeTurn {
             id: CodeTurnId::new(),
             session_id,

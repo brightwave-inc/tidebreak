@@ -2,11 +2,11 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
-use super::require_code;
 use super::types::{
     ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
@@ -16,10 +16,10 @@ use super::types::{
 use tidebreak_core::WorkspaceId;
 
 pub async fn create_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Json(body): Json<CreateWorkspaceBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let workspace = require_code(&state)?
+    let workspace = code
         .create_workspace(body.repo_id, body.title, body.base_ref)
         .await?;
     Ok((
@@ -29,10 +29,10 @@ pub async fn create_workspace(
 }
 
 pub async fn list_workspaces(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Query(query): Query<ListWorkspacesQuery>,
 ) -> Result<Json<Vec<CodeWorkspaceSnapshot>>, ServerError> {
-    let workspaces = require_code(&state)?.list_workspaces(query.repo_id).await?;
+    let workspaces = code.list_workspaces(query.repo_id).await?;
     Ok(Json(
         workspaces
             .into_iter()
@@ -42,61 +42,59 @@ pub async fn list_workspaces(
 }
 
 pub async fn get_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
     Ok(Json(CodeWorkspaceSnapshot::from(
-        require_code(&state)?.get_workspace(id).await?,
+        code.get_workspace(id).await?,
     )))
 }
 
 pub async fn patch_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<PatchWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let runtime = require_code(&state)?;
-    let mut workspace = runtime.get_workspace(id).await?;
+    let mut workspace = code.get_workspace(id).await?;
     if let Some(title) = body.title {
         let title = title.trim().to_owned();
         if title.is_empty() {
             return Err(ServerError::bad_request("title must not be empty"));
         }
         workspace.title = title;
-        runtime.save_workspace(&workspace).await?;
+        code.save_workspace(&workspace).await?;
     }
     Ok(Json(CodeWorkspaceSnapshot::from(workspace)))
 }
 
 pub async fn archive_workspace(
     State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<ArchiveWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let archived = require_code(&state)?
-        .archive_workspace(id, body.force)
-        .await?;
+    let archived = code.archive_workspace(id, body.force).await?;
     state.terminals.close_workspace(id);
     Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 
 pub async fn list_workspace_tree(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceTreeQuery>,
 ) -> Result<Json<CodeWorkspaceTree>, ServerError> {
-    let (paths, truncated) = require_code(&state)?
+    let (paths, truncated) = code
         .workspace_tree(id, query.query.as_deref().unwrap_or(""), query.limit)
         .await?;
     Ok(Json(CodeWorkspaceTree { paths, truncated }))
 }
 
 pub async fn search_workspace(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceSearchQuery>,
 ) -> Result<Json<CodeWorkspaceSearch>, ServerError> {
-    let (matches, truncated) = require_code(&state)?
+    let (matches, truncated) = code
         .workspace_search(
             id,
             &query.query,
@@ -119,13 +117,11 @@ pub async fn search_workspace(
 }
 
 pub async fn get_workspace_blob(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceBlobQuery>,
 ) -> Result<Json<CodeWorkspaceBlob>, ServerError> {
-    let blob = require_code(&state)?
-        .workspace_blob(id, &query.path)
-        .await?;
+    let blob = code.workspace_blob(id, &query.path).await?;
     Ok(Json(CodeWorkspaceBlob {
         path: blob.path,
         content: blob.content,
@@ -135,13 +131,11 @@ pub async fn get_workspace_blob(
 }
 
 pub async fn list_workspace_files(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceFilesQuery>,
 ) -> Result<Json<CodeWorkspaceFiles>, ServerError> {
-    let (files, truncated, stat, turn_id) = require_code(&state)?
-        .workspace_files(id, query.turn)
-        .await?;
+    let (files, truncated, stat, turn_id) = code.workspace_files(id, query.turn).await?;
     Ok(Json(CodeWorkspaceFiles {
         files: files
             .into_iter()
@@ -160,7 +154,7 @@ pub async fn list_workspace_files(
 }
 
 pub async fn get_workspace_diff(
-    State(state): State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Result<Json<CodeWorkspaceDiff>, ServerError> {
@@ -170,9 +164,8 @@ pub async fn get_workspace_diff(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let (diff, truncated, stat, turn_id) = require_code(&state)?
-        .workspace_diff(id, query.turn, file.as_deref())
-        .await?;
+    let (diff, truncated, stat, turn_id) =
+        code.workspace_diff(id, query.turn, file.as_deref()).await?;
     Ok(Json(CodeWorkspaceDiff {
         diff,
         truncated,

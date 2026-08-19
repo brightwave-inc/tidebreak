@@ -66,6 +66,19 @@ impl std::fmt::Display for OwnerId {
     }
 }
 
+impl Serialize for OwnerId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for OwnerId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Largest attachment revision represented exactly by every supported client.
 ///
 /// JSON numbers become JavaScript `number` values in the desktop renderer, so

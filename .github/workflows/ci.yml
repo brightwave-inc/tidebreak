@@ -716,6 +716,10 @@ jobs:
         run: >-
           cargo test -p tidebreak-core --no-default-features --features postgres
           --test postgres_turn_state --locked
+      - name: Exercise code-mode owner scoping on PostgreSQL
+        run: >-
+          cargo test -p tidebreak-core --no-default-features --features postgres
+          --test postgres_code_owner --locked
 
   ui:
     name: desktop UI

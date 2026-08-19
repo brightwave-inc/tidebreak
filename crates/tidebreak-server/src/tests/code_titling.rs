@@ -212,7 +212,9 @@ async fn a_first_turn_names_an_untitled_workspace() {
     );
     assert_eq!(workspace["title"], serde_json::json!(placeholder));
 
-    let mut updates = runtime.bus.subscribe_updates();
+    let mut updates = runtime
+        .bus
+        .subscribe_updates(&tidebreak_core::OwnerId::local());
 
     let session = client
         .post(format!(

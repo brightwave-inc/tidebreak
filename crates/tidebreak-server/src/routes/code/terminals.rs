@@ -4,12 +4,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
 use crate::code::terminal::{TerminalError, TerminalRead, TerminalSnapshot};
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 use tidebreak_core::{CodeWorkspaceStatus, WorkspaceId};
 
-use super::require_code;
 use super::types::{
     CodeTerminalRead, CodeTerminalSnapshot, CreateTerminalBody, TerminalReadQuery,
     TerminalResizeBody, TerminalWriteBody, WorkspaceTerminalPath,
@@ -17,14 +17,16 @@ use super::types::{
 
 pub async fn create_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<CreateTerminalBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let workspace = require_code(&state)?.get_workspace(id).await?;
+    let workspace = code.get_workspace(id).await?;
     require_active(&workspace.status)?;
     let snap = state
         .terminals
         .open(
+            code.owner(),
             id,
             std::path::Path::new(&workspace.worktree_path),
             body.cols,
@@ -36,9 +38,10 @@ pub async fn create_terminal(
 
 pub async fn list_terminals(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<Vec<CodeTerminalSnapshot>>, ServerError> {
-    let _ = require_code(&state)?.get_workspace(id).await?;
+    let _ = code.get_workspace(id).await?;
     Ok(Json(
         state
             .terminals
@@ -51,18 +54,20 @@ pub async fn list_terminals(
 
 pub async fn close_workspace_terminals(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = require_code(&state)?.get_workspace(id).await?;
+    let _ = code.get_workspace(id).await?;
     state.terminals.close_workspace(id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn close_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(path): Path<WorkspaceTerminalPath>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = require_code(&state)?.get_workspace(path.id).await?;
+    let _ = code.get_workspace(path.id).await?;
     state
         .terminals
         .close(path.id, path.tid)
@@ -72,10 +77,11 @@ pub async fn close_terminal(
 
 pub async fn read_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(path): Path<WorkspaceTerminalPath>,
     Query(query): Query<TerminalReadQuery>,
 ) -> Result<Json<CodeTerminalRead>, ServerError> {
-    let _ = require_code(&state)?.get_workspace(path.id).await?;
+    let _ = code.get_workspace(path.id).await?;
     Ok(Json(read_wire(
         path.tid,
         path.id,
@@ -85,10 +91,11 @@ pub async fn read_terminal(
 
 pub async fn write_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalWriteBody>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = require_code(&state)?.get_workspace(path.id).await?;
+    let _ = code.get_workspace(path.id).await?;
     let bytes = decode_write(&body.bytes)?;
     state
         .terminals
@@ -99,10 +106,11 @@ pub async fn write_terminal(
 
 pub async fn resize_terminal(
     axum::extract::State(state): axum::extract::State<AppState>,
+    code: ScopedCode,
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalResizeBody>,
 ) -> Result<Json<CodeTerminalSnapshot>, ServerError> {
-    let _ = require_code(&state)?.get_workspace(path.id).await?;
+    let _ = code.get_workspace(path.id).await?;
     let snap = state
         .terminals
         .resize(path.id, path.tid, body.cols, body.rows)

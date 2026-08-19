@@ -1,20 +1,40 @@
 //! Code-mode tables. No foreign keys into chat tables — the surfaces are
 //! type-and-schema separated.
+//!
+//! Every table here carries an `owner` column holding the storage key of the
+//! principal the row belongs to, the way chat, document, and app rows do. The
+//! column is denormalized onto child rows rather than reached through a join,
+//! so an owner-scoped query exists for every table and a shared database
+//! partitions cleanly by user. On the desktop profile every row belongs to
+//! the single local owner and keeps the default.
+//!
+//! Repositories are owned too: nothing in code mode is shared across owners,
+//! so two users may register or clone the same remote independently.
 
 use sea_orm_migration::prelude::*;
 
 use crate::db::migration::idens::*;
 
+/// Storage key written by unscoped (local-profile) writers.
+const LOCAL_OWNER: &str = "local";
+
+fn owner_column<T: IntoIden>(column: T) -> ColumnDef {
+    ColumnDef::new(column)
+        .text()
+        .not_null()
+        .default(LOCAL_OWNER)
+        .to_owned()
+}
+
 pub(super) fn code_repo_table() -> TableCreateStatement {
     Table::create()
         .table(CodeRepo::Table)
         .col(ColumnDef::new(CodeRepo::Id).uuid().not_null().primary_key())
-        .col(
-            ColumnDef::new(CodeRepo::RootPath)
-                .text()
-                .not_null()
-                .unique_key(),
-        )
+        .col(owner_column(CodeRepo::Owner))
+        // Registration paths are unique per owner, not per install: two users
+        // on a shared machine may each register the same path, and each one
+        // clones into an owner-keyed directory of their own.
+        .col(ColumnDef::new(CodeRepo::RootPath).text().not_null())
         .col(ColumnDef::new(CodeRepo::DisplayName).text().not_null())
         .col(ColumnDef::new(CodeRepo::DefaultBaseRef).text().not_null())
         .col(ColumnDef::new(CodeRepo::BranchPrefix).text().not_null())
@@ -34,7 +54,13 @@ pub(super) fn code_repo_table() -> TableCreateStatement {
 }
 
 pub(super) fn code_repo_indexes() -> Vec<IndexCreateStatement> {
-    vec![]
+    vec![Index::create()
+        .name("idx_code_repo_owner_root_path")
+        .table(CodeRepo::Table)
+        .col(CodeRepo::Owner)
+        .col(CodeRepo::RootPath)
+        .unique()
+        .to_owned()]
 }
 
 pub(super) fn code_workspace_table() -> TableCreateStatement {
@@ -46,6 +72,7 @@ pub(super) fn code_workspace_table() -> TableCreateStatement {
                 .not_null()
                 .primary_key(),
         )
+        .col(owner_column(CodeWorkspace::Owner))
         .col(ColumnDef::new(CodeWorkspace::RepoId).uuid().not_null())
         .col(ColumnDef::new(CodeWorkspace::Title).text().not_null())
         .col(
@@ -80,13 +107,21 @@ pub(super) fn code_workspace_table() -> TableCreateStatement {
 }
 
 pub(super) fn code_workspace_indexes() -> Vec<IndexCreateStatement> {
-    vec![Index::create()
-        .name("idx_code_workspace_repo_branch")
-        .table(CodeWorkspace::Table)
-        .col(CodeWorkspace::RepoId)
-        .col(CodeWorkspace::BranchName)
-        .unique()
-        .to_owned()]
+    vec![
+        Index::create()
+            .name("idx_code_workspace_repo_branch")
+            .table(CodeWorkspace::Table)
+            .col(CodeWorkspace::RepoId)
+            .col(CodeWorkspace::BranchName)
+            .unique()
+            .to_owned(),
+        Index::create()
+            .name("idx_code_workspace_owner_created")
+            .table(CodeWorkspace::Table)
+            .col(CodeWorkspace::Owner)
+            .col(CodeWorkspace::CreatedAt)
+            .to_owned(),
+    ]
 }
 
 pub(super) fn code_session_table() -> TableCreateStatement {
@@ -98,6 +133,7 @@ pub(super) fn code_session_table() -> TableCreateStatement {
                 .not_null()
                 .primary_key(),
         )
+        .col(owner_column(CodeSession::Owner))
         .col(ColumnDef::new(CodeSession::WorkspaceId).uuid().not_null())
         .col(ColumnDef::new(CodeSession::HarnessKind).text().not_null())
         .col(ColumnDef::new(CodeSession::HarnessVersion).text())
@@ -166,6 +202,7 @@ pub(super) fn code_turn_table() -> TableCreateStatement {
     Table::create()
         .table(CodeTurn::Table)
         .col(ColumnDef::new(CodeTurn::Id).uuid().not_null().primary_key())
+        .col(owner_column(CodeTurn::Owner))
         .col(ColumnDef::new(CodeTurn::SessionId).uuid().not_null())
         .col(ColumnDef::new(CodeTurn::Ordinal).big_integer().not_null())
         .col(ColumnDef::new(CodeTurn::Status).text().not_null())
@@ -207,6 +244,7 @@ pub(super) fn code_turn_indexes() -> Vec<IndexCreateStatement> {
 pub(super) fn code_turn_attachment_table() -> TableCreateStatement {
     Table::create()
         .table(CodeTurnAttachment::Table)
+        .col(owner_column(CodeTurnAttachment::Owner))
         .col(ColumnDef::new(CodeTurnAttachment::TurnId).uuid().not_null())
         .col(
             ColumnDef::new(CodeTurnAttachment::Ordinal)
@@ -264,6 +302,7 @@ pub(super) fn code_turn_attachment_indexes() -> Vec<IndexCreateStatement> {
 pub(super) fn code_event_table() -> TableCreateStatement {
     Table::create()
         .table(CodeEvent::Table)
+        .col(owner_column(CodeEvent::Owner))
         .col(ColumnDef::new(CodeEvent::SessionId).uuid().not_null())
         .col(ColumnDef::new(CodeEvent::Seq).big_integer().not_null())
         .col(ColumnDef::new(CodeEvent::Event).json_binary().not_null())
@@ -300,6 +339,7 @@ pub(super) fn code_approval_table() -> TableCreateStatement {
                 .not_null()
                 .primary_key(),
         )
+        .col(owner_column(CodeApproval::Owner))
         .col(ColumnDef::new(CodeApproval::SessionId).uuid().not_null())
         .col(ColumnDef::new(CodeApproval::TurnId).uuid().not_null())
         .col(ColumnDef::new(CodeApproval::Kind).json_binary().not_null())

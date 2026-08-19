@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use tidebreak_core::{CodeTerminalId, WorkspaceId};
+use tidebreak_core::{CodeTerminalId, OwnerId, WorkspaceId};
 use tokio::sync::broadcast;
 
 /// Cap on live shells per workspace. A terminal is a convenience, not a data plane.
@@ -45,7 +45,10 @@ const NOTICE_BUFFER: usize = 64;
 /// In-memory process-wide registry of live auxiliary terminals.
 pub(crate) struct TerminalHub {
     inner: Mutex<HubInner>,
-    notices: broadcast::Sender<TerminalNotice>,
+    /// One notice channel per owner. Terminal activity rides
+    /// `/code/updates`, so it is partitioned the same way the digests are:
+    /// a subscriber's receiver only ever carries its own owner's notices.
+    notices: Mutex<HashMap<OwnerId, broadcast::Sender<TerminalNotice>>>,
 }
 
 struct HubInner {
@@ -55,6 +58,7 @@ struct HubInner {
 
 struct LiveTerminal {
     id: CodeTerminalId,
+    owner: OwnerId,
     workspace_id: WorkspaceId,
     ring: ByteRing,
     cols: u16,
@@ -114,22 +118,32 @@ pub(crate) enum TerminalError {
 
 impl TerminalHub {
     pub(crate) fn new() -> Self {
-        let (notices, _) = broadcast::channel(NOTICE_BUFFER);
         Self {
             inner: Mutex::new(HubInner {
                 by_id: HashMap::new(),
                 by_workspace: HashMap::new(),
             }),
-            notices,
+            notices: Mutex::new(HashMap::new()),
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TerminalNotice> {
-        self.notices.subscribe()
+    fn notices_sender(&self, owner: &OwnerId) -> broadcast::Sender<TerminalNotice> {
+        self.notices
+            .lock()
+            .expect("terminal notice bus")
+            .entry(owner.clone())
+            .or_insert_with(|| broadcast::channel(NOTICE_BUFFER).0)
+            .clone()
+    }
+
+    /// Subscribe to one owner's terminal activity.
+    pub(crate) fn subscribe(&self, owner: &OwnerId) -> broadcast::Receiver<TerminalNotice> {
+        self.notices_sender(owner).subscribe()
     }
 
     pub(crate) fn open(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         cwd: &Path,
         cols: Option<u16>,
@@ -142,6 +156,7 @@ impl TerminalHub {
         let id = CodeTerminalId::new();
         let live = LiveTerminal {
             id,
+            owner: owner.clone(),
             workspace_id,
             ring: ByteRing::new(TERMINAL_RING_BYTES),
             cols,
@@ -155,8 +170,9 @@ impl TerminalHub {
         };
         let handle = Arc::new(Mutex::new(live));
         self.insert(workspace_id, id, handle.clone());
-        start_reader(handle.clone(), self.notices.clone(), spawned.reader);
-        start_reaper(handle.clone(), self.notices.clone(), spawned.child);
+        let notices = self.notices_sender(owner);
+        start_reader(handle.clone(), notices.clone(), spawned.reader);
+        start_reaper(handle.clone(), notices, spawned.child);
         Ok(lock_snapshot(&handle))
     }
 
@@ -164,6 +180,7 @@ impl TerminalHub {
     #[cfg(test)]
     pub(crate) fn open_memory(
         &self,
+        owner: &OwnerId,
         workspace_id: WorkspaceId,
         cols: u16,
         rows: u16,
@@ -174,6 +191,7 @@ impl TerminalHub {
         let id = CodeTerminalId::new();
         let live = LiveTerminal {
             id,
+            owner: owner.clone(),
             workspace_id,
             ring: ByteRing::new(TERMINAL_RING_BYTES),
             cols,
@@ -269,7 +287,8 @@ impl TerminalHub {
             // Memory-backed terminals echo writes into the ring so tests can
             // drive the same read path the PTY reader uses.
             live.ring.write(bytes);
-            apply_coalesce(&mut live, &handle, &self.notices, workspace_id, id);
+            let notices = self.notices_sender(&live.owner.clone());
+            apply_coalesce(&mut live, &handle, &notices, workspace_id, id);
         }
         Ok(())
     }
@@ -348,7 +367,8 @@ impl TerminalHub {
         let mut live = handle.lock().expect("terminal");
         live.ring.write(bytes);
         let workspace_id = live.workspace_id;
-        apply_coalesce(&mut live, &handle, &self.notices, workspace_id, id);
+        let notices = self.notices_sender(&live.owner.clone());
+        apply_coalesce(&mut live, &handle, &notices, workspace_id, id);
     }
 
     fn reserve_slot(&self, workspace_id: WorkspaceId) -> Result<(), TerminalError> {
@@ -781,7 +801,7 @@ mod tests {
     fn two_readers_at_different_cursors_both_see_retained_bytes() {
         let hub = TerminalHub::new();
         let ws = workspace();
-        let snap = hub.open_memory(ws, 80, 24).unwrap();
+        let snap = hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
         hub.push_output(snap.id, b"hello ");
         hub.push_output(snap.id, b"world");
         let first = hub.read(ws, snap.id, 0);
@@ -795,8 +815,8 @@ mod tests {
     fn fast_producer_coalesces_notices_and_reader_gets_every_byte() {
         let hub = TerminalHub::new();
         let ws = workspace();
-        let snap = hub.open_memory(ws, 80, 24).unwrap();
-        let mut rx = hub.subscribe();
+        let snap = hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
+        let mut rx = hub.subscribe(&OwnerId::local());
         let mut expected = Vec::new();
         for i in 0..64u8 {
             let chunk = [i];
@@ -824,7 +844,7 @@ mod tests {
         let marker = b"TERM_MARKER_no_durable_9f3a7c1e";
         let ws = workspace();
         let first = TerminalHub::new();
-        let snap = first.open_memory(ws, 80, 24).unwrap();
+        let snap = first.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
         first.push_output(snap.id, marker);
         let before = first.read(ws, snap.id, 0);
         assert!(before.data.windows(marker.len()).any(|w| w == marker));
@@ -843,17 +863,17 @@ mod tests {
     fn write_size_and_workspace_caps() {
         let hub = TerminalHub::new();
         let ws = workspace();
-        let snap = hub.open_memory(ws, 80, 24).unwrap();
+        let snap = hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
         let too_big = vec![b'a'; MAX_TERMINAL_WRITE_BYTES + 1];
         assert!(matches!(
             hub.write(ws, snap.id, &too_big),
             Err(TerminalError::WriteTooLarge)
         ));
         for _ in 1..MAX_TERMINALS_PER_WORKSPACE {
-            hub.open_memory(ws, 80, 24).unwrap();
+            hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
         }
         assert!(matches!(
-            hub.open_memory(ws, 80, 24),
+            hub.open_memory(&OwnerId::local(), ws, 80, 24),
             Err(TerminalError::WorkspaceCap)
         ));
     }

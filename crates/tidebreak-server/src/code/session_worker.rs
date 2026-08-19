@@ -22,14 +22,14 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    append_event, bump_spawn_epoch, get_open_turn, get_session, insert_approval, insert_turn,
-    next_turn_ordinal, save_session, save_turn, CodeJournalError,
+    append_event, bump_spawn_epoch, get_open_turn, get_session, get_session_all_owners,
+    insert_approval, insert_turn, next_turn_ordinal, save_session, save_turn, CodeJournalError,
 };
 use tidebreak_core::{
     Attention, AttentionSource, BlobStore, BoundedError, CodeApproval, CodeApprovalId,
     CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
     CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, DbStore, FenceReason,
-    HarnessNoticeLevel,
+    HarnessNoticeLevel, OwnerId,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -82,6 +82,9 @@ pub(crate) struct QueuedFollowUp {
 pub(crate) struct LiveSink {
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
+    /// Owner of the session this sink writes for. Carried explicitly so every
+    /// journal and approval write the worker makes stays inside one owner.
+    owner: OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
@@ -113,7 +116,7 @@ impl LiveSink {
         let existing = *self.turn_id.lock().expect("code sink turn");
         let turn_id = match existing {
             Some(id) => id,
-            None => match get_open_turn(&self.db, self.session_id).await {
+            None => match get_open_turn(&self.db, &self.owner, self.session_id).await {
                 Ok(Some(turn)) => turn.id,
                 _ => return,
             },
@@ -129,12 +132,16 @@ impl LiveSink {
             requested_at: Utc::now(),
             decided_at: None,
         };
-        if insert_approval(&self.db, &approval).await.is_err() {
+        if insert_approval(&self.db, &self.owner, &approval)
+            .await
+            .is_err()
+        {
             return;
         }
         let _ = super::attention::apply_attention(
             &self.db,
             &self.bus,
+            &self.owner,
             self.session_id,
             Attention::needs_you("an approval is waiting", AttentionSource::Structured),
             false,
@@ -143,6 +150,7 @@ impl LiveSink {
         let _ = persist_and_publish(
             &self.db,
             &self.bus,
+            &self.owner,
             self.session_id,
             self.spawn_epoch,
             CodeEvent::ApprovalRequested {
@@ -176,6 +184,7 @@ impl HarnessEventSink for LiveSink {
         match persist_and_publish(
             &self.db,
             &self.bus,
+            &self.owner,
             self.session_id,
             self.spawn_epoch,
             code_event,
@@ -414,7 +423,7 @@ async fn drive_turn(
         session.model = Some(model);
     }
 
-    let ordinal = next_turn_ordinal(db, session.id)
+    let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     let mut turn = CodeTurn {
@@ -432,7 +441,7 @@ async fn drive_turn(
         started_at: Utc::now(),
         ended_at: None,
     };
-    insert_turn(db, &turn)
+    insert_turn(db, &session.owner, &turn)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     sink.set_turn(turn.id);
@@ -453,6 +462,7 @@ async fn drive_turn(
     persist_and_publish(
         db,
         bus,
+        &session.owner,
         session.id,
         session.spawn_epoch,
         CodeEvent::TurnStarted { turn_id: turn.id },
@@ -529,9 +539,11 @@ async fn drive_turn(
     }
 
     // Re-read the turn: the sink may have already closed it.
-    if let Ok(Some(updated)) = get_open_turn(db, session.id).await {
+    if let Ok(Some(updated)) = get_open_turn(db, &session.owner, session.id).await {
         turn = updated;
-    } else if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, turn.id).await {
+    } else if let Ok(Some(current)) =
+        tidebreak_core::db::code::get_turn(db, &session.owner, turn.id).await
+    {
         turn = current;
     }
 
@@ -548,6 +560,7 @@ async fn drive_turn(
                 let _ = persist_and_publish(
                     db,
                     bus,
+                    &session.owner,
                     session.id,
                     session.spawn_epoch,
                     CodeEvent::HarnessNotice {
@@ -580,18 +593,27 @@ async fn drive_turn(
                 };
                 turn.status = status;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, &turn).await;
-                let _ = persist_and_publish(db, bus, session.id, session.spawn_epoch, event).await;
+                let _ = save_turn(db, &session.owner, &turn).await;
+                let _ = persist_and_publish(
+                    db,
+                    bus,
+                    &session.owner,
+                    session.id,
+                    session.spawn_epoch,
+                    event,
+                )
+                .await;
             }
         }
         Err(err) => {
             if turn.status == CodeTurnStatus::Running {
                 turn.status = CodeTurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, &turn).await;
+                let _ = save_turn(db, &session.owner, &turn).await;
                 let _ = persist_and_publish(
                     db,
                     bus,
+                    &session.owner,
                     session.id,
                     session.spawn_epoch,
                     CodeEvent::TurnFailed {
@@ -630,7 +652,8 @@ async fn drive_turn(
         }
     }
 
-    if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, turn.id).await {
+    if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, &session.owner, turn.id).await
+    {
         turn = current;
     }
     super::checkpoint::after_turn_completed(db, bus, session, &mut turn).await;
@@ -694,7 +717,7 @@ async fn hydrate_turn_images(
 }
 
 async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {
-    match get_session(db, session.id).await {
+    match get_session(db, &session.owner, session.id).await {
         Ok(Some(current)) if current.lifecycle == CodeSessionLifecycle::Ended => {
             *session = current;
             true
@@ -719,7 +742,7 @@ pub(crate) async fn attach_engine(
     let epoch = bump_spawn_epoch(db, session_id, child_pid)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
-    let mut session = get_session(db, session_id)
+    let mut session = get_session_all_owners(db, session_id)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?
         .ok_or_else(|| WorkerError::Failed(format!("session {session_id} not found")))?;
@@ -738,6 +761,7 @@ pub(crate) async fn attach_engine(
     persist_and_publish(
         db,
         bus,
+        &session.owner,
         session_id,
         epoch,
         CodeEvent::SessionStarted {
@@ -757,6 +781,7 @@ pub(crate) async fn attach_engine(
 pub(crate) fn sink_for(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
+    owner: OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: Option<CodeTurnId>,
@@ -764,6 +789,7 @@ pub(crate) fn sink_for(
     Arc::new(LiveSink {
         db,
         bus,
+        owner,
         session_id,
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
@@ -774,24 +800,26 @@ pub(crate) fn sink_for(
 pub(crate) async fn journal_event(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
-    persist_and_publish(db, bus, session_id, spawn_epoch, event).await
+    persist_and_publish(db, bus, owner, session_id, spawn_epoch, event).await
 }
 
 async fn persist_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
-    apply_side_effects(db, session_id, spawn_epoch, &event).await?;
-    let seq = append_event(db, session_id, spawn_epoch, &event).await?;
+    apply_side_effects(db, owner, session_id, spawn_epoch, &event).await?;
+    let seq = append_event(db, owner, session_id, spawn_epoch, &event).await?;
     if is_activity(&event) {
-        let _ = super::attention::note_activity(db, bus, session_id).await;
+        let _ = super::attention::note_activity(db, bus, owner, session_id).await;
     }
     bus.publish(
         session_id,
@@ -816,13 +844,14 @@ fn is_activity(event: &CodeEvent) -> bool {
 
 async fn apply_side_effects(
     db: &DbStore,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     _spawn_epoch: i64,
     event: &CodeEvent,
 ) -> Result<(), CodeJournalError> {
     match event {
         CodeEvent::TurnCompleted { usage, checkpoint } => {
-            if let Ok(Some(mut turn)) = get_open_turn(db, session_id).await {
+            if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = CodeTurnStatus::Completed;
                 turn.ended_at = Some(Utc::now());
                 turn.usage = Some(usage.clone());
@@ -830,21 +859,21 @@ async fn apply_side_effects(
                     turn.checkpoint_ref = hint.checkpoint_ref.clone();
                     turn.diffstat = hint.diffstat.clone();
                 }
-                let _ = save_turn(db, &turn).await;
+                let _ = save_turn(db, owner, &turn).await;
             }
         }
         CodeEvent::TurnFailed { .. } => {
-            if let Ok(Some(mut turn)) = get_open_turn(db, session_id).await {
+            if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = CodeTurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, &turn).await;
+                let _ = save_turn(db, owner, &turn).await;
             }
         }
         CodeEvent::TurnInterrupted => {
-            if let Ok(Some(mut turn)) = get_open_turn(db, session_id).await {
+            if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = CodeTurnStatus::Interrupted;
                 turn.ended_at = Some(Utc::now());
-                let _ = save_turn(db, &turn).await;
+                let _ = save_turn(db, owner, &turn).await;
             }
         }
         _ => {}

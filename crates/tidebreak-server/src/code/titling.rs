@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use tidebreak_core::db::code::{get_session, get_workspace, set_workspace_title_if};
-use tidebreak_core::{CodeSessionId, CodeWorkspaceStatus, Result, WorkspaceId};
+use tidebreak_core::{CodeSessionId, CodeWorkspaceStatus, OwnerId, Result, WorkspaceId};
 
 use crate::chat_titling::{
     derive_title_with_retries, head, MAX_TITLE_SOURCE_MESSAGE_BYTES, TITLE_TARGET_CHARS,
@@ -63,7 +63,12 @@ enum Outcome {
 /// Returns immediately; nothing waits on the result and a lost title costs
 /// nothing. Called from the front of turn submission so the name usually lands
 /// while the engine is still working, mirroring chat titling's hook point.
-pub(crate) fn spawn_for_turn(state: &AppState, session_id: CodeSessionId, message: String) {
+pub(crate) fn spawn_for_turn(
+    state: &AppState,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    message: String,
+) {
     let Some(code) = state.code.clone() else {
         return;
     };
@@ -73,8 +78,9 @@ pub(crate) fn spawn_for_turn(state: &AppState, session_id: CodeSessionId, messag
         return;
     }
     let state = state.clone();
+    let owner = owner.clone();
     tokio::spawn(async move {
-        match derive_workspace_title(&state, &code, session_id, &message).await {
+        match derive_workspace_title(&state, &code, &owner, session_id, &message).await {
             Ok(Outcome::Named(title)) => {
                 eprintln!("tidebreak: named a code workspace: {title}");
             }
@@ -95,17 +101,18 @@ pub(crate) fn spawn_for_turn(state: &AppState, session_id: CodeSessionId, messag
 async fn derive_workspace_title(
     state: &AppState,
     code: &Arc<CodeRuntime>,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     message: &str,
 ) -> Result<Outcome> {
-    let Some(session) = get_session(&code.db, session_id).await? else {
+    let Some(session) = get_session(&code.db, owner, session_id).await? else {
         return Ok(Outcome::NotApplicable);
     };
     let Some(claim) = TitlingClaim::acquire(code, session.workspace_id) else {
         return Ok(Outcome::NotApplicable);
     };
     let _held = claim;
-    let Some(workspace) = get_workspace(&code.db, session.workspace_id).await? else {
+    let Some(workspace) = get_workspace(&code.db, owner, session.workspace_id).await? else {
         return Ok(Outcome::NotApplicable);
     };
     let placeholder = worktree::two_word_name(workspace.id.0.as_u128());
@@ -141,13 +148,13 @@ async fn derive_workspace_title(
     let Some(title) = title else {
         return Ok(Outcome::Declined);
     };
-    if !set_workspace_title_if(&code.db, workspace.id, &placeholder, &title).await? {
+    if !set_workspace_title_if(&code.db, owner, workspace.id, &placeholder, &title).await? {
         // Renamed while the call ran; the chosen name has the floor.
         return Ok(Outcome::NotApplicable);
     }
     // Announced only once the write applied, on the digest channel every list
     // surface already watches.
-    super::attention::emit_workspace_digests(&code.db, &code.bus, workspace.id).await;
+    super::attention::emit_workspace_digests(&code.db, &code.bus, owner, workspace.id).await;
     Ok(Outcome::Named(title))
 }
 

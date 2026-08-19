@@ -1658,6 +1658,7 @@ pub mod code_repo {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub root_path: String,
         pub display_name: String,
         pub default_base_ref: String,
@@ -1683,6 +1684,7 @@ pub mod code_workspace {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub repo_id: Uuid,
         pub title: String,
         pub worktree_path: String,
@@ -1709,6 +1711,7 @@ pub mod code_session {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub workspace_id: Uuid,
         pub harness_kind: String,
         pub harness_version: Option<String>,
@@ -1741,6 +1744,7 @@ pub mod code_turn {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub session_id: Uuid,
         pub ordinal: i64,
         pub status: String,
@@ -1773,6 +1777,7 @@ pub mod code_turn_attachment {
         pub turn_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub ordinal: i32,
+        pub owner: String,
         pub blob_id: Uuid,
         pub media_type: String,
         pub byte_len: i64,
@@ -1797,6 +1802,7 @@ pub mod code_event {
         pub session_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub seq: i64,
+        pub owner: String,
         #[sea_orm(column_type = "JsonBinary")]
         pub event: Json,
         pub created_at: DateTimeUtc,
@@ -1816,6 +1822,7 @@ pub mod code_approval {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        pub owner: String,
         pub session_id: Uuid,
         pub turn_id: Uuid,
         #[sea_orm(column_type = "JsonBinary")]
