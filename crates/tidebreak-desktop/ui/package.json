@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "storybook": "storybook dev -p 6006",
+    "storybook:build": "storybook build -o storybook-static",
     "build": "tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
     "test": "vitest run",
     "before-tauri-dev": "node ../scripts/prepare-sidecar.mjs && vite",
@@ -89,6 +91,8 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
+    "@storybook/addon-a11y": "10.5.9",
+    "@storybook/react-vite": "10.5.9",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/jest-dom": "7.0.0",
     "@testing-library/react": "16.3.2",
@@ -99,6 +103,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "4.7.0",
     "jsdom": "29.1.1",
+    "storybook": "10.5.9",
     "tailwindcss": "4.3.3",
     "typescript": "5.8.3",
     "vite": "7.3.6",
