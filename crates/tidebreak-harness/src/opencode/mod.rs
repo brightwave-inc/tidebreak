@@ -187,7 +187,10 @@ mod tests {
     #[test]
     fn fixture_replay_plain_text() {
         let (events, unrecognized) = replay("plain-text");
-        assert!(unrecognized > 0, "plugin/catalog events must be counted");
+        assert_eq!(
+            unrecognized, 0,
+            "captured plugin/catalog broadcasts are recognized protocol state"
+        );
         assert!(events
             .iter()
             .any(|event| matches!(event, HarnessEvent::SessionStarted { .. })));

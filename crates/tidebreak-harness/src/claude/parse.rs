@@ -145,8 +145,8 @@ impl ClaudeStreamParser {
                 }]
             }
             "hook_started" | "hook_response" | "status" | "thinking_tokens" => {
-                // Known stream noise. Counted so it is never silent.
-                self.count_unrecognized(&format!("system/{subtype}"), value);
+                // Known lifecycle/telemetry frames that carry no transcript
+                // state. They are recognized no-ops, not protocol drift.
                 Vec::new()
             }
             other => {

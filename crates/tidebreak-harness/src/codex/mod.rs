@@ -177,7 +177,10 @@ mod tests {
     #[test]
     fn fixture_replay_plain_text() {
         let (events, unrecognized) = replay("plain-text");
-        assert!(unrecognized > 0, "startup notifications must be counted");
+        assert_eq!(
+            unrecognized, 0,
+            "captured startup notifications are recognized protocol state"
+        );
         assert!(events
             .iter()
             .any(|event| matches!(event, HarnessEvent::SessionStarted { .. })));
@@ -187,6 +190,13 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
+    }
+
+    #[test]
+    fn fixture_replay_hook_lifecycle() {
+        let (events, unrecognized) = replay("hook-lifecycle");
+        assert_eq!(unrecognized, 0, "hook lifecycle frames are known telemetry");
+        assert!(events.is_empty(), "hooks do not change the transcript");
     }
 
     #[test]

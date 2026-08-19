@@ -123,7 +123,12 @@ impl GrokStreamParser {
             "usage" => self.parse_usage(value),
             "end" => self.parse_end(value),
             "error" => self.parse_error(value),
-            "available_commands" | "plan" | "max_turns_reached" => {
+            "available_commands" => {
+                // The command inventory is stable, known startup metadata and
+                // does not belong in the normalized transcript.
+                Vec::new()
+            }
+            "plan" | "max_turns_reached" => {
                 self.count_unrecognized(kind, value);
                 Vec::new()
             }

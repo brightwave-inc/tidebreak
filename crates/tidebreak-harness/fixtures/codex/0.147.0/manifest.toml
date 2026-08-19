@@ -17,12 +17,15 @@ observed_auth = "Logged in using ChatGPT"
 # model gpt-5.6-luna (cheapest ChatGPT-account model that accepted the
 # request; gpt-5-mini is rejected on this account), effort=low, tiny
 # prompts, throwaway git repo as cwd.
+# `hook-lifecycle` is a supplemental capture from Tidebreak's attached desktop
+# profile, where real user hooks were enabled. The hook path was redacted.
 
 integration_path = "app-server-stdio"
 model = "gpt-5.6-luna"
 
 scenarios = [
   "plain-text",
+  "hook-lifecycle",
   "tool-use",
   "approval-approve",
   "approval-deny",
@@ -52,6 +55,7 @@ verified = [
   "codex login status => Logged in using ChatGPT (exit 0); empty CODEX_HOME => Not logged in (exit 1)",
   "codex app-server --stdio JSON-RPC: initialize, initialized, thread/start, thread/resume, turn/start, turn/interrupt",
   "inbound notifications: turn/started, turn/completed, item/started, item/completed, item/agentMessage/delta, item/commandExecution/requestApproval, serverRequest/resolved, thread/tokenUsage/updated",
+  "hook lifecycle notifications: hook/started and hook/completed for sessionStart, userPromptSubmit, and stop",
   "approval request item/commandExecution/requestApproval; decide via JSON-RPC result {decision: accept|decline}",
   "turn/completed status: completed | interrupted | failed",
   "commandExecution status: inProgress | completed | declined",
