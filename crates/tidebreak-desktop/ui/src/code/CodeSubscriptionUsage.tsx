@@ -302,9 +302,10 @@ function UnavailableUsage({ diagnostics }: { diagnostics: string[] }) {
     <div className="flex flex-col gap-2 py-2">
       <p className="text-sm font-medium">No machine-readable limits found</p>
       <p className="text-muted-foreground text-xs leading-5">
-        Tidebreak reads Model Gateway when modelctl is available, then falls
-        back to Codex directly. Claude Code and Grok do not currently expose a
-        stable non-interactive subscription-usage command.
+        Tidebreak reads Model Gateway when this profile is paired to the same
+        gateway configured in modelctl, then falls back to Codex directly.
+        Claude Code and Grok do not currently expose a stable non-interactive
+        subscription-usage command.
       </p>
       {diagnostics[0] && (
         <p className="text-muted-foreground text-[11px]">{diagnostics[0]}</p>

@@ -1,15 +1,18 @@
 //! Subscription quota usage for code mode.
 //!
 //! Model Gateway is the richest source and already exposes a stable JSON CLI
-//! contract. When it is absent or signed out, Codex's app-server protocol is a
-//! useful direct-provider fallback. Other harnesses remain visible in the UI
-//! through the doctor, but are not guessed here when their CLIs expose no
-//! machine-readable quota command.
+//! contract, but it belongs to this surface only when the Tidebreak profile is
+//! paired to that same gateway. An unrelated `modelctl` installation on PATH
+//! must not change an open profile's usage accounting. Otherwise Codex's
+//! app-server protocol is the useful direct-provider source. Other harnesses
+//! remain visible in the UI through the doctor, but are not guessed here when
+//! their CLIs expose no machine-readable quota command.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, ProbeCapture};
@@ -20,6 +23,7 @@ use tokio::time::timeout;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::Json;
+use crate::state::AppState;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
@@ -70,23 +74,30 @@ struct UsageWindow {
     model_scope: Option<String>,
 }
 
-/// Read every subscription quota source the local code installation can
-/// answer. Source failures are diagnostics, not route failures: a missing
-/// optional CLI must render as an honest empty state rather than a broken rail.
+/// Read the subscription quota sources this Tidebreak profile may use. Source
+/// failures are diagnostics, not route failures: a missing optional CLI must
+/// render as an honest empty state rather than a broken rail.
 pub(crate) async fn subscription_usage(
     _code: ScopedCode,
+    State(state): State<AppState>,
 ) -> Result<Json<CodeSubscriptionUsage>, ServerError> {
-    Ok(Json(collect_usage().await))
+    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    Ok(Json(collect_usage(policy.gateway_url.as_deref()).await))
 }
 
-async fn collect_usage() -> CodeSubscriptionUsage {
+async fn collect_usage(gateway_url: Option<&str>) -> CodeSubscriptionUsage {
     let mut diagnostics = Vec::new();
-    match collect_modelctl().await {
-        Ok(Some(report)) if !report.providers.is_empty() => return report,
-        Ok(_) => diagnostics.push("Model Gateway returned no subscription usage.".into()),
-        Err(error) => {
-            tracing::debug!("model-gateway usage unavailable: {error}");
-            diagnostics.push("Model Gateway usage is unavailable.".into());
+    if let Some(gateway_url) = gateway_url {
+        match collect_modelctl(gateway_url).await {
+            Ok(Some(report)) if !report.providers.is_empty() => return report,
+            Ok(Some(_)) => diagnostics.push("Model Gateway returned no subscription usage.".into()),
+            Ok(None) => {
+                diagnostics.push("No modelctl profile matches this Tidebreak gateway.".into())
+            }
+            Err(error) => {
+                tracing::debug!("model-gateway usage unavailable: {error}");
+                diagnostics.push("Model Gateway usage is unavailable.".into());
+            }
         }
     }
 
@@ -116,25 +127,37 @@ async fn collect_usage() -> CodeSubscriptionUsage {
     }
 }
 
-async fn collect_modelctl() -> Result<Option<CodeSubscriptionUsage>, String> {
+async fn collect_modelctl(gateway_url: &str) -> Result<Option<CodeSubscriptionUsage>, String> {
     let probe = probe_shell(&HostEnv::from_process(), "modelctl")
         .await
         .map_err(|error| error.to_string())?;
-    let mut command = command_from_probe(&probe);
-    command.args(["--json", "usage"]);
+    let profiles_output = run_modelctl(&probe, &["--json", "profile", "list"]).await?;
+    let profiles: Vec<ModelctlProfile> = serde_json::from_slice(&profiles_output)
+        .map_err(|error| format!("could not decode profile list: {error}"))?;
+    let Some(profile) = matching_modelctl_profile(&profiles, gateway_url) else {
+        return Ok(None);
+    };
+    let usage_output =
+        run_modelctl(&probe, &["--json", "usage", "--profile", profile.as_str()]).await?;
+    let raw: ModelctlUsage = serde_json::from_slice(&usage_output)
+        .map_err(|error| format!("could not decode usage response: {error}"))?;
+    Ok(Some(normalize_modelctl(raw)))
+}
+
+async fn run_modelctl(probe: &ProbeCapture, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut command = command_from_probe(probe);
+    command.args(args);
     let output = timeout(COMMAND_TIMEOUT, command.output())
         .await
-        .map_err(|_| "usage command timed out".to_owned())?
-        .map_err(|error| format!("could not run usage command: {error}"))?;
+        .map_err(|_| "modelctl command timed out".to_owned())?
+        .map_err(|error| format!("could not run modelctl: {error}"))?;
     if !output.status.success() {
         return Err(bounded_text(&output.stderr, 320));
     }
     if output.stdout.len() > MAX_JSON_BYTES {
-        return Err("usage response was too large".into());
+        return Err("modelctl response was too large".into());
     }
-    let raw: ModelctlUsage = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("could not decode usage response: {error}"))?;
-    Ok(Some(normalize_modelctl(raw)))
+    Ok(output.stdout)
 }
 
 fn command_from_probe(probe: &ProbeCapture) -> Command {
@@ -155,6 +178,25 @@ fn command_from_probe(probe: &ProbeCapture) -> Command {
 struct ModelctlUsage {
     #[serde(default)]
     providers: Vec<ModelctlProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelctlProfile {
+    name: String,
+    endpoint: String,
+    #[serde(default)]
+    is_default: bool,
+}
+
+fn matching_modelctl_profile(profiles: &[ModelctlProfile], gateway_url: &str) -> Option<String> {
+    profiles
+        .iter()
+        .filter(|profile| {
+            crate::managed_policy::validated_gateway_url(&profile.endpoint)
+                .is_ok_and(|endpoint| endpoint == gateway_url)
+        })
+        .max_by_key(|profile| profile.is_default)
+        .map(|profile| profile.name.clone())
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,6 +493,31 @@ fn bounded_text(bytes: &[u8], max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modelctl_profile_must_match_tidebreaks_gateway() {
+        let profiles = vec![
+            ModelctlProfile {
+                name: "unrelated".into(),
+                endpoint: "https://other.gateway.example".into(),
+                is_default: true,
+            },
+            ModelctlProfile {
+                name: "paired".into(),
+                endpoint: "https://paired.gateway.example".into(),
+                is_default: false,
+            },
+        ];
+
+        assert_eq!(
+            matching_modelctl_profile(&profiles, "https://paired.gateway.example/"),
+            Some("paired".into())
+        );
+        assert_eq!(
+            matching_modelctl_profile(&profiles, "https://missing.gateway.example/"),
+            None
+        );
+    }
 
     #[test]
     fn modelctl_usage_keeps_own_and_shared_accounts() {
