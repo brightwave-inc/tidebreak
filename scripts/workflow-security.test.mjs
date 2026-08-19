@@ -490,7 +490,7 @@ test("engineering approval is a trusted base-branch check", () => {
     approval,
     /github\.event_name == 'pull_request_target' \|\| github\.event_name == 'pull_request_review' \|\| github\.event_name == 'merge_group'/,
   );
-  assert.match(approval, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(approval, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.doesNotMatch(
     approval,
     /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/,

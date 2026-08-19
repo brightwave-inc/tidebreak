@@ -2,7 +2,7 @@ name: Engineering approval
 
 on:
   # Trusted default-branch workflow. Forks cannot delete this job. Checkout is
-  # always the pull request's base SHA, never the head.
+  # the commit that contains this workflow file, never the pull request head.
   pull_request_target:
     types:
       [opened, reopened, synchronize, ready_for_review, converted_to_draft]
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: ${{ github.event_name != 'merge_group' }}
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Require a writer approval for non-maintainers
