@@ -8,7 +8,6 @@ import {
 import {
   applyAcceptedTurn,
   hydrateCodeTurns,
-  markCodeSessionHydrated,
   type CodeSessionDeps,
 } from "./CodeSessionReducer";
 
@@ -79,12 +78,14 @@ export function acquireCodeSession(
   const controller = new CodeSessionController({
     openSocket,
     getAfter: () => store.getState().lastSeq,
-    onEvents: (frames) => {
+    onEvents: (frames, initialViewSettled) => {
       // A turn the socket announces has no prompt bubble yet: submit answers
       // only when the turn ends, and a queued follow-up is never answered
       // with a turn at all. Pull the snapshot so the transcript shows what
       // the engine is working on while it works.
-      for (const effect of store.getState().applyEvents(frames, deps)) {
+      for (const effect of store
+        .getState()
+        .applyEvents(frames, deps, initialViewSettled)) {
         if (effect.type === "turn_began") fillPrompt(effect.turnId);
       }
     },
@@ -94,9 +95,6 @@ export function acquireCodeSession(
     hydrateTurns,
     onHydrate: (turns) => {
       store.getState().update((session) => hydrateCodeTurns(session, turns));
-    },
-    onHydrateSettled: () => {
-      store.getState().update(markCodeSessionHydrated);
     },
   });
   registry.set(sessionId, { store, controller, refCount: 1 });

@@ -3,6 +3,7 @@ import type { SequencedCodeEventFrame } from "../api/types";
 import type { CodeConnectionState } from "./CodeSessionController";
 import {
   initialCodeSessionState,
+  markCodeSessionHydrated,
   reduceCodeSessionEvent,
   type CodeSessionDeps,
   type CodeSessionEffect,
@@ -39,10 +40,12 @@ export type CodeSessionStore = CodeSessionState & {
    * A reopened session can contain hundreds of journal frames. Publishing
    * every frame separately forces React's external-store subscribers to
    * synchronously re-render the whole transcript for every historical token.
+   * `settleInitialView` lowers the hydration skeleton in that same update.
    */
   applyEvents: (
     framed: readonly SequencedCodeEventFrame[],
     deps: CodeSessionDeps,
+    settleInitialView?: boolean,
   ) => CodeSessionEffect[];
   update: (change: (session: CodeSessionState) => CodeSessionState) => void;
   reset: () => void;
@@ -53,6 +56,7 @@ export function createCodeSessionStore() {
     const applyEvents = (
       framed: readonly SequencedCodeEventFrame[],
       deps: CodeSessionDeps,
+      settleInitialView = false,
     ): CodeSessionEffect[] => {
       const current = sessionOf(get());
       let state = current;
@@ -62,6 +66,7 @@ export function createCodeSessionStore() {
         state = transition.state;
         effects.push(...transition.effects);
       }
+      if (settleInitialView) state = markCodeSessionHydrated(state);
 
       // The reducer returns its input for duplicate/stale frames. Do not turn
       // that no-op into a fresh Zustand snapshot and wake every subscriber.

@@ -94,28 +94,33 @@ export function CodeTranscript({
   contentRef?: RefCallback<HTMLDivElement>;
   onScroll?: () => void;
 }) {
-  // Only greet a session that is genuinely empty. A session still reading its
-  // turns is transiently empty too, and inviting the reader to start a turn
-  // there would flash over history that is about to arrive.
+  // The durable turn snapshot lands before the journal replay that fills in
+  // assistant text and tool activity. Hide both sources until that initial
+  // replay settles; otherwise a reopened workspace shows its user prompts and
+  // then visibly reconstructs every response underneath them.
+  if (!hydrated) {
+    return (
+      <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
+        <div className="messages-column">
+          <TranscriptSkeleton />
+        </div>
+      </div>
+    );
+  }
+
+  // Only greet a session that is genuinely empty. The engine, mode, and model
+  // are already chosen, so this is the one instruction left plus what the
+  // first turn will produce.
   if (items.length === 0) {
     return (
       <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
-        {hydrated ? (
-          // The engine, mode, and model are already chosen by the time a
-          // reader gets here, so this is not a welcome screen — it is the one
-          // instruction left, plus what it will produce.
-          <div className="flex max-w-sm flex-col items-center gap-1 text-center text-balance">
-            <p className="text-sm font-medium">Send a message to start a turn.</p>
-            <p className="text-muted-foreground text-[13.5px] leading-relaxed">
-              The engine's replies, the tools it runs, and the files it changes
-              all land here.
-            </p>
-          </div>
-        ) : (
-          <div className="messages-column">
-            <TranscriptSkeleton />
-          </div>
-        )}
+        <div className="flex max-w-sm flex-col items-center gap-1 text-center text-balance">
+          <p className="text-sm font-medium">Send a message to start a turn.</p>
+          <p className="text-muted-foreground text-[13.5px] leading-relaxed">
+            The engine's replies, the tools it runs, and the files it changes
+            all land here.
+          </p>
+        </div>
       </div>
     );
   }
@@ -863,4 +868,3 @@ function CodeTurnImages({
     />
   );
 }
-

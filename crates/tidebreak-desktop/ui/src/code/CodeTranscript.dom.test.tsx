@@ -240,16 +240,15 @@ describe("CodeTranscript", () => {
 
   it("holds the transcript's shape until the session hydrates", () => {
     const { container, rerender } = render(
-      <CodeTranscript items={[]} hydrated={false} />,
+      <CodeTranscript items={items} hydrated={false} />,
     );
     expect(container.querySelector(".animate-pulse")).not.toBeNull();
     expect(screen.queryByText("Send a message to start a turn.")).toBeNull();
+    expect(screen.queryByText("Looking at the tree.")).toBeNull();
 
-    rerender(<CodeTranscript items={[]} hydrated />);
+    rerender(<CodeTranscript items={items} hydrated />);
     expect(container.querySelector(".animate-pulse")).toBeNull();
-    expect(
-      screen.getByText("Send a message to start a turn."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
   });
 
   it("expands a failed tool, clamps long output, and stops the transcript following", async () => {
