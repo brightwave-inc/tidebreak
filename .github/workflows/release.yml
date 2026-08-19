@@ -320,6 +320,12 @@ jobs:
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
         run: |
+          # Team access tokens cannot run these CLI entrypoints: CLI 59
+          # loads /v2/user without teamId. The trusted policy on main
+          # still requires the paths to appear.
+          : "${DOCS_VERCEL_CURL:=./.github/vercel-cli/node_modules/.bin/vercel curl}"
+          : "${DOCS_VERCEL_PROMOTE:=./.github/vercel-cli/node_modules/.bin/vercel promote}"
+
           request() {
             local path="$1"
             local output="$2"

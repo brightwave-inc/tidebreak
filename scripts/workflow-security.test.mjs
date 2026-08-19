@@ -1186,7 +1186,9 @@ test("release documentation is built from the validated tag and promoted only af
   assert.match(publish, /\/docs\/quickstart\//);
   assert.match(publish, /\/docs\/search-index\.json/);
   assert.match(publish, /\/docs\/sitemap\.xml/);
-  assert.doesNotMatch(publish, /vercel (?:curl|promote|inspect)/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel curl/);
+  assert.match(publish, /\.github\/vercel-cli\/node_modules\/\.bin\/vercel promote/);
+  assert.doesNotMatch(publish, /vercel inspect/);
 
   const deploy = publish.indexOf("Create an unaliased production deployment");
   const verify = publish.indexOf("Verify the transferred documentation");
