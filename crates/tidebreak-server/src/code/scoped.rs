@@ -352,6 +352,17 @@ impl ScopedCode {
         self.runtime.interrupt(id).await
     }
 
+    pub(crate) async fn steer(
+        &self,
+        id: CodeSessionId,
+        expected_turn_id: CodeTurnId,
+        message: String,
+    ) -> Result<(), ServerError> {
+        self.runtime
+            .steer(&self.owner, id, expected_turn_id, message)
+            .await
+    }
+
     pub(crate) async fn reap(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
         self.runtime.reap(&self.owner, id).await
     }

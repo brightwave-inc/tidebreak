@@ -336,7 +336,42 @@ describe("CodeComposer", () => {
     expect(await screen.findByText("Guidance sent")).toBeInTheDocument();
   });
 
-  it("queues mid-turn when steering is unsupported", async () => {
+  it("preserves text typed while a steer request is pending", async () => {
+    useUiStore.setState({ activeTurnSendMode: "steer" });
+    let resolveSteer!: () => void;
+    const onSteer = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSteer = resolve;
+        }),
+    );
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        onSend={vi.fn()}
+        onSteer={onSteer}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "try the other file" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSteer).toHaveBeenCalledWith("try the other file"),
+    );
+
+    fireEvent.change(box, { target: { value: "also keep the API small" } });
+    resolveSteer();
+
+    await waitFor(() =>
+      expect(screen.getByText("Guidance sent")).toBeInTheDocument(),
+    );
+    expect(box).toHaveValue("also keep the API small");
+  });
+
+  it("refuses unsupported steering without silently queueing or clearing the draft", async () => {
     useUiStore.setState({ activeTurnSendMode: "steer" });
     const onSend = vi.fn().mockResolvedValue(QUEUED);
     renderComposer(
@@ -352,8 +387,12 @@ describe("CodeComposer", () => {
     fireEvent.change(box, { target: { value: "and run the tests" } });
     fireEvent.keyDown(box, { key: "Enter" });
 
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith("and run the tests"));
-    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Redirect isn’t available for this harness. Choose Queue to send this after the response.",
+    );
+    expect(onSend).not.toHaveBeenCalled();
+    expect(box).toHaveValue("and run the tests");
+    expect(screen.queryByText("1 follow-up queued")).toBeNull();
   });
 
   it("submits free-typed slash text verbatim when the engine lists no commands", async () => {

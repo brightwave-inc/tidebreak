@@ -1305,7 +1305,11 @@ function CodeSessionPane({
   }
 
   async function steer(message: string) {
-    await client.steerCodeSession(session.id, message);
+    const expectedTurnId = store.getState().activeTurnId;
+    if (!expectedTurnId) {
+      throw new Error("The active turn changed. Try Redirect again.");
+    }
+    await client.steerCodeSession(session.id, expectedTurnId, message);
   }
 
   async function interrupt() {

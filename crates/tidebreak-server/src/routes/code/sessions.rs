@@ -1,8 +1,3 @@
-use axum::body::Body;
-use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, RawBytes};
@@ -11,13 +6,17 @@ use crate::routes::image_attachment::{
 };
 use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
     SequencedCodeEventFrame, SetAttentionBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::SubmitTurnOutcome;
-use tidebreak_core::{CodeSessionId, WorkspaceId};
+use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
 
 pub async fn create_session(
     code: ScopedCode,
@@ -115,17 +114,21 @@ pub async fn list_session_turns(
 }
 
 pub async fn steer_session(
-    Path(_id): Path<CodeSessionId>,
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
-    let message = body.message.trim();
-    if message.is_empty() {
-        return Err(ServerError::bad_request("message must not be empty"));
+    let guidance = body.guidance.trim().to_owned();
+    if guidance.is_empty()
+        || guidance.contains('\0')
+        || guidance.chars().count() > TurnSteer::MAX_CONTENT_LEN
+    {
+        return Err(ServerError::bad_request(
+            "guidance must be non-empty, contain no NUL characters, and fit the size limit",
+        ));
     }
-    Err(ServerError::unprocessable_kind(
-        "steering_unavailable",
-        "explicit mid-turn steering is not yet available; the message was not queued",
-    ))
+    code.steer(id, body.expected_turn_id, guidance).await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 pub async fn interrupt_session(

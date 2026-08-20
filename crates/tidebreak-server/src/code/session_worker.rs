@@ -13,6 +13,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -53,6 +54,11 @@ pub(crate) enum WorkerCommand {
     Interrupt {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
+    Steer {
+        expected_turn_id: CodeTurnId,
+        message: String,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
+    },
     Shutdown,
 }
 
@@ -60,6 +66,14 @@ pub(crate) enum WorkerCommand {
 pub(crate) enum WorkerError {
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    NoActiveTurn(String),
+    #[error("{0}")]
+    StaleTurn(String),
+    #[error("{0}")]
+    SteeringUnavailable(String),
+    #[error("{0}")]
+    SteeringRejected(String),
     #[error("{0}")]
     Failed(String),
 }
@@ -305,7 +319,9 @@ async fn run_worker(
                     let _ = reply.send(result);
                 }
                 Some(command) => {
-                    if apply_control(engine.as_ref(), command).await == ControlFlow::Shutdown {
+                    if apply_control(engine.as_ref(), command, None).await
+                        == ControlFlow::Shutdown
+                    {
                         break;
                     }
                 }
@@ -321,6 +337,11 @@ enum ControlFlow {
     Continue,
     Shutdown,
 }
+
+#[cfg(not(test))]
+const STEER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Stop the engine's current turn, discarding the adapter's error: the turn
 /// is ending either way, and the outcome is what the worker journals.
@@ -342,7 +363,11 @@ async fn next_child_pid(changes: Option<&mut watch::Receiver<Option<i64>>>) -> O
     *changes.borrow()
 }
 
-async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> ControlFlow {
+async fn apply_control(
+    engine: &dyn HarnessSession,
+    command: WorkerCommand,
+    active_turn_id: Option<CodeTurnId>,
+) -> ControlFlow {
     match command {
         WorkerCommand::Decide {
             approval,
@@ -361,6 +386,45 @@ async fn apply_control(engine: &dyn HarnessSession, command: WorkerCommand) -> C
                 .interrupt()
                 .await
                 .map_err(|err| WorkerError::Failed(err.to_string()));
+            let _ = reply.send(result);
+            ControlFlow::Continue
+        }
+        WorkerCommand::Steer {
+            expected_turn_id,
+            message,
+            reply,
+        } => {
+            let result = match active_turn_id {
+                None => Err(WorkerError::NoActiveTurn(
+                    "there is no active turn to steer; the message was not queued".into(),
+                )),
+                Some(active) if active != expected_turn_id => Err(WorkerError::StaleTurn(
+                    format!(
+                        "turn {expected_turn_id} is no longer active; current turn is {active}; the message was not queued"
+                    ),
+                )),
+                Some(_) => match tokio::time::timeout(
+                    STEER_CONTROL_TIMEOUT,
+                    engine.steer(message),
+                )
+                .await
+                {
+                    Ok(result) => result.map_err(|err| match err {
+                        HarnessError::SteeringUnsupported => WorkerError::SteeringUnavailable(
+                            "mid-turn steering is not available on this engine; the message was not queued"
+                                .into(),
+                        ),
+                        HarnessError::SteeringRejected(detail) => {
+                            WorkerError::SteeringRejected(detail)
+                        }
+                        other => WorkerError::Failed(other.to_string()),
+                    }),
+                    Err(_) => Err(WorkerError::SteeringRejected(
+                        "the engine did not acknowledge steering before the control timeout; the message was not queued"
+                            .into(),
+                    )),
+                },
+            };
             let _ = reply.send(result);
             ControlFlow::Continue
         }
@@ -490,28 +554,36 @@ async fn drive_turn(
     let mut commands_closed = false;
     let run = loop {
         tokio::select! {
-            result = &mut run => break result,
+            // Once a control has been accepted from the command channel, poll
+            // it before allowing a simultaneously-terminal turn to win. Native
+            // steering registers its response waiter on that first poll; the
+            // turn reader can then drain and demultiplex the acknowledgement.
+            biased;
             Some(flow) = controls.next(), if !controls.is_empty() => {
                 if flow == ControlFlow::Shutdown {
                     interrupted = true;
                     controls.push(Box::pin(interrupt_engine(engine)));
                 }
             }
-            pid = next_child_pid(pid_changes.as_mut()) => {
-                if session.child_pid != pid {
-                    session.child_pid = pid;
-                    let _ = save_session(db, session).await;
-                }
-            }
+            // A terminal result wins over commands that have not yet been
+            // admitted. This prevents guidance for turn A from entering the
+            // control set after A has already completed and then reaching B.
+            result = &mut run => break result,
             command = commands.recv(), if !commands_closed => match command {
                 Some(command) => {
                     interrupted |= matches!(command, WorkerCommand::Interrupt { .. });
-                    controls.push(Box::pin(apply_control(engine, command)));
+                    controls.push(Box::pin(apply_control(engine, command, Some(turn.id))));
                 }
                 None => {
                     commands_closed = true;
                     interrupted = true;
                     controls.push(Box::pin(interrupt_engine(engine)));
+                }
+            },
+            pid = next_child_pid(pid_changes.as_mut()) => {
+                if session.child_pid != pid {
+                    session.child_pid = pid;
+                    let _ = save_session(db, session).await;
                 }
             }
         }

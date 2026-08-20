@@ -1109,6 +1109,64 @@ impl CodeRuntime {
             .map_err(map_worker)
     }
 
+    pub(crate) async fn steer(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        expected_turn_id: CodeTurnId,
+        message: String,
+    ) -> Result<(), ServerError> {
+        let session = self.get_session(owner, id).await?;
+        if session.lifecycle != CodeSessionLifecycle::Running {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to steer; the message was not queued",
+            ));
+        }
+        let Some(active_turn) = get_open_turn(&self.db, owner, id).await? else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to steer; the message was not queued",
+            ));
+        };
+        if active_turn.id != expected_turn_id {
+            return Err(ServerError::conflict_kind(
+                "stale_turn",
+                format!(
+                    "turn {expected_turn_id} is no longer active; current turn is {}; the message was not queued",
+                    active_turn.id
+                ),
+            ));
+        }
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let level = adapter.capabilities(&probe).mid_turn_steering;
+        if level != CapLevel::Supported {
+            return Err(ServerError::unprocessable_kind(
+                "steering_unavailable",
+                format!(
+                    "{harness} mid-turn steering is {level}; the message was not queued",
+                    harness = session.harness_kind,
+                    level = level.as_str(),
+                ),
+            ));
+        }
+        let handle = self.require_worker(id)?;
+        let (reply, rx) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::Steer {
+                expected_turn_id,
+                message,
+                reply,
+            })
+            .await
+            .map_err(|_| ServerError::internal("session worker is gone"))?;
+        rx.await
+            .map_err(|_| ServerError::internal("session worker dropped the steer"))?
+            .map_err(map_worker)
+    }
+
     pub(crate) async fn reap(
         &self,
         owner: &OwnerId,
@@ -1805,6 +1863,14 @@ fn map_worktree(err: WorktreeError) -> ServerError {
 fn map_worker(err: WorkerError) -> ServerError {
     match err {
         WorkerError::Conflict(message) => ServerError::conflict_kind("conflict", message),
+        WorkerError::NoActiveTurn(message) => ServerError::conflict_kind("no_active_turn", message),
+        WorkerError::StaleTurn(message) => ServerError::conflict_kind("stale_turn", message),
+        WorkerError::SteeringUnavailable(message) => {
+            ServerError::unprocessable_kind("steering_unavailable", message)
+        }
+        WorkerError::SteeringRejected(message) => {
+            ServerError::conflict_kind("steering_rejected", message)
+        }
         WorkerError::Failed(message) => ServerError::internal(message),
     }
 }

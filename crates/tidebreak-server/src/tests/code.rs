@@ -18,8 +18,8 @@ use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CapLevel, CodeEvent, CodePermissionMode,
-    CodeSessionId, CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason,
-    HarnessKind, WorkspaceId,
+    CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore,
+    FenceReason, HarnessKind, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -871,6 +871,26 @@ async fn turn_statuses(
         .collect()
 }
 
+async fn wait_for_open_turn(runtime: &CodeRuntime, session_id: CodeSessionId) -> CodeTurnId {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(turn) = tidebreak_core::db::code::get_open_turn(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                session_id,
+            )
+            .await
+            .unwrap()
+            {
+                break turn.id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("turn never became active")
+}
+
 #[tokio::test]
 async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     // Claude Code advertises mid_turn_steering: Unknown. Queue-default must
@@ -1009,8 +1029,11 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 }
 
 #[tokio::test]
-async fn explicit_steer_is_not_yet_available() {
-    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+async fn unsupported_explicit_steer_is_refused_without_queueing() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_millis(40)),
+    )
+    .await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
@@ -1031,19 +1054,552 @@ async fn explicit_steer_is_not_yet_available() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
     let refused = client
-        .post(format!(
-            "http://{addr}/code/sessions/{}/steer",
-            json_id(&session)
-        ))
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "redirect" }))
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id,
+            "guidance": "redirect",
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "steering_unavailable");
+    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_up() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_delay(Duration::from_millis(40))
+            .with_steering(CapLevel::Supported),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let mut events = runtime.bus.subscribe(parsed);
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let active_turn_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
+                break turn_id;
+            }
+        }
+    })
+    .await
+    .expect("turn never started");
+
+    let first_steer = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id,
+            "guidance": "try the other file",
+        }))
+        .send();
+    let second_steer = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id,
+            "guidance": "keep the public API small",
+        }))
+        .send();
+    let (first_steer, second_steer) = tokio::join!(first_steer, second_steer);
+    assert_eq!(first_steer.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        second_steer.unwrap().status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let mut steer_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.unwrap().event;
+            if let CodeEvent::UserSteered { text } = &event {
+                steer_events.push(text.clone());
+            }
+            if matches!(event, CodeEvent::TurnCompleted { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("turn never completed");
+    steer_events.sort();
+    assert_eq!(
+        steer_events,
+        ["keep the public API small", "try the other file"]
+    );
+
+    let turns = tidebreak_core::db::code::list_turns(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turns.len(), 1, "steering must not create a follow-up turn");
+    assert_eq!(turns[0].user_input, "first");
+}
+
+#[tokio::test]
+async fn supported_steer_requires_an_active_turn() {
+    let (router, token, _runtime, dir) =
+        code_app_with(ScriptedAdapter::new(plain_text_script()).with_steering(CapLevel::Supported))
+            .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/steer",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": CodeTurnId::new(),
+            "guidance": "too late",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "no_active_turn");
+}
+
+#[tokio::test]
+async fn steer_rejects_blank_nul_and_oversized_guidance() {
+    let (router, token, _runtime, dir) =
+        code_app_with(ScriptedAdapter::new(plain_text_script()).with_steering(CapLevel::Supported))
+            .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    for guidance in [
+        "   ".to_owned(),
+        "contains\0nul".to_owned(),
+        "x".repeat(tidebreak_core::TurnSteer::MAX_CONTENT_LEN + 1),
+    ] {
+        let refused = client
+            .post(format!(
+                "http://{addr}/code/sessions/{}/steer",
+                json_id(&session)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "expected_turn_id": CodeTurnId::new(),
+                "guidance": guidance,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_delay(Duration::from_millis(80))
+            .with_steering(CapLevel::Supported),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
+    let stale_turn_id = loop {
+        let candidate = CodeTurnId::new();
+        if candidate != active_turn_id {
+            break candidate;
+        }
+    };
+
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": stale_turn_id,
+            "guidance": "wrong turn",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "stale_turn");
+    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let events = tidebreak_core::db::code::list_events(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.event, CodeEvent::UserSteered { .. })),
+        "stale steering reached the adapter: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_delay(Duration::from_millis(80))
+            .with_steering_delay(Duration::from_secs(1)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
+
+    let started = tokio::time::Instant::now();
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id,
+            "guidance": "this adapter never answers",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        started.elapsed() < Duration::from_millis(750),
+        "worker-level timeout did not bound the stalled control"
+    );
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "steering_rejected");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), turn)
+            .await
+            .expect("turn completion was wedged")
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+}
+
+#[tokio::test]
+async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_delay(Duration::from_millis(20))
+            .with_steering(CapLevel::Supported),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let mut events = runtime.bus.subscribe(parsed);
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let mut active_turn_id = None;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await.unwrap().event {
+                CodeEvent::TurnStarted { turn_id } => active_turn_id = Some(turn_id),
+                CodeEvent::TurnCompleted { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn never completed");
+
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id.expect("turn id"),
+            "guidance": "too late",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "no_active_turn");
+    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_delay(Duration::from_millis(40))
+            .with_steering_rejection("turn is no longer steerable"),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let mut events = runtime.bus.subscribe(parsed);
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let active_turn_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
+                break turn_id;
+            }
+        }
+    })
+    .await
+    .expect("turn never started");
+
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "expected_turn_id": active_turn_id,
+            "guidance": "redirect",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "steering_rejected");
+    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let turns = tidebreak_core::db::code::list_turns(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].status, CodeTurnStatus::Completed);
 }
 
 fn scripted_registry() -> AdapterRegistry {
@@ -3495,6 +4051,19 @@ async fn a_second_user_sees_neither_code_rows_nor_updates_of_another_owner() {
         .await
         .unwrap();
     assert_eq!(interrupted.status(), reqwest::StatusCode::NOT_FOUND);
+    let steered = client
+        .post(format!(
+            "http://{addr}/code/sessions/{alice_session_id}/steer"
+        ))
+        .bearer_auth(BOB_TOKEN)
+        .json(&serde_json::json!({
+            "expected_turn_id": CodeTurnId::new(),
+            "guidance": "whose session is this",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(steered.status(), reqwest::StatusCode::NOT_FOUND);
 
     // The updates channel. Bob's connect snapshot is empty even though Alice
     // has a live session, and Alice's turn produces no notice on his socket.

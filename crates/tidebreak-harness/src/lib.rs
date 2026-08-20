@@ -362,11 +362,14 @@ pub trait HarnessSession: Send + Sync {
     ///
     /// The default refuses: an adapter must override this only when its
     /// capability vector states [`CapLevel::Supported`] for mid-turn steering.
+    /// An accepting adapter owns the matching [`HarnessEvent::UserSteered`]
+    /// emission: emit it exactly once before returning `Ok(())`, and emit none
+    /// when admission is rejected. Keeping acknowledgement and event ordering
+    /// inside the protocol adapter lets a terminal event that follows in the
+    /// same native batch remain causally after the user's guidance.
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
         let _ = text;
-        Err(HarnessError::Other(
-            "mid-turn steering is not available on this engine".into(),
-        ))
+        Err(HarnessError::SteeringUnsupported)
     }
 
     /// Engine-native resume token, when the stream has reported one.
@@ -449,6 +452,12 @@ pub enum HarnessError {
     /// rather than treat this as one failed turn.
     #[error("the engine no longer has this session: {0}")]
     ResumeLost(String),
+    /// The adapter has no verified same-turn steering channel.
+    #[error("mid-turn steering is not available on this engine")]
+    SteeringUnsupported,
+    /// The native engine refused a steer for the currently active turn.
+    #[error("the engine refused mid-turn steering: {0}")]
+    SteeringRejected(String),
     /// I/O or spawn failure.
     #[error("engine io: {0}")]
     Io(#[from] std::io::Error),
