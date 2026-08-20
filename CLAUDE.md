@@ -25,6 +25,18 @@ is React/TypeScript under `crates/tidebreak-desktop/ui`.
   ready PR lands when its lanes go green.
 - This is a public repository. No secrets, no private design docs.
 
+## GitHub tracking
+
+The [Tidebreak GitHub Project](https://github.com/orgs/brightwave-inc/projects/5)
+is the board. Milestones are delivery buckets. Parked product ideas stay in
+[`docs/deferred.md`](docs/deferred.md) until a slice is buildable; do not copy
+that list onto the board.
+
+- Open an issue only for a bounded outcome with an owner. Do not file per-file
+  or per-session tasks.
+- Multi-slice work uses an `epic` parent. Children are the slices, not the
+  files inside them.
+
 ## Desktop UI workflow
 
 - When adding or changing a reusable visual component or a meaningful UI state,
@@ -40,6 +52,7 @@ is React/TypeScript under `crates/tidebreak-desktop/ui`.
 ## Pointers
 
 - Humans and commit/PR titles: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Board: [Tidebreak GitHub Project](https://github.com/orgs/brightwave-inc/projects/5)
 - Decisions: [`docs/decisions/`](docs/decisions)
 - Parked scope: [`docs/deferred.md`](docs/deferred.md)
 - Releases: [`docs/releases.md`](docs/releases.md)
