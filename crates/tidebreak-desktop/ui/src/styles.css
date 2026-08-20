@@ -461,17 +461,32 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1.5rem;
+  gap: 2rem;
   width: 100%;
-  max-width: 34rem;
+  max-width: 46rem;
+  padding-block: 1rem;
   text-align: center;
 }
 
+.welcome-intro {
+  display: flex;
+  max-width: 42rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.15rem;
+}
+
+.welcome-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .welcome-mark svg {
-  width: 2.25rem;
+  width: 2.75rem;
   height: auto;
   color: var(--ink);
-  opacity: 0.9;
+  opacity: 0.88;
 }
 
 .welcome-copy {
@@ -494,15 +509,53 @@ body {
   font-size: 0.95rem;
 }
 
+.welcome .welcome-copy {
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.welcome .welcome-copy h2 {
+  font-size: clamp(1.7rem, 3vw, 2rem);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+.welcome .welcome-copy p {
+  max-width: 40rem;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.welcome .welcome-copy .welcome-disclosure {
+  margin-top: 0.35rem;
+  max-width: 38rem;
+  font-size: 0.8rem;
+}
+
 .welcome-prompts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.55rem;
+  gap: 0.7rem;
   width: 100%;
-  margin-top: 0.25rem;
 }
 
 @media (max-width: 720px) {
+  .welcome {
+    gap: 1.5rem;
+    padding-block: 1.5rem;
+  }
+
+  .welcome-intro {
+    gap: 0.9rem;
+  }
+
+  .welcome-mark svg {
+    width: 2rem;
+  }
+
   .welcome-prompts {
     grid-template-columns: minmax(0, 1fr);
   }
