@@ -1,4 +1,5 @@
 import type {
+  CodeWatchSnapshot,
   CodeWorkspacePrSnapshot,
   PendingUserQuestions,
   TaskPlan,
@@ -112,5 +113,63 @@ export const openPrGit: CodeWorkspacePrSnapshot = {
     state: "open",
     title: "Add a scoped UI workshop",
     checks_summary: "8 passing, 1 pending, 0 failing",
+  },
+};
+
+const watchBase: CodeWatchSnapshot = {
+  id: "watch-1",
+  workspace_id: "ws-1",
+  session_id: "sess-watch",
+  pr_number: 184,
+  state: "watching",
+  cycles: 0,
+  created_at: "2026-08-20T09:00:00.000Z",
+  updated_at: "2026-08-20T09:05:00.000Z",
+};
+
+/** Watch task polling a PR whose checks are still running. */
+export const watchingPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    checks: [
+      { name: "test", bucket: "pass" },
+      { name: "clippy", bucket: "pending" },
+    ],
+  },
+  watch: watchBase,
+};
+
+/** Watch task driving a fix turn against failing checks. */
+export const fixingPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    checks_summary: "7 passing, 1 failing",
+    checks: [
+      { name: "test", bucket: "pass" },
+      { name: "clippy", bucket: "fail", detail: "exit 101" },
+    ],
+  },
+  watch: {
+    ...watchBase,
+    state: "fixing",
+    detail: "fixing failing checks",
+    cycles: 2,
+  },
+};
+
+/** Watch task parked on something only the user can do. */
+export const blockedWatchPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    review_decision: "review_required",
+  },
+  watch: {
+    ...watchBase,
+    state: "blocked",
+    detail: "a review or repository requirement is outstanding",
+    cycles: 1,
   },
 };

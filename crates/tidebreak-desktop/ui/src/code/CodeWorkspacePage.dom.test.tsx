@@ -143,6 +143,7 @@ const REPO = {
 const SESSION: CodeSessionSnapshot = {
   id: "sess-1",
   workspace_id: "ws-1",
+  kind: "interactive" as const,
   harness_kind: "claude_code" as const,
   permission_mode: "ask" as const,
   lifecycle: "idle" as const,
@@ -235,6 +236,26 @@ function makeClient() {
         remediation: "",
       }),
     ),
+    startCodeWatch: vi.fn(async () => ({
+      id: "watch-1",
+      workspace_id: "ws-1",
+      session_id: "sess-watch",
+      pr_number: 41,
+      state: "watching" as const,
+      cycles: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+      updated_at: "2026-08-15T00:00:00.000Z",
+    })),
+    stopCodeWatch: vi.fn(async () => ({
+      id: "watch-1",
+      workspace_id: "ws-1",
+      session_id: "sess-watch",
+      pr_number: 41,
+      state: "stopped" as const,
+      cycles: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+      updated_at: "2026-08-15T00:00:00.000Z",
+    })),
     commitCodeWorkspace: vi.fn(async () => ({
       sha: "abc123",
       message: "Fix login",
@@ -658,14 +679,11 @@ describe("CodeWorkspacePage", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Watch and fix" }),
     );
+    // Watch and fix is a durable server-side task, not a composer prompt.
     await waitFor(() =>
-      expect(client.submitCodeTurn).toHaveBeenLastCalledWith(
-        "sess-1",
-        expect.stringMatching(/Watch pull request #41/),
-        undefined,
-        undefined,
-      ),
+      expect(client.startCodeWatch).toHaveBeenCalledWith("ws-1"),
     );
+    expect(client.submitCodeTurn).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     const menu = await screen.findByRole("menu");

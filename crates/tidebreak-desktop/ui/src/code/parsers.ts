@@ -9,6 +9,8 @@ import type {
   CodePermissionMode,
   CodeRepoSnapshot,
   CodeSessionLifecycle,
+  CodeSessionKind,
+  CodeWatchState,
   CodeSessionSnapshot,
   CodeFileChange,
   CodeTurnSnapshot,
@@ -22,6 +24,7 @@ import type {
   CodeWorkspaceBlob,
   CodeWorkspaceTree,
   CodeWorkspacePrSnapshot,
+  CodeWatchSnapshot,
   CodeWorkspaceSnapshot,
   CodeActionSnapshot,
   CodeCommitSnapshot,
@@ -67,6 +70,7 @@ import type {
   CodeTurnAttachment as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  CodeWatchSnapshot as WireCodeWatchSnapshot,
   CodeActionSnapshot as WireCodeActionSnapshot,
   CodeCommitSnapshot as WireCodeCommitSnapshot,
   CodePushSnapshot as WireCodePushSnapshot,
@@ -120,6 +124,15 @@ const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "running",
   "fenced",
   "ended",
+]);
+const SESSION_KINDS = new Set<CodeSessionKind>(["interactive", "watch"]);
+const WATCH_STATES = new Set<CodeWatchState>([
+  "watching",
+  "fixing",
+  "blocked",
+  "done",
+  "stopped",
+  "failed",
 ]);
 const WORKSPACE_STATUSES = new Set<CodeWorkspaceStatus>([
   "creating",
@@ -443,6 +456,7 @@ export function parsePullRequestDigest(
       "merge_state_status",
       "head_branch",
       "base_branch",
+      "head_sha",
       "auto_merge_enabled",
       "in_merge_queue",
     ]) ||
@@ -456,6 +470,7 @@ export function parsePullRequestDigest(
     !optionalStringField(value.merge_state_status) ||
     !optionalStringField(value.head_branch) ||
     !optionalStringField(value.base_branch) ||
+    !optionalStringField(value.head_sha) ||
     !optionalBooleanField(value.draft) ||
     !optionalBooleanField(value.merged) ||
     !optionalBooleanField(value.auto_merge_enabled) ||
@@ -483,6 +498,7 @@ export function parsePullRequestDigest(
       : {}),
     ...(value.head_branch ? { head_branch: value.head_branch } : {}),
     ...(value.base_branch ? { base_branch: value.base_branch } : {}),
+    ...(value.head_sha ? { head_sha: value.head_sha } : {}),
     ...(typeof value.auto_merge_enabled === "boolean"
       ? { auto_merge_enabled: value.auto_merge_enabled }
       : {}),
@@ -536,6 +552,7 @@ export function parseCodeWorkspacePr(
       "gh_found",
       "gh_authenticated",
       "remediation",
+      "watch",
     ]) ||
     typeof value.dirty !== "boolean" ||
     typeof value.unpushed !== "boolean" ||
@@ -566,7 +583,51 @@ export function parseCodeWorkspacePr(
     if (!pr) return null;
     parsed.pr = pr;
   }
+  if (value.watch !== undefined) {
+    const watch = parseCodeWatch(value.watch);
+    if (!watch) return null;
+    parsed.watch = watch;
+  }
   return parsed;
+}
+
+export function parseCodeWatch(value: unknown): CodeWatchSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWatchSnapshot>(value, [
+      "id",
+      "workspace_id",
+      "session_id",
+      "pr_number",
+      "state",
+      "detail",
+      "cycles",
+      "created_at",
+      "updated_at",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.workspace_id) ||
+    !nonEmpty(value.session_id) ||
+    !isFiniteNumber(value.pr_number) ||
+    !isMember(value.state, WATCH_STATES) ||
+    (value.detail !== undefined && typeof value.detail !== "string") ||
+    !isFiniteNumber(value.cycles) ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    workspace_id: value.workspace_id,
+    session_id: value.session_id,
+    pr_number: value.pr_number,
+    state: value.state,
+    cycles: value.cycles,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    ...(value.detail !== undefined ? { detail: value.detail } : {}),
+  };
 }
 
 const PR_COMMENT_KINDS = new Set<PullRequestCommentKind>([
@@ -694,6 +755,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !onlyKeys<WireCodeSessionSnapshot>(value, [
       "id",
       "workspace_id",
+      "kind",
       "harness_kind",
       "harness_version",
       "harness_resume_ref",
@@ -707,6 +769,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     ]) ||
     !nonEmpty(value.id) ||
     !nonEmpty(value.workspace_id) ||
+    !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalString(value.harness_version) ||
     !optionalString(value.harness_resume_ref) ||
@@ -728,6 +791,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
   return {
     id: value.id,
     workspace_id: value.workspace_id,
+    kind: value.kind,
     harness_kind: value.harness_kind,
     permission_mode: value.permission_mode,
     lifecycle: value.lifecycle,
@@ -763,7 +827,12 @@ export function parseCodeSessionList(
 export function liveCodeSession(
   sessions: readonly CodeSessionSnapshot[],
 ): CodeSessionSnapshot | null {
-  return sessions.find((session) => session.lifecycle !== "ended") ?? null;
+  return (
+    sessions.find(
+      (session) =>
+        session.kind === "interactive" && session.lifecycle !== "ended",
+    ) ?? null
+  );
 }
 
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
@@ -1779,6 +1848,7 @@ export function parseCodeSessionDigest(
     !onlyKeys<WireCodeSessionDigest>(value, [
       "workspace",
       "session",
+      "kind",
       "lifecycle",
       "attention",
       "title",
@@ -1787,6 +1857,7 @@ export function parseCodeSessionDigest(
     ]) ||
     !nonEmpty(value.workspace) ||
     !nonEmpty(value.session) ||
+    !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     typeof value.title !== "string" ||
     !isFiniteNumber(value.turn_count)
@@ -1801,6 +1872,7 @@ export function parseCodeSessionDigest(
   return {
     workspace: value.workspace,
     session: value.session,
+    kind: value.kind,
     lifecycle: value.lifecycle,
     attention,
     title: value.title,
@@ -1836,6 +1908,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "type",
           "workspace",
           "session",
+          "kind",
           "lifecycle",
           "attention",
           "title",
@@ -1844,6 +1917,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         ]) ||
         !nonEmpty(value.workspace) ||
         !nonEmpty(value.session) ||
+        !isMember(value.kind, SESSION_KINDS) ||
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
         typeof value.title !== "string" ||
         !isFiniteNumber(value.turn_count)
@@ -1859,6 +1933,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         type: "digest",
         workspace: value.workspace,
         session: value.session,
+        kind: value.kind,
         lifecycle: value.lifecycle,
         attention,
         title: value.title,

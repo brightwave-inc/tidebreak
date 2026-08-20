@@ -709,7 +709,7 @@ impl ReferenceClass {
 async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     use crate::code::{
         Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
-        CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
+        CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
         CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
     };
     use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
@@ -759,6 +759,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             id: session_id,
             owner: crate::OwnerId::local(),
             workspace_id,
+            kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("scripted".into()),
             harness_resume_ref: None,

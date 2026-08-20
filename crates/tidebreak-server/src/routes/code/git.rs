@@ -9,8 +9,8 @@ use crate::extract::{Json, Path};
 
 use super::types::{
     CodeActionSnapshot, CodeCommitSnapshot, CodePrCommentsSnapshot, CodePrMergeMethod,
-    CodePushSnapshot, CodeWorkspacePrSnapshot, CommitWorkspaceBody, CreatePullRequestBody,
-    MergeCodePrBody,
+    CodePushSnapshot, CodeWatchSnapshot, CodeWorkspacePrSnapshot, CommitWorkspaceBody,
+    CreatePullRequestBody, MergeCodePrBody,
 };
 use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
 use tidebreak_core::WorkspaceId;
@@ -38,21 +38,41 @@ pub async fn create_pull_request(
     Json(body): Json<CreatePullRequestBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let snapshot = code.create_workspace_pr(id, body.title, body.body).await?;
-    Ok((StatusCode::CREATED, Json(pr_snapshot(snapshot))))
+    Ok((StatusCode::CREATED, Json(pr_snapshot(snapshot, None))))
 }
 
 pub async fn get_workspace_pr(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
-    Ok(Json(pr_snapshot(code.workspace_pr(id).await?)))
+    let status = code.workspace_pr(id).await?;
+    let watch = code.latest_watch(id).await?;
+    Ok(Json(pr_snapshot(status, watch)))
 }
 
 pub async fn refresh_workspace_pr(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
-    Ok(Json(pr_snapshot(code.refresh_workspace_pr(id).await?)))
+    let status = code.refresh_workspace_pr(id).await?;
+    let watch = code.latest_watch(id).await?;
+    Ok(Json(pr_snapshot(status, watch)))
+}
+
+pub async fn start_workspace_watch(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<impl IntoResponse, ServerError> {
+    let watch = code.start_watch(id).await?;
+    Ok((StatusCode::CREATED, Json(CodeWatchSnapshot::from(watch))))
+}
+
+pub async fn stop_workspace_watch(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWatchSnapshot>, ServerError> {
+    let watch = code.stop_watch(id).await?;
+    Ok(Json(CodeWatchSnapshot::from(watch)))
 }
 
 pub async fn get_workspace_pr_comments(
@@ -76,9 +96,9 @@ pub async fn merge_workspace_pr(
         CodePrMergeMethod::Merge => MergeMethod::Merge,
         CodePrMergeMethod::Rebase => MergeMethod::Rebase,
     };
-    Ok(Json(pr_snapshot(
-        code.merge_workspace_pr(id, method, body.auto).await?,
-    )))
+    let status = code.merge_workspace_pr(id, method, body.auto).await?;
+    let watch = code.latest_watch(id).await?;
+    Ok(Json(pr_snapshot(status, watch)))
 }
 
 pub async fn run_workspace_action(
@@ -104,7 +124,10 @@ fn push_snapshot(outcome: PushOutcome) -> CodePushSnapshot {
     }
 }
 
-fn pr_snapshot(status: WorkspaceGitStatus) -> CodeWorkspacePrSnapshot {
+fn pr_snapshot(
+    status: WorkspaceGitStatus,
+    watch: Option<tidebreak_core::CodeWatch>,
+) -> CodeWorkspacePrSnapshot {
     CodeWorkspacePrSnapshot {
         dirty: status.dirty,
         unpushed: status.unpushed,
@@ -115,6 +138,7 @@ fn pr_snapshot(status: WorkspaceGitStatus) -> CodeWorkspacePrSnapshot {
         gh_found: status.gh_found,
         gh_authenticated: status.gh_authenticated,
         remediation: status.remediation,
+        watch: watch.map(CodeWatchSnapshot::from),
     }
 }
 

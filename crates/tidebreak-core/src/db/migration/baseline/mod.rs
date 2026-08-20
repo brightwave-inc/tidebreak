@@ -204,6 +204,7 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         ),
         entry(code::code_event_table(), code::code_event_indexes()),
         entry(code::code_approval_table(), code::code_approval_indexes()),
+        entry(code::code_watch_table(), code::code_watch_indexes()),
     ]
 }
 

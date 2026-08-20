@@ -5,7 +5,7 @@ use sea_orm::{
 
 use crate::code::{
     Attention, AttentionSource, AttentionState, CodePermissionMode, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, FenceReason, HarnessKind, WorkspaceId,
+    CodeSessionKind, CodeSessionLifecycle, FenceReason, HarnessKind, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -20,6 +20,7 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         id: Set(session.id.0),
         owner: Set(session.owner.as_str().to_owned()),
         workspace_id: Set(session.workspace_id.0),
+        kind: Set(session.kind.as_str().to_owned()),
         harness_kind: Set(session.harness_kind.as_str().to_owned()),
         harness_version: Set(session.harness_version.clone()),
         harness_resume_ref: Set(session.harness_resume_ref.clone()),
@@ -299,6 +300,12 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
             row.id, row.permission_mode
         ))
     })?;
+    let kind = CodeSessionKind::from_str(&row.kind).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code_session {} has unknown kind {}",
+            row.id, row.kind
+        ))
+    })?;
     let lifecycle = CodeSessionLifecycle::from_str(&row.lifecycle).ok_or_else(|| {
         AgentError::Store(format!(
             "code_session {} has unknown lifecycle {}",
@@ -324,6 +331,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         id: CodeSessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
         workspace_id: WorkspaceId(row.workspace_id),
+        kind,
         harness_kind,
         harness_version: row.harness_version,
         harness_resume_ref: row.harness_resume_ref,

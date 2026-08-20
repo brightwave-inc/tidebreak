@@ -19,7 +19,8 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle,
     CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, DbStore, HarnessKind,
     OwnerId, RepoId, WorkspaceId,
 };
@@ -76,6 +77,7 @@ async fn seed_owner(
             id: session_id,
             owner: owner.clone(),
             workspace_id,
+            kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,

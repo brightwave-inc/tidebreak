@@ -110,6 +110,7 @@ import {
   type CodePermissionMode as WireCodePermissionMode,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
   type CodeSessionId as WireCodeSessionId,
+  type CodeSessionKind as WireCodeSessionKind,
   type CodeSessionLifecycle as WireCodeSessionLifecycle,
   type CodeSessionSnapshot as WireCodeSessionSnapshot,
   type CodeTurnId as WireCodeTurnId,
@@ -124,6 +125,8 @@ import {
   type CodeWorkspaceTree as WireCodeWorkspaceTree,
   type CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  type CodeWatchSnapshot as WireCodeWatchSnapshot,
+  type CodeWatchState as WireCodeWatchState,
   type CodeActionSnapshot as WireCodeActionSnapshot,
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
   type CodePushSnapshot as WireCodePushSnapshot,
@@ -1043,6 +1046,7 @@ export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
 /** One durable conversation with an external coding engine. */
 export type CodeSessionSnapshot = WireCodeSessionSnapshot;
 export type CodeSessionId = WireCodeSessionId;
+export type CodeSessionKind = WireCodeSessionKind;
 export type CodeSessionLifecycle = WireCodeSessionLifecycle;
 export type CodePermissionMode = WireCodePermissionMode;
 export type FenceReason = WireFenceReason;
@@ -1067,6 +1071,9 @@ export type CodeWorkspaceTree = WireCodeWorkspaceTree;
 export type CodeWorkspaceBlob = WireCodeWorkspaceBlob;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
+/** One durable watch task on a workspace's pull request. */
+export type CodeWatchSnapshot = WireCodeWatchSnapshot;
+export type CodeWatchState = WireCodeWatchState;
 export type CodeCommitSnapshot = WireCodeCommitSnapshot;
 export type CodePushSnapshot = WireCodePushSnapshot;
 export type CodeActionSnapshot = WireCodeActionSnapshot;

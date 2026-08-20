@@ -1,7 +1,8 @@
 use super::temp_store;
 use crate::code::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle,
     CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId,
     WorkspaceId,
 };
@@ -81,6 +82,7 @@ async fn seed_owner(
             id: session_id,
             owner: owner.clone(),
             workspace_id,
+            kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("2.1.233".into()),
             harness_resume_ref: None,

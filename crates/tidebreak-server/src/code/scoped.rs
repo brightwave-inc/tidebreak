@@ -244,6 +244,27 @@ impl ScopedCode {
         self.runtime.refresh_workspace_pr(&self.owner, id).await
     }
 
+    pub(crate) async fn start_watch(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<tidebreak_core::CodeWatch, ServerError> {
+        self.runtime.start_watch(&self.owner, id).await
+    }
+
+    pub(crate) async fn stop_watch(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<tidebreak_core::CodeWatch, ServerError> {
+        self.runtime.stop_watch(&self.owner, id).await
+    }
+
+    pub(crate) async fn latest_watch(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<Option<tidebreak_core::CodeWatch>, ServerError> {
+        self.runtime.latest_watch(&self.owner, id).await
+    }
+
     pub(crate) async fn workspace_pr_comments(
         &self,
         id: WorkspaceId,

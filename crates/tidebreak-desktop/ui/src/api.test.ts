@@ -1590,6 +1590,7 @@ describe("code workspace sessions", () => {
     const session = {
       id: "sess-1",
       workspace_id: "ws-1",
+      kind: "interactive",
       harness_kind: "claude_code",
       permission_mode: "plan",
       lifecycle: "idle",

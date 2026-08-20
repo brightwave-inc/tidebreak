@@ -54,6 +54,9 @@ pub struct CodeWorkspaceSnapshot {
 pub struct CodeSessionSnapshot {
     pub id: CodeSessionId,
     pub workspace_id: WorkspaceId,
+    /// Defaults to interactive so older servers without the field still parse.
+    #[serde(default = "default_session_kind")]
+    pub kind: tidebreak_core::CodeSessionKind,
     pub harness_kind: HarnessKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_version: Option<String>,
@@ -69,6 +72,10 @@ pub struct CodeSessionSnapshot {
     #[serde(default)]
     pub unrecognized_event_count: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_session_kind() -> tidebreak_core::CodeSessionKind {
+    tidebreak_core::CodeSessionKind::Interactive
 }
 
 /// One user→engine turn.

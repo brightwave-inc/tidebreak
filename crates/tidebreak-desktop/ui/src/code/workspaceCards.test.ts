@@ -55,6 +55,7 @@ function digest(
   return {
     workspace: workspaceId,
     session: `sess-${workspaceId}`,
+    kind: "interactive",
     lifecycle: "idle",
     attention: working,
     title: workspaceId,

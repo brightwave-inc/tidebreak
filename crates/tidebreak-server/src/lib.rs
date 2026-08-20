@@ -783,6 +783,11 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::merge_workspace_pr),
         )
         .route(
+            "/code/workspaces/{id}/watch",
+            post(routes::code::start_workspace_watch)
+                .delete(routes::code::stop_workspace_watch),
+        )
+        .route(
             "/code/workspaces/{id}/actions/{name}",
             post(routes::code::run_workspace_action),
         )

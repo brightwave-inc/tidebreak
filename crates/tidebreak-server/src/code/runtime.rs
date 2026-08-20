@@ -19,8 +19,8 @@ use tidebreak_core::db::code::{
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    Diffstat, FenceReason, HarnessKind, OwnerId, RepoId, WorkspaceId,
+    CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace,
+    CodeWorkspaceStatus, DbStore, Diffstat, FenceReason, HarnessKind, OwnerId, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -130,6 +130,8 @@ pub(crate) struct CodeRuntime {
     pub(crate) gh_search_path: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
     stall_started: AtomicBool,
+    watch_sweep: Mutex<Option<super::watch::WatchSweepGuard>>,
+    watch_started: AtomicBool,
     /// Workspaces with a background naming call in flight.
     ///
     /// One call per workspace at a time; a second trigger is dropped rather
@@ -166,6 +168,8 @@ impl CodeRuntime {
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
+            watch_sweep: Mutex::new(None),
+            watch_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -194,7 +198,14 @@ impl CodeRuntime {
     ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
         self.set_loopback_base(loopback_base);
         let runtime = self.clone();
-        async move { runtime.recover().await }
+        async move {
+            let actions = runtime.recover().await;
+            // After recovery so resumed watch sessions have workers to drive;
+            // the sweep reads its work list from the `code_watch` table, so
+            // active watches resume with no extra state.
+            runtime.ensure_watch_sweep();
+            actions
+        }
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -222,6 +233,8 @@ impl CodeRuntime {
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
+            watch_sweep: Mutex::new(None),
+            watch_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -894,6 +907,32 @@ impl CodeRuntime {
         permission_mode: CodePermissionMode,
         model: Option<String>,
     ) -> Result<CodeSession, ServerError> {
+        self.create_session_of_kind(
+            owner,
+            workspace_id,
+            CodeSessionKind::Interactive,
+            harness,
+            permission_mode,
+            model,
+        )
+        .await
+    }
+
+    /// Shared create path for interactive sessions and watch sessions.
+    ///
+    /// One active session per workspace *per kind*: a watch session shares
+    /// the worktree with the conversation it forked from, so the guard keeps
+    /// one of each rather than one in total. The watch sweep serializes fix
+    /// turns against interactive turns before submitting.
+    pub(super) async fn create_session_of_kind(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        kind: CodeSessionKind,
+        harness: HarnessKind,
+        permission_mode: CodePermissionMode,
+        model: Option<String>,
+    ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
@@ -904,11 +943,14 @@ impl CodeRuntime {
         let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         if existing
             .iter()
-            .any(|session| session.lifecycle != CodeSessionLifecycle::Ended)
+            .any(|session| session.lifecycle != CodeSessionLifecycle::Ended && session.kind == kind)
         {
             return Err(ServerError::conflict_kind(
                 "session_exists",
-                "this workspace already has an active session",
+                match kind {
+                    CodeSessionKind::Interactive => "this workspace already has an active session",
+                    CodeSessionKind::Watch => "this workspace already has an active watch session",
+                },
             ));
         }
         let adapter = self.adapter(harness)?;
@@ -950,6 +992,7 @@ impl CodeRuntime {
             id: CodeSessionId::new(),
             owner: owner.clone(),
             workspace_id,
+            kind,
             harness_kind: harness,
             harness_version: probe.version.clone(),
             harness_resume_ref: None,
@@ -1225,6 +1268,57 @@ impl CodeRuntime {
         }
         let guard = super::attention::StallSweepGuard::spawn(self.db.clone(), self.bus.clone());
         *self.stall_sweep.lock().expect("stall sweep") = Some(guard);
+    }
+
+    /// Start the watch sweep once. The guard holds a weak runtime handle so
+    /// this field never keeps its own runtime alive.
+    pub(super) fn ensure_watch_sweep(self: &Arc<Self>) {
+        if self.watch_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::watch::WatchSweepGuard::spawn(Arc::downgrade(self));
+        *self.watch_sweep.lock().expect("watch sweep") = Some(guard);
+    }
+
+    /// End one session: mark the row ended, stop its worker, and re-assert.
+    ///
+    /// The same steps [`Self::end_workspace_sessions`] takes per session,
+    /// for callers that must end a single session (the watch path) without
+    /// touching the workspace's other sessions.
+    pub(super) async fn end_session_row(
+        &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
+    ) -> Result<(), ServerError> {
+        let Some(mut session) = get_session(&self.db, owner, session_id).await? else {
+            return Ok(());
+        };
+        if session.lifecycle == CodeSessionLifecycle::Ended {
+            return Ok(());
+        }
+        let handle = self
+            .workers
+            .lock()
+            .expect("code workers")
+            .remove(&session.id);
+        session.lifecycle = CodeSessionLifecycle::Ended;
+        session.child_pid = None;
+        session.fence_reason = None;
+        super::attention::persist_session(&self.db, &self.bus, &session).await?;
+        if let Some(handle) = handle {
+            Self::shut_down_worker(session.id, handle).await;
+        }
+        let mut current = self.get_session(owner, session.id).await?;
+        current.lifecycle = CodeSessionLifecycle::Ended;
+        current.child_pid = None;
+        current.fence_reason = None;
+        if !super::attention::persist_session(&self.db, &self.bus, &current).await? {
+            return Err(ServerError::conflict_kind(
+                "session_not_ended",
+                "the session did not stay ended after the worker stopped",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_sessions(

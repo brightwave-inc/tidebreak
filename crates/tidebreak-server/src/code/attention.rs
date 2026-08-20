@@ -15,7 +15,7 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
+    CodeSessionKind, CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -330,6 +330,7 @@ async fn build_digest(
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
+        kind: session.kind,
         lifecycle: session.lifecycle,
         attention: session.attention.clone(),
         title: workspace.title,
@@ -403,6 +404,7 @@ mod tests {
             id: CodeSessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
             workspace_id: WorkspaceId::new(),
+            kind: CodeSessionKind::Interactive,
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,

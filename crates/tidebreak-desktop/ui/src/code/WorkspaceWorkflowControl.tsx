@@ -10,7 +10,11 @@ import {
 import { toast } from "sonner";
 
 import { HttpError, type ApiClient } from "../api/client";
-import type { PullRequestDigest } from "../api/types";
+import type {
+  CodeWatchSnapshot,
+  CodeWatchState,
+  PullRequestDigest,
+} from "../api/types";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -61,7 +65,13 @@ export function WorkspaceWorkflowControl({
   resource,
   onOpenSourceControl,
 }: {
-  client: Pick<ApiClient, "pushCodeWorkspace" | "createCodePullRequest">;
+  client: Pick<
+    ApiClient,
+    | "pushCodeWorkspace"
+    | "createCodePullRequest"
+    | "startCodeWatch"
+    | "stopCodeWatch"
+  >;
   workspaceId: string;
   branchName: string;
   baseRef?: string;
@@ -81,7 +91,13 @@ export function WorkspaceWorkflowControl({
     () => workspaceWorkflowModel(resource.data, fallbackPr),
     [fallbackPr, resource.data],
   );
-  const primary = model.primary;
+  const watch = resource.data?.watch;
+  const watchActive =
+    watch !== undefined &&
+    (watch.state === "watching" ||
+      watch.state === "fixing" ||
+      watch.state === "blocked");
+  const primary = watchActive ? undefined : model.primary;
   const busy = resource.busy;
   const primaryLabel = primary
     ? workspaceWorkflowActionLabel(primary, model.stage)
@@ -93,12 +109,53 @@ export function WorkspaceWorkflowControl({
     model.pr?.checks?.filter(
       (check) => check.bucket === "fail" || check.bucket === "pending",
     ) ?? [];
+  // While a watch runs, agent actions would contend for the same worktree;
+  // local Git and navigation actions stay available.
+  const secondaryActions = watchActive
+    ? model.secondary.filter(
+        (action) =>
+          action === "open_pr" ||
+          action === "open_source" ||
+          action === "push" ||
+          action === "create_pr",
+      )
+    : model.secondary;
 
-  function runAgentAction(action: PrWorkflowAction) {
+  function runAgentAction(action: Exclude<PrWorkflowAction, "watch_and_fix">) {
     const pr = model.pr;
     if (!pr) return;
     setDetailsOpen(false);
     runComposerPrompt(workspaceId, prWorkflowPrompt(action, pr));
+  }
+
+  async function startWatch() {
+    setDetailsOpen(false);
+    try {
+      await resource.runMutation("watch", async () => {
+        await client.startCodeWatch(workspaceId);
+        await resource.refresh();
+      });
+      toast.success("Watching the pull request");
+    } catch (err) {
+      const message = friendlyErrorMessage(err, "Could not start the watch");
+      resource.setMutationError(message);
+      toast.error(message);
+    }
+  }
+
+  async function stopWatch() {
+    setDetailsOpen(false);
+    try {
+      await resource.runMutation("stop_watch", async () => {
+        await client.stopCodeWatch(workspaceId);
+        await resource.refresh();
+      });
+      toast.success("Stopped watching");
+    } catch (err) {
+      const message = friendlyErrorMessage(err, "Could not stop the watch");
+      resource.setMutationError(message);
+      toast.error(message);
+    }
   }
 
   async function run(action: WorkspaceWorkflowAction) {
@@ -152,6 +209,9 @@ export function WorkspaceWorkflowControl({
           resource.setMutationError(message);
           toast.error(message);
         }
+        return;
+      case "watch_and_fix":
+        await startWatch();
         return;
       default:
         runAgentAction(action);
@@ -280,6 +340,17 @@ export function WorkspaceWorkflowControl({
                 </dd>
               </div>
             ) : null}
+            {watch ? (
+              <div className="flex items-center gap-3 py-2.5">
+                <dt className="text-foreground-subtle shrink-0">Watch</dt>
+                <dd
+                  className="min-w-0 flex-1 truncate text-right"
+                  title={watch.detail}
+                >
+                  {watchStatusLabel(watch)}
+                </dd>
+              </div>
+            ) : null}
           </dl>
 
           {activeChecks.length > 0 ? (
@@ -356,7 +427,39 @@ export function WorkspaceWorkflowControl({
         </PopoverContent>
       </Popover>
 
-      {primary === "open_pr" && primaryLabel && model.pr?.url ? (
+      {watchActive && watch ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-transparent px-2.5 hover:bg-muted/70"
+          title={
+            watch.detail
+              ? `${watchStateLabel(watch.state)}: ${watch.detail}. Click to stop watching.`
+              : "A watch task is keeping this pull request moving. Click to stop watching."
+          }
+          disabled={busy !== null}
+          aria-busy={busy === "stop_watch"}
+          data-testid="workspace-watch-control"
+          onClick={() => void stopWatch()}
+        >
+          {busy === "stop_watch" ? (
+            <Spinner aria-hidden />
+          ) : (
+            <CircleDotDashed
+              className={cn(
+                watch.state === "blocked"
+                  ? "text-warning"
+                  : "text-info-foreground",
+              )}
+              aria-hidden
+            />
+          )}
+          <span className="truncate max-[760px]:sr-only">
+            {busy === "stop_watch" ? "Stopping…" : watchStateLabel(watch.state)}
+          </span>
+        </Button>
+      ) : primary === "open_pr" && primaryLabel && model.pr?.url ? (
         <Button
           asChild
           variant="ghost"
@@ -418,7 +521,7 @@ export function WorkspaceWorkflowControl({
         </Button>
       ) : null}
 
-      {model.secondary.length > 0 ? (
+      {secondaryActions.length > 0 ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -433,7 +536,7 @@ export function WorkspaceWorkflowControl({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
-            {model.secondary.map((action) => (
+            {secondaryActions.map((action) => (
               <DropdownMenuItem key={action} onSelect={() => void run(action)}>
                 {workspaceWorkflowActionLabel(action, model.stage)}
               </DropdownMenuItem>
@@ -443,4 +546,28 @@ export function WorkspaceWorkflowControl({
       ) : null}
     </div>
   );
+}
+
+function watchStateLabel(state: CodeWatchState): string {
+  switch (state) {
+    case "watching":
+      return "Watching";
+    case "fixing":
+      return "Fixing";
+    case "blocked":
+      return "Watch blocked";
+    case "done":
+      return "Watch done";
+    case "stopped":
+      return "Watch stopped";
+    case "failed":
+      return "Watch failed";
+  }
+}
+
+function watchStatusLabel(watch: CodeWatchSnapshot): string {
+  const base = watch.detail ?? watchStateLabel(watch.state);
+  return watch.cycles > 0
+    ? `${base} · ${watch.cycles} fix ${watch.cycles === 1 ? "turn" : "turns"}`
+    : base;
 }

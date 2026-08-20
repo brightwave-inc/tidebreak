@@ -1166,12 +1166,17 @@ export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: st
 /**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, };
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, };
 
 /**
  * Identifies one durable conversation with an external agent engine.
  */
 export type CodeSessionId = string;
+
+/**
+ * Why a session exists: the user's conversation, or an automation task.
+ */
+export type CodeSessionKind = "interactive" | "watch";
 
 /**
  * Lifecycle of a persisted code session.
@@ -1181,7 +1186,7 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
 
 /**
  * Unsequenced activity notice published on the updates channel.
@@ -1253,7 +1258,7 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
  * Boxed to keep the notice enum's variants near one size; the wire
  * shape is unchanged.
@@ -1282,6 +1287,21 @@ cache_read_input_tokens: number,
 cache_creation_input_tokens: number, };
 
 /**
+ * Identifies one durable watch task on a workspace's pull request.
+ */
+export type CodeWatchId = string;
+
+/**
+ * One durable watch task on a workspace's pull request.
+ */
+export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: CodeSessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
+
+/**
+ * State of a persisted watch task.
+ */
+export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopped" | "failed";
+
+/**
  * One worktree file's text for the center viewer.
  */
 export type CodeWorkspaceBlob = { path: string, content: string, truncated: boolean, binary: boolean, };
@@ -1299,7 +1319,7 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
 /**
  * PR + checks digest plus the local git facts the PR card needs.
  */
-export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, };
+export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, watch?: CodeWatchSnapshot, };
 
 /**
  * Bounded content-search response for `GET /code/workspaces/{id}/search`.
@@ -2863,6 +2883,11 @@ head_branch?: string,
  * Base branch name on the host.
  */
 base_branch?: string, 
+/**
+ * Head commit SHA the digest was read against, when the host reported
+ * one. The watch sweep uses it to avoid re-fixing the same head.
+ */
+head_sha?: string, 
 /**
  * True when auto-merge is enabled on the host.
  */

@@ -171,13 +171,6 @@ describe("prWorkflowPrompt", () => {
     expect(prWorkflowPrompt("address_feedback", digest)).toMatch(
       /requested changes/,
     );
-    const watch = prWorkflowPrompt("watch_and_fix", digest);
-    expect(watch).toMatch(/keep watching/i);
-    expect(watch).toMatch(/Enable auto-merge/);
-    expect(watch).toMatch(/required human approval/);
-    expect(watch).toMatch(/current head SHA/);
-    expect(watch).toMatch(/rebase onto main/);
-    expect(watch).toMatch(/mark it ready for review/);
     expect(prWorkflowPrompt("mark_ready", digest)).toMatch(/ready for review/);
   });
 });

@@ -13,8 +13,8 @@ use tidebreak_core::db::code::{
     append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_turn,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
-    CodeTurnStatus, DbStore, FenceReason,
+    Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionKind,
+    CodeSessionLifecycle, CodeTurnStatus, DbStore, FenceReason,
 };
 
 use super::attention::{persist_session, replace_attention};
@@ -378,6 +378,7 @@ mod tests {
                 id: session_id,
                 owner: tidebreak_core::OwnerId::local(),
                 workspace_id,
+                kind: CodeSessionKind::Interactive,
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
                 harness_resume_ref: None,

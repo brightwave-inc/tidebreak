@@ -109,7 +109,9 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
   (`Creating | SetupFailed | Active | Archived`), `pr` (JSON digest:
   number, url, state, checks summary; nullable), `created_at`,
   `archived_at`.
-- **`code_session`** — `id`, `workspace_id`, `harness_kind`,
+- **`code_session`** — `id`, `workspace_id`, `kind`
+  (`Interactive | Watch`, per
+  [`0049`](decisions/0049-watch-and-fix-is-a-durable-task.md)), `harness_kind`,
   `harness_version` (observed at launch), `harness_resume_ref` (the
   harness's own session/thread id for resume), `permission_mode`,
   `lifecycle` (`Created | Idle | Running | Fenced | Ended`), `fence_reason`
@@ -128,6 +130,13 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
   normalized classification), `harness_raw` (JSON, size-capped), `state`
   (`Pending | Approved | Denied`), `feedback`, `requested_at`,
   `decided_at`.
+- **`code_watch`** — `id`, `workspace_id`, `session_id` (the watch's
+  dedicated `kind = watch` session), `pr_number`, `state`
+  (`Watching | Fixing | Blocked | Done | Stopped | Failed`), `detail`,
+  `last_fix_head`, `cycles`, `created_at`, `updated_at`. Driven by a
+  try-based sweep that reads active rows every tick, so restarts resume
+  watches with no extra recovery state
+  ([`0049`](decisions/0049-watch-and-fix-is-a-durable-task.md)).
 
 Boot recovery (`code/recovery.rs`, per
 [`0032`](decisions/0032-code-workspaces-worktrees-checkpoints.md)): sessions
@@ -284,6 +293,7 @@ GET             /code/workspaces/{id}/files          changed files vs base, per-
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
 GET             /code/workspaces/{id}/pr             PR + checks digest (gh; graceful absence)
+POST/DELETE     /code/workspaces/{id}/watch          durable watch-and-fix task (0049)
 POST            /code/workspaces/{id}/actions/{name} quick action; output journaled
 
 POST/GET/DELETE /code/workspaces/{id}/terminals

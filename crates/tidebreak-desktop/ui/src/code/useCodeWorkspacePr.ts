@@ -10,7 +10,9 @@ export type CodeWorkspacePrMutation =
   | "push"
   | "create_pr"
   | "merge"
-  | "auto_merge";
+  | "auto_merge"
+  | "watch"
+  | "stop_watch";
 
 export type CodeWorkspacePrResource = LiveResource<CodeWorkspacePrSnapshot> & {
   busy: CodeWorkspacePrMutation | null;

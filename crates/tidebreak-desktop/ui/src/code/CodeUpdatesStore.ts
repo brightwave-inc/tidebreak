@@ -49,13 +49,18 @@ export function reduceCodeUpdates(
 ): CodeUpdatesState {
   switch (action.type) {
     case "snapshot": {
+      // One digest per workspace: the interactive session. A watch session's
+      // digest never displaces the conversation the list surfaces show; its
+      // state reaches the UI through the workspace PR snapshot instead.
       const byWorkspace: Record<string, CodeSessionDigest> = {};
       for (const digest of action.sessions) {
+        if (digest.kind === "watch") continue;
         byWorkspace[digest.workspace] = digest;
       }
       return { ...state, byWorkspace };
     }
     case "digest":
+      if (action.digest.kind === "watch") return state;
       return {
         ...state,
         byWorkspace: {
@@ -106,6 +111,7 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
       digest: {
         workspace: notice.workspace,
         session: notice.session,
+        kind: notice.kind,
         lifecycle: notice.lifecycle,
         attention: notice.attention,
         title: notice.title,

@@ -22,6 +22,7 @@ pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,
     merge_workspace_pr, push_workspace, refresh_workspace_pr, run_workspace_action,
+    start_workspace_watch, stop_workspace_watch,
 };
 pub(crate) use harnesses::{list_harness_models, list_harnesses, refresh_harnesses};
 pub(crate) use repos::{
