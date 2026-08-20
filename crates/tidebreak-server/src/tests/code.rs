@@ -100,6 +100,9 @@ fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::path::PathBuf 
         ["git", "init", "-b", "main"].as_slice(),
         ["git", "config", "user.email", "dev@example.com"].as_slice(),
         ["git", "config", "user.name", "Dev"].as_slice(),
+        // Windows runners default to autocrlf=true; pin LF so file-content
+        // assertions stay identical across platforms.
+        ["git", "config", "core.autocrlf", "false"].as_slice(),
     ] {
         assert!(std::process::Command::new(args[0])
             .args(&args[1..])
@@ -1089,9 +1092,11 @@ async fn unsupported_explicit_steer_is_refused_without_queueing() {
 
 #[tokio::test]
 async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_up() {
+    // Park on an approval so the active-turn window is event-driven rather
+    // than a short wall-clock delay. Fixed delays race on loaded Windows CI.
     let (router, token, runtime, dir) = code_app_with(
-        ScriptedAdapter::new(plain_text_script())
-            .with_delay(Duration::from_millis(40))
+        ScriptedAdapter::new(approval_script())
+            .with_approvals(CapLevel::Supported)
             .with_steering(CapLevel::Supported),
     )
     .await;
@@ -1107,7 +1112,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "harness": "claude_code",
-            "permission_mode": "plan",
+            "permission_mode": "ask",
         }))
         .send()
         .await
@@ -1133,7 +1138,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
                 .unwrap()
         }
     });
-    let active_turn_id = tokio::time::timeout(Duration::from_secs(2), async {
+    let active_turn_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
                 break turn_id;
@@ -1142,6 +1147,25 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     })
     .await
     .expect("turn never started");
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
 
     let first_steer = client
         .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
@@ -1165,10 +1189,29 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         second_steer.unwrap().status(),
         reqwest::StatusCode::ACCEPTED
     );
-    assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), turn)
+            .await
+            .expect("turn never finished after the mid-turn decision")
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
 
     let mut steer_events = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events.recv().await.unwrap().event;
             if let CodeEvent::UserSteered { text } = &event {
@@ -1375,9 +1418,12 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
 
 #[tokio::test]
 async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
+    // Hold the turn open on an approval so a slow runner cannot finish the
+    // script before the stalled steer is admitted. The worker must still
+    // bound the control and let the parked turn complete after a decision.
     let (router, token, runtime, dir) = code_app_with(
-        ScriptedAdapter::new(plain_text_script())
-            .with_delay(Duration::from_millis(80))
+        ScriptedAdapter::new(approval_script())
+            .with_approvals(CapLevel::Supported)
             .with_steering_delay(Duration::from_secs(1)),
     )
     .await;
@@ -1393,7 +1439,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "harness": "claude_code",
-            "permission_mode": "plan",
+            "permission_mode": "ask",
         }))
         .send()
         .await
@@ -1418,6 +1464,25 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
         }
     });
     let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
 
     let started = tokio::time::Instant::now();
     let refused = client
@@ -1437,8 +1502,20 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
     );
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "steering_rejected");
+
+    let decided = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), turn)
+        tokio::time::timeout(Duration::from_secs(5), turn)
             .await
             .expect("turn completion was wedged")
             .unwrap()
@@ -4311,9 +4388,11 @@ async fn restore_reactivates_an_archived_workspace_on_its_own_branch() {
     assert_eq!(body["worktree_path"], path.as_str());
     assert_eq!(body["branch_name"], branch.as_str());
     assert!(body.get("archived_at").is_none() || body["archived_at"].is_null());
+    let kept = std::fs::read_to_string(std::path::Path::new(&path).join("kept.txt")).unwrap();
     assert_eq!(
-        std::fs::read_to_string(std::path::Path::new(&path).join("kept.txt")).unwrap(),
-        "kept\n"
+        kept.replace("\r\n", "\n").replace('\r', "\n"),
+        "kept\n",
+        "restored committed content must match regardless of platform newlines"
     );
     assert!(!std::path::Path::new(&path).join("scratch.txt").exists());
 
