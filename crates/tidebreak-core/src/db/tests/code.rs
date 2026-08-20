@@ -685,6 +685,7 @@ fn every_code_table_carries_an_owner_column() {
             "code_session",
             "code_turn",
             "code_turn_attachment",
+            "code_watch",
             "code_workspace",
         ],
         "the set of code tables changed; confirm the new one is owner-scoped"
