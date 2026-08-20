@@ -6,8 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
-import { ArrowDown, PanelRight, SquareTerminal } from "lucide-react";
+import { ArrowDown, CircleDotDashed, PanelRight, SquareTerminal } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -17,10 +18,13 @@ import type {
   CodePermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
+  CodeWatchSnapshot,
   CodeWorkspaceSnapshot,
   HarnessKind,
   ModelInfo,
 } from "../api/types";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+
 import { useApp } from "@/AppContext";
 import { copyPlainText } from "@/ClipboardCopyButton";
 import { Badge } from "@/components/ui/badge";
@@ -157,6 +161,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
   const workspaceOverlayOpen = useWorkspaceOverlayOpen();
+  const navigate = useNavigate();
+  const taskParam = (useSearch({ strict: false }) as { task?: string }).task;
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore(
     (state) => state.toggleReviewSidebar,
@@ -256,8 +262,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   }, [setViewedWorkspace, workspaceId]);
 
   useEffect(() => {
+    if (taskParam) return;
     if (rememberedSession) setSession(rememberedSession);
-  }, [rememberedSession]);
+  }, [rememberedSession, taskParam]);
 
   useEffect(() => {
     return () => {
@@ -280,8 +287,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         const catalogState = useCodeCatalogStore.getState();
         catalogState.upsertWorkspace(next);
         const live = liveCodeSession(sessions);
-        if (live) {
-          catalogState.rememberSession(live);
+        if (live) catalogState.rememberSession(live);
+        // `?task=` attaches a child task's transcript — today, the watch
+        // session — instead of the conversation.
+        const named = taskParam
+          ? sessions.find(
+              (candidate) =>
+                candidate.id === taskParam && candidate.lifecycle !== "ended",
+            )
+          : undefined;
+        if (named) {
+          setSession(named);
+        } else if (live) {
           setSession(live);
         } else if (!catalogState.sessionsByWorkspace[workspaceId]) {
           setSession(null);
@@ -297,7 +314,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceId, reloadToken]);
+  }, [client, workspaceId, reloadToken, taskParam]);
 
   async function startSession(
     harness: HarnessKind,
@@ -402,6 +419,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   function requestNewTab(region: CodeEditorRegion) {
     setQuickOpenTarget(region);
     setQuickOpenRequest((request) => request + 1);
+  }
+
+  /** Attach a child task's transcript (or the conversation when undefined). */
+  function openWorkspaceTask(sessionId: string | undefined) {
+    void navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId },
+      search: (current: Record<string, unknown>) => ({
+        ...current,
+        task: sessionId,
+      }),
+    });
   }
 
   function openInspectorTab(tab: InspectorTab) {
@@ -664,6 +693,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   defaultModelKey={defaultModelKey}
                   disabled={fenced || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
+                  composerOverride={
+                    session.kind === "watch" ? (
+                      <WatchTaskBar
+                        client={client}
+                        workspaceId={workspaceId}
+                        watch={prResource.data?.watch}
+                        onBack={() => openWorkspaceTask(undefined)}
+                        onStopped={() => {
+                          openWorkspaceTask(undefined);
+                          void prResource.refresh();
+                        }}
+                      />
+                    ) : undefined
+                  }
                 />
               )}
             </div>
@@ -836,6 +879,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               fallbackPr={pr}
               resource={prResource}
               onOpenSourceControl={() => openInspectorTab("source")}
+              onOpenWatchTask={
+                prResource.data?.watch
+                  ? () => openWorkspaceTask(prResource.data?.watch?.session_id)
+                  : undefined
+              }
             />
           )}
           {session && (
@@ -1159,6 +1207,7 @@ function CodeSessionPane({
   defaultModelKey,
   disabled,
   onOpenTurnDiff,
+  composerOverride,
 }: {
   session: CodeSessionSnapshot;
   workspaceId: string;
@@ -1168,6 +1217,12 @@ function CodeSessionPane({
   disabled: boolean;
   /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /**
+   * Replace the composer. A watch task's transcript is read-along: the sweep
+   * drives its turns, so the seat where the user would type carries the watch
+   * controls instead.
+   */
+  composerOverride?: ReactNode;
 }) {
   const follow = useTranscriptFollow();
   const store = useRegisteredCodeSession(session.id, client);
@@ -1432,7 +1487,8 @@ function CodeSessionPane({
           <ArrowDown size={16} />
         </button>
       </div>
-      {lifecycle !== "ended" && (
+      {composerOverride}
+      {lifecycle !== "ended" && !composerOverride && (
         <CodeComposer
           running={busy || lifecycle === "running"}
           disabled={disabled}
@@ -1489,4 +1545,81 @@ function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
     };
   }, [sessionId, client]);
   return storeRef.current;
+}
+
+/**
+ * The watch task's seat in the transcript view: the sweep drives this
+ * session's turns, so instead of a composer the reader gets what the watch
+ * is doing and the two decisions that are theirs — stop it, or go back.
+ */
+function WatchTaskBar({
+  client,
+  workspaceId,
+  watch,
+  onBack,
+  onStopped,
+}: {
+  client: Pick<ApiClient, "stopCodeWatch">;
+  workspaceId: string;
+  watch: CodeWatchSnapshot | undefined;
+  onBack: () => void;
+  onStopped: () => void;
+}) {
+  const [stopping, setStopping] = useState(false);
+  const active =
+    watch !== undefined &&
+    (watch.state === "watching" ||
+      watch.state === "fixing" ||
+      watch.state === "blocked");
+  const label = !watch
+    ? "This watch task has finished."
+    : watch.state === "fixing"
+      ? `Fixing PR #${watch.pr_number}${watch.cycles > 0 ? ` · fix turn ${watch.cycles}` : ""}`
+      : watch.state === "blocked"
+        ? `Watch blocked${watch.detail ? `: ${watch.detail}` : ""}`
+        : watch.state === "watching"
+          ? `Watching PR #${watch.pr_number}${watch.detail ? ` · ${watch.detail}` : ""}`
+          : `Watch ${watch.state}${watch.detail ? `: ${watch.detail}` : ""}`;
+  return (
+    <div
+      className="border-border-subtle bg-background/80 mx-auto mb-3 flex w-full max-w-3xl items-center gap-2 rounded-md border px-3 py-2 text-xs"
+      data-testid="watch-task-bar"
+    >
+      <CircleDotDashed
+        className={cn(
+          "size-3.5 shrink-0",
+          watch?.state === "blocked" ? "text-warning" : "text-info-foreground",
+        )}
+        aria-hidden
+      />
+      <span className="min-w-0 flex-1 truncate" title={watch?.detail}>
+        {label}
+      </span>
+      {active && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={stopping}
+          onClick={() => {
+            setStopping(true);
+            client
+              .stopCodeWatch(workspaceId)
+              .then(() => onStopped())
+              .catch((err) => {
+                toast.error(
+                  friendlyErrorMessage(err, "Could not stop the watch"),
+                );
+              })
+              .finally(() => setStopping(false));
+          }}
+        >
+          {stopping ? "Stopping…" : "Stop watching"}
+        </Button>
+      )}
+      <Button type="button" variant="ghost" size="sm" onClick={onBack}>
+        Back to main task
+      </Button>
+    </div>
+  );
 }

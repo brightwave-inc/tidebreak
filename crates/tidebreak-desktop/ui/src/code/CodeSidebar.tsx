@@ -3,6 +3,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ChevronRight,
   CircleAlert,
+  CircleDotDashed,
   FolderGit2,
   GitPullRequest,
   Plus,
@@ -79,6 +80,7 @@ export function CodeSidebar() {
   const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const refresh = useCodeCatalogStore((state) => state.refresh);
   const digests = useCodeUpdatesStore((state) => state.byWorkspace);
+  const watchDigests = useCodeUpdatesStore((state) => state.watchByWorkspace);
   const newWorkspaceOpen = useCodeUiStore((state) => state.newWorkspaceOpen);
   const newWorkspaceRepoId = useCodeUiStore(
     (state) => state.newWorkspaceRepoId,
@@ -202,6 +204,14 @@ export function CodeSidebar() {
               const pr = digest?.pr_state ?? workspace.pr;
               return (
                 <WorkspaceCard
+                  watch={watchDigests[workspace.id]}
+                  onOpenWatch={(sessionId) =>
+                    void navigate({
+                      to: "/code/w/$workspaceId",
+                      params: { workspaceId: workspace.id },
+                      search: { task: sessionId },
+                    })
+                  }
                   key={workspace.id}
                   workspace={workspace}
                   digest={digest}
@@ -311,6 +321,8 @@ export function WorkspaceCard({
   commands,
   onOpen,
   onCommand,
+  watch,
+  onOpenWatch,
 }: {
   workspace: CodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
@@ -321,6 +333,10 @@ export function WorkspaceCard({
   commands: WorkspaceCommand[];
   onOpen: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
+  /** The workspace's live watch task, when one is running. */
+  watch?: CodeSessionDigest;
+  /** Open the watch task's transcript. */
+  onOpenWatch?: (sessionId: string) => void;
 }) {
   // The digest restates the title on every notice, so a background rename
   // lands here without a catalog refresh.
@@ -429,8 +445,49 @@ export function WorkspaceCard({
           />
         ))}
       </ContextMenuContent>
+      {watch && (
+        <button
+          type="button"
+          className={cn(
+            "hover:bg-muted mt-0.5 ml-4 flex w-[calc(100%-1rem)] cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] text-muted-foreground",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
+          aria-label={`Open watch task ${watchTaskName(watch)}`}
+          title={watchRowTooltip(watch)}
+          data-testid="workspace-watch-row"
+          onClick={() => onOpenWatch?.(watch.session)}
+        >
+          <CircleDotDashed
+            className={cn(
+              "size-3 shrink-0",
+              watch.attention.state.type === "needs_you"
+                ? "text-critical"
+                : "text-info-foreground",
+            )}
+            aria-hidden
+          />
+          <span className="min-w-0 flex-1 truncate">
+            {watchTaskName(watch)}
+          </span>
+          <AttentionBadge attention={watch.attention} compact />
+        </button>
+      )}
     </ContextMenu>
   );
+}
+
+/** The fork's name: what the watch was asked to do, not a session id. */
+function watchTaskName(watch: CodeSessionDigest): string {
+  const number = watch.pr_state?.number;
+  return number ? `Fix PR #${number}` : "Watch and fix";
+}
+
+function watchRowTooltip(watch: CodeSessionDigest): string {
+  const name = watchTaskName(watch);
+  return `${name} — forked from this workspace's conversation. ${
+    watch.lifecycle === "running" ? "A fix turn is running." : "Watching."
+  }`;
 }
 
 function WorkspaceMenuItem({

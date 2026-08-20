@@ -180,6 +180,11 @@ export type PanelSearch = {
   /** `"1"` when the right editor group most recently received focus. */
   splitFocused?: string;
   /**
+   * Code workspace: the session id of a child task to attach instead of the
+   * conversation — today, a watch task. Absent means the conversation.
+   */
+  task?: string;
+  /**
    * The retired pair-of-slots grammar. Read on the way in so older links and
    * already-open windows still land somewhere; never written back out.
    */

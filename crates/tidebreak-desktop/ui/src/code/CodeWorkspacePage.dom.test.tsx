@@ -998,6 +998,58 @@ describe("CodeWorkspacePage", () => {
     expect(screen.getByTestId("file-viewer")).toHaveTextContent("src/lib.rs");
   });
 
+  it("attaches the watch task's transcript via ?task and offers its controls", async () => {
+    const client = makeClient();
+    const watchSession = {
+      ...SESSION,
+      id: "sess-watch",
+      kind: "watch" as const,
+      permission_mode: "auto" as const,
+      lifecycle: "idle" as const,
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION, watchSession]);
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: PR,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+      watch: {
+        id: "watch-1",
+        workspace_id: "ws-1",
+        session_id: "sess-watch",
+        pr_number: PR.number,
+        state: "watching" as const,
+        cycles: 1,
+        created_at: "2026-08-20T09:00:00.000Z",
+        updated_at: "2026-08-20T09:05:00.000Z",
+      },
+    });
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(client, "/code/w/ws-1?task=sess-watch");
+
+    const bar = await screen.findByTestId("watch-task-bar");
+    expect(bar).toHaveTextContent(`Watching PR #${PR.number}`);
+    // The watch bar replaces the composer: the sweep drives this session.
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      within(bar).getByRole("button", { name: "Back to main task" }),
+    );
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty(
+        "task",
+        "sess-watch",
+      ),
+    );
+  });
+
   it("opens source control and PR details as center tabs from the + menu", async () => {
     const client = makeClient();
     client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });

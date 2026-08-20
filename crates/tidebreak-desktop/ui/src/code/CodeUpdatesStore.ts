@@ -26,6 +26,8 @@ import { requestUserAttention } from "../host";
 
 export type CodeUpdatesState = {
   byWorkspace: Record<string, CodeSessionDigest>;
+  /** Live watch-task sessions, one per workspace, beside the conversation. */
+  watchByWorkspace: Record<string, CodeSessionDigest>;
   cloneJobs: Record<string, CodeCloneJobSnapshot>;
   viewedWorkspaceId: string | null;
 };
@@ -39,6 +41,7 @@ export type CodeUpdatesAction =
 
 const EMPTY: CodeUpdatesState = {
   byWorkspace: {},
+  watchByWorkspace: {},
   cloneJobs: {},
   viewedWorkspaceId: null,
 };
@@ -49,18 +52,35 @@ export function reduceCodeUpdates(
 ): CodeUpdatesState {
   switch (action.type) {
     case "snapshot": {
-      // One digest per workspace: the interactive session. A watch session's
-      // digest never displaces the conversation the list surfaces show; its
-      // state reaches the UI through the workspace PR snapshot instead.
+      // Two digests per workspace at most: the conversation, and its watch
+      // task. A watch session never displaces the conversation the list
+      // surfaces show; it is the workspace's child task.
       const byWorkspace: Record<string, CodeSessionDigest> = {};
+      const watchByWorkspace: Record<string, CodeSessionDigest> = {};
       for (const digest of action.sessions) {
-        if (digest.kind === "watch") continue;
-        byWorkspace[digest.workspace] = digest;
+        if (digest.kind === "watch") {
+          watchByWorkspace[digest.workspace] = digest;
+        } else {
+          byWorkspace[digest.workspace] = digest;
+        }
       }
-      return { ...state, byWorkspace };
+      return { ...state, byWorkspace, watchByWorkspace };
     }
     case "digest":
-      if (action.digest.kind === "watch") return state;
+      if (action.digest.kind === "watch") {
+        if (action.digest.lifecycle === "ended") {
+          const { [action.digest.workspace]: _ended, ...watchByWorkspace } =
+            state.watchByWorkspace;
+          return { ...state, watchByWorkspace };
+        }
+        return {
+          ...state,
+          watchByWorkspace: {
+            ...state.watchByWorkspace,
+            [action.digest.workspace]: action.digest,
+          },
+        };
+      }
       return {
         ...state,
         byWorkspace: {

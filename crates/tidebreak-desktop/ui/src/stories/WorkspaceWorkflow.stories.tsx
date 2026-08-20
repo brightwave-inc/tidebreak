@@ -37,9 +37,12 @@ function resourceFor(
 function WorkflowState({
   snapshot,
   busy = null,
+  watchTaskLink = false,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   busy?: CodeWorkspacePrMutation | null;
+  /** Offer the "Watching in …" link the workspace page wires up. */
+  watchTaskLink?: boolean;
 }) {
   return (
     <WorkspaceWorkflowControl
@@ -54,6 +57,7 @@ function WorkflowState({
       baseRef="main"
       resource={resourceFor(snapshot, busy)}
       onOpenSourceControl={fn()}
+      onOpenWatchTask={watchTaskLink ? fn() : undefined}
     />
   );
 }
@@ -88,9 +92,9 @@ export const ReadyForPullRequest: Story = {
 
 export const PullRequestOpen: Story = {};
 
-/** A durable watch task is polling; checks are still running. */
+/** A durable watch task is polling; the segment links into the fork. */
 export const Watching: Story = {
-  args: { snapshot: watchingPrGit },
+  args: { snapshot: watchingPrGit, watchTaskLink: true },
 };
 
 /** The watch task is running a fix turn against failing checks. */
