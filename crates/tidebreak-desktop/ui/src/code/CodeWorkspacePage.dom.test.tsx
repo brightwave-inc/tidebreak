@@ -982,6 +982,9 @@ describe("CodeWorkspacePage", () => {
     expect(mainPanel).toHaveAttribute("aria-labelledby", mainAgent.id);
 
     await user.click(screen.getByRole("button", { name: "New tab" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Open file…" }),
+    );
     const picker = await screen.findByRole("textbox", {
       name: "Search files by name",
     });
@@ -1003,7 +1006,10 @@ describe("CodeWorkspacePage", () => {
     const user = userEvent.setup();
     const { router } = await mountWorkspace(client);
 
-    await user.click(await screen.findByRole("button", { name: "New browser tab" }));
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "New browser tab" }),
+    );
 
     expect(await screen.findByRole("tab", { name: "Browser" })).toHaveAttribute(
       "aria-selected",

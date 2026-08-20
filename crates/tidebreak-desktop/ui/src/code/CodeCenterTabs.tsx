@@ -12,6 +12,7 @@ import {
   FileCode,
   FileDiff,
   Globe2,
+  SquareTerminal,
   ListX,
   MessageSquare,
   MoveLeft,
@@ -29,6 +30,12 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
@@ -69,6 +76,8 @@ export function CodeCenterTabs({
   onCopyPath,
   onNewTab,
   onNewBrowser,
+  onNewDiff,
+  onNewTerminal,
   browserTitles = {},
   region = "primary",
   showMainAgent = true,
@@ -90,8 +99,13 @@ export function CodeCenterTabs({
   onCloseOtherEditors: (index: number) => void;
   onCloseEditorsToRight: (index: number) => void;
   onCopyPath: (path: string) => void;
+  /** Open the file picker; the menu's "Open file" entry. */
   onNewTab: () => void;
   onNewBrowser?: () => void;
+  /** Open the all-changes diff as a center tab. */
+  onNewDiff?: () => void;
+  /** Open the workspace terminal. */
+  onNewTerminal?: () => void;
   browserTitles?: Readonly<Record<string, string>>;
   region?: CenterTabRegion;
   showMainAgent?: boolean;
@@ -325,32 +339,48 @@ export function CodeCenterTabs({
           </ContextMenu>
         );
       })}
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
-          FOCUS_RING_TIGHT,
-          HOVER_TINT,
-        )}
-        aria-label="New tab"
-        onClick={onNewTab}
-      >
-        <Plus className="size-3.5" />
-      </button>
-      {onNewBrowser && (
-        <button
-          type="button"
-          className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
-            FOCUS_RING_TIGHT,
-            HOVER_TINT,
+      {/* One + for everything the center can open. A bare click must say
+          what it will do, so the button offers the choices instead of
+          jumping into the file picker. */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+              FOCUS_RING_TIGHT,
+              HOVER_TINT,
+            )}
+            aria-label="New tab"
+          >
+            <Plus className="size-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-44">
+          <DropdownMenuItem onSelect={onNewTab}>
+            <FileCode />
+            Open file…
+          </DropdownMenuItem>
+          {onNewDiff && (
+            <DropdownMenuItem onSelect={onNewDiff}>
+              <FileDiff />
+              All changes
+            </DropdownMenuItem>
           )}
-          aria-label="New browser tab"
-          onClick={onNewBrowser}
-        >
-          <Globe2 className="size-3.5" />
-        </button>
-      )}
+          {onNewBrowser && (
+            <DropdownMenuItem onSelect={onNewBrowser}>
+              <Globe2 />
+              New browser tab
+            </DropdownMenuItem>
+          )}
+          {onNewTerminal && (
+            <DropdownMenuItem onSelect={onNewTerminal}>
+              <SquareTerminal />
+              Terminal
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
       {region === "primary" && onSplitActive && (
         <button
           type="button"
