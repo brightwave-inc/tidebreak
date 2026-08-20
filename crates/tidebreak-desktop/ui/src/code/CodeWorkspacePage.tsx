@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowDown, CircleDotDashed } from "lucide-react";
+import { ArrowDown, Bot, CircleDotDashed } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -18,6 +18,8 @@ import type {
   CodePermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
+  CodeSubagentStatus,
+  CodeSubagentSummary,
   CodeWatchSnapshot,
   CodeWorkspaceSnapshot,
   HarnessKind,
@@ -110,6 +112,11 @@ import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import {
+  mainAgentTranscriptItems,
+  subagentTranscriptItems,
+  type CodeTranscriptItem,
+} from "./CodeSessionReducer";
+import {
   hasEditorTabDrag,
   readEditorTabDrag,
   type EditorTabDrag,
@@ -168,7 +175,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const chrome = splitCodeChromeLayout(layout);
   const workspaceOverlayOpen = useWorkspaceOverlayOpen();
   const navigate = useNavigate();
-  const taskParam = (useSearch({ strict: false }) as { task?: string }).task;
+  const workspaceSearch = useSearch({ strict: false }) as {
+    task?: string;
+    subagent?: string;
+  };
+  const taskParam = workspaceSearch.task;
+  const subagentParam = workspaceSearch.subagent;
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore(
     (state) => state.toggleReviewSidebar,
@@ -435,6 +447,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       search: (current: Record<string, unknown>) => ({
         ...current,
         task: sessionId,
+        subagent: undefined,
+      }),
+    });
+  }
+
+  /** Filter the parent transcript to one harness-owned child. */
+  function openWorkspaceSubagent(callId: string | undefined) {
+    void navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId },
+      search: (current: Record<string, unknown>) => ({
+        ...current,
+        task: undefined,
+        subagent: callId,
       }),
     });
   }
@@ -691,6 +717,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   defaultModelKey={defaultModelKey}
                   disabled={fenced || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
+                  subagentCallId={subagentParam}
+                  subagentSummary={digest?.subagents?.find(
+                    (entry) => entry.call_id === subagentParam,
+                  )}
+                  onBackFromSubagent={() => openWorkspaceSubagent(undefined)}
                   composerOverride={
                     session.kind === "watch" ? (
                       <WatchTaskBar
@@ -1195,6 +1226,9 @@ function CodeSessionPane({
   defaultModelKey,
   disabled,
   onOpenTurnDiff,
+  subagentCallId,
+  subagentSummary,
+  onBackFromSubagent,
   composerOverride,
 }: {
   session: CodeSessionSnapshot;
@@ -1205,6 +1239,11 @@ function CodeSessionPane({
   disabled: boolean;
   /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** The spanning Task call to inspect inside this still-mounted session. */
+  subagentCallId?: string;
+  /** Current bounded rail summary, when the Task is still in the digest. */
+  subagentSummary?: CodeSubagentSummary;
+  onBackFromSubagent?: () => void;
   /**
    * Replace the composer. A watch task's transcript is read-along: the sweep
    * drives its turns, so the seat where the user would type carries the watch
@@ -1224,7 +1263,27 @@ function CodeSessionPane({
   // The reducer's own applied-event cursor is the activity signal the stall
   // timer wants: every delta, tool result, and boundary advances it.
   const lastSeq = store((state) => state.lastSeq);
-  const streamStalled = useStreamStalled(busy, lastSeq);
+  const transcriptSubagent = useMemo(
+    () =>
+      subagentCallId
+        ? subagentSummaryFromTranscript(items, subagentCallId)
+        : null,
+    [items, subagentCallId],
+  );
+  const selectedSubagent = subagentCallId
+    ? (subagentSummary ?? transcriptSubagent)
+    : null;
+  const transcriptItems = useMemo(
+    () =>
+      subagentCallId
+        ? subagentTranscriptItems(items, subagentCallId)
+        : mainAgentTranscriptItems(items),
+    [items, subagentCallId],
+  );
+  const transcriptBusy = subagentCallId
+    ? selectedSubagent?.status === "running"
+    : busy;
+  const streamStalled = useStreamStalled(transcriptBusy, lastSeq);
   const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
   const [approvals, setApprovals] = useState<
     Record<string, CodeApprovalSnapshot>
@@ -1434,6 +1493,13 @@ function CodeSessionPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {subagentCallId && (
+        <SubagentContextBar
+          name={selectedSubagent?.name ?? "Subagent unavailable"}
+          status={selectedSubagent?.status ?? "unavailable"}
+          onBack={onBackFromSubagent}
+        />
+      )}
       <div className={cn("message-view", follow.fadeClass)}>
         {connectionState === "reconnecting" && (
           <p
@@ -1444,10 +1510,10 @@ function CodeSessionPane({
           </p>
         )}
         <CodeTranscript
-          items={items}
+          items={transcriptItems}
           sessionId={session.id}
           hydrated={hydrated}
-          busy={busy}
+          busy={transcriptBusy}
           streamStalled={streamStalled}
           animateStreaming={animateStreaming}
           approvals={approvals}
@@ -1459,6 +1525,11 @@ function CodeSessionPane({
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
           onDecide={decideApproval}
+          emptyState={
+            subagentCallId
+              ? subagentEmptyState(selectedSubagent?.status)
+              : undefined
+          }
         />
         <button
           type="button"
@@ -1476,7 +1547,7 @@ function CodeSessionPane({
         </button>
       </div>
       {composerOverride}
-      {lifecycle !== "ended" && !composerOverride && (
+      {lifecycle !== "ended" && !composerOverride && !subagentCallId && (
         <CodeComposer
           running={busy || lifecycle === "running"}
           disabled={disabled}
@@ -1533,6 +1604,136 @@ function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
     };
   }, [sessionId, client]);
   return storeRef.current;
+}
+
+type SubagentViewStatus = CodeSubagentStatus | "unavailable";
+
+function subagentSummaryFromTranscript(
+  items: readonly CodeTranscriptItem[],
+  callId: string,
+): CodeSubagentSummary | null {
+  const task = items.find(
+    (item) =>
+      item.kind === "tool" &&
+      item.parentCallId === null &&
+      item.callId === callId &&
+      item.name === "Task",
+  );
+  if (!task || task.kind !== "tool") return null;
+  return {
+    call_id: callId,
+    name: toolDetailSubject(task.detail) || task.name,
+    status:
+      task.status === "running"
+        ? "running"
+        : task.status === "succeeded"
+          ? "done"
+          : "failed",
+  };
+}
+
+function toolDetailSubject(
+  detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
+): string;
+function toolDetailSubject(
+  detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
+): string {
+  switch (detail.kind) {
+    case "command":
+      return detail.cmd;
+    case "file_read":
+    case "file_edit":
+      return detail.path;
+    case "search":
+      return detail.query;
+    case "other":
+      return detail.summary;
+  }
+}
+
+function subagentEmptyState(status: CodeSubagentStatus | undefined): {
+  title: string;
+  description: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        title: "Waiting for this subagent",
+        description:
+          "It is still running, but it has not produced attributed transcript output yet.",
+      };
+    case "done":
+      return {
+        title: "No captured subagent output",
+        description:
+          "This subagent completed without leaving attributed assistant or tool activity.",
+      };
+    case "failed":
+      return {
+        title: "No captured subagent output",
+        description:
+          "This subagent ended before attributed assistant or tool activity was captured.",
+      };
+    default:
+      return {
+        title: "Subagent unavailable",
+        description:
+          "This link no longer matches a captured Task in the parent session.",
+      };
+  }
+}
+
+function SubagentContextBar({
+  name,
+  status,
+  onBack,
+}: {
+  name: string;
+  status: SubagentViewStatus;
+  onBack?: () => void;
+}) {
+  const label =
+    status === "running"
+      ? "Running"
+      : status === "done"
+        ? "Completed"
+        : status === "failed"
+          ? "Failed"
+          : "Unavailable";
+  const variant =
+    status === "running"
+      ? "info"
+      : status === "done"
+        ? "success"
+        : status === "failed"
+          ? "critical"
+          : "outline";
+  return (
+    <div
+      className="border-border-subtle bg-background/85 mx-auto mt-3 flex w-[calc(100%-2rem)] max-w-3xl items-center gap-2 rounded-lg border px-3 py-2 shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_4%,transparent)]"
+      data-testid="subagent-context-bar"
+    >
+      <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+        <Bot className="size-3.5" aria-hidden />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-xs font-semibold" title={name}>
+            {name}
+          </span>
+          <Badge variant={variant} size="sm" className="shrink-0">
+            {label}
+          </Badge>
+        </div>
+        <p className="text-muted-foreground text-[11px]">
+          Read-only subagent view
+        </p>
+      </div>
+      <Button type="button" variant="ghost" size="sm" onClick={onBack}>
+        Back to main agent
+      </Button>
+    </div>
+  );
 }
 
 /**

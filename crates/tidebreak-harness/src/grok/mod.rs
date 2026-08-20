@@ -160,18 +160,29 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tidebreak_core::CodePermissionMode;
 
-    fn fixture_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok/1.0.4")
+    fn fixture_dir(version: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/grok/{version}"))
     }
 
     fn replay(name: &str) -> (Vec<HarnessEvent>, u64) {
-        let path = fixture_dir().join(format!("{name}.ndjson"));
+        replay_version("1.0.4", name)
+    }
+
+    fn replay_version(version: &str, name: &str) -> (Vec<HarnessEvent>, u64) {
+        let directory = fixture_dir(version);
+        let path = directory.join(format!("{name}.ndjson"));
         let input = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("missing fixture {}: {err}", path.display()));
-        let out = GrokStreamParser::parse_ndjson(&input);
-        let expected_path = fixture_dir().join(format!("{name}.expected.json"));
+        let mut parser = GrokStreamParser::new();
+        parser.set_version(version);
+        let mut events = Vec::new();
+        for line in input.lines() {
+            events.extend(parser.push_line(line));
+        }
+        let unrecognized = parser.unrecognized();
+        let expected_path = directory.join(format!("{name}.expected.json"));
         if std::env::var_os("UPDATE_HARNESS_FIXTURES").is_some() {
-            let rendered = format!("{}\n", serde_json::to_string_pretty(&out.events).unwrap());
+            let rendered = format!("{}\n", serde_json::to_string_pretty(&events).unwrap());
             std::fs::write(&expected_path, rendered).unwrap();
         } else {
             let expected = std::fs::read_to_string(&expected_path).unwrap_or_else(|err| {
@@ -181,14 +192,14 @@ mod tests {
                     expected_path.display()
                 )
             });
-            let actual = format!("{}\n", serde_json::to_string_pretty(&out.events).unwrap());
+            let actual = format!("{}\n", serde_json::to_string_pretty(&events).unwrap());
             assert_eq!(
                 expected.replace("\r\n", "\n"),
                 actual,
                 "normalized sequence for {name} drifted from the fixture"
             );
         }
-        (out.events, out.unrecognized)
+        (events, unrecognized)
     }
 
     #[test]
@@ -278,8 +289,80 @@ mod tests {
     }
 
     #[test]
+    fn fixture_replay_subagent_task() {
+        let subagent_id = "01a02025-bcce-7723-a8f6-27e6f2a6a856";
+        let (events, unrecognized) = replay_version("1.0.5", "subagent-task");
+        assert_eq!(unrecognized, 0);
+
+        let task_start = events.iter().position(|event| {
+            matches!(
+                event,
+                HarnessEvent::ToolStarted {
+                    call_id,
+                    name,
+                    parent_call_id: None,
+                    ..
+                } if call_id == subagent_id && name == "Task"
+            )
+        });
+        let running_poll = events.iter().position(|event| {
+            matches!(
+                event,
+                HarnessEvent::ToolCompleted {
+                    call_id,
+                    parent_call_id: Some(parent_call_id),
+                    preview,
+                    ..
+                } if call_id == &format!("call-output-1:{subagent_id}")
+                    && parent_call_id == subagent_id
+                    && preview.contains("still running")
+            )
+        });
+        let child_output = events.iter().position(|event| {
+            matches!(
+                event,
+                HarnessEvent::AssistantMessage {
+                    text,
+                    parent_call_id: Some(parent_call_id),
+                } if parent_call_id == subagent_id && text == "Focused parser checks passed."
+            )
+        });
+        let task_end = events.iter().position(|event| {
+            matches!(
+                event,
+                HarnessEvent::ToolCompleted {
+                    call_id,
+                    outcome: tidebreak_core::ToolOutcome::Succeeded,
+                    parent_call_id: None,
+                    ..
+                } if call_id == subagent_id
+            )
+        });
+
+        assert!(task_start < running_poll);
+        assert!(running_poll < child_output);
+        assert!(child_output < task_end);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCompleted {
+                        call_id,
+                        parent_call_id: None,
+                        ..
+                    } if call_id == subagent_id
+                ))
+                .count(),
+            1,
+            "a running poll must not settle the spanning Task"
+        );
+    }
+
+    #[test]
     fn adapter_has_a_fixtures_directory_with_a_manifest() {
-        assert!(fixture_dir().join("manifest.toml").is_file());
+        assert!(fixture_dir("1.0.4").join("manifest.toml").is_file());
+        assert!(fixture_dir("1.0.5").join("manifest.toml").is_file());
     }
 
     #[test]

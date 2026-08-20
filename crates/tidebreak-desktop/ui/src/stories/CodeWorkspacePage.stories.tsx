@@ -15,6 +15,7 @@ import type {
   CodeRepoSnapshot,
   CodeSessionDigest,
   CodeSessionSnapshot,
+  CodeSubagentStatus,
   CodeTurnSnapshot,
   CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
@@ -30,7 +31,11 @@ import {
 } from "@/code/CodeUpdatesStore";
 import { CodeWorkspacePage } from "@/code/CodeWorkspacePage";
 import type { LayoutState } from "@/panel/panelTypes";
-import { searchFromLayout, type PanelSearch } from "@/panel/panelUrl";
+import {
+  panelSearchFrom,
+  searchFromLayout,
+  type PanelSearch,
+} from "@/panel/panelUrl";
 import { useUiStore } from "@/UiStore";
 import {
   attentionNeedsYou,
@@ -42,12 +47,79 @@ import {
   watchDigest,
 } from "./fixtures";
 
+type SubagentScenario =
+  | "subagent-running"
+  | "subagent-completed"
+  | "subagent-failed"
+  | "subagent-waiting"
+  | "subagent-recovered"
+  | "subagent-empty";
+
 type WorkspaceScenario =
   | "active"
   | "nested"
   | "start"
   | "loading"
-  | "failure";
+  | "failure"
+  | SubagentScenario;
+
+type SubagentStorySpec = {
+  callId: string;
+  name: string;
+  status: CodeSubagentStatus;
+  includeInDigest: boolean;
+};
+
+const SUBAGENT_STORIES: Record<SubagentScenario, SubagentStorySpec> = {
+  "subagent-running": {
+    callId: "toolu_story_running",
+    name: "Audit drag-and-drop boundaries",
+    status: "running",
+    includeInDigest: true,
+  },
+  "subagent-completed": {
+    callId: "toolu_story_completed",
+    name: "Review pane navigation contracts",
+    status: "done",
+    includeInDigest: true,
+  },
+  "subagent-failed": {
+    callId: "toolu_story_failed",
+    name: "Run the desktop integration suite",
+    status: "failed",
+    includeInDigest: true,
+  },
+  "subagent-waiting": {
+    callId: "toolu_story_waiting",
+    name: "Trace the recovery journal",
+    status: "running",
+    includeInDigest: true,
+  },
+  "subagent-recovered": {
+    callId: "toolu_story_recovered",
+    name: "Recover the interrupted audit",
+    status: "failed",
+    includeInDigest: false,
+  },
+  "subagent-empty": {
+    callId: "toolu_story_empty",
+    name: "Check generated bindings",
+    status: "done",
+    includeInDigest: true,
+  },
+};
+
+function isSubagentScenario(
+  scenario: WorkspaceScenario,
+): scenario is SubagentScenario {
+  return Object.prototype.hasOwnProperty.call(SUBAGENT_STORIES, scenario);
+}
+
+function subagentStorySpec(
+  scenario: WorkspaceScenario,
+): SubagentStorySpec | null {
+  return isSubagentScenario(scenario) ? SUBAGENT_STORIES[scenario] : null;
+}
 
 const repo: CodeRepoSnapshot = {
   id: "repo-tidebreak",
@@ -219,8 +291,10 @@ function socketAfterOpen(afterOpen?: () => void): WebSocket {
   return socket;
 }
 
-function transcriptFrames(): SequencedCodeEventFrame[] {
-  return [
+function transcriptFrames(
+  scenario: WorkspaceScenario,
+): SequencedCodeEventFrame[] {
+  const frames: SequencedCodeEventFrame[] = [
     {
       seq: 1,
       replayed: true,
@@ -268,7 +342,126 @@ function transcriptFrames(): SequencedCodeEventFrame[] {
       replayed: true,
       event: { type: "turn_completed", usage },
     },
-  ] as SequencedCodeEventFrame[];
+  ];
+  const spec = subagentStorySpec(scenario);
+  if (!spec) return frames;
+
+  let seq = frames.length;
+  const emit = (event: SequencedCodeEventFrame["event"]) => {
+    frames.push({ seq: ++seq, replayed: true, event });
+  };
+  emit({ type: "turn_started", turn_id: `turn-${scenario}` });
+  emit({
+    type: "tool_started",
+    call_id: spec.callId,
+    name: "Task",
+    detail: { kind: "other", summary: spec.name },
+  });
+
+  switch (scenario) {
+    case "subagent-running":
+      emit({
+        type: "tool_started",
+        call_id: `${spec.callId}-search`,
+        name: "Grep",
+        detail: { kind: "search", query: "CODE_EDITOR_DRAG_TYPE" },
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "tool_completed",
+        call_id: `${spec.callId}-search`,
+        outcome: "succeeded",
+        preview: "Found the typed transfer payload in the editor tab strip.",
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "assistant_message",
+        text: "The typed drag payload is intact. I’m checking the focus handoff before I report back.",
+        parent_call_id: spec.callId,
+      });
+      break;
+    case "subagent-completed":
+      emit({
+        type: "tool_started",
+        call_id: `${spec.callId}-read`,
+        name: "Read",
+        detail: { kind: "file_read", path: "src/panel/usePanelNav.ts" },
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "tool_completed",
+        call_id: `${spec.callId}-read`,
+        outcome: "succeeded",
+        preview: "The selected child address survives every layout write.",
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "assistant_message",
+        text: "The pane URL contract is stable: selecting a subagent never remounts the parent session.",
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "tool_completed",
+        call_id: spec.callId,
+        outcome: "succeeded",
+        preview: "Navigation contract verified.",
+      });
+      emit({ type: "turn_completed", usage });
+      break;
+    case "subagent-failed":
+      emit({
+        type: "tool_started",
+        call_id: `${spec.callId}-command`,
+        name: "Bash",
+        detail: {
+          kind: "command",
+          cmd: "pnpm test:desktop",
+          cwd: workspace.worktree_path,
+        },
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "tool_completed",
+        call_id: `${spec.callId}-command`,
+        outcome: "failed",
+        preview: "Native browser host was unavailable.",
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "assistant_message",
+        text: "The desktop suite stopped in the native browser harness before assertions ran.",
+        parent_call_id: spec.callId,
+      });
+      emit({
+        type: "tool_completed",
+        call_id: spec.callId,
+        outcome: "failed",
+        preview: "Integration suite could not start.",
+      });
+      emit({ type: "turn_completed", usage });
+      break;
+    case "subagent-recovered":
+      emit({
+        type: "tool_completed",
+        call_id: spec.callId,
+        outcome: "failed",
+        preview: "Parent session recovered and settled stale work.",
+      });
+      break;
+    case "subagent-empty":
+      emit({
+        type: "tool_completed",
+        call_id: spec.callId,
+        outcome: "succeeded",
+        preview: "Bindings are current.",
+      });
+      emit({ type: "turn_completed", usage });
+      break;
+    case "subagent-waiting":
+      break;
+  }
+
+  return frames;
 }
 
 function digestFor(
@@ -289,6 +482,7 @@ function digestFor(
 }
 
 function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
+  const selectedSubagent = subagentStorySpec(scenario);
   const current =
     scenario === "nested"
       ? {
@@ -298,6 +492,35 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
           title: workspace.title,
           pr_state: pullRequest,
         }
+      : selectedSubagent
+        ? digestFor(workspace, {
+            session: session.id,
+            lifecycle:
+              selectedSubagent.status === "running" ? "running" : "idle",
+            attention:
+              selectedSubagent.status === "running"
+                ? { state: { type: "working" }, source: "lifecycle" }
+                : {
+                    state: { type: "done_unreviewed" },
+                    source: "lifecycle",
+                  },
+            turn_count: 3,
+            pr_state: pullRequest,
+            ...(selectedSubagent.status === "running"
+              ? { activity: "subagents" }
+              : {}),
+            ...(selectedSubagent.includeInDigest
+              ? {
+                  subagents: [
+                    {
+                      call_id: selectedSubagent.callId,
+                      name: selectedSubagent.name,
+                      status: selectedSubagent.status,
+                    },
+                  ],
+                }
+              : {}),
+          })
       : digestFor(workspace, { session: session.id, pr_state: pullRequest });
   const needsYou = digestFor(otherWorkspaces[0], {
     attention: attentionNeedsYou,
@@ -324,7 +547,9 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
 
 function storyClient(scenario: WorkspaceScenario): ApiClient {
   const sessions =
-    scenario === "active" || scenario === "nested" ? [session] : [];
+    scenario === "start" || scenario === "loading" || scenario === "failure"
+      ? []
+      : [session];
   const loadWorkspace =
     scenario === "loading"
       ? () => pending<CodeWorkspaceSnapshot>()
@@ -343,7 +568,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       onFrame: (frame: SequencedCodeEventFrame) => void,
     ) =>
       socketAfterOpen(() => {
-        for (const frame of transcriptFrames()) onFrame(frame);
+        for (const frame of transcriptFrames(scenario)) onFrame(frame);
       }),
     getCodeRepo: async () => repo,
     listCodeRepos: async () => [repo],
@@ -503,22 +728,6 @@ function appContext(client: ApiClient): AppContextValue {
   };
 }
 
-function parsePanelSearch(search: Record<string, unknown>): PanelSearch {
-  const text = (value: unknown) =>
-    typeof value === "string" ? value : undefined;
-  return {
-    tabs: text(search.tabs),
-    active: text(search.active),
-    fullscreen: text(search.fullscreen),
-    split: text(search.split),
-    splitActive: text(search.splitActive),
-    splitFocused: text(search.splitFocused),
-    task: text(search.task),
-    left: text(search.left),
-    right: text(search.right),
-  };
-}
-
 function storyRouter(client: ApiClient, initialUrl: string) {
   const rootRoute = createRootRoute();
   const homeRoute = createRoute({
@@ -544,7 +753,8 @@ function storyRouter(client: ApiClient, initialUrl: string) {
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
-    validateSearch: parsePanelSearch,
+    validateSearch: (search: Record<string, unknown>): PanelSearch =>
+      panelSearchFrom(search),
     component: function WorkspaceRoute() {
       const { workspaceId } = workspaceRoute.useParams();
       return (
@@ -624,6 +834,11 @@ function workspaceUrl(layout?: LayoutState): string {
   }
   const query = params.toString();
   return `/code/w/${workspace.id}${query ? `?${query}` : ""}`;
+}
+
+function subagentUrl(scenario: SubagentScenario): string {
+  const spec = SUBAGENT_STORIES[scenario];
+  return `${conversationUrl}?subagent=${encodeURIComponent(spec.callId)}`;
 }
 
 function dragTransfer(): DataTransfer {
@@ -737,6 +952,122 @@ export const NestedTasks: Story = {
   args: { scenario: "nested", reviewOpen: false },
 };
 
+/** A running child keeps its own attributed tools and text out of the parent transcript. */
+export const RunningSubagent: Story = {
+  args: {
+    scenario: "subagent-running",
+    initialUrl: subagentUrl("subagent-running"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByTestId("subagent-context-bar");
+    await expect(context).toHaveTextContent("Audit drag-and-drop boundaries");
+    await expect(context).toHaveTextContent("Running");
+    await expect(
+      await canvas.findByText(
+        "The typed drag payload is intact. I’m checking the focus handoff before I report back.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+/** Settled work stays linkable and clearly read-only after the parent turn ends. */
+export const CompletedSubagent: Story = {
+  args: {
+    scenario: "subagent-completed",
+    initialUrl: subagentUrl("subagent-completed"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByTestId("subagent-context-bar");
+    await expect(context).toHaveTextContent("Review pane navigation contracts");
+    await expect(context).toHaveTextContent("Completed");
+    await expect(
+      await canvas.findByText(
+        "The pane URL contract is stable: selecting a subagent never remounts the parent session.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+/** Failed work keeps its useful output and a distinct terminal status. */
+export const FailedSubagent: Story = {
+  args: {
+    scenario: "subagent-failed",
+    initialUrl: subagentUrl("subagent-failed"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByTestId("subagent-context-bar");
+    await expect(context).toHaveTextContent("Run the desktop integration suite");
+    await expect(context).toHaveTextContent("Failed");
+    await expect(
+      await canvas.findByText(
+        "The desktop suite stopped in the native browser harness before assertions ran.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+/** A live Task with no attributed output says that it is waiting, not empty or broken. */
+export const RunningSubagentWithoutOutput: Story = {
+  args: {
+    scenario: "subagent-waiting",
+    initialUrl: subagentUrl("subagent-waiting"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText("Waiting for this subagent"),
+    ).toBeVisible();
+    await expect(
+      await canvas.findByText(
+        "It is still running, but it has not produced attributed transcript output yet.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+/** A bounded digest may forget an old row; journal replay recovers its name and failure. */
+export const RecoveredStaleSubagent: Story = {
+  args: {
+    scenario: "subagent-recovered",
+    initialUrl: subagentUrl("subagent-recovered"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByTestId("subagent-context-bar");
+    await expect(context).toHaveTextContent("Recover the interrupted audit");
+    await expect(context).toHaveTextContent("Failed");
+    await expect(
+      await canvas.findByText("No captured subagent output"),
+    ).toBeVisible();
+  },
+};
+
+/** Successful Tasks can legitimately finish without emitting a child transcript. */
+export const EmptySubagentTranscript: Story = {
+  args: {
+    scenario: "subagent-empty",
+    initialUrl: subagentUrl("subagent-empty"),
+    reviewOpen: false,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByTestId("subagent-context-bar");
+    await expect(context).toHaveTextContent("Check generated bindings");
+    await expect(context).toHaveTextContent("Completed");
+    await expect(
+      await canvas.findByText("No captured subagent output"),
+    ).toBeVisible();
+  },
+};
+
 /** A workspace with no session keeps the first prompt calm and centered. */
 export const StartSession: Story = {
   args: { scenario: "start", reviewOpen: false },
@@ -753,5 +1084,16 @@ export const Failure: Story = {
 /** Compact panes collapse global navigation so the conversation remains usable. */
 export const CompactConversation: Story = {
   args: { sidebarCollapsed: true, reviewOpen: false },
+  parameters: { viewport: { defaultViewport: "compact" } },
+};
+
+/** The filtered context and transcript remain legible in the compact desktop pane. */
+export const CompactSubagentTranscript: Story = {
+  args: {
+    scenario: "subagent-running",
+    initialUrl: subagentUrl("subagent-running"),
+    sidebarCollapsed: true,
+    reviewOpen: false,
+  },
   parameters: { viewport: { defaultViewport: "compact" } },
 };

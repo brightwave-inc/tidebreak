@@ -1,0 +1,79 @@
+[
+  {
+    "type": "assistant_delta",
+    "text": "Delegating the focused check."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "name": "Task",
+    "detail": {
+      "kind": "other",
+      "summary": "Run focused checks (general-purpose)"
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call-output-1:01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "name": "get_command_or_subagent_output",
+    "detail": {
+      "kind": "other",
+      "summary": "Check subagent output 01a02025"
+    },
+    "parent_call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call-output-1:01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "outcome": "succeeded",
+    "preview": "Subagent is still running.\nProgress: running cargo test",
+    "parent_call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call-output-2:01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "name": "get_command_or_subagent_output",
+    "detail": {
+      "kind": "other",
+      "summary": "Check subagent output 01a02025"
+    },
+    "parent_call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "call-output-2:01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "outcome": "succeeded",
+    "preview": "Focused parser checks passed.",
+    "parent_call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+  },
+  {
+    "type": "assistant_message",
+    "text": "Focused parser checks passed.",
+    "parent_call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "01a02025-bcce-7723-a8f6-27e6f2a6a856",
+    "outcome": "succeeded",
+    "preview": "Focused parser checks passed."
+  },
+  {
+    "type": "assistant_message",
+    "text": "Delegating the focused check."
+  },
+  {
+    "type": "session_started",
+    "harness_kind": "grok",
+    "harness_version": "1.0.5",
+    "resume_ref": "01a02024-f756-7712-a39b-1bb7397374e6"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 40,
+      "output_tokens": 18,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

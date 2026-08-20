@@ -47,9 +47,15 @@ from the spanning call (running, done, failed). Opening it filters the
 parent transcript to events whose `parent_call_id` matches — a view inside
 the parent session, not a new socket.
 
-Claude Code is the first adapter; Grok's `spawn_subagent` family maps onto
-the same contract in a follow-up slice. Codex and OpenCode map when their
-streams expose equivalent structure.
+Claude Code's `Task` family and Grok's `spawn_subagent` family both map onto
+this contract. Grok normalizes the launcher around its durable `subagent_id`,
+then attributes output, wait, and kill activity to that spanning call. Codex
+and OpenCode map when their streams expose equivalent structure.
+
+Parent lifecycle is the outer bound. A normal parent turn completion settles
+any still-running child as done; failure or interruption settles it as failed.
+Recovery and fencing paths also fail any child left running by a missing or
+orphaned parent process. An already-settled child is never overwritten.
 
 ## Consequences
 
@@ -57,9 +63,9 @@ streams expose equivalent structure.
   reader expand it — the flattened interleaving goes away.
 - The wire contract grows only optional fields; a UI ahead of or behind the
   server degrades to today's flattened view.
-- Deriving subagents from spans means a harness that loses the pairing (a
-  crash mid-Task) shows a subagent that never completes; the parent turn's
-  own completion bounds how long that can dangle.
+- Deriving subagents from spans keeps one source of truth while parent terminal
+  events and recovery fencing prevent a crash mid-Task from leaving a child
+  permanently running.
 - Each harness pays its own mapping cost at the adapter boundary
   (record 31); nothing downstream of `CodeEvent` knows harness names.
 

@@ -38,6 +38,8 @@ export type CodeTranscriptItem =
       kind: "assistant";
       id: string;
       turnId: string | null;
+      /** The spanning Task call when a harness subagent produced this text. */
+      parentCallId: string | null;
       text: string;
       streaming: boolean;
     }
@@ -53,6 +55,8 @@ export type CodeTranscriptItem =
       id: string;
       turnId: string | null;
       callId: string;
+      /** The spanning Task call when a harness subagent issued this tool. */
+      parentCallId: string | null;
       name: string;
       detail: ToolDetail;
       status: CodeToolStatus;
@@ -180,6 +184,29 @@ export function boundaryItemId(turnId: string): string {
 
 export function fileActivityItemId(turnId: string | null): string {
   return turnId ? `files:${turnId}` : "files:open";
+}
+
+/** Parent-facing transcript with harness-owned child activity folded away. */
+export function mainAgentTranscriptItems(
+  items: readonly CodeTranscriptItem[],
+): CodeTranscriptItem[] {
+  return items.filter(
+    (item) =>
+      (item.kind !== "assistant" && item.kind !== "tool") ||
+      item.parentCallId === null,
+  );
+}
+
+/** One harness subagent's attributed assistant and tool activity. */
+export function subagentTranscriptItems(
+  items: readonly CodeTranscriptItem[],
+  callId: string,
+): CodeTranscriptItem[] {
+  return items.filter(
+    (item) =>
+      (item.kind === "assistant" || item.kind === "tool") &&
+      item.parentCallId === callId,
+  );
 }
 
 /**
@@ -325,6 +352,7 @@ export function reduceCodeSessionEvent(
             "assistant",
             assistantBuffer,
             state.activeTurnId,
+            null,
             deps.nextId,
           ),
         },
@@ -333,19 +361,26 @@ export function reduceCodeSessionEvent(
     }
 
     case "assistant_message": {
+      const parentCallId = event.parent_call_id ?? null;
       return {
         state: {
           ...state,
-          assistantBuffer: event.text,
+          // Child messages are complete attributed records. They must not
+          // replace the parent's delta buffer or a later parent message will
+          // merge into the child's transcript.
+          assistantBuffer:
+            parentCallId === null ? event.text : state.assistantBuffer,
           items: finalizeStreaming(
             upsertStreaming(
               state.items,
               "assistant",
               event.text,
               state.activeTurnId,
+              parentCallId,
               deps.nextId,
             ),
             "assistant",
+            parentCallId,
           ),
         },
         effects,
@@ -363,6 +398,7 @@ export function reduceCodeSessionEvent(
             "reasoning",
             reasoningBuffer,
             state.activeTurnId,
+            null,
             deps.nextId,
           ),
         },
@@ -371,19 +407,23 @@ export function reduceCodeSessionEvent(
     }
 
     case "tool_started": {
+      const parentCallId = event.parent_call_id ?? null;
       return {
         state: {
           ...state,
-          assistantBuffer: "",
-          reasoningBuffer: "",
+          assistantBuffer:
+            parentCallId === null ? "" : state.assistantBuffer,
+          reasoningBuffer:
+            parentCallId === null ? "" : state.reasoningBuffer,
           items: insertBeforeTurnBoundary(
-            finalizeStreaming(state.items, "assistant"),
+            finalizeStreaming(state.items, "assistant", parentCallId),
             state.activeTurnId,
             {
               kind: "tool",
               id: deps.nextId(),
               turnId: state.activeTurnId,
               callId: event.call_id,
+              parentCallId,
               name: event.name,
               detail: event.detail,
               status: "running",
@@ -398,11 +438,14 @@ export function reduceCodeSessionEvent(
     }
 
     case "tool_completed": {
+      const parentCallId = event.parent_call_id ?? null;
       return {
         state: {
           ...state,
           items: state.items.map((item) =>
-            item.kind === "tool" && item.callId === event.call_id
+            item.kind === "tool" &&
+            item.callId === event.call_id &&
+            item.parentCallId === parentCallId
               ? {
                   ...item,
                   status: event.outcome,
@@ -584,28 +627,31 @@ function upsertStreaming(
   kind: "assistant" | "reasoning",
   text: string,
   turnId: string | null,
+  parentCallId: string | null,
   nextId: () => string,
 ): CodeTranscriptItem[] {
   const last = items[items.length - 1];
   if (
     last &&
-    last.kind === kind &&
-    last.streaming &&
-    last.turnId === turnId
+    streamingItemMatches(last, kind, turnId, parentCallId) &&
+    last.streaming
   ) {
     return [...items.slice(0, -1), { ...last, text }];
   }
-  const existing = lastIndexOfKindForTurn(items, kind, turnId);
+  const existing = lastIndexOfKindForTurn(
+    items,
+    kind,
+    turnId,
+    parentCallId,
+  );
   if (existing !== -1) {
     const prev = items[existing];
     if (prev.kind !== kind) {
-      return insertBeforeTurnBoundary(items, turnId, {
-        kind,
-        id: nextId(),
+      return insertBeforeTurnBoundary(
+        items,
         turnId,
-        text,
-        streaming: true,
-      });
+        streamingItem(kind, nextId(), turnId, parentCallId, text),
+      );
     }
     if (text === prev.text || prev.text.startsWith(text)) {
       return items;
@@ -619,33 +665,51 @@ function upsertStreaming(
           index === existing ? { ...prev, text, streaming: true } : item,
         );
       }
-      return insertBeforeTurnBoundary(items, turnId, {
-        kind,
-        id: nextId(),
+      return insertBeforeTurnBoundary(
+        items,
         turnId,
-        text: suffix,
-        streaming: true,
-      });
+        streamingItem(kind, nextId(), turnId, parentCallId, suffix),
+      );
     }
   }
   if (text.trim() === "") return items;
-  return insertBeforeTurnBoundary(items, turnId, {
-    kind,
-    id: nextId(),
+  return insertBeforeTurnBoundary(
+    items,
     turnId,
-    text,
-    streaming: true,
-  });
+    streamingItem(kind, nextId(), turnId, parentCallId, text),
+  );
+}
+
+function streamingItem(
+  kind: "assistant" | "reasoning",
+  id: string,
+  turnId: string | null,
+  parentCallId: string | null,
+  text: string,
+): CodeTranscriptItem {
+  return kind === "assistant"
+    ? {
+        kind,
+        id,
+        turnId,
+        parentCallId,
+        text,
+        streaming: true,
+      }
+    : { kind, id, turnId, text, streaming: true };
 }
 
 function lastIndexOfKindForTurn(
   items: readonly CodeTranscriptItem[],
   kind: "assistant" | "reasoning",
   turnId: string | null,
+  parentCallId: string | null,
 ): number {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (item.kind === kind && item.turnId === turnId) return index;
+    if (streamingItemMatches(item, kind, turnId, parentCallId)) {
+      return index;
+    }
   }
   return -1;
 }
@@ -670,10 +734,26 @@ function insertBeforeTurnBoundary(
 function finalizeStreaming(
   items: CodeTranscriptItem[],
   kind: "assistant" | "reasoning",
+  parentCallId?: string | null,
 ): CodeTranscriptItem[] {
   return items.map((item) =>
-    item.kind === kind && item.streaming ? { ...item, streaming: false } : item,
+    item.kind === kind &&
+    item.streaming &&
+    (parentCallId === undefined ||
+      streamingItemMatches(item, kind, item.turnId, parentCallId))
+      ? { ...item, streaming: false }
+      : item,
   );
+}
+
+function streamingItemMatches(
+  item: CodeTranscriptItem,
+  kind: "assistant" | "reasoning",
+  turnId: string | null,
+  parentCallId: string | null,
+): item is Extract<CodeTranscriptItem, { kind: "assistant" | "reasoning" }> {
+  if (item.kind !== kind || item.turnId !== turnId) return false;
+  return item.kind !== "assistant" || item.parentCallId === parentCallId;
 }
 
 function insertUserBeforeTurn(

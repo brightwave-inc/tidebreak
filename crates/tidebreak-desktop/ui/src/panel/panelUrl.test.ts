@@ -3,9 +3,22 @@ import { describe, expect, it } from "vitest";
 import {
   encodePanelSegment,
   layoutFromSearch,
+  panelSearchFrom,
   parsePanelSegment,
   searchFromLayout,
 } from "./panelUrl";
+
+describe("panel search", () => {
+  it("normalizes child transcript addresses and lets a task win the conversation seat", () => {
+    expect(
+      panelSearchFrom({ task: " watch-session ", subagent: " task-call " }),
+    ).toMatchObject({ task: "watch-session", subagent: undefined });
+    expect(panelSearchFrom({ task: "   ", subagent: " task-call " })).toMatchObject({
+      task: undefined,
+      subagent: "task-call",
+    });
+  });
+});
 
 describe("panel URLs", () => {
   it("reads navigation panels and addressed document viewers", () => {

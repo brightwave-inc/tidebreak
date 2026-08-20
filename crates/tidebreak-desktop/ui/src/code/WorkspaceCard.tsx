@@ -73,6 +73,7 @@ export function WorkspaceCard({
   onOpen,
   onCommand,
   onOpenChildSession,
+  onOpenSubagent,
   onWorkflowAction,
 }: {
   workspace: CodeWorkspaceSnapshot;
@@ -88,6 +89,7 @@ export function WorkspaceCard({
   onOpen: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onOpenChildSession?: (sessionId: string) => void;
+  onOpenSubagent?: (callId: string) => void;
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
   const title = digest?.title ?? workspace.title;
@@ -223,7 +225,7 @@ export function WorkspaceCard({
                 }
                 ariaLabel={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
                 icon={<Bot />}
-                onClick={onOpen}
+                onClick={() => onOpenSubagent?.(subagent.call_id)}
               />
             ))}
           </div>

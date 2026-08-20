@@ -139,6 +139,26 @@ describe("usePanelNav", () => {
     await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
   });
 
+  it("preserves a filtered subagent while the workspace layout changes", async () => {
+    const user = userEvent.setup();
+    const { router } = await mount("/code/w/ws-1?subagent=task-call-1");
+
+    await user.click(screen.getByText("open folders"));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        tabs: "folders",
+        subagent: "task-call-1",
+      }),
+    );
+
+    await user.click(screen.getByText("close active"));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        subagent: "task-call-1",
+      }),
+    );
+  });
+
   it("toggles fullscreen on and back off, and not at all with nothing open", async () => {
     const user = userEvent.setup();
     const { router } = await mount("/c/chat-1?tabs=folders");

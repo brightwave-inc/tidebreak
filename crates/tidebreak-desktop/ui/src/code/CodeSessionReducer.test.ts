@@ -4,8 +4,10 @@ import {
   applyAcceptedTurn,
   hydrateCodeTurns,
   initialCodeSessionState,
+  mainAgentTranscriptItems,
   markCodeSessionHydrated,
   reduceCodeSessionEvent,
+  subagentTranscriptItems,
   userItemId,
   type CodeSessionDeps,
   type CodeSessionState,
@@ -195,6 +197,94 @@ describe("turn lifecycle", () => {
       status: "failed",
       error: "engine exited",
     });
+  });
+});
+
+describe("subagent attribution", () => {
+  it("keeps parent and child assistant messages in separate streams", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "assistant_delta", text: "Parent response" },
+      {
+        type: "assistant_message",
+        text: "Child report",
+        parent_call_id: "task-1",
+      },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+
+    const messages = state.items.filter((item) => item.kind === "assistant");
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      text: "Parent response",
+      parentCallId: null,
+      streaming: false,
+    });
+    expect(messages[1]).toMatchObject({
+      text: "Child report",
+      parentCallId: "task-1",
+      streaming: false,
+    });
+    expect(state.assistantBuffer).toBe("");
+  });
+
+  it("preserves tool attribution and filters the parent and child views", () => {
+    const accepted = applyAcceptedTurn(initialCodeSessionState(), {
+      id: "t1",
+      session_id: "s1",
+      ordinal: 1,
+      status: "running",
+      user_input: "Delegate the audit",
+      attachments: [],
+      started_at: NOW,
+    });
+    const { state } = play(
+      [
+        {
+          type: "tool_started",
+          call_id: "task-1",
+          name: "Task",
+          detail: { kind: "other", summary: "Audit the parser" },
+        },
+        {
+          type: "tool_started",
+          call_id: "child-read",
+          name: "Read",
+          detail: { kind: "file_read", path: "src/parser.rs" },
+          parent_call_id: "task-1",
+        },
+        {
+          type: "tool_completed",
+          call_id: "child-read",
+          outcome: "succeeded",
+          preview: "parser source",
+          parent_call_id: "task-1",
+        },
+        {
+          type: "assistant_message",
+          text: "The parser is sound.",
+          parent_call_id: "task-1",
+        },
+      ],
+      accepted,
+    );
+
+    const childTool = state.items.find(
+      (item) => item.kind === "tool" && item.callId === "child-read",
+    );
+    expect(childTool).toMatchObject({
+      parentCallId: "task-1",
+      status: "succeeded",
+      preview: "parser source",
+    });
+
+    expect(mainAgentTranscriptItems(state.items).map((item) => item.kind)).toEqual([
+      "user",
+      "tool",
+    ]);
+    expect(
+      subagentTranscriptItems(state.items, "task-1").map((item) => item.kind),
+    ).toEqual(["tool", "assistant"]);
   });
 });
 

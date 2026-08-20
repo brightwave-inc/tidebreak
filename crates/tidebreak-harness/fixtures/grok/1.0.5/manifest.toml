@@ -1,0 +1,36 @@
+harness = "grok"
+version = "1.0.5"
+date = "2026-08-20"
+observed_version_command = "grok --version"
+observed_version = "grok 1.0.5"
+integration_path = "supplemental streaming-json projection"
+
+scenarios = ["subagent-task"]
+
+[capture]
+notes = """
+Supplemental decision-52 fixture assembled from a real signed-in Grok 1.0.5
+session rather than another paid model turn. The spawn_subagent,
+get_command_or_subagent_output, progress, and TaskOutput payloads were copied
+field-for-field from the session's persisted update stream, then stripped of
+the outer session/update envelope used by the interactive shell. The resulting
+objects use the same tool_call/tool_call_update payload shape consumed by the
+print streaming-json parser. Human task text and output were shortened while
+preserving the observed fields and status values.
+"""
+
+[redaction]
+notes = """
+Repository names, paths, prompts, command output, and unrelated task ids were
+replaced with a tiny focused-check scenario. The observed subagent/session ids
+and tool payload structure were retained. No credentials or token-like values
+were present.
+"""
+
+verified = [
+  "spawn_subagent completion text carries subagent_id",
+  "background spawn completion is launcher success, not child completion",
+  "get_command_or_subagent_output addresses children by task_ids",
+  "TaskOutput MultiResult statuses include running and completed",
+  "TaskOutput results carry per-task output and exit_code",
+]
