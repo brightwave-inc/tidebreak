@@ -85,8 +85,21 @@ mod setup;
 use print::OutputFormat;
 use setup::{Command as SetupCommand, SecretSource};
 
+/// What `--version` reports.
+///
+/// The workspace manifest stays at `0.0.0`: release numbering lives on the Git
+/// tag and the desktop bundle, not in Cargo. A release build passes the tag
+/// through `TIDEBREAK_VERSION` so the published binary states the release it
+/// came from. A build without it says so plainly rather than claiming a
+/// version it does not have.
+const VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
+    Some(version) => version,
+    None => "0.0.0-unreleased",
+};
+
 const USAGE: &str = "\
 usage: tidebreak serve
+       tidebreak --version
        tidebreak mcp <workspace>
        tidebreak rehome-secrets
        tidebreak -p <prompt> [--chat <id>] [--output-format text|json]
@@ -204,6 +217,18 @@ async fn run() -> Result<i32> {
                 usage_error("serve does not accept arguments");
             }
             serve().await.map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("--version") => {
+            // A published container has no other way to say what it is: the
+            // image tag can be moved, and `serve` needs a database before it
+            // reports anything. This is also the smoke test the server image
+            // publish runs against a freshly built binary.
+            server_flags.refuse("--version");
+            if args.next().is_some() {
+                usage_error("--version does not accept arguments");
+            }
+            println!("tidebreak {VERSION}");
+            Ok(0)
         }
         Some(command) if command == OsStr::new("mcp") => {
             server_flags.refuse("mcp");

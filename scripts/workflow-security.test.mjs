@@ -771,6 +771,21 @@ test("the self-host runtime installs packages from an immutable Debian snapshot"
   );
 });
 
+test("the published server image states the release it carries", () => {
+  // The workspace manifest stays at 0.0.0, so the release tag reaches the
+  // binary only through this build argument. Without it `--version` answers
+  // "0.0.0-unreleased" and the smoke test below catches the mismatch.
+  assert.match(selfHostDockerfile, /^ARG TIDEBREAK_VERSION="0\.0\.0-unreleased"$/m);
+
+  const buildJob = workflowJob(workflows["publish-server-image.yml"], "build");
+  assert.match(buildJob, /--build-arg "TIDEBREAK_VERSION=\$VERSION"/);
+
+  // Asserting the reported string, not just a zero exit. The smoke test that
+  // shipped ran `--version` against a binary with no such flag; it would have
+  // failed on any build, and did on the first one that compiled.
+  assert.match(buildJob, /\[\[ "\$reported" = "tidebreak \$VERSION" \]\]/);
+});
+
 test(
   "BuildKit admits only exact source inputs from allowed source paths",
   { skip: process.env.TIDEBREAK_SKIP_DOCKER_CONTEXT_PROBE === "1" },
