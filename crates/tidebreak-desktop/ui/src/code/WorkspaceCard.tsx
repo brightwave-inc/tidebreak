@@ -32,6 +32,7 @@ import type {
 import { AttentionBadge } from "./AttentionBadge";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
+import { HARNESS_LABELS, LIFECYCLE_LABELS } from "./labels";
 import type { WorkspaceCommand } from "./workspaceActions";
 import {
   workspaceWorkflowActionLabel,
@@ -370,10 +371,23 @@ function WorkspaceActivityLine({
     digest?.attention.state.type === "needs_you"
       ? digest.attention.state.prompt || "Needs you"
       : null;
-  const sessionLine =
-    digest && isSessionRowWorthy(digest)
-      ? `${sessionRowLabel(digest)} - ${digest.turn_count} ${digest.turn_count === 1 ? "turn" : "turns"}`
+  const worthyDigest =
+    digest && isSessionRowWorthy(digest) ? digest : undefined;
+  const statusLabel = needsYou
+    ? null
+    : worthyDigest
+      ? sessionRowLabel(worthyDigest)
+      : digest
+        ? LIFECYCLE_LABELS[digest.lifecycle]
+        : session
+          ? LIFECYCLE_LABELS[session.lifecycle]
+          : null;
+  const turnCount = digest?.turn_count;
+  const turnLabel =
+    !needsYou && turnCount !== undefined
+      ? `${turnCount} ${turnCount === 1 ? "turn" : "turns"}`
       : null;
+  const sessionLine = [statusLabel, turnLabel].filter(Boolean).join(" · ");
   const HarnessIcon = session ? HARNESS_ICONS[session.harness_kind] : null;
   const stamp = session?.created_at ?? workspace.created_at;
   const age = formatCompactAge(stamp);
@@ -386,12 +400,14 @@ function WorkspaceActivityLine({
     <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-[11px] text-muted-foreground">
       {needsYou ? (
         <CircleAlert className="size-3 shrink-0 text-critical" aria-hidden />
+      ) : session && HarnessIcon ? (
+        <span title={HARNESS_LABELS[session.harness_kind]}>
+          <HarnessIcon className="size-3 shrink-0" aria-hidden />
+        </span>
       ) : terminalOnly ? (
         <SquareTerminal className="size-3 shrink-0" aria-hidden />
       ) : ActivityIcon ? (
         <ActivityIcon className="size-3 shrink-0" aria-hidden />
-      ) : HarnessIcon ? (
-        <HarnessIcon className="size-3 shrink-0" aria-hidden />
       ) : null}
       <span
         className={cn(
@@ -399,7 +415,7 @@ function WorkspaceActivityLine({
           needsYou && "text-critical-foreground",
         )}
       >
-        {needsYou ?? sessionLine ?? "Terminal open"}
+        {needsYou ?? (sessionLine || "Terminal open")}
       </span>
       {age && (
         <span className="shrink-0 tabular-nums">

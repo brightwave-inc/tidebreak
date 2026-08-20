@@ -1430,7 +1430,9 @@ function ImageAttachmentChip({
         {attachment.previewUrl ? (
           // Shown from the bytes already in hand rather than fetched back from
           // the server, so the reader sees what they attached immediately.
-          <img className="size-full object-cover" src={attachment.previewUrl} alt="" />
+          // Contain, not cover: a wide dark screenshot cropped to a square
+          // reads as a black tile.
+          <img className="size-full object-contain" src={attachment.previewUrl} alt="" />
         ) : (
           <ImageIcon size={16} aria-hidden="true" />
         )}

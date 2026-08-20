@@ -31,6 +31,12 @@ export type ImageAttachmentControls = {
   retry: (id: string) => void;
   /** Forget everything, once a turn has carried it. */
   clear: () => void;
+  /**
+   * Put a cleared strip back after a refused send. Local previews are gone —
+   * those object URLs were revoked with the clear — so ready chips fall back
+   * to name and geometry the way host-picked images always do.
+   */
+  restore: (items: readonly ImageAttachment[]) => void;
 };
 
 const NO_IMAGES: ImageAttachment[] = [];
@@ -261,6 +267,9 @@ export function useImageAttachments(
       }
       update(() => []);
       setError(null);
+    },
+    restore: (items) => {
+      update(() => items.map((item) => ({ ...item, previewUrl: null })));
     },
   };
 }

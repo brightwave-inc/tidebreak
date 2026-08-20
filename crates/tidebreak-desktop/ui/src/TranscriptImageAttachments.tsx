@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ApiClient } from "./api";
 import type { TranscriptImageAttachment } from "./ImageAttachments";
+import { cn } from "./lib/utils";
 
 type TranscriptImageAttachmentsProps = {
   client: Pick<ApiClient, "getChatImageAttachment">;
@@ -25,12 +26,19 @@ export function TranscriptImageAttachments({
           mediaType={image.mediaType}
           width={image.width}
           height={image.height}
-          label={`Attached image ${index + 1}: ${image.width} by ${image.height} pixels`}
+          label={imageLabel(index + 1, image.width, image.height)}
           unavailableLabel="Attached image unavailable"
         />
       ))}
     </div>
   );
+}
+
+function imageLabel(ordinal: number, width: number, height: number): string {
+  if (width > 0 && height > 0) {
+    return `attached image ${ordinal}: ${width} by ${height} pixels`;
+  }
+  return `attached image ${ordinal}`;
 }
 
 export function ChatImage({
@@ -54,6 +62,7 @@ export function ChatImage({
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -84,13 +93,21 @@ export function ChatImage({
 
   if (url !== null) {
     return (
-      <img
-        className="message-image"
-        src={url}
-        alt={label}
-        width={width}
-        height={height}
-      />
+      <button
+        type="button"
+        className={cn("message-image-toggle", expanded && "is-expanded")}
+        aria-expanded={expanded}
+        aria-label={expanded ? `Collapse ${label}` : `Expand ${label}`}
+        onClick={() => setExpanded((open) => !open)}
+      >
+        <img
+          className="message-image"
+          src={url}
+          alt=""
+          {...(width > 0 ? { width } : {})}
+          {...(height > 0 ? { height } : {})}
+        />
+      </button>
     );
   }
 

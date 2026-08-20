@@ -17,6 +17,7 @@ import { CodeComposer, HarnessModelMenu } from "./CodeComposer";
 import { useCodeUiStore } from "./CodeUiStore";
 import { HttpError } from "../api/client";
 import { useComposerDrafts } from "../ComposerDrafts";
+import { readyImageAttachment } from "../ImageAttachments";
 import { OpenAIIcon, ProviderIcon } from "../ProviderIcons";
 import { useUiStore } from "../UiStore";
 
@@ -611,6 +612,67 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("drops attached images as soon as send starts", async () => {
+    const onSend = vi.fn(() => new Promise<void>(() => {}));
+    useComposerDrafts.getState().setImages("sess-1", [
+      readyImageAttachment("img-1", {
+        attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+        fileName: "shot.png",
+        mediaType: "image/png",
+        width: 390,
+        height: 202,
+        byteLen: 1024,
+      }),
+    ]);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        imageInput
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "look at this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(screen.queryByLabelText("Attached images")).toBeNull();
+  });
+
+  it("puts images back when send is refused", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("Could not send that turn"));
+    useComposerDrafts.getState().setImages("sess-1", [
+      readyImageAttachment("img-1", {
+        attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+        fileName: "shot.png",
+        mediaType: "image/png",
+        width: 390,
+        height: 202,
+        byteLen: 1024,
+      }),
+    ]);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        imageInput
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "look at this" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("shot.png")).toBeInTheDocument();
+    expect(box).toHaveValue("look at this");
   });
 });
 

@@ -574,10 +574,13 @@ describe("historical image attachments", () => {
         expect.any(AbortSignal),
       ),
     );
-    const image = await screen.findByRole("img", {
-      name: "Attached image 1: 320 by 240 pixels",
+    const toggle = await screen.findByRole("button", {
+      name: "Expand attached image 1: 320 by 240 pixels",
     });
-    expect(image).toHaveAttribute("src", "blob:transcript-image");
+    expect(toggle.querySelector("img")).toHaveAttribute(
+      "src",
+      "blob:transcript-image",
+    );
     expect(createObjectUrl).toHaveBeenCalledTimes(1);
 
     unmount();

@@ -128,10 +128,12 @@ export const Active: Story = {
   args: { active: true },
 };
 
+/** Harness mark, live activity, and turn count on the detailed status line. */
 export const RunningSession: Story = {
   args: {
     digest: runningDigest,
     session: codeSession,
+    visibleMeta: { repoChip: true, branch: true },
     commands: workspaceCommands({
       hasPr: false,
       archived: false,
