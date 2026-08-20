@@ -44,6 +44,8 @@ function TabStrip({
       onNewTab={fn()}
       onNewBrowser={withBrowser ? fn() : undefined}
       onNewDiff={withDiff ? fn() : undefined}
+      onNewSourceControl={withDiff ? fn() : undefined}
+      onNewPr={withDiff ? fn() : undefined}
       onNewTerminal={withTerminal ? fn() : undefined}
       onSplitActive={fn()}
       region={region}
@@ -81,6 +83,17 @@ export const FilesOpen: Story = {
       { type: "file", path: "crates/tidebreak-server/src/code/watch.rs" },
       { type: "file", path: "docs/code-mode.md" },
       { type: "diff" },
+    ],
+  },
+};
+
+/** Source control and the PR's details are peer tabs, not sidebar-only. */
+export const WorkflowTabs: Story = {
+  args: {
+    editorTabs: [
+      { type: "source_control" },
+      { type: "pr" },
+      { type: "file", path: "src/lib.rs" },
     ],
   },
 };

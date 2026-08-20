@@ -30,7 +30,11 @@ export type PanelContent =
   /** A colored diff in the workspace center. */
   | { type: "diff"; path?: string; turnId?: string }
   /** One native browser session in the workspace center. */
-  | { type: "browser"; browserId: string };
+  | { type: "browser"; browserId: string }
+  /** The change index plus commit, push, and PR creation, as a peer tab. */
+  | { type: "source_control" }
+  /** The pull request's own life: status, checks, and review comments. */
+  | { type: "pr" };
 
 export type PanelType = PanelContent["type"];
 
