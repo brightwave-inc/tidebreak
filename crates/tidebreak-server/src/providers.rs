@@ -397,16 +397,66 @@ impl ProviderKind {
         !matches!(self, Self::Ollama)
     }
 
-    /// The URL this kind actually calls: a stored override, else the default,
-    /// with hosted presets ignoring any stored value.
+    /// Environment variable consulted for this kind's base URL when the
+    /// deployment plane holds none.
+    ///
+    /// Only kinds that accept a stored base URL have one. Hosted presets and
+    /// the first-party Gemini and xAI endpoints are fixed, so no variable can
+    /// redirect them.
+    pub const fn base_url_env_var(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some("ANTHROPIC_BASE_URL"),
+            Self::Openai => Some("OPENAI_BASE_URL"),
+            Self::Ollama => Some("OLLAMA_BASE_URL"),
+            Self::OpenaiCompatible => Some("OPENAI_COMPATIBLE_BASE_URL"),
+            Self::Xai
+            | Self::Gemini
+            | Self::Fireworks
+            | Self::Together
+            | Self::Openrouter
+            | Self::ModelGateway => None,
+        }
+    }
+
+    /// The URL this kind actually calls: a stored override, else the
+    /// environment fallback, else the default, with hosted presets ignoring
+    /// both.
     pub fn effective_base_url(self, configured: Option<&str>) -> Option<String> {
+        self.effective_base_url_from(configured, |name| std::env::var(name).ok())
+    }
+
+    /// [`effective_base_url`](Self::effective_base_url) against an injected
+    /// environment, so tests can exercise the fallback without mutating the
+    /// process environment.
+    fn effective_base_url_from(
+        self,
+        configured: Option<&str>,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Option<String> {
         if self.has_fixed_endpoint() {
             return self.default_base_url().map(str::to_owned);
         }
         configured
             .filter(|url| !url.is_empty())
             .map(str::to_owned)
+            .or_else(|| self.env_base_url_from(lookup))
             .or_else(|| self.default_base_url().map(str::to_owned))
+    }
+
+    /// The environment fallback for this kind's base URL.
+    ///
+    /// A value that is empty, unparseable, or that this kind may not call over
+    /// the offered transport is ignored, exactly as an empty API-key variable
+    /// is: the deployment falls back to the built-in default rather than
+    /// failing the boot or dropping the route.
+    fn env_base_url_from(self, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let url = lookup(self.base_url_env_var()?)?;
+        if url.is_empty() {
+            return None;
+        }
+        // A kind that needs no credential may be reached over loopback HTTP,
+        // matching what the deployment plane accepts for a stored value.
+        base_url_is_allowed(&url, !self.requires_credential()).then_some(url)
     }
 
     /// Store setting key for this kind's non-secret config.
@@ -1553,8 +1603,15 @@ pub async fn update_provider(
         config.models = models;
     }
 
-    // openai_compatible needs a base URL to be useful when enabled.
-    if kind == ProviderKind::OpenaiCompatible && config.enabled && config.base_url.is_none() {
+    // openai_compatible needs a base URL to be useful when enabled. The
+    // environment fallback counts, so a deployment that supplies the endpoint
+    // through its environment can still enable the provider.
+    if kind == ProviderKind::OpenaiCompatible
+        && config.enabled
+        && kind
+            .effective_base_url(config.base_url.as_deref())
+            .is_none()
+    {
         return Err(ServerError::bad_request(
             "openai_compatible requires a base_url when enabled",
         ));
@@ -2921,6 +2978,130 @@ mod tests {
                 .as_deref(),
             Some("https://api.fireworks.ai/inference/v1")
         );
+    }
+
+    /// A lookup that answers one variable, standing in for the process
+    /// environment so the precedence tests never mutate it.
+    fn env_of(name: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |requested| (requested == name).then(|| value.to_string())
+    }
+
+    #[test]
+    fn a_stored_base_url_wins_over_the_environment_fallback() {
+        assert_eq!(
+            ProviderKind::Anthropic
+                .effective_base_url_from(
+                    Some("https://stored.example/v1"),
+                    env_of("ANTHROPIC_BASE_URL", "https://env.example/v1"),
+                )
+                .as_deref(),
+            Some("https://stored.example/v1")
+        );
+    }
+
+    #[test]
+    fn the_environment_fallback_answers_when_nothing_is_stored() {
+        assert_eq!(
+            ProviderKind::Anthropic
+                .effective_base_url_from(None, env_of("ANTHROPIC_BASE_URL", "https://env.example"),)
+                .as_deref(),
+            Some("https://env.example")
+        );
+        assert_eq!(
+            ProviderKind::Openai
+                .effective_base_url_from(None, env_of("OPENAI_BASE_URL", "https://env.example/v1"))
+                .as_deref(),
+            Some("https://env.example/v1")
+        );
+        assert_eq!(
+            ProviderKind::OpenaiCompatible
+                .effective_base_url_from(
+                    None,
+                    env_of("OPENAI_COMPATIBLE_BASE_URL", "https://env.example/v1"),
+                )
+                .as_deref(),
+            Some("https://env.example/v1")
+        );
+        // An empty stored value is not a value, so the fallback still answers.
+        assert_eq!(
+            ProviderKind::Openai
+                .effective_base_url_from(
+                    Some(""),
+                    env_of("OPENAI_BASE_URL", "https://env.example/v1"),
+                )
+                .as_deref(),
+            Some("https://env.example/v1")
+        );
+    }
+
+    /// A credentialless kind may be pointed at loopback HTTP from the
+    /// environment, exactly as it may from a stored value.
+    #[test]
+    fn the_ollama_fallback_accepts_loopback_http() {
+        assert_eq!(
+            ProviderKind::Ollama
+                .effective_base_url_from(
+                    None,
+                    env_of("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                )
+                .as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    /// Same posture as an empty `*_API_KEY`: an unusable value is ignored,
+    /// never an error, and the built-in default still applies.
+    #[test]
+    fn an_unusable_environment_base_url_is_ignored() {
+        for value in [
+            "",
+            "not a url",
+            "ftp://example.com/v1",
+            // Cleartext to a non-loopback host, for a kind that carries a key.
+            "http://proxy.internal/v1",
+            // Credentials embedded in the URL.
+            "https://user:pass@example.com/v1",
+        ] {
+            let lookup =
+                |requested: &str| (requested == "ANTHROPIC_BASE_URL").then(|| value.to_string());
+            assert_eq!(
+                ProviderKind::Anthropic.effective_base_url_from(None, lookup),
+                None,
+                "`{value}` must not become Anthropic's endpoint"
+            );
+            let lookup =
+                |requested: &str| (requested == "OLLAMA_BASE_URL").then(|| value.to_string());
+            assert_eq!(
+                ProviderKind::Ollama
+                    .effective_base_url_from(None, lookup)
+                    .as_deref(),
+                Some("http://127.0.0.1:11434/v1"),
+                "`{value}` must leave Ollama on its default endpoint"
+            );
+        }
+    }
+
+    /// Fixed first-party and hosted-preset endpoints ignore the environment,
+    /// exactly as they ignore a stored value.
+    #[test]
+    fn fixed_endpoint_kinds_have_no_environment_fallback() {
+        for kind in [
+            ProviderKind::Xai,
+            ProviderKind::Gemini,
+            ProviderKind::Fireworks,
+            ProviderKind::Together,
+            ProviderKind::Openrouter,
+            ProviderKind::ModelGateway,
+        ] {
+            assert_eq!(kind.base_url_env_var(), None);
+            assert_eq!(
+                kind.effective_base_url_from(None, |_| Some(
+                    "https://attacker.invalid/v1".to_string()
+                )),
+                kind.default_base_url().map(str::to_owned),
+                "{kind} must keep its fixed endpoint"
+            );
+        }
     }
 
     #[test]
