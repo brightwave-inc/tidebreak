@@ -61,12 +61,18 @@ function isDrawerTab(tab: PanelContent): boolean {
 }
 
 export function isEditorTab(tab: PanelContent): boolean {
-  return tab.type === "file" || tab.type === "diff" || tab.type === "browser";
+  return (
+    tab.type === "file" ||
+    tab.type === "diff" ||
+    tab.type === "browser" ||
+    tab.type === "source_control" ||
+    tab.type === "pr"
+  );
 }
 
 export type CodeEditorPanel = Extract<
   PanelContent,
-  { type: "file" | "diff" | "browser" }
+  { type: "file" | "diff" | "browser" | "source_control" | "pr" }
 >;
 
 /** Browser session ids removed by a layout transition, once each. */

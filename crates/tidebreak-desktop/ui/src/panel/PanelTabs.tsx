@@ -48,6 +48,10 @@ function panelTabFallbackLabel(panel: PanelContent): string {
           : "Diff";
     case "browser":
       return "Browser";
+    case "source_control":
+      return "Source control";
+    case "pr":
+      return "Pull request";
   }
 }
 

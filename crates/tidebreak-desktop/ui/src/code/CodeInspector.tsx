@@ -301,7 +301,13 @@ export function inspectorTurnLabel(
  * user-initiated ways to land it. The digest arrives over the updates socket,
  * so actions only have to hit the server — the fresh state restates itself.
  */
-function PrTab({
+/**
+ * The pull request's own life: status, checks, and review comments.
+ *
+ * Exported so the center can host it as a peer tab; the inspector remains
+ * its other caller.
+ */
+export function PrTab({
   client,
   workspaceId,
   pr,
