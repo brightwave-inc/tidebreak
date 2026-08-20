@@ -26,7 +26,10 @@ vi.mock("sonner", () => ({
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
-  useCodeUiStore.setState({ lastCreate: null });
+  useCodeUiStore.setState({
+    lastCreate: null,
+    pendingComposerPrompt: null,
+  });
   toastError.mockReset();
 });
 
@@ -221,9 +224,10 @@ describe("NewWorkspaceDialog", () => {
         model: "gpt-5.6-sol",
       }),
     );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
   });
 
-  it("lists the workspace block before harness, then model", async () => {
+  it("lists repo, harness, model, then starting prompt, then the rest", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
       repos,
@@ -255,12 +259,62 @@ describe("NewWorkspaceDialog", () => {
     ].map((el) => el.textContent);
     expect(labels).toEqual([
       "Repo",
-      "Title",
-      "Base ref",
       "Harness",
       "Model",
+      "Starting prompt",
+      "Title",
+      "Base ref",
       "Permission mode",
     ]);
+  });
+
+  it("inserts a starting prompt into the workspace composer after create", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const createCodeWorkspace = vi.fn(async () =>
+      workspace("ws-prompt", "repo-new", "2026-08-20T00:00:00.000Z"),
+    );
+    const createCodeSession = vi.fn(async () =>
+      session("ws-prompt", "claude_code", "2026-08-20T00:00:00.000Z"),
+    );
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          createCodeSession,
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "claude_code" as const,
+            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Starting prompt" }), {
+      target: { value: "  list the files  " },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(createCodeWorkspace).toHaveBeenCalled(),
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
+      scope: "ws-prompt",
+      text: "list the files",
+      submit: false,
+    });
   });
 
   it("drops the previous harness model while the next catalog loads", async () => {
