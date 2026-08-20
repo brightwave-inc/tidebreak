@@ -135,6 +135,12 @@ pub(super) fn code_session_table() -> TableCreateStatement {
         )
         .col(owner_column(CodeSession::Owner))
         .col(ColumnDef::new(CodeSession::WorkspaceId).uuid().not_null())
+        .col(
+            ColumnDef::new(CodeSession::Kind)
+                .text()
+                .not_null()
+                .default("interactive"),
+        )
         .col(ColumnDef::new(CodeSession::HarnessKind).text().not_null())
         .col(ColumnDef::new(CodeSession::HarnessVersion).text())
         .col(ColumnDef::new(CodeSession::HarnessResumeRef).text())
@@ -184,6 +190,7 @@ pub(super) fn code_session_table() -> TableCreateStatement {
             Expr::col(CodeSession::Lifecycle)
                 .is_in(["created", "idle", "running", "fenced", "ended"]),
         )
+        .check(Expr::col(CodeSession::Kind).is_in(["interactive", "watch"]))
         .check(Expr::col(CodeSession::PermissionMode).is_in(["plan", "ask", "auto", "allow"]))
         .check(Expr::col(CodeSession::SpawnEpoch).gte(0))
         .check(Expr::col(CodeSession::UnrecognizedEventCount).gte(0))
@@ -378,5 +385,69 @@ pub(super) fn code_approval_indexes() -> Vec<IndexCreateStatement> {
         .table(CodeApproval::Table)
         .col(CodeApproval::SessionId)
         .col(CodeApproval::State)
+        .to_owned()]
+}
+
+/// Durable watch tasks. One active watch per workspace, enforced in the
+/// create path rather than by a partial index so terminal rows keep the
+/// history.
+pub(super) fn code_watch_table() -> TableCreateStatement {
+    Table::create()
+        .table(CodeWatch::Table)
+        .col(
+            ColumnDef::new(CodeWatch::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(owner_column(CodeWatch::Owner))
+        .col(ColumnDef::new(CodeWatch::WorkspaceId).uuid().not_null())
+        .col(ColumnDef::new(CodeWatch::SessionId).uuid().not_null())
+        .col(ColumnDef::new(CodeWatch::PrNumber).big_integer().not_null())
+        .col(ColumnDef::new(CodeWatch::State).text().not_null())
+        .col(ColumnDef::new(CodeWatch::Detail).text())
+        .col(ColumnDef::new(CodeWatch::LastFixHead).text())
+        .col(
+            ColumnDef::new(CodeWatch::Cycles)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(CodeWatch::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeWatch::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_watch_workspace")
+                .from(CodeWatch::Table, CodeWatch::WorkspaceId)
+                .to(CodeWorkspace::Table, CodeWorkspace::Id),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_watch_session")
+                .from(CodeWatch::Table, CodeWatch::SessionId)
+                .to(CodeSession::Table, CodeSession::Id),
+        )
+        .check(
+            Expr::col(CodeWatch::State)
+                .is_in(["watching", "fixing", "blocked", "done", "stopped", "failed"]),
+        )
+        .check(Expr::col(CodeWatch::PrNumber).gte(1))
+        .check(Expr::col(CodeWatch::Cycles).gte(0))
+        .to_owned()
+}
+
+pub(super) fn code_watch_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_code_watch_workspace")
+        .table(CodeWatch::Table)
+        .col(CodeWatch::WorkspaceId)
         .to_owned()]
 }

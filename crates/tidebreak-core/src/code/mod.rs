@@ -102,6 +102,10 @@ code_id_type!(
     /// Identifies one auxiliary terminal attached to a workspace.
     CodeTerminalId
 );
+code_id_type!(
+    /// Identifies one durable watch task on a workspace's pull request.
+    CodeWatchId
+);
 
 /// Which external agent engine a session is bound to.
 ///
@@ -202,6 +206,38 @@ impl CodeSessionLifecycle {
             "running" => Some(Self::Running),
             "fenced" => Some(Self::Fenced),
             "ended" => Some(Self::Ended),
+            _ => None,
+        }
+    }
+}
+
+/// Why a session exists: the user's conversation, or an automation task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeSessionKind {
+    /// The user's conversation with the engine.
+    Interactive,
+    /// A watch task's session; it runs fix turns, never user input.
+    Watch,
+}
+
+impl CodeSessionKind {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Watch => "watch",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "interactive" => Some(Self::Interactive),
+            "watch" => Some(Self::Watch),
             _ => None,
         }
     }
@@ -414,6 +450,11 @@ pub struct PullRequestDigest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub base_branch: Option<String>,
+    /// Head commit SHA the digest was read against, when the host reported
+    /// one. The watch sweep uses it to avoid re-fixing the same head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
     /// True when auto-merge is enabled on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -559,6 +600,8 @@ pub struct CodeSession {
     pub owner: crate::OwnerId,
     /// Owning workspace.
     pub workspace_id: WorkspaceId,
+    /// Why the session exists: user conversation or watch task.
+    pub kind: CodeSessionKind,
     /// Engine this session is bound to.
     pub harness_kind: HarnessKind,
     /// Version observed at last launch, when known.
@@ -630,6 +673,92 @@ pub struct CodeTurnAttachment {
     pub media_type: crate::image::ImageMediaType,
     /// Size of the stored bytes.
     pub byte_len: u64,
+}
+
+/// State of a persisted watch task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeWatchState {
+    /// Polling the host; nothing is actionable right now.
+    Watching,
+    /// A fix turn is running or was just submitted.
+    Fixing,
+    /// Progress needs the user; polling continues in case it clears.
+    Blocked,
+    /// Terminal: the pull request merged, closed, or became ready.
+    Done,
+    /// Terminal: the user stopped the watch.
+    Stopped,
+    /// Terminal: the watch cannot continue (session gone, workspace archived).
+    Failed,
+}
+
+impl CodeWatchState {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Watching => "watching",
+            Self::Fixing => "fixing",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "watching" => Some(Self::Watching),
+            "fixing" => Some(Self::Fixing),
+            "blocked" => Some(Self::Blocked),
+            "done" => Some(Self::Done),
+            "stopped" => Some(Self::Stopped),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// True when the watch no longer sweeps.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Stopped | Self::Failed)
+    }
+}
+
+/// Persisted watch task: a durable background loop that keeps one
+/// workspace's pull request moving until it merges or needs the user.
+///
+/// The watch owns a dedicated [`CodeSessionKind::Watch`] session in the same
+/// worktree. It never merges or arms auto-merge — decision 42 reserves those
+/// for the user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeWatch {
+    /// Stable id.
+    pub id: CodeWatchId,
+    /// Principal this watch belongs to, denormalized from its workspace.
+    pub owner: crate::OwnerId,
+    /// Workspace whose pull request is watched.
+    pub workspace_id: WorkspaceId,
+    /// The watch's dedicated session.
+    pub session_id: CodeSessionId,
+    /// Pull request number at watch start.
+    pub pr_number: u64,
+    /// Watch state.
+    pub state: CodeWatchState,
+    /// Human-readable reason for the current state, when one exists.
+    pub detail: Option<String>,
+    /// Head SHA the last fix turn was submitted against, when any.
+    pub last_fix_head: Option<String>,
+    /// Fix turns submitted so far.
+    pub cycles: i64,
+    /// Creation time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Last sweep write.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Persisted approval record.

@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tidebreak_core::{
-    Attention, CodeSessionId, CodeSessionLifecycle, OwnerId, PullRequestDigest, RepoId,
-    SequencedCodeEvent, WorkspaceId,
+    Attention, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, OwnerId, PullRequestDigest,
+    RepoId, SequencedCodeEvent, WorkspaceId,
 };
 use tokio::sync::broadcast;
 
@@ -33,6 +33,7 @@ const UPDATES_BUFFER: usize = 256;
 pub(crate) struct SessionDigest {
     pub workspace: WorkspaceId,
     pub session: CodeSessionId,
+    pub kind: CodeSessionKind,
     pub lifecycle: CodeSessionLifecycle,
     pub attention: Attention,
     pub title: String,

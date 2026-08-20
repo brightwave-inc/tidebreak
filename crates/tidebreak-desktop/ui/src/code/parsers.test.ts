@@ -31,6 +31,7 @@ import {
 const SESSION = {
   id: "sess-1",
   workspace_id: "ws-1",
+  kind: "interactive",
   harness_kind: "claude_code",
   permission_mode: "plan",
   lifecycle: "idle",
@@ -437,6 +438,7 @@ describe("pull request state in live updates", () => {
   const digest = {
     workspace: "ws-1",
     session: "sess-1",
+    kind: "interactive",
     lifecycle: "idle",
     attention: { state: { type: "working" }, source: "lifecycle" },
     title: "Fix login",
@@ -585,6 +587,18 @@ describe("liveCodeSession", () => {
     expect(ended && live).toBeTruthy();
     expect(liveCodeSession([ended!, live!])?.id).toBe("sess-1");
     expect(liveCodeSession([ended!])).toBeNull();
+  });
+
+  it("never attaches a watch session to the workspace page", () => {
+    const watch = parseCodeSession({
+      ...SESSION,
+      id: "watch-1",
+      kind: "watch",
+    });
+    const live = parseCodeSession(SESSION);
+    expect(watch && live).toBeTruthy();
+    expect(liveCodeSession([watch!, live!])?.id).toBe("sess-1");
+    expect(liveCodeSession([watch!])).toBeNull();
   });
 });
 

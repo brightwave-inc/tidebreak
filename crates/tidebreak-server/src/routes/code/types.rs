@@ -5,10 +5,10 @@ use ts_rs::TS;
 
 use tidebreak_core::{
     Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionLifecycle, CodeTerminalId,
-    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, Diffstat,
-    FenceReason, FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest,
-    QuickAction, RepoId, WorkspaceId,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle,
+    CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState,
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
+    HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -86,6 +86,7 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
 pub struct CodeSessionSnapshot {
     pub id: tidebreak_core::CodeSessionId,
     pub workspace_id: WorkspaceId,
+    pub kind: CodeSessionKind,
     pub harness_kind: HarnessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -111,6 +112,7 @@ impl From<CodeSession> for CodeSessionSnapshot {
         Self {
             id: session.id,
             workspace_id: session.workspace_id,
+            kind: session.kind,
             harness_kind: session.harness_kind,
             harness_version: session.harness_version,
             harness_resume_ref: session.harness_resume_ref,
@@ -380,6 +382,41 @@ pub struct CodeWorkspacePrSnapshot {
     #[ts(optional)]
     pub gh_authenticated: Option<bool>,
     pub remediation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch: Option<CodeWatchSnapshot>,
+}
+
+/// One durable watch task on a workspace's pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWatchSnapshot {
+    pub id: CodeWatchId,
+    pub workspace_id: WorkspaceId,
+    pub session_id: tidebreak_core::CodeSessionId,
+    pub pr_number: u64,
+    pub state: CodeWatchState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    pub cycles: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<CodeWatch> for CodeWatchSnapshot {
+    fn from(watch: CodeWatch) -> Self {
+        Self {
+            id: watch.id,
+            workspace_id: watch.workspace_id,
+            session_id: watch.session_id,
+            pr_number: watch.pr_number,
+            state: watch.state,
+            detail: watch.detail,
+            cycles: watch.cycles,
+            created_at: watch.created_at,
+            updated_at: watch.updated_at,
+        }
+    }
 }
 
 /// Body of `POST /code/workspaces/{id}/pr/merge`.
@@ -704,6 +741,7 @@ pub struct CodeTerminalActivityNotice {
 pub struct CodeSessionDigest {
     pub workspace: WorkspaceId,
     pub session: tidebreak_core::CodeSessionId,
+    pub kind: CodeSessionKind,
     pub lifecycle: CodeSessionLifecycle,
     pub attention: Attention,
     pub title: String,
@@ -718,6 +756,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
         Self {
             workspace: digest.workspace,
             session: digest.session,
+            kind: digest.kind,
             lifecycle: digest.lifecycle,
             attention: digest.attention,
             title: digest.title,
@@ -742,6 +781,7 @@ pub enum CodeUpdateNotice {
     Digest {
         workspace: WorkspaceId,
         session: tidebreak_core::CodeSessionId,
+        kind: CodeSessionKind,
         lifecycle: CodeSessionLifecycle,
         attention: Attention,
         title: String,
@@ -791,6 +831,7 @@ impl CodeUpdateNotice {
         Self::Digest {
             workspace: wire.workspace,
             session: wire.session,
+            kind: wire.kind,
             lifecycle: wire.lifecycle,
             attention: wire.attention,
             title: wire.title,

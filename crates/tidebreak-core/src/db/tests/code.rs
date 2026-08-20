@@ -1,9 +1,9 @@
 use super::temp_store;
 use crate::code::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
-    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId,
-    WorkspaceId,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
+    HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
@@ -81,6 +81,7 @@ async fn seed_owner(
             id: session_id,
             owner: owner.clone(),
             workspace_id,
+            kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("2.1.233".into()),
             harness_resume_ref: None,
@@ -684,6 +685,7 @@ fn every_code_table_carries_an_owner_column() {
             "code_session",
             "code_turn",
             "code_turn_attachment",
+            "code_watch",
             "code_workspace",
         ],
         "the set of code tables changed; confirm the new one is owner-scoped"

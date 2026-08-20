@@ -829,6 +829,7 @@ pub(crate) enum CodeSession {
     Table,
     Id,
     WorkspaceId,
+    Kind,
     HarnessKind,
     HarnessVersion,
     HarnessResumeRef,
@@ -896,5 +897,21 @@ pub(crate) enum CodeApproval {
     Feedback,
     RequestedAt,
     DecidedAt,
+    Owner,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeWatch {
+    Table,
+    Id,
+    WorkspaceId,
+    SessionId,
+    PrNumber,
+    State,
+    Detail,
+    LastFixHead,
+    Cycles,
+    CreatedAt,
+    UpdatedAt,
     Owner,
 }

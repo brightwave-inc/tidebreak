@@ -284,8 +284,8 @@ mod tests {
         get_session, get_turn, insert_repo, insert_session, insert_turn, insert_workspace,
     };
     use tidebreak_core::{
-        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeTurn, CodeTurnId,
-        CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeSessionKind, CodeTurn,
+        CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
@@ -378,6 +378,7 @@ mod tests {
                 id: session_id,
                 owner: tidebreak_core::OwnerId::local(),
                 workspace_id,
+                kind: CodeSessionKind::Interactive,
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
                 harness_resume_ref: None,

@@ -97,8 +97,13 @@ export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
   return { state: workflowState(pr, checks), checks };
 }
 
+/**
+ * Prompt actions run in the workspace's interactive session. "Watch and fix"
+ * is not one of them: it starts a durable server-side watch task instead
+ * (`POST /code/workspaces/{id}/watch`).
+ */
 export function prWorkflowPrompt(
-  action: PrWorkflowAction,
+  action: Exclude<PrWorkflowAction, "watch_and_fix">,
   pr: PullRequestDigest,
 ): string {
   const number = `#${pr.number}`;
@@ -106,9 +111,6 @@ export function prWorkflowPrompt(
   const context = prWorkflowPromptContext(pr);
   let instruction: string;
   switch (action) {
-    case "watch_and_fix":
-      instruction = `Watch pull request ${number} until it is mergeable. This watch runs in the current task, so stay on this workspace and branch. On every cycle, associate checks with the current head SHA and inspect required checks, actionable review feedback, draft status, mergeability, and whether the branch is behind ${base}. Wait efficiently while work is pending. When a check fails, a reviewer requests a concrete change, conflicts appear, or the branch must be updated, diagnose it, make the smallest safe fix, fetch and rebase onto ${base} when needed, resolve conflicts, run focused validation, commit if needed, push, and keep watching against the new head SHA. If the pull request is a draft, mark it ready for review before enabling auto-merge when that action is authorized; otherwise report the required authorization as the blocker. Enable auto-merge once required checks and automated reviews are green. Do not stop merely because checks are pending. Stop only when the pull request is merged or when a required human approval, missing permission, external outage, or product decision blocks progress; in that case report the exact blocker.`;
-      break;
     case "mark_ready":
       instruction = `Mark pull request ${number} ready for review. First confirm the current head is pushed and the pull request is still a draft. Do not merge it. Report the result.`;
       break;

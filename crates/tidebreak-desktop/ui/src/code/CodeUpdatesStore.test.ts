@@ -18,6 +18,7 @@ function digest(overrides: Partial<CodeSessionDigest> = {}): CodeSessionDigest {
   return {
     workspace: "ws-1",
     session: "sess-1",
+    kind: "interactive",
     lifecycle: "idle",
     attention: working,
     title: "first change",
@@ -53,6 +54,24 @@ describe("reduceCodeUpdates", () => {
     expect(Object.keys(restated.byWorkspace)).toEqual(["ws-3"]);
   });
 
+  it("never lets a watch session displace the interactive digest", () => {
+    const empty = { byWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
+    const seeded = reduceCodeUpdates(empty, {
+      type: "snapshot",
+      sessions: [
+        digest(),
+        digest({ session: "sess-watch", kind: "watch", lifecycle: "running" }),
+      ],
+    });
+    expect(seeded.byWorkspace["ws-1"].session).toBe("sess-1");
+    const afterWatchDigest = reduceCodeUpdates(seeded, {
+      type: "digest",
+      digest: digest({ session: "sess-watch", kind: "watch", turn_count: 5 }),
+    });
+    expect(afterWatchDigest.byWorkspace["ws-1"].session).toBe("sess-1");
+    expect(afterWatchDigest.byWorkspace["ws-1"].turn_count).toBe(0);
+  });
+
   it("maps notices onto reducer actions", () => {
     expect(
       noticeToAction({
@@ -65,6 +84,7 @@ describe("reduceCodeUpdates", () => {
         type: "digest",
         workspace: "ws-1",
         session: "sess-1",
+        kind: "interactive",
         lifecycle: "running",
         attention: working,
         title: "first change",
@@ -75,6 +95,7 @@ describe("reduceCodeUpdates", () => {
       digest: {
         workspace: "ws-1",
         session: "sess-1",
+        kind: "interactive",
         lifecycle: "running",
         attention: working,
         title: "first change",

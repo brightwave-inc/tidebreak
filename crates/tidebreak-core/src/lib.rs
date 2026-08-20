@@ -143,14 +143,14 @@ pub use client_tools::{
 pub use code::{
     should_replace, ApprovalDecisionKind, Attention, AttentionSource, AttentionState, BoundedError,
     CapLevel, CheckpointHint, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionLifecycle,
-    CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeUsage,
-    CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, PullRequestCheck,
-    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
-    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
-    MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
-    MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
+    CodeUsage, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus,
+    Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind,
+    HarnessNoticeLevel, HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestComment,
+    PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail,
+    ToolOutcome, WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS,
+    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

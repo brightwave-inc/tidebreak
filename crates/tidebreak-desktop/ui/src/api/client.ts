@@ -93,6 +93,7 @@ import {
   type CodeWorkspaceBlob,
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
+  type CodeWatchSnapshot,
   type CodePrCommentsSnapshot,
   type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
@@ -141,6 +142,7 @@ import {
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
+  parseCodeWatch,
   parseCodePrComments,
   parseHarnessModelList,
   parseHarnessDoctorReport,
@@ -2155,6 +2157,32 @@ export class ApiClient {
         ),
       ),
       "code pull request",
+    );
+  }
+
+  /** Start a durable watch on the workspace's open pull request. */
+  async startCodeWatch(workspaceId: string): Promise<CodeWatchSnapshot> {
+    return requireParsed(
+      parseCodeWatch(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/watch`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "code watch",
+    );
+  }
+
+  /** Stop the workspace's active watch and end its session. */
+  async stopCodeWatch(workspaceId: string): Promise<CodeWatchSnapshot> {
+    return requireParsed(
+      parseCodeWatch(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/watch`,
+          { method: "DELETE", headers: this.headers() },
+        ),
+      ),
+      "code watch",
     );
   }
 

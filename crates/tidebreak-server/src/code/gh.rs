@@ -349,6 +349,7 @@ pub(crate) async fn create_pull_request(
         merge_state_status: None,
         head_branch: None,
         base_branch: None,
+        head_sha: None,
         auto_merge_enabled: None,
         in_merge_queue: None,
     };
@@ -1115,6 +1116,7 @@ fn pr_view_snapshot_from_json(json: &str, checks_table: &str) -> Option<PrViewSn
         merge_state_status: lower_token("mergeStateStatus"),
         head_branch: branch("headRefName"),
         base_branch: branch("baseRefName"),
+        head_sha: head_oid.clone(),
         auto_merge_enabled: Some(
             parsed
                 .get("autoMergeRequest")

@@ -15,6 +15,7 @@ pub mod journal;
 pub mod repo;
 pub mod session;
 pub mod turn;
+pub mod watch;
 pub mod workspace;
 
 pub use approval::*;
@@ -22,6 +23,7 @@ pub use journal::*;
 pub use repo::*;
 pub use session::*;
 pub use turn::*;
+pub use watch::*;
 pub use workspace::*;
 
 /// Typed journal-append failure. A stale spawn epoch is a distinct variant so

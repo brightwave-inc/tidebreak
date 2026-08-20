@@ -1713,6 +1713,7 @@ pub mod code_session {
         pub id: Uuid,
         pub owner: String,
         pub workspace_id: Uuid,
+        pub kind: String,
         pub harness_kind: String,
         pub harness_version: Option<String>,
         pub harness_resume_ref: Option<String>,
@@ -1833,6 +1834,32 @@ pub mod code_approval {
         pub feedback: Option<String>,
         pub requested_at: DateTimeUtc,
         pub decided_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_watch {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_watch")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub workspace_id: Uuid,
+        pub session_id: Uuid,
+        pub pr_number: i64,
+        pub state: String,
+        pub detail: Option<String>,
+        pub last_fix_head: Option<String>,
+        pub cycles: i64,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

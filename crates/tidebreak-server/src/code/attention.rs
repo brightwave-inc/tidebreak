@@ -330,6 +330,7 @@ async fn build_digest(
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
+        kind: session.kind,
         lifecycle: session.lifecycle,
         attention: session.attention.clone(),
         title: workspace.title,
@@ -381,7 +382,7 @@ impl Drop for StallSweepGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{should_replace, FenceReason, WorkspaceId};
+    use tidebreak_core::{should_replace, CodeSessionKind, FenceReason, WorkspaceId};
 
     fn auto_working() -> Attention {
         Attention::working(AttentionSource::Lifecycle)
@@ -403,6 +404,7 @@ mod tests {
             id: CodeSessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
             workspace_id: WorkspaceId::new(),
+            kind: CodeSessionKind::Interactive,
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,

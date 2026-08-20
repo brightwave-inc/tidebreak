@@ -805,10 +805,11 @@ async fn resolve_start_mode(
 
 fn pick_active_session(sessions: &[CodeSessionSnapshot]) -> Option<CodeSessionId> {
     let usable = |session: &&CodeSessionSnapshot| {
-        !matches!(
-            session.lifecycle,
-            CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
-        )
+        session.kind == tidebreak_core::CodeSessionKind::Interactive
+            && !matches!(
+                session.lifecycle,
+                CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+            )
     };
     sessions
         .iter()
