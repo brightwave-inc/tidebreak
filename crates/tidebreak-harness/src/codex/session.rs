@@ -1522,10 +1522,11 @@ done
             )
             .await;
 
-        let state = session.control_state.lock().expect("codex control state");
-        assert_eq!(state.turn, ControlTurn::Closed);
-        assert!(state.pending.is_empty());
-        drop(state);
+        {
+            let state = session.control_state.lock().expect("codex control state");
+            assert_eq!(state.turn, ControlTurn::Closed);
+            assert!(state.pending.is_empty());
+        }
         assert!(matches!(
             receiver.await.unwrap(),
             Err(HarnessError::SteeringRejected(_))
