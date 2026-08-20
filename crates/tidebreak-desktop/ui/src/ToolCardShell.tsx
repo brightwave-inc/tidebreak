@@ -87,12 +87,16 @@ export function ToolCardShell({
           {icon}
         </span>
         <span className={cn("min-w-0 flex-1", titleClassName)}>
-          <span
-            className={cn(typeof title === "string" && "block truncate")}
-            title={typeof title === "string" ? title : undefined}
-          >
-            {title}
-          </span>
+          {typeof title === "string" ? (
+            <span className="block truncate" title={title}>
+              {title}
+            </span>
+          ) : (
+            // Rendered directly so a `titleClassName` flex layout reaches the
+            // host's own title children; an inline wrapper here forces a
+            // block-level child (e.g. MiddleTruncate) onto its own line.
+            title
+          )}
         </span>
         <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
           {trailing}

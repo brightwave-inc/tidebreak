@@ -641,9 +641,24 @@ function toolSubject(detail: ToolDetail, name: string): string {
  * serialization verbatim leaves ordinary globs looking like
  * `'"'!node_modules'"'`. Decode the outer double-quoted `-lc` argument for
  * display only; the command is never executed from this value.
+ *
+ * Headless engines also lead every command with `cd <worktree> && `, so a
+ * session's rows all open with the same long path and the part worth reading
+ * is pushed into the truncated middle. Drop that leading `cd` for display —
+ * the worktree is the session's own directory, so it says nothing the row
+ * does not already mean.
  */
 function humanizeShellCommand(command: string): string {
-  const trimmed = command.trim();
+  const unwrapped = unwrapShellLauncher(command.trim());
+  const stripped = unwrapped.replace(
+    /^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*&&\s*/,
+    "",
+  );
+  // A bare `cd <path>` is the whole command; stripping it would leave nothing.
+  return stripped.trim() || unwrapped;
+}
+
+function unwrapShellLauncher(trimmed: string): string {
   const wrapped = trimmed.match(
     /^\/(?:usr\/)?bin\/(?:zsh|bash|sh) -lc "([\s\S]*)"$/,
   );
