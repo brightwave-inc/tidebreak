@@ -20,6 +20,10 @@ Desktop builds require CMake to compile the pinned whisper.cpp local voice engin
 # Arguments are forwarded to `cargo tauri dev`.
 scripts/dev.sh
 
+# Run Storybook for the desktop UI: installs the UI dependencies, then starts
+# the Storybook dev server. Arguments are forwarded to `pnpm storybook`.
+scripts/storybook.sh
+
 # Build everything
 cargo build --workspace
 
