@@ -495,10 +495,7 @@ pub(crate) async fn create_worktree(
 }
 
 /// True when `refs/heads/<branch>` exists in the repository.
-pub(crate) async fn branch_exists(
-    repo_root: &Path,
-    branch: &str,
-) -> Result<bool, WorktreeError> {
+pub(crate) async fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool, WorktreeError> {
     match git(
         Some(repo_root),
         &[
@@ -543,12 +540,7 @@ pub(crate) async fn restore_worktree(
     }
     let add = git(
         Some(repo_root),
-        &[
-            "worktree",
-            "add",
-            &worktree_path.to_string_lossy(),
-            branch,
-        ],
+        &["worktree", "add", &worktree_path.to_string_lossy(), branch],
         GIT_WORKTREE_TIMEOUT,
     )
     .await;

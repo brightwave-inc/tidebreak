@@ -765,10 +765,7 @@ impl CodeRuntime {
         if path.exists() {
             return Err(ServerError::conflict_kind(
                 "worktree_path_occupied",
-                format!(
-                    "something already exists at {}",
-                    workspace.worktree_path
-                ),
+                format!("something already exists at {}", workspace.worktree_path),
             ));
         }
         worktree::restore_worktree(repo_root, path, &workspace.branch_name)
