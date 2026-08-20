@@ -30,7 +30,10 @@ pub const RESOURCE_LLM: &str = "llm";
 /// The audience accepted by a Gateway-backed Tidebreak server.
 pub const RESOURCE_TIDEBREAK: &str = "tidebreak";
 
-const SCOPE: &str = "openid profile offline_access models:read inference:invoke tidebreak:access";
+// `tidebreak:access` is deliberately absent: the Gateway derives it from the
+// machine-bound resource at refresh time, so requesting it at sign-in would
+// only break sign-in against Gateways that predate the Tidebreak audience.
+const SCOPE: &str = "openid profile offline_access models:read inference:invoke";
 /// The secret-store key the gateway session lives under. Public so the secret
 /// cache can treat it as a miss-passthrough key, and so [`crate::secret_rehome`]
 /// can name every stored credential.
