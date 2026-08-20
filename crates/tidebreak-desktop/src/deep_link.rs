@@ -70,6 +70,18 @@ impl PairingStore {
     pub(crate) fn new(rx: watch::Receiver<Option<PairingHandle>>) -> Self {
         Self { rx }
     }
+
+    pub(crate) async fn handle(&self) -> Result<PairingHandle, String> {
+        let mut rx = self.rx.clone();
+        loop {
+            if let Some(handle) = rx.borrow().clone() {
+                return Ok(handle);
+            }
+            rx.changed()
+                .await
+                .map_err(|_| "the embedded server did not start".to_string())?;
+        }
+    }
 }
 
 /// A validated provision link: the gateway URL to pair with, and its origin
@@ -586,15 +598,7 @@ fn show_pairing_failure(app: &tauri::AppHandle, origin: &str, failure: &PairingE
 }
 
 async fn wait_pairing_handle(app: &tauri::AppHandle) -> Result<PairingHandle, String> {
-    let mut rx = app.state::<PairingStore>().rx.clone();
-    loop {
-        if let Some(handle) = rx.borrow().clone() {
-            return Ok(handle);
-        }
-        rx.changed()
-            .await
-            .map_err(|_| "the embedded server did not start".to_string())?;
-    }
+    app.state::<PairingStore>().handle().await
 }
 
 /// Growth cap for `pairing.log`. Every ignored deep link writes a line, and

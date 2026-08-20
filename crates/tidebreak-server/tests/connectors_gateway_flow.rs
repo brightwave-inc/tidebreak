@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use tidebreak_core::{Result as CoreResult, SecretProvider};
 use tidebreak_server::connectors::{
     is_sign_in_required, CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayCatalogFetch,
-    GatewayConnection, GatewayInvokeOutcome, RESOURCE_CONTROL, RESOURCE_LLM,
+    GatewayConnection, GatewayInvokeOutcome, GATEWAY_SECRET_KEY, RESOURCE_CONTROL, RESOURCE_LLM,
 };
 
 const INSTALLATION: &str = "11111111-2222-3333-4444-555555555555";
@@ -471,6 +471,12 @@ fn browser() -> reqwest::Client {
 }
 
 async fn signed_in_connection() -> (Arc<FakeGateway>, GatewayConnection) {
+    let (gateway, connection, _) = signed_in_connection_with_secrets().await;
+    (gateway, connection)
+}
+
+async fn signed_in_connection_with_secrets(
+) -> (Arc<FakeGateway>, GatewayConnection, Arc<MockSecrets>) {
     let gateway = Arc::new(FakeGateway::default());
     let address = serve_fake_gateway(gateway.clone()).await;
     let auth =
@@ -482,10 +488,10 @@ async fn signed_in_connection() -> (Arc<FakeGateway>, GatewayConnection) {
     browser().get(&url).send().await.unwrap();
     let session = finish.await.unwrap().unwrap();
 
-    let connection =
-        GatewayConnection::new(auth, CredentialVault::new(Arc::new(MockSecrets::default())));
+    let secrets = Arc::new(MockSecrets::default());
+    let connection = GatewayConnection::new(auth, CredentialVault::new(secrets.clone()));
     connection.store_session(&session).await.unwrap();
-    (gateway, connection)
+    (gateway, connection, secrets)
 }
 
 #[tokio::test]
@@ -541,6 +547,72 @@ async fn access_tokens_cache_per_resource_and_rotate_on_refresh() {
     assert_eq!(models[1].protocol, "openai_chat_completions");
     let identity = connection.identity().await.unwrap();
     assert_eq!(identity.user_id, USER);
+}
+
+#[tokio::test]
+async fn tidebreak_machine_tokens_and_cache_entries_never_reach_the_vault() {
+    let (gateway, connection, secrets) = signed_in_connection_with_secrets().await;
+    let resource = format!("tidebreak:{}", "a".repeat(64));
+
+    // Simulate an entry persisted by an older desktop. The next vault save
+    // must scrub it in addition to keeping the newly minted bearer volatile.
+    let mut seeded: Value = serde_json::from_str(
+        &secrets
+            .get_secret(GATEWAY_SECRET_KEY)
+            .await
+            .unwrap()
+            .expect("the signed-in session is stored"),
+    )
+    .unwrap();
+    let refresh_before = seeded["refresh_token"].as_str().unwrap().to_owned();
+    seeded["access_tokens"].as_object_mut().unwrap().insert(
+        resource.clone(),
+        json!({
+            "token": "old-persisted-tidebreak-bearer",
+            "expires_at_unix": u64::MAX,
+            "scope": "tidebreak:access",
+        }),
+    );
+    secrets
+        .set_secret(GATEWAY_SECRET_KEY, &serde_json::to_string(&seeded).unwrap())
+        .await
+        .unwrap();
+
+    let exchanges = gateway.token_requests.load(Ordering::SeqCst);
+    let token = connection.access_token(&resource).await.unwrap();
+    assert_eq!(gateway.token_requests.load(Ordering::SeqCst), exchanges + 1);
+    assert_eq!(
+        connection.access_token(&resource).await.unwrap(),
+        token,
+        "a live connection should reuse its process-only Tidebreak token"
+    );
+    assert_eq!(gateway.token_requests.load(Ordering::SeqCst), exchanges + 1);
+
+    let persisted = secrets
+        .get_secret(GATEWAY_SECRET_KEY)
+        .await
+        .unwrap()
+        .expect("refresh rotation remains durable");
+    let persisted_json: Value = serde_json::from_str(&persisted).unwrap();
+    let access_tokens = persisted_json["access_tokens"].as_object().unwrap();
+    assert!(
+        access_tokens
+            .keys()
+            .all(|resource| resource != "tidebreak" && !resource.starts_with("tidebreak:")),
+        "the durable cache contained a Tidebreak machine resource: {access_tokens:?}"
+    );
+    assert!(!persisted.contains("old-persisted-tidebreak-bearer"));
+    assert!(!persisted.contains(&token));
+    assert_ne!(
+        persisted_json["refresh_token"].as_str().unwrap(),
+        refresh_before,
+        "the rotating refresh token must still be persisted"
+    );
+    assert_eq!(
+        gateway.access_tokens.lock().unwrap().get(&token),
+        Some(&resource),
+        "the volatile bearer still carries the requested machine audience"
+    );
 }
 
 #[tokio::test]

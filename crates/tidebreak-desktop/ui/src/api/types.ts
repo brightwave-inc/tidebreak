@@ -239,6 +239,7 @@ export type ServerInfo = {
   baseUrl: string;
   token: string;
   attachment: Attachment;
+  gatewayAuth: boolean;
 };
 
 /** What the shell knows about the current attachment. */
@@ -267,7 +268,8 @@ export type RemoteConnectReason =
   | "remote_machine_unreachable"
   | "remote_machine_token_refused"
   | "remote_machine_not_a_machine"
-  | "remote_machine_token_storage_failed";
+  | "remote_machine_token_storage_failed"
+  | "remote_machine_gateway_auth_unavailable";
 
 export type ProviderKind = WireProviderKind;
 /** Stable provider-scoped key used for new settings and chat overrides. */

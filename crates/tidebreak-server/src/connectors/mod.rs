@@ -41,5 +41,6 @@ pub use gateway::{
     GatewayCatalogFetch, GatewayCatalogModel, GatewayConnection, GatewayConsentOutcome,
     GatewayCredentials, GatewayIdentity, GatewayInvokeOutcome, GatewayMeta, GatewayModel,
     GatewayOperationSummary, GatewayRegistrationOutcome, GatewaySurfaces, PendingSignIn, TokenSet,
-    MEMBER_CATALOG_V1, RESOURCE_CONTROL, RESOURCE_LLM, SECRET_KEY as GATEWAY_SECRET_KEY,
+    MEMBER_CATALOG_V1, RESOURCE_CONTROL, RESOURCE_LLM, RESOURCE_TIDEBREAK,
+    SECRET_KEY as GATEWAY_SECRET_KEY,
 };

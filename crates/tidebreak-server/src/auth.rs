@@ -7,11 +7,11 @@
 //!   [`Principal::LocalOwner`]. It's the one thing standing between the agent
 //!   and any other local process that finds the port, so the check is
 //!   mandatory on every non-health route.
-//! - **Self-host** authenticates with static named bearer tokens from an
-//!   operator-maintained file ([`TokenMap`]); each token names the configured
-//!   user it belongs to, resolved to [`Principal::User`]. The per-launch token
-//!   names nobody on a shared deployment and is not accepted there — a
-//!   credential that names no one is rejected at this middleware (#853).
+//! - **Self-host** authenticates either with live Model Gateway identity or
+//!   static named bearer tokens from an operator-maintained file ([`TokenMap`]).
+//!   Both resolve to [`Principal::User`]. The per-launch token names nobody on
+//!   a shared deployment and is not accepted there — a credential that names
+//!   no one is rejected at this middleware (#853).
 //!
 //! # Self-host token file
 //!
@@ -54,6 +54,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::{
@@ -62,6 +63,8 @@ use axum::http::{
 };
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use futures::StreamExt as _;
 use tidebreak_core::{AgentError, Profile, Result};
 
 use crate::principal::{AuthContext, Principal, Role, UserId};
@@ -84,6 +87,39 @@ pub const CLIENT_EXECUTOR_HEADER: HeaderName =
 /// Scoped credential for publishing caller-held bytes into one chat.
 pub const LOCAL_IMPORT_HEADER: HeaderName = HeaderName::from_static("x-tidebreak-local-import");
 
+/// Public, non-secret authentication metadata for native clients attaching to
+/// a hosted machine. A client uses this to discover that it should mint a
+/// Gateway `tidebreak` resource token instead of asking a person to paste a
+/// long-lived static bearer.
+#[derive(serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub(crate) enum AuthDiscovery {
+    Gateway {
+        gateway_url: String,
+        resource: String,
+    },
+    StaticToken,
+    Local,
+}
+
+pub(crate) async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
+    let discovery = match state.config.profile {
+        Profile::SelfHost => match state.config.auth_gateway_url.as_deref() {
+            Some(gateway_url) => AuthDiscovery::Gateway {
+                gateway_url: gateway_url.trim_end_matches('/').to_owned(),
+                resource: state
+                    .principal_authenticator
+                    .gateway_resource()
+                    .expect("Gateway authenticator exposes its machine resource")
+                    .to_owned(),
+            },
+            None => AuthDiscovery::StaticToken,
+        },
+        _ => AuthDiscovery::Local,
+    };
+    Json(discovery)
+}
+
 /// Reject requests whose bearer token does not resolve to a principal — from
 /// `Authorization: Bearer <token>`, or (on WebSocket upgrades only)
 /// `Sec-WebSocket-Protocol: tidebreak-token.<token>`.
@@ -95,11 +131,25 @@ pub async fn require_token(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let resolved =
-        extract_token(request.headers()).and_then(|presented| resolve_principal(&state, presented));
+    let presented = extract_token(request.headers()).map(str::to_owned);
+    let resolved = match presented.as_deref() {
+        Some(presented) => resolve_principal(&state, presented).await,
+        None => None,
+    };
 
     match resolved {
         Some(principal) => {
+            if matches!(
+                state.principal_authenticator.as_ref(),
+                PrincipalAuthenticator::Gateway(_)
+            ) {
+                request.extensions_mut().insert(GatewayAuthLease {
+                    bearer: presented
+                        .expect("a resolved principal had a presented token")
+                        .into(),
+                    principal: principal.clone(),
+                });
+            }
             request.extensions_mut().insert(AuthContext {
                 principal,
                 client_executor: false,
@@ -110,12 +160,36 @@ pub async fn require_token(
     }
 }
 
+/// Process-memory lease retained by Gateway-authenticated WebSocket tasks.
+///
+/// The bearer is intentionally private and this type deliberately implements
+/// neither `Debug` nor serialization. Socket loops use it only to re-check the
+/// live Gateway principal; static-token and local sockets receive no lease.
+#[derive(Clone)]
+pub(crate) struct GatewayAuthLease {
+    bearer: std::sync::Arc<str>,
+    principal: Principal,
+}
+
+impl GatewayAuthLease {
+    /// Revalidate the original credential and require identity and role to be
+    /// unchanged. Refusal, expiry, deactivation, demotion/promotion, and
+    /// verifier outages all fail closed.
+    pub(crate) async fn revalidate(&self, state: &AppState) -> bool {
+        state
+            .principal_authenticator
+            .resolve(&self.bearer)
+            .await
+            .is_some_and(|principal| principal == self.principal)
+    }
+}
+
 /// Map the presented credential to WHO is asking, per the boot profile.
 ///
 /// `None` is a 401: a token that names no one admits no one. Unknown future
 /// profiles resolve nobody until they choose an authenticator — fail closed,
 /// never defaulted to the local owner.
-fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
+async fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
     match state.config.profile {
         // The per-launch bearer is loopback-only and handed to one client, so
         // the verified caller *is* the local owner.
@@ -124,20 +198,227 @@ fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
         // Every self-host credential names a configured user. The per-launch
         // bearer is deliberately not consulted: on a shared deployment it
         // names nobody, so it authenticates nobody.
-        Profile::SelfHost => state
-            .principal_tokens
-            .resolve(presented)
-            .map(|(id, role)| Principal::User { id, role }),
+        Profile::SelfHost => state.principal_authenticator.resolve(presented).await,
         _ => None,
     }
+}
+
+/// The self-host credential-to-principal mechanism selected at boot.
+///
+/// Gateway mode is the hosted default: every request is checked against the
+/// Gateway's live account and session state. Static tokens remain available
+/// for standalone self-host deployments with no Model Gateway.
+pub(crate) enum PrincipalAuthenticator {
+    None,
+    Static(TokenMap),
+    Gateway(GatewayAuthenticator),
+}
+
+impl PrincipalAuthenticator {
+    pub(crate) fn from_config(config: &tidebreak_core::Config) -> Result<Self> {
+        match (
+            config.auth_tokens_file.as_deref(),
+            config.auth_gateway_url.as_deref(),
+            config.auth_gateway_verifier_url.as_deref(),
+            config.public_url.as_deref(),
+        ) {
+            (Some(path), None, None, _) => Ok(Self::Static(TokenMap::load(path)?)),
+            (None, Some(gateway_url), verifier_url, Some(public_url)) => {
+                let public_url = canonical_public_url(public_url)?;
+                Ok(Self::Gateway(GatewayAuthenticator::new(
+                    verifier_url.unwrap_or(gateway_url),
+                    tidebreak_core::config::tidebreak_machine_resource(&public_url),
+                )?))
+            }
+            (None, Some(_), _, None) => Err(AgentError::config(
+                "TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_GATEWAY_URL so user credentials can be bound to this exact machine",
+            )),
+            (Some(_), Some(_), _, _) | (Some(_), None, Some(_), _) => Err(AgentError::config(
+                "self-host authentication is ambiguous: set exactly one of \
+                 TIDEBREAK_AUTH_TOKENS_FILE or TIDEBREAK_AUTH_GATEWAY_URL",
+            )),
+            (None, None, Some(_), _) => Err(AgentError::config(
+                "TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL requires \
+                 TIDEBREAK_AUTH_GATEWAY_URL to name the public identity authority",
+            )),
+            (None, None, None, _) => Err(AgentError::config(
+                "self-host requires a principal-naming authenticator: set \
+                 TIDEBREAK_AUTH_GATEWAY_URL for Model Gateway identity, or \
+                 TIDEBREAK_AUTH_TOKENS_FILE for standalone static tokens",
+            )),
+        }
+    }
+
+    async fn resolve(&self, presented: &str) -> Option<Principal> {
+        match self {
+            Self::None => None,
+            Self::Static(tokens) => tokens
+                .resolve(presented)
+                .map(|(id, role)| Principal::User { id, role }),
+            Self::Gateway(gateway) => match gateway.resolve(presented).await {
+                Ok(principal) => principal,
+                Err(error) => {
+                    tracing::warn!(%error, "model-gateway could not validate Tidebreak caller");
+                    None
+                }
+            },
+        }
+    }
+
+    fn gateway_resource(&self) -> Option<&str> {
+        match self {
+            Self::Gateway(gateway) => Some(&gateway.resource),
+            Self::None | Self::Static(_) => None,
+        }
+    }
+}
+
+/// Live verifier for Gateway-issued `tidebreak` resource tokens.
+pub(crate) struct GatewayAuthenticator {
+    principal_url: reqwest::Url,
+    resource: String,
+    client: reqwest::Client,
+}
+
+#[derive(serde::Deserialize)]
+struct GatewayPrincipal {
+    user_id: uuid::Uuid,
+    is_admin: bool,
+}
+
+impl GatewayAuthenticator {
+    const RESPONSE_LIMIT: usize = 16 * 1024;
+
+    fn new(base_url: &str, resource: String) -> Result<Self> {
+        let mut base = reqwest::Url::parse(base_url.trim()).map_err(|error| {
+            AgentError::config(format!("invalid Model Gateway verifier URL: {error}"))
+        })?;
+        if !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(AgentError::config(
+                "the Model Gateway verifier URL must not contain credentials, a query, or a fragment",
+            ));
+        }
+        let loopback = base.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if base.scheme() != "https" && !(base.scheme() == "http" && loopback) {
+            return Err(AgentError::config(
+                "the Model Gateway verifier URL must use https (http is allowed only for loopback development)",
+            ));
+        }
+        base.set_path("/api/v1/tidebreak/principal");
+        base.set_query(None);
+        base.set_fragment(None);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| AgentError::config(format!("gateway auth client: {error}")))?;
+        Ok(Self {
+            principal_url: base,
+            resource,
+            client,
+        })
+    }
+
+    async fn resolve(&self, presented: &str) -> Result<Option<Principal>> {
+        if !presented.starts_with("mg_at_") || presented.len() > 512 {
+            return Ok(None);
+        }
+        let response = self
+            .client
+            .get(self.principal_url.clone())
+            .query(&[("resource", &self.resource)])
+            .bearer_auth(presented)
+            .send()
+            .await
+            .map_err(|error| AgentError::msg(format!("gateway auth request failed: {error}")))?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(AgentError::msg(format!(
+                "gateway auth returned status {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > Self::RESPONSE_LIMIT as u64)
+        {
+            return Err(AgentError::msg("gateway auth response exceeded size limit"));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                AgentError::msg(format!("gateway auth response failed: {error}"))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > Self::RESPONSE_LIMIT {
+                return Err(AgentError::msg("gateway auth response exceeded size limit"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let principal: GatewayPrincipal = serde_json::from_slice(&bytes).map_err(|error| {
+            AgentError::msg(format!("gateway auth response was invalid: {error}"))
+        })?;
+        let id = UserId::new(&principal.user_id.to_string())?;
+        let role = if principal.is_admin {
+            Role::Admin
+        } else {
+            Role::Member
+        };
+        Ok(Some(Principal::User { id, role }))
+    }
+}
+
+fn canonical_public_url(raw: &str) -> Result<String> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|error| AgentError::config(format!("invalid Tidebreak public URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AgentError::config(
+            "the Tidebreak public URL must be an HTTP(S) base URL without credentials, a query, or a fragment",
+        ));
+    }
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(AgentError::config(
+            "the Tidebreak public URL must use https (http is allowed only for loopback development)",
+        ));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// The self-host profile's static credential-to-principal mapping.
 ///
 /// Loaded once at boot from the operator's token file (format in the module
-/// docs). This is the seam a future authenticator (gateway-derived identity,
-/// #578) replaces: whatever verifies the credential, the middleware's output
-/// stays "which [`UserId`] is asking".
+/// docs). This remains the standalone compatibility implementation behind the
+/// same principal-authenticator seam used by live Gateway identity.
 #[derive(Debug, Default)]
 pub struct TokenMap {
     /// `(token, user, role)` triples; tokens are unique, users may repeat —
@@ -547,6 +828,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use axum::routing::get;
+    use axum::Router;
 
     fn headers(pairs: &[(HeaderName, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -769,5 +1052,99 @@ mod tests {
             Some("split-token")
         );
         assert!(offered_handshake_subprotocol(&headers));
+    }
+
+    #[tokio::test]
+    async fn gateway_auth_maps_live_identity_and_fails_closed() {
+        let user_id = uuid::Uuid::new_v4();
+        let resource =
+            tidebreak_core::config::tidebreak_machine_resource("https://tidebreak.example.test");
+        let expected_resource = resource.clone();
+        let app = Router::new().route(
+            "/api/v1/tidebreak/principal",
+            get(
+                move |query: axum::extract::Query<HashMap<String, String>>, headers: HeaderMap| {
+                    let expected_resource = expected_resource.clone();
+                    async move {
+                        if query.get("resource") != Some(&expected_resource) {
+                            return StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        match headers
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                        {
+                            Some("Bearer mg_at_admin") => Json(serde_json::json!({
+                                "user_id": user_id,
+                                "is_admin": true,
+                            }))
+                            .into_response(),
+                            Some("Bearer mg_at_member") => Json(serde_json::json!({
+                                "user_id": user_id,
+                                "is_admin": false,
+                            }))
+                            .into_response(),
+                            Some("Bearer mg_at_broken") => StatusCode::BAD_GATEWAY.into_response(),
+                            _ => StatusCode::UNAUTHORIZED.into_response(),
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let verifier = GatewayAuthenticator::new(&format!("http://{address}"), resource).unwrap();
+
+        let admin = verifier.resolve("mg_at_admin").await.unwrap().unwrap();
+        assert!(admin.is_admin());
+        assert_eq!(admin.owner_id().as_str(), format!("user:{user_id}"));
+
+        let member = verifier.resolve("mg_at_member").await.unwrap().unwrap();
+        assert!(!member.is_admin());
+        assert_eq!(member.owner_id().as_str(), format!("user:{user_id}"));
+
+        assert!(verifier.resolve("mg_at_revoked").await.unwrap().is_none());
+        assert!(verifier
+            .resolve("not-a-gateway-token")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(verifier.resolve("mg_at_broken").await.is_err());
+        server.abort();
+    }
+
+    #[test]
+    fn self_host_requires_exactly_one_principal_authenticator() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = tidebreak_core::Config::desktop(data_dir.path());
+        config.profile = Profile::SelfHost;
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+
+        config.auth_gateway_url = Some("https://gateway.example.test".to_owned());
+        config.auth_gateway_verifier_url =
+            Some("https://gateway.model-gateway.svc.cluster.local".to_owned());
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+        config.public_url = Some("https://tidebreak.example.test".to_owned());
+        assert!(matches!(
+            PrincipalAuthenticator::from_config(&config),
+            Ok(PrincipalAuthenticator::Gateway(_))
+        ));
+
+        let tokens = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tokens.path(),
+            "admin 0123456789abcdef0123456789abcdef admin\n",
+        )
+        .unwrap();
+        config.auth_tokens_file = Some(tokens.path().to_owned());
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+
+        config.auth_gateway_url = None;
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+        config.auth_gateway_verifier_url = None;
+        assert!(matches!(
+            PrincipalAuthenticator::from_config(&config),
+            Ok(PrincipalAuthenticator::Static(_))
+        ));
     }
 }

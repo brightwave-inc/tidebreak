@@ -15,6 +15,7 @@ import {
 import { AppContextProvider } from "./AppContext";
 
 import { resolveServerInfo } from "./boot";
+import { remoteMachineAccessToken } from "./remoteMachine";
 import {
   deletionDescription,
   detachChatFolders,
@@ -240,6 +241,26 @@ export function AppShell() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!client || !info?.gatewayAuth) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const token = await remoteMachineAccessToken();
+        if (cancelled) return;
+        client.setAccessToken(token);
+        connectOutputs(client.baseUrl, token);
+      } catch (error) {
+        if (!cancelled) console.warn("could not refresh hosted Tidebreak access", error);
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client, info]);
 
   useEffect(() => {
     if (!client || !info) return;

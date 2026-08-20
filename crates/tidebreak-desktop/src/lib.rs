@@ -52,6 +52,9 @@ pub struct ServerInfo {
     /// attached to. Host authority exists only on the local machine, so every
     /// caller that reaches the host branches on this.
     pub attachment: remote::Attachment,
+    /// Whether the bearer is a short-lived Model Gateway resource token the
+    /// shell can refresh from its existing OAuth session.
+    pub gateway_auth: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +70,7 @@ impl NativeServerInfo {
             base_url: self.base_url.clone(),
             token: self.token.clone(),
             attachment: remote::Attachment::Local,
+            gateway_auth: false,
         }
     }
 }
@@ -94,15 +98,54 @@ struct AppState {
 async fn server_info(
     state: tauri::State<'_, Arc<AppState>>,
     attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+    pairing: tauri::State<'_, deep_link::PairingStore>,
 ) -> Result<ServerInfo, String> {
     if let Some(attached) = attachment.current().await {
+        let (token, gateway_auth) = remote_token(&attached, &pairing).await?;
         return Ok(ServerInfo {
             base_url: attached.base_url,
-            token: attached.token,
+            token,
             attachment: remote::Attachment::Remote,
+            gateway_auth,
         });
     }
     Ok(wait_server_info(state.inner()).await?.renderer_info())
+}
+
+async fn remote_token(
+    attached: &remote::Attached,
+    pairing: &deep_link::PairingStore,
+) -> Result<(String, bool), String> {
+    match &attached.auth {
+        remote::AttachedAuth::StaticToken(token) => Ok((token.clone(), false)),
+        remote::AttachedAuth::Gateway { gateway_url } => {
+            let resource = tidebreak_core::config::tidebreak_machine_resource(&attached.base_url);
+            pairing
+                .handle()
+                .await?
+                .hosted_tidebreak_access_token(gateway_url, &resource)
+                .await
+                .map(|token| (token, true))
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+/// Return a fresh credential for the currently attached machine. Gateway mode
+/// rotates through the existing desktop OAuth session; static mode returns the
+/// legacy stored bearer.
+#[tauri::command]
+async fn remote_machine_access_token(
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+    pairing: tauri::State<'_, deep_link::PairingStore>,
+) -> Result<String, String> {
+    let attached = attachment
+        .current()
+        .await
+        .ok_or_else(|| "this window is not attached to a remote machine".to_string())?;
+    remote_token(&attached, &pairing)
+        .await
+        .map(|(token, _)| token)
 }
 
 /// Report which machine this client is attached to.
@@ -124,6 +167,29 @@ async fn connect_remote_machine(
     token: String,
 ) -> Result<remote::RemoteMachineState, remote::RemoteConnectError> {
     attachment.connect(&base_url, &token).await
+}
+
+/// Attach to a hosted machine using the Model Gateway session this desktop
+/// already holds. No user bearer is persisted or copied.
+#[tauri::command]
+async fn connect_gateway_remote_machine(
+    attachment: tauri::State<'_, Arc<remote::RemoteAttachment>>,
+    pairing: tauri::State<'_, deep_link::PairingStore>,
+    base_url: String,
+) -> Result<remote::RemoteMachineState, remote::RemoteConnectError> {
+    let (base_url, gateway_url, resource) = remote::discover_gateway(&base_url).await?;
+    let handle = pairing.handle().await.map_err(|error| {
+        remote::RemoteConnectError::detailed(remote::REASON_GATEWAY_AUTH_UNAVAILABLE, error)
+    })?;
+    let token = handle
+        .hosted_tidebreak_access_token(&gateway_url, &resource)
+        .await
+        .map_err(|error| {
+            remote::RemoteConnectError::detailed(remote::REASON_GATEWAY_AUTH_UNAVAILABLE, error)
+        })?;
+    attachment
+        .connect_gateway(&base_url, &gateway_url, &token)
+        .await
 }
 
 /// Detach from the remote machine and forget its token.
@@ -649,6 +715,8 @@ pub fn run() {
             server_info,
             remote_machine_state,
             connect_remote_machine,
+            connect_gateway_remote_machine,
+            remote_machine_access_token,
             disconnect_remote_machine,
             put_native_mcp_servers,
             request_user_attention,
@@ -985,6 +1053,7 @@ mod server_info_tests {
         // The embedded server is always the local machine; the renderer reads
         // host authority off this field.
         assert!(serialized.contains(r#""attachment":"local""#));
+        assert!(serialized.contains(r#""gatewayAuth":false"#));
     }
 
     #[test]

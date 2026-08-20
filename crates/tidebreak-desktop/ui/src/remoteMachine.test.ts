@@ -21,6 +21,7 @@ describe("remote connect refusals", () => {
       "remote_machine_token_refused",
       "remote_machine_not_a_machine",
       "remote_machine_token_storage_failed",
+      "remote_machine_gateway_auth_unavailable",
     ] as const;
     for (const reason of reasons) {
       const refused = remoteConnectError({ reason, detail: null });

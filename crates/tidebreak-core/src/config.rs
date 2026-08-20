@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{AgentError, Result};
 
@@ -94,6 +95,28 @@ pub struct Config {
     /// ignores this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_tokens_file: Option<PathBuf>,
+    /// Model Gateway base URL used to authenticate self-hosted callers.
+    ///
+    /// Mutually exclusive with [`Config::auth_tokens_file`]. The server sends
+    /// each presented `tidebreak` resource token to the Gateway's live
+    /// principal endpoint, so Gateway membership, deactivation, session
+    /// revocation, and administrator changes apply without a generated roster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_gateway_url: Option<String>,
+    /// Optional server-to-server Model Gateway URL used only for principal
+    /// validation. The public [`Config::auth_gateway_url`] remains the identity
+    /// authority exposed to clients; this override supports clusters that
+    /// cannot hairpin through that public origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_gateway_verifier_url: Option<String>,
+    /// Canonical public base URL of this self-hosted Tidebreak machine.
+    ///
+    /// Gateway-backed authentication hashes this URL into the OAuth resource,
+    /// binding every user credential to this one machine. It must be the same
+    /// normalized URL desktop clients use to attach (including any ingress
+    /// path prefix, without a trailing slash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     /// The address the API binds, for deployments that must be reachable from
     /// outside the machine (a container publishing a port, say). `None` — the
     /// default — keeps the loopback, ephemeral-port bind every profile has
@@ -164,6 +187,9 @@ impl Config {
             container_execution_enabled: false,
             container_image: None,
             auth_tokens_file: None,
+            auth_gateway_url: None,
+            auth_gateway_verifier_url: None,
+            public_url: None,
             listen_addr: None,
         }
     }
@@ -174,7 +200,10 @@ impl Config {
     /// this to the platform's app-data location),
     /// `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` (default `false`),
     /// `TIDEBREAK_CONTAINER_IMAGE` (defaulting to the server's default agent
-    /// image), `TIDEBREAK_AUTH_TOKENS_FILE` (self-host only; required there),
+    /// image), `TIDEBREAK_AUTH_TOKENS_FILE` or `TIDEBREAK_AUTH_GATEWAY_URL`
+    /// (self-host only; exactly one is required there), optional
+    /// `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` for cluster-internal validation,
+    /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials,
     /// and `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
     /// ephemeral port).
     pub fn from_env() -> Result<Self> {
@@ -184,6 +213,9 @@ impl Config {
             std::env::var("TIDEBREAK_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("TIDEBREAK_CONTAINER_IMAGE").ok(),
             std::env::var_os("TIDEBREAK_AUTH_TOKENS_FILE"),
+            std::env::var("TIDEBREAK_AUTH_GATEWAY_URL").ok(),
+            std::env::var("TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL").ok(),
+            std::env::var("TIDEBREAK_PUBLIC_URL").ok(),
             std::env::var("TIDEBREAK_LISTEN_ADDR").ok(),
         )
     }
@@ -195,12 +227,16 @@ impl Config {
     /// An **empty** value is treated as unset: a caller that exports
     /// `TIDEBREAK_DATA_DIR=` (or an empty profile) gets the documented defaults,
     /// not an empty path rooted at the current directory.
+    #[allow(clippy::too_many_arguments)] // mirrors the environment variables one-to-one
     fn from_vars(
         profile: Option<String>,
         data_dir: Option<OsString>,
         container_execution_enabled: Option<String>,
         container_image: Option<String>,
         auth_tokens_file: Option<OsString>,
+        auth_gateway_url: Option<String>,
+        auth_gateway_verifier_url: Option<String>,
+        public_url: Option<String>,
         listen_addr: Option<String>,
     ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
@@ -227,6 +263,10 @@ impl Config {
         let auth_tokens_file = auth_tokens_file
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
+        let auth_gateway_url = auth_gateway_url.filter(|value| !value.trim().is_empty());
+        let auth_gateway_verifier_url =
+            auth_gateway_verifier_url.filter(|value| !value.trim().is_empty());
+        let public_url = public_url.filter(|value| !value.trim().is_empty());
         let listen_addr = match listen_addr.filter(|value| !value.is_empty()) {
             None => None,
             Some(value) => Some(value.parse::<SocketAddr>().map_err(|_| {
@@ -248,6 +288,9 @@ impl Config {
             container_execution_enabled,
             container_image,
             auth_tokens_file,
+            auth_gateway_url,
+            auth_gateway_verifier_url,
+            public_url,
             listen_addr,
         })
     }
@@ -295,6 +338,18 @@ impl Config {
     }
 }
 
+/// OAuth resource bound to one exact, already-canonical Tidebreak public URL.
+///
+/// Callers canonicalize first because URL parsing belongs at their trust
+/// boundary: the server validates operator config, while desktop validates the
+/// user-entered remote address. Hashing is shared so both sides cannot drift.
+#[must_use]
+pub fn tidebreak_machine_resource(canonical_public_url: &str) -> String {
+    let digest = Sha256::digest(canonical_public_url.as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("tidebreak:{hex}")
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -323,8 +378,18 @@ mod tests {
     fn empty_data_dir_var_falls_back_to_the_default() {
         // `TIDEBREAK_DATA_DIR=` (set but empty) must behave like unset, not point
         // the store at `tidebreak.db` in the current directory.
-        let config =
-            Config::from_vars(None, Some(OsString::new()), None, None, None, None).unwrap();
+        let config = Config::from_vars(
+            None,
+            Some(OsString::new()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
         assert_eq!(config.data_dir, expected);
         assert_eq!(config.profile, Profile::Desktop);
@@ -335,6 +400,9 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -353,6 +421,9 @@ mod tests {
             None,
             Some(OsString::from("/etc/tidebreak/tokens")),
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(config.profile, Profile::SelfHost);
@@ -365,7 +436,18 @@ mod tests {
 
     #[test]
     fn unknown_profile_var_is_an_error() {
-        assert!(Config::from_vars(Some("bogus".into()), None, None, None, None, None).is_err());
+        assert!(Config::from_vars(
+            Some("bogus".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None
+        )
+        .is_err());
     }
 
     /// The desktop server is loopback-only by design, so a configured address
@@ -392,6 +474,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
             Some("0.0.0.0:8080".into()),
         )
         .unwrap();
@@ -404,6 +489,9 @@ mod tests {
         // back to the loopback default the operator was trying to escape.
         assert!(Config::from_vars(
             Some("self_host".into()),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -429,6 +517,9 @@ mod tests {
         assert!(!config.container_execution_enabled);
         assert_eq!(config.container_image, None);
         assert_eq!(config.auth_tokens_file, None);
+        assert_eq!(config.auth_gateway_url, None);
+        assert_eq!(config.auth_gateway_verifier_url, None);
+        assert_eq!(config.public_url, None);
     }
 
     #[test]
@@ -448,6 +539,9 @@ mod tests {
             Some("tidebreak-sandbox-agent:dev".into()),
             None,
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert!(config.container_execution_enabled);
@@ -455,6 +549,57 @@ mod tests {
             config.container_image.as_deref(),
             Some("tidebreak-sandbox-agent:dev")
         );
-        assert!(Config::from_vars(None, None, Some("yes".into()), None, None, None).is_err());
+        assert!(Config::from_vars(
+            None,
+            None,
+            Some("yes".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn gateway_auth_url_is_loaded_for_self_host() {
+        let config = Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            Some("https://gateway.example.test".into()),
+            Some("https://gateway.model-gateway.svc.cluster.local".into()),
+            Some("https://tidebreak.example.test".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            config.auth_gateway_url.as_deref(),
+            Some("https://gateway.example.test")
+        );
+        assert_eq!(
+            config.auth_gateway_verifier_url.as_deref(),
+            Some("https://gateway.model-gateway.svc.cluster.local")
+        );
+        assert_eq!(
+            config.public_url.as_deref(),
+            Some("https://tidebreak.example.test")
+        );
+    }
+
+    #[test]
+    fn tidebreak_machine_resource_is_stable_and_url_specific() {
+        assert_eq!(
+            tidebreak_machine_resource("https://tidebreak.example.test"),
+            "tidebreak:3c6444cbec9b33f56b4ed0f1bf7015741c69cf7e516977c52975c6a0012a097b"
+        );
+        assert_ne!(
+            tidebreak_machine_resource("https://tidebreak.example.test"),
+            tidebreak_machine_resource("https://other.example.test")
+        );
     }
 }

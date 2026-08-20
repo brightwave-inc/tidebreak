@@ -56,7 +56,7 @@ async function desktopListenInfo(): Promise<ServerInfo | null> {
       typeof record.baseUrl === "string" ? record.baseUrl.trim().replace(/\/$/, "") : "";
     const token = typeof record.token === "string" ? record.token.trim() : "";
     if (!baseUrl || !token) return null;
-    return { baseUrl, token, attachment: "local" };
+    return { baseUrl, token, attachment: "local", gatewayAuth: false };
   } catch {
     return null;
   }
@@ -71,5 +71,6 @@ function envServerInfo(): ServerInfo | null {
     baseUrl: baseUrl.replace(/\/$/, ""),
     token,
     attachment: "local",
+    gatewayAuth: false,
   };
 }
