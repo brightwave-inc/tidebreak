@@ -67,8 +67,11 @@ The product store therefore owns an output record whose identity is an opaque
   foreground turn or a background run, never both — recorded in two mutually
   exclusive nullable references so existing turn-produced revisions are
   unchanged and a background run can now be attributed just as precisely. Only a
-  turn producer may carry retrieval source references, which resolve against
-  the turn's evidence. Revision rows are insert-only.
+  turn producer may carry retrieval source references. The revision API derives
+  those references from the producing turn's durable assistant citations and
+  completed web-search result rows, so the output layer cannot invent evidence
+  or retain a second copy that drifts from the transcript. User-authored and
+  background-run revisions carry no sources. Revision rows are insert-only.
 - Updating an output appends a revision and republishes the current one. The
   replaced revision keeps its own id and stays readable, so an update can no
   longer destroy the bytes it supersedes.
@@ -181,8 +184,7 @@ person can move back.
 ## Deliberate limits
 
 An export is a synchronous user action, so it is not automatically retried and
-does not yet have a durable export receipt. Office document generation,
-transcript-inline artifact cards, per-revision source references, and writing
-directly into connected folders remain later slices. Those additions should
-preserve the same rule: the model names a logical output, while a person or
-narrowly scoped capability chooses where host data is written.
+does not yet have a durable export receipt. Writing directly into connected
+folders remains a later slice. That addition should preserve the same rule: the
+model names a logical output, while a person or narrowly scoped capability
+chooses where host data is written.

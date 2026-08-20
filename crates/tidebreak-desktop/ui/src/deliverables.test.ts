@@ -9,10 +9,13 @@ import {
   parseDeliverablePreview,
   parseDeliverablesCatalog,
   parseOutputExportResult,
+  parseOutputRevisionsCatalog,
 } from "./deliverables";
 
 const outputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
 const revisionId = "72cb0277-5a3c-45ee-bda8-43534f74feb2";
+const citationId = "46abf484-8368-4c2d-b2ec-8b9ed77e202f";
+const documentId = "4571ebc0-69a7-4f8a-a9c7-936c50f0f022";
 
 beforeEach(() => invokeMock.mockReset());
 
@@ -246,6 +249,60 @@ describe("deliverable renderer projections", () => {
         destination: "/private/export.md",
       }),
     ).toThrow("Invalid output export response");
+  });
+
+  it("accepts only bounded, renderer-safe revision sources", () => {
+    const row = {
+      revisionId,
+      ordinal: 1,
+      sizeBytes: 42,
+      createdAt: "2026-07-24T00:00:00Z",
+      producedBy: "agent",
+      isCurrent: true,
+      sources: [
+        {
+          kind: "document",
+          citationId,
+          documentId,
+          locator: { kind: "lines", start: 4, end: 8 },
+        },
+        {
+          kind: "web",
+          url: "https://example.com/report",
+          label: "Research report",
+          domain: "example.com",
+        },
+      ],
+    };
+    expect(
+      parseOutputRevisionsCatalog({ outputId, revisions: [row] }, outputId)
+        .revisions[0]?.sources,
+    ).toEqual(row.sources);
+
+    expect(() =>
+      parseOutputRevisionsCatalog({
+        outputId,
+        revisions: [
+          {
+            ...row,
+            sources: [
+              {
+                kind: "web",
+                url: "javascript:alert(1)",
+                label: "Unsafe",
+                domain: "unsafe",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow("Invalid output versions response");
+    expect(() =>
+      parseOutputRevisionsCatalog({
+        outputId,
+        revisions: [{ ...row, sources: Array(21).fill(row.sources[0]) }],
+      }),
+    ).toThrow("Invalid output versions response");
   });
 
   it("retries an ambiguous bridge response with the exact operation identity", async () => {
