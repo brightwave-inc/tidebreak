@@ -668,8 +668,8 @@ impl CodexSession {
     async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
         let value = serde_json::from_str::<Value>(line).ok();
         if let Some(value) = value.as_ref() {
-            if is_rpc_response(&value) {
-                if let Some(rpc_id) = value_rpc_id(&value) {
+            if is_rpc_response(value) {
+                if let Some(rpc_id) = value_rpc_id(value) {
                     let pending = self
                         .control_state
                         .lock()
@@ -677,7 +677,7 @@ impl CodexSession {
                         .pending
                         .remove(&rpc_id);
                     if let Some(mut pending) = pending {
-                        let result = validate_steer_response(&value, &pending.expected_turn_id);
+                        let result = validate_steer_response(value, &pending.expected_turn_id);
                         if pending.accept_response && result.is_ok() {
                             self.spec
                                 .sink
@@ -691,7 +691,7 @@ impl CodexSession {
                     }
                 }
             }
-            if let Some(detail) = lost_resume_detail(&value) {
+            if let Some(detail) = lost_resume_detail(value) {
                 *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
         }
