@@ -63,6 +63,7 @@ import {
   openCodeEditor,
   removedCodeBrowserIds,
   splitCodeChromeLayout,
+  openTerminalLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
 import {
@@ -540,7 +541,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onNewDiff={() =>
           setWorkspaceLayout(openCodeEditor(layout, { type: "diff" }, "primary"))
         }
-        onNewTerminal={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
+        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "primary", index, "secondary"))
         }
@@ -669,7 +670,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "diff" }, "secondary"),
           )
         }
-        onNewTerminal={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
+        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "secondary", index, "primary"))
         }
