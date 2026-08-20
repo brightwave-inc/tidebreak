@@ -57,6 +57,7 @@ mod mcp_curated;
 pub mod media_type;
 mod model_registry;
 mod model_roles;
+mod obo_inference;
 /// OpenAPI ingest into the bounded operation catalog a `rest_api` connected
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
@@ -1309,14 +1310,20 @@ async fn bind_inner(
         store.clone(),
         secrets.clone(),
     )?);
-    let resolver = Arc::new(KeyedResolver::new(
-        store.clone(),
-        secrets.clone(),
-        gateway.clone(),
-        chatgpt.clone(),
-        provisioned_policy.clone(),
-        os_policy.clone(),
-    ));
+    // One instance, shared by the resolver that builds each caller's routes
+    // and the authentication middleware that records each caller's live token.
+    let on_behalf_of_inference = obo_inference::OboInference::from_config(&config)?;
+    let resolver = Arc::new(
+        KeyedResolver::new(
+            store.clone(),
+            secrets.clone(),
+            gateway.clone(),
+            chatgpt.clone(),
+            provisioned_policy.clone(),
+            os_policy.clone(),
+        )
+        .with_on_behalf_of_inference(on_behalf_of_inference.clone()),
+    );
     // Under the `scripted-provider` feature only — absent from every released
     // binary — a scripted provider stands in for configured routing so a test
     // in another crate can drive a real turn. See [`scripted_provider`].
@@ -1413,7 +1420,8 @@ async fn bind_inner(
         chatgpt,
         provisioned_policy,
         os_policy,
-    )?;
+    )?
+    .with_on_behalf_of_inference(on_behalf_of_inference);
     state.agent_run_wake = agent_run_wake;
     state.sandbox_attempts = sandbox_attempts;
     state.sandbox_steering = sandbox_steering;

@@ -529,6 +529,17 @@ pub(in crate::db) async fn get_chat(
         .transpose()
 }
 
+pub(in crate::db) async fn chat_owner(store: &DbStore, id: ChatId) -> Result<Option<OwnerId>> {
+    let Some(model) = entities::chat::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    OwnerId::new(&model.owner).map(Some)
+}
+
 pub(in crate::db) async fn list_chats(
     store: &DbStore,
     owner: Option<&OwnerId>,

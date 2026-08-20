@@ -143,10 +143,17 @@ pub async fn require_token(
                 state.principal_authenticator.as_ref(),
                 PrincipalAuthenticator::Gateway(_)
             ) {
+                let bearer: std::sync::Arc<str> = presented
+                    .expect("a resolved principal had a presented token")
+                    .into();
+                // Remember the live caller token so this caller's turns can be
+                // driven on their own gateway authority (decision 51). The
+                // token stays in process memory and is never persisted.
+                if let Some(inference) = state.on_behalf_of_inference.as_ref() {
+                    inference.record_caller(&principal.owner_id(), bearer.clone());
+                }
                 request.extensions_mut().insert(GatewayAuthLease {
-                    bearer: presented
-                        .expect("a resolved principal had a presented token")
-                        .into(),
+                    bearer,
                     principal: principal.clone(),
                 });
             }

@@ -1859,6 +1859,14 @@ pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
     }
 }
 
+/// A per-caller inference path offered where the deployment states no other
+/// one: the caller's rotating credential and the base URL it authenticates
+/// against.
+pub type OnBehalfOfInference = (
+    std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
+    String,
+);
+
 /// Collect enabled, credentialed routes for the composite router.
 ///
 /// A kind with no usable credential is skipped. OpenAI ChatGPT OAuth
@@ -1872,6 +1880,11 @@ pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
 /// is the policy URL. On an unmanaged profile there is no gateway route at
 /// all: policy is the only gateway source, and a legacy stored row is never
 /// read.
+///
+/// `on_behalf_of` is the hosted machine's per-caller credential (decision 51).
+/// It becomes an Anthropic route only where the deployment states no other
+/// inference path for that provider — see
+/// [`on_behalf_of_states_the_only_path`].
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -1880,6 +1893,7 @@ pub async fn collect_routes(
         std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
         String,
     )>,
+    on_behalf_of: Option<OnBehalfOfInference>,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Vec<tidebreak_router::Route> {
     let mut routes = Vec::new();
@@ -1973,6 +1987,27 @@ pub async fn collect_routes(
         if policy.managed {
             continue;
         }
+        // A hosted machine resolves this provider per caller only where the
+        // deployment states no other path to it (decision 51, rule 3).
+        if kind == ProviderKind::Anthropic {
+            if let Some((source, base_url)) = on_behalf_of.clone() {
+                if on_behalf_of_states_the_only_path(store, secrets, kind).await {
+                    routes.push(tidebreak_router::Route {
+                        kind: route_kind(kind),
+                        // The credential rotates; there is no key to snapshot.
+                        api_key: String::new(),
+                        base_url: Some(base_url),
+                        curated_models: model_registry::models_for(kind)
+                            .map(|spec| spec.id.to_string())
+                            .collect(),
+                        model_rewrites: HashMap::new(),
+                        token_source: Some(source),
+                        chatgpt_account_id: None,
+                    });
+                    continue;
+                }
+            }
+        }
         let config = match read_config(store, kind).await {
             Ok(c) => c,
             Err(_) => continue,
@@ -2049,6 +2084,35 @@ pub async fn collect_routes(
         });
     }
     routes
+}
+
+/// Whether per-caller inference is the only path this deployment states to
+/// `kind`.
+///
+/// Three statements outrank it, in the order a deployment makes them: a stored
+/// provider configuration row, a stored credential, and the environment
+/// fallbacks for the credential and the base URL. Any one of them means the
+/// operator has named an inference path, and decision 51 leaves it in force —
+/// including a row that disables the provider outright.
+///
+/// Every read failure answers `false`, so an unreadable store or secret skips
+/// the provider rather than routing a caller's turn on a guess.
+async fn on_behalf_of_states_the_only_path(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+) -> bool {
+    if !matches!(store.get_setting(&kind.setting_key()).await, Ok(None)) {
+        return false;
+    }
+    if !matches!(read_credential(secrets, kind).await, Ok(None)) {
+        return false;
+    }
+    if env_api_key(kind).is_some() {
+        return false;
+    }
+    kind.env_base_url_from(|name| std::env::var(name).ok())
+        .is_none()
 }
 
 /// One-shot boot migration for authentication that can outlive provider config.

@@ -197,6 +197,10 @@ pub struct AppState {
     /// checks live account state; static-token mode remains for standalone
     /// deployments. Desktop never consults it.
     pub(crate) principal_authenticator: Arc<crate::auth::PrincipalAuthenticator>,
+    /// Per-caller inference credentials on a gateway-authenticated hosted
+    /// machine (decision 51). `None` everywhere else, which is what keeps
+    /// static-token and desktop deployments on their configured providers.
+    pub(crate) on_behalf_of_inference: Option<Arc<crate::obo_inference::OboInference>>,
     /// A second per-launch secret required for native-only operations.
     pub(crate) client_executor_token: Arc<str>,
     /// A per-launch capability limited to publishing caller-supplied bytes.
@@ -418,6 +422,7 @@ impl AppState {
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             principal_authenticator,
+            on_behalf_of_inference: None,
             client_executor_token: mint_client_executor_token(),
             local_import_token: mint_local_import_token(),
             client_executor_id,
@@ -437,6 +442,21 @@ impl AppState {
 
     pub fn set_local_voice_runner(&mut self, runner: Arc<dyn LocalVoiceRunner>) {
         self.local_voice = runner;
+    }
+
+    /// Resolve model credentials per caller through `inference` (decision 51).
+    ///
+    /// Pass the same instance the resolver holds: the authentication
+    /// middleware records each caller's live gateway token here, and the
+    /// resolver reads it back when it builds that caller's routes. Two
+    /// instances would leave every turn without a credential.
+    #[must_use]
+    pub(crate) fn with_on_behalf_of_inference(
+        mut self,
+        inference: Option<Arc<crate::obo_inference::OboInference>>,
+    ) -> Self {
+        self.on_behalf_of_inference = inference;
+        self
     }
 }
 
