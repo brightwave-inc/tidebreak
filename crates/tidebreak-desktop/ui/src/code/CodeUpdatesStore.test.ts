@@ -6,6 +6,8 @@ import {
   reduceCodeUpdates,
   shouldRequestOsAttention,
   useCodeUpdatesStore,
+  watchChildren,
+  type CodeUpdatesState,
 } from "./CodeUpdatesStore";
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
@@ -27,6 +29,13 @@ function digest(overrides: Partial<CodeSessionDigest> = {}): CodeSessionDigest {
   };
 }
 
+const EMPTY_STATE: CodeUpdatesState = {
+  byWorkspace: {},
+  childrenByWorkspace: {},
+  cloneJobs: {},
+  viewedWorkspaceId: null,
+};
+
 afterEach(() => {
   useCodeUpdatesStore.getState().reset();
   vi.restoreAllMocks();
@@ -34,8 +43,7 @@ afterEach(() => {
 
 describe("reduceCodeUpdates", () => {
   it("replaces the map on snapshot and upserts a digest", () => {
-    const empty = { byWorkspace: {}, watchByWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
-    const afterSnapshot = reduceCodeUpdates(empty, {
+    const afterSnapshot = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",
       sessions: [digest(), digest({ workspace: "ws-2", session: "sess-2", title: "other" })],
     });
@@ -54,34 +62,54 @@ describe("reduceCodeUpdates", () => {
     expect(Object.keys(restated.byWorkspace)).toEqual(["ws-3"]);
   });
 
-  it("never lets a watch session displace the interactive digest", () => {
-    const empty = { byWorkspace: {}, watchByWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
-    const seeded = reduceCodeUpdates(empty, {
+  it("keeps watch digests beside the conversation, never in its slot", () => {
+    const seeded = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",
       sessions: [
         digest(),
         digest({ session: "sess-watch", kind: "watch", lifecycle: "running" }),
       ],
     });
+    // ADR 0050: the interactive digest keeps the workspace slot.
     expect(seeded.byWorkspace["ws-1"].session).toBe("sess-1");
-    expect(seeded.watchByWorkspace["ws-1"].session).toBe("sess-watch");
+    expect(watchChildren(seeded, "ws-1").map((child) => child.session)).toEqual([
+      "sess-watch",
+    ]);
+
     const afterWatchDigest = reduceCodeUpdates(seeded, {
-      type: "digest",
-      digest: digest({ session: "sess-watch", kind: "watch", turn_count: 5 }),
-    });
-    expect(afterWatchDigest.byWorkspace["ws-1"].session).toBe("sess-1");
-    expect(afterWatchDigest.byWorkspace["ws-1"].turn_count).toBe(0);
-    expect(afterWatchDigest.watchByWorkspace["ws-1"].turn_count).toBe(5);
-    const afterEnd = reduceCodeUpdates(afterWatchDigest, {
       type: "digest",
       digest: digest({
         session: "sess-watch",
         kind: "watch",
-        lifecycle: "ended",
+        lifecycle: "running",
+        turn_count: 5,
       }),
     });
-    expect(afterEnd.watchByWorkspace["ws-1"]).toBeUndefined();
-    expect(afterEnd.byWorkspace["ws-1"].session).toBe("sess-1");
+    expect(afterWatchDigest.byWorkspace["ws-1"].session).toBe("sess-1");
+    expect(afterWatchDigest.byWorkspace["ws-1"].turn_count).toBe(0);
+    expect(watchChildren(afterWatchDigest, "ws-1")[0]?.turn_count).toBe(5);
+  });
+
+  it("drops an ended watch child and rebuilds children on snapshot", () => {
+    const seeded = reduceCodeUpdates(EMPTY_STATE, {
+      type: "snapshot",
+      sessions: [
+        digest(),
+        digest({ session: "sess-watch", kind: "watch", lifecycle: "running" }),
+      ],
+    });
+    const ended = reduceCodeUpdates(seeded, {
+      type: "digest",
+      digest: digest({ session: "sess-watch", kind: "watch", lifecycle: "ended" }),
+    });
+    expect(watchChildren(ended, "ws-1")).toEqual([]);
+
+    // A reconnect snapshot that no longer lists the watch heals a missed end.
+    const healed = reduceCodeUpdates(seeded, {
+      type: "snapshot",
+      sessions: [digest()],
+    });
+    expect(watchChildren(healed, "ws-1")).toEqual([]);
   });
 
   it("maps notices onto reducer actions", () => {

@@ -18,6 +18,7 @@ import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { WORKSPACE_STATUS_LABELS } from "./labels";
+import { useWorkspaceCardCommands } from "./workspaceActions";
 import { middleTruncate } from "./workspaceCards";
 
 /**
@@ -44,6 +45,7 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
   // The dialog itself is mounted once, by the rail this page renders beside
   // it, so that Cmd+N and the buttons all drive the same one.
   const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
+  const { run, dialogs } = useWorkspaceCardCommands();
 
   useEffect(() => {
     void refresh(client);
@@ -100,11 +102,12 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
       ) : (
         <ul className="flex flex-col gap-1">
           {listed.map((workspace) => (
-            <li key={workspace.id}>
+            <li key={workspace.id} className="flex items-center gap-1">
               <button
                 type="button"
                 className={cn(
                   "hover:bg-muted flex w-full cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm",
+                  workspace.status === "archived" && "opacity-70",
                   FOCUS_RING,
                   HOVER_TINT,
                 )}
@@ -140,10 +143,25 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
                   {WORKSPACE_STATUS_LABELS[workspace.status]}
                 </span>
               </button>
+              {workspace.status === "archived" && (
+                // A sibling, not a child, of the row button: buttons cannot
+                // nest, and restoring should not also open the workspace.
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  aria-label={`Restore ${workspace.title}`}
+                  onClick={() => run("restore", { workspace, title: workspace.title })}
+                >
+                  Restore
+                </Button>
+              )}
             </li>
           ))}
         </ul>
       )}
+      {dialogs}
     </div>
   );
 }

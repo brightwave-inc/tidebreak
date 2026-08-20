@@ -3,14 +3,39 @@ import { create } from "zustand";
 import type { HarnessKind } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import {
+  isCardDensity,
   isWorkspaceSortMode,
+  type CardDensity,
   type WorkspaceSortMode,
 } from "./workspaceCards";
 
 const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
 const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
+const RAIL_PREFS_KEY = "tidebreak.code-rail-prefs";
 const TERMINAL_DRAWER_HEIGHTS_KEY = "tidebreak.code-terminal-drawer-heights";
+
+/**
+ * How the reader shaped the workspace rail: order, card density, which meta
+ * the cards draw, and whether the archived shelf shows. One blob, one writer —
+ * per-key storage is how preferences drift into half-migrated states.
+ */
+export type CodeRailPrefs = {
+  sortMode: WorkspaceSortMode;
+  density: CardDensity;
+  /** Suppressed per-card in by-repo order regardless; this is the reader's say. */
+  showRepoChip: boolean;
+  showBranch: boolean;
+  showArchived: boolean;
+};
+
+export const DEFAULT_RAIL_PREFS: CodeRailPrefs = {
+  sortMode: "by-repo",
+  density: "detailed",
+  showRepoChip: true,
+  showBranch: false,
+  showArchived: false,
+};
 
 /** What the reader picked the last time they created a workspace. */
 export type CodeCreateDefaults = {
@@ -85,12 +110,47 @@ function readStoredWorkspaceSort(): WorkspaceSortMode {
   } catch {
     // Preference persistence is best-effort.
   }
-  return "by-repo";
+  return DEFAULT_RAIL_PREFS.sortMode;
 }
 
-function storeWorkspaceSort(mode: WorkspaceSortMode): void {
+/**
+ * Field-wise: a blob written by a newer build with one more key must not
+ * knock the known fields back to defaults. When no blob exists yet, the
+ * legacy sort key (the only rail pref that predates the blob) seeds it.
+ */
+function readStoredRailPrefs(): CodeRailPrefs {
   try {
-    window.localStorage.setItem(WORKSPACE_SORT_KEY, mode);
+    const raw = window.localStorage.getItem(RAIL_PREFS_KEY);
+    if (!raw) {
+      return { ...DEFAULT_RAIL_PREFS, sortMode: readStoredWorkspaceSort() };
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return DEFAULT_RAIL_PREFS;
+    const record = parsed as Record<string, unknown>;
+    const flag = (value: unknown, fallback: boolean) =>
+      typeof value === "boolean" ? value : fallback;
+    return {
+      sortMode:
+        typeof record.sortMode === "string" &&
+        isWorkspaceSortMode(record.sortMode)
+          ? record.sortMode
+          : DEFAULT_RAIL_PREFS.sortMode,
+      density:
+        typeof record.density === "string" && isCardDensity(record.density)
+          ? record.density
+          : DEFAULT_RAIL_PREFS.density,
+      showRepoChip: flag(record.showRepoChip, DEFAULT_RAIL_PREFS.showRepoChip),
+      showBranch: flag(record.showBranch, DEFAULT_RAIL_PREFS.showBranch),
+      showArchived: flag(record.showArchived, DEFAULT_RAIL_PREFS.showArchived),
+    };
+  } catch {
+    return DEFAULT_RAIL_PREFS;
+  }
+}
+
+function storeRailPrefs(prefs: CodeRailPrefs): void {
+  try {
+    window.localStorage.setItem(RAIL_PREFS_KEY, JSON.stringify(prefs));
   } catch {
     // Preference persistence is best-effort.
   }
@@ -153,7 +213,7 @@ export type CodeUiStore = {
   reviewSidebarOpen: boolean;
   /** Files and diff scoped to one turn, or the whole worktree when null. */
   inspectorScope: InspectorScope | null;
-  workspaceSortMode: WorkspaceSortMode;
+  railPrefs: CodeRailPrefs;
   lastCreate: CodeCreateDefaults | null;
   /** Per-workspace terminal drawer height, remembered across reloads. */
   terminalDrawerHeights: Record<string, number>;
@@ -170,7 +230,7 @@ export type CodeUiStore = {
   toggleReviewSidebar: () => void;
   setReviewSidebarOpen: (open: boolean) => void;
   setInspectorScope: (scope: InspectorScope | null) => void;
-  setWorkspaceSortMode: (mode: WorkspaceSortMode) => void;
+  setRailPrefs: (patch: Partial<CodeRailPrefs>) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
   setTerminalDrawerHeight: (workspaceId: string, height: number) => void;
@@ -193,7 +253,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
   inspectorScope: null,
-  workspaceSortMode: readStoredWorkspaceSort(),
+  railPrefs: readStoredRailPrefs(),
   lastCreate: readStoredCreateDefaults(),
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
   pendingComposerPrompt: null,
@@ -249,10 +309,12 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ reviewSidebarOpen: open });
   },
   setInspectorScope: (inspectorScope) => set({ inspectorScope }),
-  setWorkspaceSortMode: (mode) => {
-    storeWorkspaceSort(mode);
-    set({ workspaceSortMode: mode });
-  },
+  setRailPrefs: (patch) =>
+    set((state) => {
+      const railPrefs = { ...state.railPrefs, ...patch };
+      storeRailPrefs(railPrefs);
+      return { railPrefs };
+    }),
   rememberCreate: (defaults) => {
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });

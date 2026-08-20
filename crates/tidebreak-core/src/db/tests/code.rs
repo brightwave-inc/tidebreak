@@ -756,3 +756,94 @@ fn code_store_queries_are_owner_scoped_or_say_they_are_not() {
          say why in its documentation."
     );
 }
+
+/// The digest builder labels a watch child row from the watch found by its
+/// session id. A workspace-based match would hand one session the other
+/// watch's state the moment a workspace has watched twice.
+#[tokio::test]
+async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
+    use crate::code::{CodeWatch, CodeWatchId, CodeWatchState};
+    use crate::db::code::{insert_watch, latest_watch_for_session};
+
+    let (_dir, store, session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    let watch_session_id = CodeSessionId::new();
+    insert_session(
+        &store,
+        &CodeSession {
+            id: watch_session_id,
+            owner: owner.clone(),
+            workspace_id,
+            kind: CodeSessionKind::Watch,
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: CodePermissionMode::Auto,
+            model: None,
+            lifecycle: CodeSessionLifecycle::Running,
+            fence_reason: None,
+            child_pid: None,
+            spawn_epoch: 0,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            created_at: now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let older = CodeWatch {
+        id: CodeWatchId::new(),
+        owner: owner.clone(),
+        workspace_id,
+        session_id,
+        pr_number: 7,
+        state: CodeWatchState::Stopped,
+        detail: None,
+        last_fix_head: None,
+        cycles: 1,
+        created_at: now() - chrono::Duration::minutes(5),
+        updated_at: now() - chrono::Duration::minutes(5),
+    };
+    let newer = CodeWatch {
+        id: CodeWatchId::new(),
+        owner: owner.clone(),
+        workspace_id,
+        session_id: watch_session_id,
+        pr_number: 9,
+        state: CodeWatchState::Fixing,
+        detail: Some("fixing failing checks".to_owned()),
+        last_fix_head: None,
+        cycles: 3,
+        created_at: now(),
+        updated_at: now(),
+    };
+    insert_watch(&store, &older).await.unwrap();
+    insert_watch(&store, &newer).await.unwrap();
+
+    let found = latest_watch_for_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .expect("older watch");
+    assert_eq!(found.id, older.id);
+    assert_eq!(found.state, CodeWatchState::Stopped);
+
+    let found = latest_watch_for_session(&store, &owner, watch_session_id)
+        .await
+        .unwrap()
+        .expect("newer watch");
+    assert_eq!(found.cycles, 3);
+    assert_eq!(found.detail.as_deref(), Some("fixing failing checks"));
+
+    assert!(
+        latest_watch_for_session(&store, &owner, CodeSessionId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

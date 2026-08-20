@@ -5,6 +5,7 @@ import type {
   CodeWatchSnapshot,
   CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
+  PullRequestDigest,
   HarnessCaps,
   HarnessDoctorEntry,
   HarnessDoctorReport,
@@ -345,4 +346,64 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
       caps: { ...fullCaps, mid_turn_steering: "supported" },
     }),
   ],
+};
+
+// ---------------------------------------------------------------------------
+// Rail card states: digests per attention, PR chip tones, watch child rows.
+// ---------------------------------------------------------------------------
+
+/** Digest for a session mid-turn: the card's live state line. */
+export const runningDigest: CodeSessionDigest = codeDigest({ turn_count: 3 });
+
+/** Digest for a structured question the harness is waiting on. */
+export const needsYouDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: attentionNeedsYou,
+});
+
+/** Digest for a session that went quiet without finishing. */
+export const stalledDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: attentionStalled,
+});
+
+/** A watch-and-fix task riding under the workspace (decision 50). */
+export const watchDigest: CodeSessionDigest = codeDigest({
+  session: "sess-watch",
+  kind: "watch",
+  lifecycle: "running",
+  turn_count: 2,
+});
+
+/** Workspace PR digests, one per chip tone. */
+export const openPrDigest: PullRequestDigest = {
+  number: 184,
+  url: "https://github.com/example/tidebreak/pull/184",
+  state: "open",
+  title: "Add a scoped UI workshop",
+};
+
+export const draftPrDigest: PullRequestDigest = {
+  ...openPrDigest,
+  draft: true,
+};
+
+export const mergedPrDigest: PullRequestDigest = {
+  ...openPrDigest,
+  state: "merged",
+  merged: true,
+};
+
+export const closedPrDigest: PullRequestDigest = {
+  ...openPrDigest,
+  state: "closed",
+};
+
+/** A put-away workspace: worktree gone, branch and history kept. */
+export const archivedWorkspace: CodeWorkspaceSnapshot = {
+  ...codeWorkspace,
+  id: "ws-archived",
+  title: "Shipped last week",
+  status: "archived",
+  archived_at: "2026-08-18T17:00:00.000Z",
 };

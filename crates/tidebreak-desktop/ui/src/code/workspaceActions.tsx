@@ -3,7 +3,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 
-import { archiveForceKind, type ApiClient } from "../api/client";
+import { archiveForceKind, HttpError, type ApiClient } from "../api/client";
 import type {
   CodeActionSnapshot,
   CodeSessionSnapshot,
@@ -37,6 +37,7 @@ import { searchFromLayout } from "@/panel/panelUrl";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { toggleTerminalLayout } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 
 /**
  * Workspace commands shared by the card context menu and the workspace
@@ -54,7 +55,9 @@ export type WorkspaceCommandId =
   | "pin-attention"
   | "clear-attention"
   | "run-quick-action"
-  | "archive";
+  | "archive"
+  | "force-archive"
+  | "restore";
 
 export type WorkspaceCommand = {
   id: WorkspaceCommandId;
@@ -80,6 +83,17 @@ export function workspaceCommands(input: {
   hasSession?: boolean;
   attentionPinned?: boolean;
 }): WorkspaceCommand[] {
+  // An archived workspace has no worktree: nothing to open a terminal in,
+  // no session to steer. What is left is reading, copying the branch that
+  // survived, and bringing it back.
+  if (input.archived) {
+    return [
+      { id: "open", label: "Open workspace" },
+      { id: "copy-branch", label: "Copy branch name" },
+      { id: "copy-worktree", label: "Copy worktree path" },
+      { id: "restore", label: "Restore workspace", separated: true },
+    ];
+  }
   const items: WorkspaceCommand[] = [
     { id: "open", label: "Open workspace" },
     { id: "new-session", label: "New session" },
@@ -99,14 +113,17 @@ export function workspaceCommands(input: {
     );
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
   }
-  if (!input.archived) {
-    items.push({
-      id: "archive",
-      label: "Archive",
-      destructive: true,
-      separated: true,
-    });
-  }
+  items.push({
+    id: "archive",
+    label: "Archive",
+    destructive: true,
+    separated: true,
+  });
+  items.push({
+    id: "force-archive",
+    label: "Force archive (discard changes)",
+    destructive: true,
+  });
   return items;
 }
 
@@ -143,6 +160,13 @@ export function workspaceHeaderCommands(input: {
       destructive: true,
       separated: true,
     });
+    items.push({
+      id: "force-archive",
+      label: "Force archive (discard changes)",
+      destructive: true,
+    });
+  } else {
+    items.push({ id: "restore", label: "Restore workspace", separated: true });
   }
   return items;
 }
@@ -286,6 +310,23 @@ export function useWorkspaceCardCommands(): {
     });
   }
 
+  async function afterArchive(archived: CodeWorkspaceSnapshot) {
+    upsertWorkspace(archived);
+    forgetWorkspaceSession(archived.id);
+    toast.success("Workspace archived");
+    if (pathname === `/code/w/${archived.id}`) {
+      if (archived.repo_id) {
+        await navigate({
+          to: "/code/r/$repoId",
+          params: { repoId: archived.repo_id },
+          replace: true,
+        });
+      } else {
+        await navigate({ to: "/code", replace: true });
+      }
+    }
+  }
+
   async function runArchive(workspace: CodeWorkspaceSnapshot) {
     try {
       const archived = await archiveWorkspaceWithConfirm({
@@ -294,20 +335,29 @@ export function useWorkspaceCardCommands(): {
         confirm,
       });
       if (!archived) return;
-      upsertWorkspace(archived);
-      forgetWorkspaceSession(archived.id);
-      toast.success("Workspace archived");
-      if (pathname === `/code/w/${archived.id}`) {
-        if (archived.repo_id) {
-          await navigate({
-            to: "/code/r/$repoId",
-            params: { repoId: archived.repo_id },
-            replace: true,
-          });
-        } else {
-          await navigate({ to: "/code", replace: true });
-        }
-      }
+      await afterArchive(archived);
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "Could not archive"));
+    }
+  }
+
+  /**
+   * The deliberate force path. The escalating flow in `runArchive` exists for
+   * readers who find out mid-archive that work is dirty; this one is for the
+   * reader who already knows and does not want two dialogs about it. One
+   * confirmation still stands between the click and the worktree going away.
+   */
+  async function runForceArchive(workspace: CodeWorkspaceSnapshot) {
+    const ok = await confirm({
+      title: "Discard changes and archive?",
+      description:
+        "Uncommitted and unpushed work is lost and a running session is stopped. The branch and its commits are kept.",
+      confirmLabel: "Discard and archive",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await afterArchive(await client.archiveCodeWorkspace(workspace.id, true));
     } catch (error) {
       toast.error(friendlyErrorMessage(error, "Could not archive"));
     }
@@ -327,6 +377,54 @@ export function useWorkspaceCardCommands(): {
       toast.error(friendlyErrorMessage(error, "Could not rename"));
     } finally {
       setRenaming(false);
+    }
+  }
+
+  /**
+   * True restore first; when the branch is gone that is impossible, so the
+   * fallback offer is a fresh workspace on the same repo. A failed setup
+   * script still restored the checkout — surface the error and open the
+   * workspace anyway so the reader can see what they got back.
+   */
+  async function runRestore(workspace: CodeWorkspaceSnapshot) {
+    const openRestored = () =>
+      navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: workspace.id },
+      });
+    try {
+      const restored = await client.restoreCodeWorkspace(workspace.id);
+      upsertWorkspace(restored);
+      toast.success("Workspace restored");
+      await openRestored();
+    } catch (error) {
+      if (error instanceof HttpError && error.kind === "branch_missing") {
+        const ok = await confirm({
+          title: "The branch is gone",
+          description:
+            "This workspace's branch was deleted after it was archived, so its work cannot come back. Start a new workspace on the same repo instead?",
+          confirmLabel: "New workspace",
+        });
+        if (ok) {
+          useCodeUiStore.getState().startNewWorkspace(workspace.repo_id);
+        }
+        return;
+      }
+      if (error instanceof HttpError && error.kind === "setup_failed") {
+        toast.error(
+          friendlyErrorMessage(
+            error,
+            "Restored, but the setup script failed",
+          ),
+        );
+        const refreshed = await client
+          .getCodeWorkspace(workspace.id)
+          .catch(() => null);
+        if (refreshed) upsertWorkspace(refreshed);
+        await openRestored();
+        return;
+      }
+      toast.error(friendlyErrorMessage(error, "Could not restore"));
     }
   }
 
@@ -442,6 +540,12 @@ export function useWorkspaceCardCommands(): {
       }
       case "archive":
         void runArchive(context.workspace);
+        return;
+      case "force-archive":
+        void runForceArchive(context.workspace);
+        return;
+      case "restore":
+        void runRestore(context.workspace);
         return;
     }
   }

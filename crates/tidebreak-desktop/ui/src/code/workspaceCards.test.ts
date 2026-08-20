@@ -146,7 +146,9 @@ describe("arrangeWorkspaces", () => {
         pr_state: { number: 12, state: "open" },
       }),
     };
-    const groups = arrangeWorkspaces("by-status", repos, listed, digests);
+    const groups = arrangeWorkspaces("by-status", repos, listed, digests, {
+      showArchived: true,
+    });
     expect(
       groups.map((group) => [group.key, group.workspaces.map((item) => item.id)]),
     ).toEqual([
@@ -154,6 +156,34 @@ describe("arrangeWorkspaces", () => {
       ["running", ["ws-lib"]],
       ["pr_open", ["ws-app-new"]],
       ["archived", ["ws-archived"]],
+    ]);
+  });
+
+  it("keeps archived off the rail by default in every mode", () => {
+    for (const mode of ["by-repo", "by-status", "by-created"] as const) {
+      const groups = arrangeWorkspaces(mode, repos, listed, {});
+      expect(idsOf(groups)).not.toContain("ws-archived");
+    }
+  });
+
+  it("appends one trailing archived shelf when asked, newest put-away first", () => {
+    const rows = [
+      ...listed,
+      {
+        ...workspace("ws-archived-late", "lib", "archived", "2026-08-10T00:00:00.000Z"),
+        archived_at: "2026-08-18T00:00:00.000Z",
+      },
+    ];
+    const groups = arrangeWorkspaces("by-repo", repos, rows, {}, {
+      showArchived: true,
+    });
+    const last = groups[groups.length - 1];
+    expect(last?.key).toBe("archived");
+    expect(last?.label).toBe("Archived");
+    // archived_at orders the shelf; rows without it fall back to created_at.
+    expect(last?.workspaces.map((item) => item.id)).toEqual([
+      "ws-archived-late",
+      "ws-archived",
     ]);
   });
 

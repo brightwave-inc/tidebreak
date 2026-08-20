@@ -47,6 +47,25 @@ pub async fn latest_watch_for_workspace(
     row.map(watch_from_row).transpose()
 }
 
+/// The owner's most recent watch driven by one session, terminal or not.
+///
+/// A session drives at most one watch at a time; the ordering only settles
+/// the (unexpected) case of stale rows sharing a session id.
+pub async fn latest_watch_for_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Option<CodeWatch>> {
+    let row = entities::code_watch::Entity::find()
+        .filter(entities::code_watch::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_watch::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::code_watch::Column::CreatedAt)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?;
+    row.map(watch_from_row).transpose()
+}
+
 /// Every non-terminal watch on the machine.
 ///
 /// A system path, not a request path: the watch sweep drives every owner's

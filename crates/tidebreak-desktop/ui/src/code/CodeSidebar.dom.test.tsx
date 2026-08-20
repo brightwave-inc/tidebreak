@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { useCodeUiStore } from "./CodeUiStore";
+import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
 
@@ -125,7 +125,8 @@ afterEach(() => {
   useCodeCatalogStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
-  useCodeUiStore.setState({ workspaceSortMode: "by-repo" });
+  useCodeUiStore.setState({ railPrefs: DEFAULT_RAIL_PREFS });
+  window.localStorage.clear();
 });
 
 describe("CodeSidebar", () => {
@@ -140,7 +141,15 @@ describe("CodeSidebar", () => {
     expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Work" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "app" })).toBeInTheDocument();
+    // The repo list collapsed into the switcher; the by-repo group header is
+    // now the way into the repo page.
+    expect(
+      await screen.findByRole("button", { name: "Open repo app" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Repos" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Workspace list settings" }),
+    ).toBeInTheDocument();
     // The card's name carries what the glyph rail shows, not just the title.
     expect(
       screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
@@ -178,6 +187,36 @@ describe("CodeSidebar", () => {
       "aria-valuetext",
       "91% used",
     );
+  });
+
+  it("re-sorts and persists from the settings popover", async () => {
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    await screen.findByRole("button", { name: "Open repo app" });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Workspace list settings" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("radio", { name: "By created" }),
+    );
+
+    // By-created has no group headers, so the repo header link goes away and
+    // the card grows its repo chip back.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Open repo app" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("tidebreak.code-rail-prefs") ?? "{}",
+      ),
+    ).toMatchObject({ sortMode: "by-created" });
   });
 
   it("opens the workspace context menu from the keyboard and gives focus back", async () => {

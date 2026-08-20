@@ -411,7 +411,9 @@ async function mountWorkspace(
   const codeWorkspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
-    validateSearch: (search: Record<string, unknown>): PanelSearch => ({
+    validateSearch: (
+      search: Record<string, unknown>,
+    ): PanelSearch => ({
       tabs: typeof search.tabs === "string" ? search.tabs : undefined,
       active: typeof search.active === "string" ? search.active : undefined,
       fullscreen:
@@ -755,6 +757,33 @@ describe("CodeWorkspacePage", () => {
     expect(
       screen.queryByRole("heading", { name: /Fix login/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("force-archives with one confirm and force=true from the header menu", async () => {
+    const client = makeClient();
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Force archive (discard changes)",
+      }),
+    );
+    const confirmation = await screen.findByRole("alertdialog");
+    expect(confirmation).toHaveTextContent("Discard changes and archive?");
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Discard and archive" }),
+    );
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/r/repo-1"),
+    );
+    expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", true);
   });
 
   it("keeps git and comments in the review sidebar, and opens the terminal as a drawer", async () => {

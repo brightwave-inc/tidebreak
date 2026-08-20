@@ -1886,6 +1886,26 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Reactivate an archived workspace: worktree back at its path, on its kept
+   * branch. 409 kinds `branch_missing` and `worktree_path_occupied` mean a
+   * true restore is impossible; the caller offers the new-workspace fallback.
+   */
+  async restoreCodeWorkspace(workspaceId: string): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/restore`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+          },
+        ),
+      ),
+      "code workspace",
+    );
+  }
+
   async listCodeWorkspaceSessions(
     workspaceId: string,
   ): Promise<CodeSessionSnapshot[]> {
