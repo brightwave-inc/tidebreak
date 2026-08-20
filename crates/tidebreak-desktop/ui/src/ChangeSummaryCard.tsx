@@ -14,6 +14,12 @@ import type {
   ExecFileUndoOutcome,
 } from "./api";
 import type { ExecFilePreviewAvailability } from "./generated/wire";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { cn } from "./lib/utils";
 
 type ChangeClient = Pick<
@@ -231,32 +237,40 @@ function FileChangeRow({
 
 function TextDiff({ diff }: { diff: string }) {
   return (
-    <details className="ml-6 mt-2">
-      <summary className="cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground">
-        Text diff
-      </summary>
-      <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/40 py-2 text-[11px] leading-4">
-        {diff.split("\n").map((line, index) => (
-          <span
-            // A unified diff can contain identical lines; position is the
-            // stable identity within this immutable presentation.
-            key={index}
-            className={cn(
-              "block min-h-4 px-2",
-              line.startsWith("+") &&
-                !line.startsWith("+++") &&
-                "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-              line.startsWith("-") &&
-                !line.startsWith("---") &&
-                "bg-red-500/10 text-red-700 dark:text-red-300",
-              line.startsWith("@@") && "text-muted-foreground",
-            )}
-          >
-            {line || " "}
-          </span>
-        ))}
-      </pre>
-    </details>
+    <Collapsible className="ml-6 mt-2">
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant="link"
+          className="h-auto px-0 text-xs text-muted-foreground hover:text-foreground"
+        >
+          Text diff
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/40 py-2 text-[11px] leading-4">
+          {diff.split("\n").map((line, index) => (
+            <span
+              // A unified diff can contain identical lines; position is the
+              // stable identity within this immutable presentation.
+              key={index}
+              className={cn(
+                "block min-h-4 px-2",
+                line.startsWith("+") &&
+                  !line.startsWith("+++") &&
+                  "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                line.startsWith("-") &&
+                  !line.startsWith("---") &&
+                  "bg-red-500/10 text-red-700 dark:text-red-300",
+                line.startsWith("@@") && "text-muted-foreground",
+              )}
+            >
+              {line || " "}
+            </span>
+          ))}
+        </pre>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -275,14 +289,18 @@ function BinaryPreview({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <details
-      className="ml-6 mt-2"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
-        <FileImage size={13} aria-hidden="true" />
-        Before and after preview
-      </summary>
+    <Collapsible className="ml-6 mt-2" open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant="link"
+          className="h-auto gap-1.5 px-0 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <FileImage size={13} aria-hidden="true" />
+          Before and after preview
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
       <div className="mt-2 grid gap-2 md:grid-cols-2">
         <RevisionPreview
           client={client}
@@ -305,7 +323,8 @@ function BinaryPreview({
           fileName={file.relative_path}
         />
       </div>
-    </details>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

@@ -38,14 +38,16 @@ describe("CodeQuickOpen", () => {
     );
 
     fireEvent.keyDown(window, { key: "p", metaKey: true });
-    const input = await screen.findByRole("textbox", { name: "Search files by name" });
+    const input = await screen.findByRole("combobox", { name: "Search files by name" });
     expect(input).toHaveFocus();
     expect(client.listCodeWorkspaceTree).toHaveBeenCalledWith("ws-1", {
       limit: 5000,
     });
 
     await userEvent.setup().type(input, "m");
-    await waitFor(() => expect(screen.getByRole("button", { name: "src/main.rs" })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "src/main.rs" })).toBeInTheDocument(),
+    );
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onOpenFile).toHaveBeenCalledWith("src/model.rs");
@@ -81,7 +83,7 @@ describe("CodeQuickOpen", () => {
     );
 
     expect(
-      await screen.findByRole("textbox", { name: "Search files by name" }),
+      await screen.findByRole("combobox", { name: "Search files by name" }),
     ).toHaveFocus();
     expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(1);
   });
@@ -105,13 +107,13 @@ describe("CodeQuickOpen", () => {
 
     fireEvent.keyDown(window, { key: "p", metaKey: true });
     expect(
-      await screen.findByRole("button", { name: "src/main.rs" }),
+      await screen.findByRole("option", { name: "src/main.rs" }),
     ).toBeInTheDocument();
     await user.keyboard("{Escape}");
 
     fireEvent.keyDown(window, { key: "p", metaKey: true });
     expect(
-      await screen.findByRole("button", { name: "src/main.rs" }),
+      await screen.findByRole("option", { name: "src/main.rs" }),
     ).toBeInTheDocument();
     expect(client.listCodeWorkspaceTree).toHaveBeenCalledTimes(1);
     await user.keyboard("{Escape}");
@@ -155,7 +157,7 @@ describe("CodeQuickOpen", () => {
     );
     fireEvent.keyDown(window, { key: "p", metaKey: true });
     expect(
-      await screen.findByRole("button", { name: "old.ts" }),
+      await screen.findByRole("option", { name: "old.ts" }),
     ).toBeInTheDocument();
 
     rerender(
@@ -169,10 +171,10 @@ describe("CodeQuickOpen", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "p", metaKey: true });
-    expect(screen.queryByRole("button", { name: "old.ts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "old.ts" })).not.toBeInTheDocument();
     resolveSecond?.({ paths: ["new.ts"], truncated: false });
     expect(
-      await screen.findByRole("button", { name: "new.ts" }),
+      await screen.findByRole("option", { name: "new.ts" }),
     ).toBeInTheDocument();
   });
 });

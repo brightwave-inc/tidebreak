@@ -18,7 +18,10 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { McpHealthChip, McpPanel, McpTierChip } from "./McpPanel";
 import {
   SettingsError,
@@ -304,15 +307,14 @@ function OperationPicker({
       >
         {shown.map((operation) => (
           <li key={operation.operation_id}>
-            <label className="flex items-start gap-2 text-xs">
-              <input
-                type="checkbox"
+            <Label className="flex items-start gap-2 text-xs font-normal">
+              <Checkbox
                 className="mt-0.5"
                 checked={chosen.has(operation.operation_id)}
                 disabled={disabled}
-                onChange={(event) =>
+                onCheckedChange={(checked) =>
                   onChange(
-                    event.target.checked
+                    checked === true
                       ? [...selected, operation.operation_id]
                       : selected.filter(
                           (id) => id !== operation.operation_id,
@@ -330,7 +332,7 @@ function OperationPicker({
                   </span>
                 )}
               </span>
-            </label>
+            </Label>
           </li>
         ))}
         {shown.length === 0 && (
@@ -665,10 +667,20 @@ export function ConnectedAppsPanel({
             ? "Only the selected operations are kept, never the document itself."
             : "The raw document is not stored, so provide it again to save changes."}
         </p>
-        <div
-          className="flex gap-4"
-          role="radiogroup"
+        <RadioGroup
+          className="flex flex-row flex-wrap gap-4"
+          value={draft.source}
           aria-label="Document source"
+          disabled={saving || previewing}
+          onValueChange={(source) =>
+            // Switching sources invalidates any preview: the selection
+            // must never outlive the document it was made against.
+            update({
+              source: source as DocumentSource,
+              preview: null,
+              selected: [],
+            })
+          }
         >
           {(
             [
@@ -676,22 +688,15 @@ export function ConnectedAppsPanel({
               ["paste", "Paste document"],
             ] as const
           ).map(([source, label]) => (
-            <label key={source} className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="document-source"
-                checked={draft.source === source}
-                disabled={saving || previewing}
-                onChange={() =>
-                  // Switching sources invalidates any preview: the selection
-                  // must never outlive the document it was made against.
-                  update({ source, preview: null, selected: [] })
-                }
-              />
+            <Label
+              key={source}
+              className="flex items-center gap-2 text-sm font-normal"
+            >
+              <RadioGroupItem value={source} />
               {label}
-            </label>
+            </Label>
           ))}
-        </div>
+        </RadioGroup>
       </div>
       {draft.source === "url" ? (
         <SettingsField
@@ -763,7 +768,13 @@ export function ConnectedAppsPanel({
       )}
       <fieldset className="flex flex-col gap-1.5">
         <legend className="font-bold">Credential</legend>
-        <div className="flex gap-4" role="radiogroup" aria-label="Credential">
+        <RadioGroup
+          className="flex flex-row flex-wrap gap-4"
+          value={draft.mode}
+          aria-label="Credential"
+          disabled={saving}
+          onValueChange={(mode) => update({ mode: mode as CredentialMode })}
+        >
           {(
             [
               ["none", "No credential"],
@@ -771,18 +782,15 @@ export function ConnectedAppsPanel({
               ["header", "Custom header"],
             ] as const
           ).map(([mode, label]) => (
-            <label key={mode} className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="credential-mode"
-                checked={draft.mode === mode}
-                disabled={saving}
-                onChange={() => update({ mode })}
-              />
+            <Label
+              key={mode}
+              className="flex items-center gap-2 text-sm font-normal"
+            >
+              <RadioGroupItem value={mode} />
               {label}
-            </label>
+            </Label>
           ))}
-        </div>
+        </RadioGroup>
       </fieldset>
       {draft.mode === "header" && (
         <SettingsField label="Header name">

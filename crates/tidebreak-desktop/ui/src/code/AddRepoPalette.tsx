@@ -4,7 +4,16 @@ import { Folder, GitBranch, Link2 } from "lucide-react";
 
 import type { CodeCloneDefaults, CodeCloneJobSnapshot } from "../api/types";
 import { useApp } from "@/AppContext";
+import type { OptionRow } from "@/components/OptionListbox";
 import { Button } from "@/components/ui/button";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import {
   Dialog,
   DialogContent,
@@ -13,13 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import {
-  OptionListbox,
-  optionElementId,
-  type OptionRow,
-} from "@/components/OptionListbox";
 import { Progress } from "@/components/ui/progress";
-import { SearchInput } from "@/components/SearchInput";
 import { hasNativeHost, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -68,7 +71,6 @@ export function AddRepoPalette({
   const cloneJobs = useCodeUpdatesStore((state) => state.cloneJobs);
   const [stage, setStage] = useState<Stage>("sources");
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
   const [path, setPath] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [url, setUrl] = useState("");
@@ -95,7 +97,6 @@ export function AddRepoPalette({
     if (!open) return;
     setStage("sources");
     setQuery("");
-    setActive(0);
     setPath("");
     setDisplayName("");
     setUrl("");
@@ -109,10 +110,6 @@ export function AddRepoPalette({
       setParentDir(next.parent_dir ?? "");
     });
   }, [open, client]);
-
-  useEffect(() => {
-    if (active >= rows.length) setActive(0);
-  }, [active, rows.length]);
 
   useEffect(() => {
     if (!job || stage !== "progress") return;
@@ -202,10 +199,9 @@ export function AddRepoPalette({
     }
   }
 
-  function selectSource(index: number) {
-    const row = rows[index];
+  function selectSource(key: string) {
+    const row = rows.find((entry) => entry.key === key) ?? SOURCES.find((entry) => entry.key === key);
     if (!row) return;
-    setActive(index);
     if (row.key === "local") {
       setStage("local");
       if (hasNativeHost()) void pickDirectory("path");
@@ -228,18 +224,6 @@ export function AddRepoPalette({
       if (typing && target.value.length > 0) return;
       event.preventDefault();
       goBack();
-      return;
-    }
-    if (stage !== "sources") return;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActive((current) => Math.min(current + 1, Math.max(rows.length - 1, 0)));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActive((current) => Math.max(current - 1, 0));
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      selectSource(active);
     }
   }
 
@@ -277,28 +261,49 @@ export function AddRepoPalette({
         </DialogHeader>
 
         {stage === "sources" && (
-          <div className="flex flex-col gap-2">
-            <SearchInput
+          <Command
+            shouldFilter={false}
+            label="Sources"
+            className="rounded-md border bg-transparent"
+          >
+            <CommandInput
               value={query}
               onValueChange={setQuery}
               placeholder="Filter sources"
-              size="sm"
-              aria-controls="add-repo-sources"
-              aria-activedescendant={
-                rows[active]
-                  ? optionElementId("add-repo-sources", active)
-                  : undefined
-              }
+              aria-label="Filter sources"
+              className="h-9"
             />
-            <OptionListbox
-              listId="add-repo-sources"
-              label="Sources"
-              rows={rows}
-              activeIndex={active}
-              onPick={selectSource}
-              onHighlight={setActive}
-            />
-          </div>
+            <CommandList className="max-h-56">
+              <CommandEmpty className="px-3 py-2 text-xs text-muted-foreground">
+                Nothing matches.
+              </CommandEmpty>
+              <CommandGroup className="p-1">
+                {rows.map((row) => {
+                  const Icon = row.icon;
+                  return (
+                    <CommandItem
+                      key={row.key}
+                      value={row.key}
+                      onSelect={() => selectSource(row.key)}
+                    >
+                      <Icon
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate">{row.label}</span>
+                        {row.description && (
+                          <span className="truncate text-xs text-muted-foreground">
+                            {row.description}
+                          </span>
+                        )}
+                      </span>
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            </CommandList>
+          </Command>
         )}
 
         {stage === "local" && (

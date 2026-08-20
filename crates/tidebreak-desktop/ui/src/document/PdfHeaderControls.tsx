@@ -1,6 +1,7 @@
 import { ChevronLeftIcon, ChevronRightIcon, MinusIcon, PlusIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { PdfControlsData } from "@/document/PdfControlsContext";
 import { useZoom } from "@/document/useZoom";
@@ -42,12 +43,13 @@ export function PdfHeaderControls({ page }: { page: PdfControlsData }) {
             </Button>
           </WithTooltip>
           <div className="flex items-center gap-1 text-xs">
-            <input
+            <Input
               value={currentPage}
               onChange={(e) => goToPage(e.target.value)}
               onFocus={(e) => e.target.select()}
               aria-label="Page number"
-              className="h-6 w-8 rounded border border-border bg-background text-center text-xs outline-none"
+              size="sm"
+              className="h-6 w-8 px-1 text-center text-xs"
             />
             <span>/ {numPages}</span>
           </div>
@@ -71,7 +73,7 @@ export function PdfHeaderControls({ page }: { page: PdfControlsData }) {
           <span className="sr-only">Zoom out</span>
         </Button>
       </WithTooltip>
-      <input
+      <Input
         value={inputValue}
         onChange={(e) => onInputChange(e.target.value)}
         onFocus={(e) => e.target.select()}
@@ -81,7 +83,8 @@ export function PdfHeaderControls({ page }: { page: PdfControlsData }) {
           if (e.key === "Escape") cancelInput();
         }}
         aria-label="Zoom"
-        className="h-6 w-12 rounded border border-border bg-background text-center text-xs outline-none"
+        size="sm"
+        className="h-6 w-12 px-1 text-center text-xs"
       />
       <WithTooltip label="Zoom in">
         <Button variant="ghost" size="icon-sm" onClick={zoomIn}>

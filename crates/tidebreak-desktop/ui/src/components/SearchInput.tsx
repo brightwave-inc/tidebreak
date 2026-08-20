@@ -4,6 +4,7 @@ import { type ComponentProps, type RefObject, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 const variants = cva(
@@ -63,7 +64,7 @@ export function SearchInput({
       <SearchIcon
         className={cn("transition-colors", empty ? "text-muted-foreground" : "text-primary")}
       />
-      <input
+      <Input
         ref={ref}
         type="search"
         placeholder={placeholder}
@@ -71,7 +72,7 @@ export function SearchInput({
         onChange={(event) => onValueChange?.(event.target.value)}
         onFocus={() => setIsFocused(true)}
         onBlur={() => setIsFocused(false)}
-        className="min-w-0 grow bg-transparent outline-hidden placeholder:text-muted-foreground [&::-webkit-search-cancel-button]:hidden"
+        className="h-auto min-w-0 grow border-0 bg-transparent p-0 shadow-none focus-visible:border-transparent focus-visible:ring-0 [&::-webkit-search-cancel-button]:hidden"
       />
       <Button
         type="button"
