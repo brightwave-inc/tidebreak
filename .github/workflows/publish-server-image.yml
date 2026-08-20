@@ -1,0 +1,335 @@
+name: Publish server image
+
+run-name: >-
+  ${{ github.event_name == 'release'
+    && format('Publish server image {0}', github.event.release.tag_name)
+    || github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    && format('Publish server image {0}', inputs.release_tag)
+    || 'Publish server image (latest release)' }}
+
+# Builds the self-host server from deploy/self-host/Dockerfile and publishes it
+# to GHCR:
+#
+#   ghcr.io/brightwave-inc/tidebreak-server
+#
+# The image is the same artifact deploy/self-host/docker-compose.yml builds
+# locally as `tidebreak-self-host:local`: the `tidebreak` binary with
+# tidebreak-server's `postgres` feature, running `Profile::SelfHost`. It exists
+# as a published image so operators do not have to compile the workspace to run
+# a server, and so model gateway deployments can install Tidebreak as an add-on
+# against a digest they pin.
+#
+# Publishes happen on three triggers:
+#
+#   - a published, non-prerelease GitHub Release, which is the release cadence
+#     and the primary path. `release` events run this file from the default
+#     branch, not from the tag, so a hostile or stale tag YAML cannot publish;
+#   - a weekly scheduled rebuild, so Debian security patches in the runtime
+#     base flush through even when nothing in-repo changes;
+#   - manual dispatch, for retries and backfills. Dispatch takes an optional
+#     release tag; with none, it rebuilds the current latest release, exactly
+#     like the schedule does.
+#
+# Publication source is the default branch only. Manual dispatch and the weekly
+# schedule must run this workflow from that branch, and every publish refuses a
+# revision that is not an ancestor of it. The build checkout does not persist
+# credentials, and deploy/self-host/Dockerfile.dockerignore keeps `.git` and
+# every untracked non-source path out of the `COPY . .` context.
+#
+# Tag scheme, for a release tag `vX.Y.Z`:
+#
+#   - `X.Y.Z`  — the version, without the `v`, so Helm-style `image.tag` values
+#                read as plain semver;
+#   - `latest` — moved only when the built tag is the repository's current
+#                latest release. A backfill of an older version never demotes
+#                `latest`.
+#
+# Release publishes are immutable: a version tag that already exists on GHCR
+# fails the run. Scheduled and dispatched rebuilds deliberately repoint the
+# same version tag, because flushing base-image patches into `X.Y.Z` is the
+# whole point of that lane. Consumers that need an immutable reference pin the
+# digest, which every run prints in its step summary.
+#
+# Publishing uses the workflow's own GITHUB_TOKEN; no repository secret is
+# consumed. First-time note: a package created by this workflow is private by
+# default — making it publicly pullable (and linking it to the repository) is a
+# one-time manual toggle in the GHCR package settings.
+
+on:
+  release:
+    types: [published]
+  schedule:
+    # Weekly patch flush: Tuesday 05:17 UTC, off the busy on-the-hour and
+    # on-the-half-hour scheduling spikes.
+    - cron: "17 5 * * 2"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Release tag to publish (vX.Y.Z). Leave empty to rebuild the current
+          latest release.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tidebreak-server-image-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag || 'latest-release' }}
+  cancel-in-progress: false
+
+env:
+  SERVER_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-server
+
+jobs:
+  resolve:
+    name: resolve the release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      build_sha: ${{ steps.decide.outputs.build_sha }}
+      publish_latest: ${{ steps.decide.outputs.publish_latest }}
+      immutable: ${{ steps.decide.outputs.immutable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the publication source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_REF_NAME: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ -n "$DEFAULT_BRANCH" ]] || {
+            echo "The repository event did not identify a default branch." >&2
+            exit 1
+          }
+          git fetch --no-tags origin \
+            "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] || {
+            echo "The trusted checkout does not match the workflow revision $SOURCE_SHA." >&2
+            exit 1
+          }
+
+          case "$EVENT_NAME" in
+            workflow_dispatch|schedule)
+              [[ "$SOURCE_REF" == "refs/heads/$DEFAULT_BRANCH" &&
+                "$SOURCE_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
+                echo "Server image publication must run the current $DEFAULT_BRANCH workflow, got $SOURCE_REF ($SOURCE_REF_NAME)" >&2
+                exit 1
+              }
+              ;;
+            release)
+              # `release` events already load this file from the default
+              # branch. The tree built below is the tag commit; it still has to
+              # sit on the default branch, checked in the next step.
+              [[ "$RELEASE_DRAFT" == "false" && "$RELEASE_PRERELEASE" == "false" ]] || {
+                echo "Server image publication requires a published, non-prerelease GitHub Release." >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "unknown event $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Decide the version, revision, and tag moves
+        id: decide
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          release_pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          # The repository's current latest release decides whether this run
+          # may move `latest`, so resolve it for every event.
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          [[ "$latest_tag" =~ $release_pattern ]] || {
+            echo "The repository's latest release tag does not look like vX.Y.Z: $latest_tag" >&2
+            exit 1
+          }
+
+          immutable=false
+          case "$EVENT_NAME" in
+            release)
+              tag="$RELEASE_TAG"
+              # Only a release publishes a version tag for the first time, so
+              # only a release refuses to overwrite one.
+              immutable=true
+              ;;
+            workflow_dispatch)
+              tag="${DISPATCH_TAG:-$latest_tag}"
+              ;;
+            schedule)
+              tag="$latest_tag"
+              ;;
+            *)
+              echo "unknown event $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          [[ "$tag" =~ $release_pattern ]] || {
+            echo "The image tag must come from a release tag shaped vX.Y.Z: $tag" >&2
+            exit 1
+          }
+
+          git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+          build_sha="$(git rev-parse "refs/tags/$tag^{commit}")"
+          git merge-base --is-ancestor "$build_sha" "origin/$DEFAULT_BRANCH" || {
+            echo "Refusing to publish a server image not contained in $DEFAULT_BRANCH: $build_sha" >&2
+            exit 1
+          }
+
+          publish_latest=false
+          if [[ "$tag" == "$latest_tag" ]]; then
+            publish_latest=true
+          fi
+
+          {
+            echo "version=${tag#v}"
+            echo "build_sha=$build_sha"
+            echo "publish_latest=$publish_latest"
+            echo "immutable=$immutable"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v} build_sha=$build_sha publish_latest=$publish_latest immutable=$immutable"
+
+  build:
+    name: build and push · ${{ matrix.arch }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
+      IMMUTABLE: ${{ needs.resolve.outputs.immutable }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve.outputs.build_sha }}
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # A release publishes a version for the first time, so refuse the whole
+      # build when its tag already exists — before any per-arch push mutates
+      # anything. Rebuild lanes skip this on purpose: repointing the version
+      # tag onto freshly patched bases is what they are for.
+      - name: Refuse to republish an existing release version
+        if: needs.resolve.outputs.immutable == 'true'
+        run: |
+          if docker manifest inspect "$SERVER_REPOSITORY:$VERSION" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing tag $SERVER_REPOSITORY:$VERSION" >&2
+            exit 1
+          fi
+
+      # The build context is the workspace root, matching the `context: ../..`
+      # that deploy/self-host/docker-compose.yml builds from: `cargo build
+      # --locked` has to see the whole workspace and the committed Cargo.lock.
+      # BuildKit reads the sidecar deploy/self-host/Dockerfile.dockerignore,
+      # which denies by default and admits only source paths.
+      - name: Build the server container
+        run: |
+          docker build \
+            --file deploy/self-host/Dockerfile \
+            --tag "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" \
+            .
+
+      - name: Smoke test the built binary
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/tidebreak \
+            "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" --version
+
+      - name: Push the per-architecture tag
+        run: docker push "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}"
+
+  manifest:
+    # Assembles the user-facing tags only after every architecture has built
+    # and pushed.
+    name: assemble the multi-arch manifest
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create the version manifest
+        run: |
+          docker buildx imagetools create \
+            --tag "$SERVER_REPOSITORY:$VERSION" \
+            "$SERVER_REPOSITORY:$VERSION-amd64" \
+            "$SERVER_REPOSITORY:$VERSION-arm64"
+
+      # `latest` moves only for the repository's current latest release, so a
+      # backfill of an older version cannot demote it.
+      - name: Move the latest tag
+        if: needs.resolve.outputs.publish_latest == 'true'
+        run: |
+          docker buildx imagetools create \
+            --tag "$SERVER_REPOSITORY:latest" \
+            "$SERVER_REPOSITORY:$VERSION-amd64" \
+            "$SERVER_REPOSITORY:$VERSION-arm64"
+
+      # The digest is the reference deployments pin, so print it where a human
+      # and a copy-paste can both reach it.
+      - name: Record the published digest
+        env:
+          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
+        run: |
+          digest="$(docker buildx imagetools inspect \
+            "$SERVER_REPOSITORY:$VERSION" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "unexpected digest for $SERVER_REPOSITORY:$VERSION: $digest" >&2
+            exit 1
+          }
+          echo "Published $SERVER_REPOSITORY:$VERSION at $digest"
+          {
+            echo "## Published server image"
+            echo
+            echo "- \`$SERVER_REPOSITORY:$VERSION\`"
+            if [[ "$PUBLISH_LATEST" == "true" ]]; then
+              echo "- \`$SERVER_REPOSITORY:latest\`"
+            fi
+            echo
+            echo "Pin the digest:"
+            echo
+            echo '```'
+            echo "$SERVER_REPOSITORY@$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
