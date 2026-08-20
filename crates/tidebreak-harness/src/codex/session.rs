@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::timeout;
+use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
+use tokio::time::{timeout, Instant};
 use tracing::warn;
 
 use crate::codex::parse::CodexStreamParser;
@@ -24,6 +24,7 @@ use crate::{
 use tidebreak_core::{CodePermissionMode, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
 /// Live Codex session: one app-server child for the session lifetime.
@@ -41,15 +42,89 @@ pub struct CodexSession {
     child_pid: AtomicU32,
     stdin: Option<Arc<AsyncMutex<ChildStdin>>>,
     stdout: Option<Arc<AsyncMutex<StdoutReader>>>,
-    parser: Mutex<CodexStreamParser>,
+    parser: Arc<Mutex<CodexStreamParser>>,
     next_id: AtomicI64,
+    control_state: Arc<Mutex<ControlState>>,
+    control_state_changed: Arc<Notify>,
     pending_approvals: Mutex<HashMap<String, Value>>,
-    current_turn_id: Mutex<Option<String>>,
 }
 
 struct StdoutReader {
     stdout: ChildStdout,
     lines: StreamLineBuffer,
+}
+
+struct ControlState {
+    turn: ControlTurn,
+    pending: HashMap<i64, PendingSteer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlTurn {
+    Idle,
+    Starting,
+    Active(String),
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingWriteState {
+    Queued,
+    Writing,
+    Written,
+}
+
+struct PendingSteer {
+    expected_turn_id: String,
+    text: String,
+    reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
+    deadline: Option<Instant>,
+    write_state: PendingWriteState,
+    accept_response: bool,
+}
+
+struct ControlRegistration<'a> {
+    session: &'a CodexSession,
+    rpc_id: i64,
+    armed: bool,
+}
+
+impl ControlRegistration<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ControlRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let removed = {
+            let mut state = self
+                .session
+                .control_state
+                .lock()
+                .expect("codex control state");
+            if state
+                .pending
+                .get(&self.rpc_id)
+                .is_some_and(|pending| pending.write_state == PendingWriteState::Queued)
+            {
+                state.pending.remove(&self.rpc_id)
+            } else {
+                None
+            }
+        };
+        if removed.is_some() {
+            self.session
+                .parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(self.rpc_id));
+            self.session.control_state_changed.notify_one();
+        }
+    }
 }
 
 impl CodexSession {
@@ -64,10 +139,14 @@ impl CodexSession {
             child_pid: AtomicU32::new(0),
             stdin: None,
             stdout: None,
-            parser: Mutex::new(CodexStreamParser::new()),
+            parser: Arc::new(Mutex::new(CodexStreamParser::new())),
             next_id: AtomicI64::new(1),
+            control_state: Arc::new(Mutex::new(ControlState {
+                turn: ControlTurn::Idle,
+                pending: HashMap::new(),
+            })),
+            control_state_changed: Arc::new(Notify::new()),
             pending_approvals: Mutex::new(HashMap::new()),
-            current_turn_id: Mutex::new(None),
         }
     }
 
@@ -102,6 +181,249 @@ impl CodexSession {
         self.write_message(&json!({ "id": id, "method": method, "params": params }))
             .await?;
         Ok(id)
+    }
+
+    /// Admit one native steer while `run_turn` remains the sole stdout reader.
+    /// The turn id and admission gate are read under the same lock, so a
+    /// terminal event cannot leave a request registered for the following
+    /// turn. The stdin writer is detached: cancellation before it owns the
+    /// write removes a queued request, while cancellation after that point
+    /// leaves the stream reader responsible for the acknowledgement and
+    /// `UserSteered` event.
+    async fn request_steer(&self, thread_id: String, text: String) -> Result<(), HarnessError> {
+        let Some(stdin) = self.stdin.clone() else {
+            return Err(HarnessError::SteeringRejected(
+                "the engine child has no stdin".into(),
+            ));
+        };
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let (rpc_id, message, rx) = loop {
+            let changed = self.control_state_changed.notified();
+            let admitted = {
+                let mut state = self.control_state.lock().expect("codex control state");
+                match &state.turn {
+                    ControlTurn::Active(turn_id) => {
+                        let expected_turn_id = turn_id.clone();
+                        let rpc_id = self.next_rpc_id();
+                        let client_message_id = format!("tidebreak-steer-{rpc_id}");
+                        let message = steer_request(
+                            rpc_id,
+                            &thread_id,
+                            &expected_turn_id,
+                            &text,
+                            &client_message_id,
+                        );
+                        let (tx, rx) = oneshot::channel();
+                        self.parser
+                            .lock()
+                            .expect("codex parser")
+                            .note_outbound(&json!(rpc_id), "turn/steer");
+                        state.pending.insert(
+                            rpc_id,
+                            PendingSteer {
+                                expected_turn_id,
+                                text: text.clone(),
+                                reply: Some(tx),
+                                deadline: None,
+                                write_state: PendingWriteState::Queued,
+                                accept_response: true,
+                            },
+                        );
+                        Some(Ok((rpc_id, message, rx)))
+                    }
+                    ControlTurn::Starting => None,
+                    ControlTurn::Idle | ControlTurn::Closed => {
+                        Some(Err(HarnessError::SteeringRejected(
+                            "the active turn finished before steering was admitted".into(),
+                        )))
+                    }
+                }
+            };
+            if let Some(admitted) = admitted {
+                break admitted?;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || timeout(remaining, changed).await.is_err() {
+                return Err(HarnessError::SteeringRejected(
+                    "the active turn was not acknowledged by the engine".into(),
+                ));
+            }
+        };
+        self.control_state_changed.notify_one();
+
+        let mut registration = ControlRegistration {
+            session: self,
+            rpc_id,
+            armed: true,
+        };
+        spawn_control_write(
+            stdin,
+            Arc::clone(&self.control_state),
+            Arc::clone(&self.control_state_changed),
+            Arc::clone(&self.parser),
+            rpc_id,
+            message,
+        );
+        let result = rx.await.unwrap_or_else(|_| {
+            Err(HarnessError::SteeringRejected(
+                "the engine dropped the steering response".into(),
+            ))
+        });
+        registration.disarm();
+        result
+    }
+
+    fn begin_control_turn(&self) {
+        let pending = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            state.turn = ControlTurn::Starting;
+            std::mem::take(&mut state.pending)
+        };
+        for (id, mut pending) in pending {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::SteeringRejected(
+                    "the prior turn ended before steering was accepted".into(),
+                )));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(id));
+        }
+        self.control_state_changed.notify_waiters();
+    }
+
+    fn activate_control_turn(&self, turn_id: &str) {
+        let changed = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            match &state.turn {
+                ControlTurn::Starting => {
+                    state.turn = ControlTurn::Active(turn_id.to_owned());
+                    true
+                }
+                ControlTurn::Active(active) if active == turn_id => false,
+                ControlTurn::Idle | ControlTurn::Active(_) | ControlTurn::Closed => false,
+            }
+        };
+        if changed {
+            self.control_state_changed.notify_waiters();
+        }
+    }
+
+    /// Close admission before a terminal event is emitted. Requests that have
+    /// not started writing are removed immediately. An in-flight write becomes
+    /// a bounded tombstone: its caller is rejected now, and the sole stream
+    /// reader still consumes its eventual response without emitting a steer.
+    fn close_control_turn_for_terminal(&self, detail: &str) {
+        let removed = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            state.turn = ControlTurn::Closed;
+            let queued_ids = state
+                .pending
+                .iter()
+                .filter_map(|(id, pending)| {
+                    (pending.write_state == PendingWriteState::Queued).then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            let removed = queued_ids
+                .into_iter()
+                .filter_map(|id| state.pending.remove(&id).map(|pending| (id, pending)))
+                .collect::<Vec<_>>();
+            for pending in state.pending.values_mut() {
+                pending.accept_response = false;
+                if let Some(reply) = pending.reply.take() {
+                    let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+                }
+            }
+            removed
+        };
+        for (id, mut pending) in removed {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(id));
+        }
+        self.control_state_changed.notify_waiters();
+    }
+
+    fn abort_control_turn(&self, detail: &str) {
+        let pending = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            state.turn = ControlTurn::Closed;
+            std::mem::take(&mut state.pending)
+        };
+        for (id, mut pending) in pending {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(id));
+        }
+        self.control_state_changed.notify_waiters();
+    }
+
+    fn next_control_deadline(&self) -> Option<Instant> {
+        self.control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .values()
+            .filter_map(|pending| pending.deadline)
+            .min()
+    }
+
+    fn expire_control_requests(&self) {
+        let now = Instant::now();
+        let expired = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            let ids = state
+                .pending
+                .iter()
+                .filter_map(|(id, pending)| {
+                    pending
+                        .deadline
+                        .is_some_and(|deadline| deadline <= now)
+                        .then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| state.pending.remove(&id).map(|pending| (id, pending)))
+                .collect::<Vec<_>>()
+        };
+        for (id, mut pending) in expired {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::SteeringRejected(
+                    "timed out waiting for the engine to accept steering".into(),
+                )));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(id));
+        }
+        self.control_state_changed.notify_waiters();
+    }
+
+    fn controls_pending(&self) -> bool {
+        !self
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .is_empty()
+    }
+
+    fn active_control_turn_id(&self) -> Option<String> {
+        let state = self.control_state.lock().expect("codex control state");
+        match &state.turn {
+            ControlTurn::Active(turn_id) => Some(turn_id.clone()),
+            ControlTurn::Idle | ControlTurn::Starting | ControlTurn::Closed => None,
+        }
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), HarnessError> {
@@ -266,14 +588,42 @@ impl CodexSession {
     }
 
     async fn read_until_terminal_turn(&self) -> Result<(), HarnessError> {
+        let mut terminal = false;
         loop {
-            let lines = self.read_lines().await?;
-            if lines.is_empty() {
-                return Err(HarnessError::Other(
-                    "engine stdout closed before the turn finished".into(),
-                ));
+            let changed = self.control_state_changed.notified();
+            let deadline = self.next_control_deadline();
+            if terminal && !self.controls_pending() {
+                return Ok(());
             }
-            let mut terminal = false;
+
+            let lines = match deadline {
+                Some(deadline) => {
+                    tokio::select! {
+                        biased;
+                        lines = self.read_lines() => lines?,
+                        () = changed => continue,
+                        () = tokio::time::sleep_until(deadline) => {
+                            self.expire_control_requests();
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        biased;
+                        lines = self.read_lines() => lines?,
+                        () = changed => continue,
+                    }
+                }
+            };
+            if lines.is_empty() {
+                let message = if terminal {
+                    "engine stdout closed before a control response arrived"
+                } else {
+                    "engine stdout closed before the turn finished"
+                };
+                return Err(HarnessError::Other(message.into()));
+            }
             for line in lines {
                 for event in self.emit_parsed(&line).await {
                     if matches!(
@@ -285,9 +635,6 @@ impl CodexSession {
                         terminal = true;
                     }
                 }
-            }
-            if terminal {
-                return Ok(());
             }
         }
     }
@@ -319,23 +666,54 @@ impl CodexSession {
     }
 
     async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            if let Some(turn_id) = value
-                .pointer("/result/turn/id")
-                .or_else(|| value.pointer("/params/turn/id"))
-                .or_else(|| value.pointer("/params/turnId"))
-                .and_then(Value::as_str)
-            {
-                *self.current_turn_id.lock().expect("codex turn") = Some(turn_id.to_owned());
-                // The engine acknowledged a turn on this thread, so it has
-                // written the thread's rollout: the id is resumable now.
-                self.thread_ran_a_turn.store(true, Ordering::SeqCst);
+        let value = serde_json::from_str::<Value>(line).ok();
+        if let Some(value) = value.as_ref() {
+            if is_rpc_response(&value) {
+                if let Some(rpc_id) = value_rpc_id(&value) {
+                    let pending = self
+                        .control_state
+                        .lock()
+                        .expect("codex control state")
+                        .pending
+                        .remove(&rpc_id);
+                    if let Some(mut pending) = pending {
+                        let result = validate_steer_response(&value, &pending.expected_turn_id);
+                        if pending.accept_response && result.is_ok() {
+                            self.spec
+                                .sink
+                                .emit(HarnessEvent::UserSteered { text: pending.text })
+                                .await;
+                        }
+                        if let Some(reply) = pending.reply.take() {
+                            let _ = reply.send(result);
+                        }
+                        self.control_state_changed.notify_waiters();
+                    }
+                }
             }
             if let Some(detail) = lost_resume_detail(&value) {
                 *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
         }
         let events = self.parser.lock().expect("codex parser").push_line(line);
+        let terminal = events.iter().any(|event| {
+            matches!(
+                event,
+                HarnessEvent::TurnCompleted { .. }
+                    | HarnessEvent::TurnFailed { .. }
+                    | HarnessEvent::TurnInterrupted
+            )
+        });
+        if terminal {
+            self.close_control_turn_for_terminal(
+                "the active turn finished before steering was accepted",
+            );
+        } else if let Some(turn_id) = value.as_ref().and_then(observed_turn_id) {
+            self.activate_control_turn(turn_id);
+            // The engine acknowledged a turn on this thread, so it has
+            // written the thread's rollout: the id is resumable now.
+            self.thread_ran_a_turn.store(true, Ordering::SeqCst);
+        }
         for event in &events {
             if let HarnessEvent::SessionStarted {
                 resume_ref: Some(resume),
@@ -380,7 +758,8 @@ impl HarnessSession for CodexSession {
         let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
             return Err(HarnessError::Other("thread has no resume ref".into()));
         };
-        let id = self
+        self.begin_control_turn();
+        let id = match self
             .request(
                 "turn/start",
                 json!({
@@ -388,7 +767,14 @@ impl HarnessSession for CodexSession {
                     "input": [{ "type": "text", "text": input.text }],
                 }),
             )
-            .await?;
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                self.abort_control_turn("the turn did not start");
+                return Err(err);
+            }
+        };
         let _ = id;
         // Long-lived child: its exit is a session-level failure, not a turn
         // outcome, and `read_until_terminal_turn` already errors on a stream
@@ -397,10 +783,28 @@ impl HarnessSession for CodexSession {
         if let Some(detail) = self.lost_resume() {
             // The thread this session attached to is gone. Report the lost
             // resume rather than a turn failure the caller would retry.
+            self.abort_control_turn("the engine session was lost");
             return Err(HarnessError::ResumeLost(detail));
         }
-        terminal?;
-        Ok(TurnOutcome::Clean)
+        match terminal {
+            Ok(()) => {
+                self.abort_control_turn("the active turn finished before steering was accepted");
+                Ok(TurnOutcome::Clean)
+            }
+            Err(err) => {
+                self.abort_control_turn("the engine stopped before steering was accepted");
+                Err(err)
+            }
+        }
+    }
+
+    async fn steer(&self, text: String) -> Result<(), HarnessError> {
+        let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
+            return Err(HarnessError::SteeringRejected(
+                "the engine session has no thread id".into(),
+            ));
+        };
+        self.request_steer(thread_id, text).await
     }
 
     async fn decide(
@@ -444,7 +848,7 @@ impl HarnessSession for CodexSession {
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
         let thread_id = self.resume_ref.lock().expect("codex resume").clone();
-        let turn_id = self.current_turn_id.lock().expect("codex turn").clone();
+        let turn_id = self.active_control_turn_id();
         if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
             let id = self
                 .request(
@@ -519,11 +923,190 @@ fn line_is_rpc_id(line: &str, rpc_id: i64) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return false;
     };
+    if !is_rpc_response(&value) {
+        return false;
+    }
     match value.get("id") {
         Some(Value::Number(n)) => n.as_i64() == Some(rpc_id),
         Some(Value::String(s)) => s.parse::<i64>().ok() == Some(rpc_id),
         _ => false,
     }
+}
+
+fn is_rpc_response(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.contains_key("id")
+        && !object.contains_key("method")
+        && (object.contains_key("result") || object.contains_key("error"))
+}
+
+fn observed_turn_id(value: &Value) -> Option<&str> {
+    let method = value.get("method").and_then(Value::as_str);
+    if method == Some("turn/started") {
+        return value.pointer("/params/turn/id").and_then(Value::as_str);
+    }
+    if is_rpc_response(value) {
+        return value.pointer("/result/turn/id").and_then(Value::as_str);
+    }
+    None
+}
+
+fn value_rpc_id(value: &Value) -> Option<i64> {
+    match value.get("id") {
+        Some(Value::Number(number)) => number.as_i64(),
+        Some(Value::String(string)) => string.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn rpc_error_detail(value: &Value) -> Option<String> {
+    let message = value.pointer("/error/message").and_then(Value::as_str)?;
+    Some(message.chars().take(MAX_NOTICE_CHARS).collect())
+}
+
+fn validate_steer_response(value: &Value, expected_turn_id: &str) -> Result<(), HarnessError> {
+    if let Some(detail) = rpc_error_detail(value) {
+        return Err(HarnessError::SteeringRejected(detail));
+    }
+    let accepted_turn_id = value
+        .pointer("/result/turnId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HarnessError::SteeringRejected(
+                "the engine returned no turn id for the steering request".into(),
+            )
+        })?;
+    if accepted_turn_id != expected_turn_id {
+        return Err(HarnessError::SteeringRejected(format!(
+            "the engine acknowledged turn {accepted_turn_id}, not active turn {expected_turn_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn steer_request(
+    rpc_id: i64,
+    thread_id: &str,
+    expected_turn_id: &str,
+    text: &str,
+    client_message_id: &str,
+) -> Value {
+    json!({
+        "id": rpc_id,
+        "method": "turn/steer",
+        "params": {
+            "threadId": thread_id,
+            "expectedTurnId": expected_turn_id,
+            "input": [{ "type": "text", "text": text }],
+            "clientUserMessageId": client_message_id,
+        }
+    })
+}
+
+fn spawn_control_write(
+    stdin: Arc<AsyncMutex<ChildStdin>>,
+    control_state: Arc<Mutex<ControlState>>,
+    changed: Arc<Notify>,
+    parser: Arc<Mutex<CodexStreamParser>>,
+    rpc_id: i64,
+    message: Value,
+) {
+    tokio::spawn(async move {
+        let line = match serde_json::to_vec(&message) {
+            Ok(mut line) => {
+                line.push(b'\n');
+                line
+            }
+            Err(err) => {
+                fail_control_write(
+                    &control_state,
+                    &changed,
+                    &parser,
+                    rpc_id,
+                    format!("serialize steering rpc: {err}"),
+                );
+                return;
+            }
+        };
+        let write = timeout(CONTROL_RPC_TIMEOUT, async {
+            let mut stdin = stdin.lock().await;
+            {
+                let mut state = control_state.lock().expect("codex control state");
+                let Some(pending) = state.pending.get_mut(&rpc_id) else {
+                    return Ok(false);
+                };
+                if pending.write_state != PendingWriteState::Queued {
+                    return Ok(false);
+                }
+                pending.write_state = PendingWriteState::Writing;
+            }
+            changed.notify_waiters();
+            stdin.write_all(&line).await?;
+            stdin.flush().await?;
+            Ok::<bool, std::io::Error>(true)
+        })
+        .await;
+        match write {
+            Ok(Ok(false)) => return,
+            Ok(Ok(true)) => {}
+            Ok(Err(err)) => {
+                fail_control_write(
+                    &control_state,
+                    &changed,
+                    &parser,
+                    rpc_id,
+                    format!("write steering rpc: {err}"),
+                );
+                return;
+            }
+            Err(_) => {
+                fail_control_write(
+                    &control_state,
+                    &changed,
+                    &parser,
+                    rpc_id,
+                    "timed out writing the steering request".into(),
+                );
+                return;
+            }
+        }
+        if let Some(pending) = control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .get_mut(&rpc_id)
+        {
+            pending.write_state = PendingWriteState::Written;
+            pending.deadline = Some(Instant::now() + CONTROL_RPC_TIMEOUT);
+        }
+        changed.notify_waiters();
+    });
+}
+
+fn fail_control_write(
+    control_state: &Mutex<ControlState>,
+    changed: &Notify,
+    parser: &Mutex<CodexStreamParser>,
+    rpc_id: i64,
+    detail: String,
+) {
+    let pending = control_state
+        .lock()
+        .expect("codex control state")
+        .pending
+        .remove(&rpc_id);
+    if let Some(mut pending) = pending {
+        if let Some(reply) = pending.reply.take() {
+            let _ = reply.send(Err(HarnessError::SteeringRejected(detail)));
+        }
+    }
+    parser
+        .lock()
+        .expect("codex parser")
+        .forget_outbound(&json!(rpc_id));
+    changed.notify_waiters();
 }
 
 async fn drain_capped<R>(mut reader: R, cap: usize) -> String
@@ -630,7 +1213,37 @@ done
 "#;
 
     #[cfg(unix)]
+    const FAKE_STEERING_APP_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"userAgent":"fake/0.147.0"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"TURN-1","status":"inProgress"}}}\n' "$id"
+      printf '{"method":"turn/started","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"inProgress"}}}\n'
+      ;;
+    *'"method":"turn/steer"'*)
+      printf '%s\n' "$line" >"$FAKE_CODEX_STEER"
+      printf '{"id":%s,"result":{"turnId":"TURN-1"}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"completed"}}}\n'
+      ;;
+  esac
+done
+"#;
+
+    #[cfg(unix)]
     fn write_fake_app_server(path: &std::path::Path) {
+        write_app_server(path, FAKE_APP_SERVER);
+    }
+
+    #[cfg(unix)]
+    fn write_app_server(path: &std::path::Path, script: &str) {
         // Write a sibling inode, fsync, then rename over `path` so execve
         // never sees a file that still has a writer (Linux ETXTBSY).
         use std::io::Write;
@@ -643,7 +1256,7 @@ done
             .mode(0o755)
             .open(&staging)
             .unwrap();
-        file.write_all(FAKE_APP_SERVER.as_bytes()).unwrap();
+        file.write_all(script.as_bytes()).unwrap();
         file.sync_all().unwrap();
         drop(file);
         std::fs::rename(&staging, path).unwrap();
@@ -660,6 +1273,61 @@ done
     #[async_trait]
     impl crate::HarnessEventSink for SilentSink {
         async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<HarnessEvent>>,
+    }
+
+    #[async_trait]
+    impl crate::HarnessEventSink for RecordingSink {
+        async fn emit(&self, event: HarnessEvent) {
+            self.events.lock().expect("codex test events").push(event);
+        }
+    }
+
+    fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
+        CodexSession::new(SessionSpec {
+            worktree: PathBuf::from("."),
+            permission_mode: CodePermissionMode::Auto,
+            model: None,
+            resume_ref: Some("THREAD-1".into()),
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: None,
+            binary: PathBuf::from("codex"),
+            sink,
+        })
+    }
+
+    fn register_pending(
+        session: &CodexSession,
+        rpc_id: i64,
+        write_state: PendingWriteState,
+        deadline: Option<Instant>,
+    ) -> oneshot::Receiver<Result<(), HarnessError>> {
+        let (reply, receiver) = oneshot::channel();
+        session
+            .parser
+            .lock()
+            .expect("codex parser")
+            .note_outbound(&json!(rpc_id), "turn/steer");
+        let mut state = session.control_state.lock().expect("codex control state");
+        state.turn = ControlTurn::Active("TURN-1".into());
+        state.pending.insert(
+            rpc_id,
+            PendingSteer {
+                expected_turn_id: "TURN-1".into(),
+                text: "redirect".into(),
+                reply: Some(reply),
+                deadline,
+                write_state,
+                accept_response: true,
+            },
+        );
+        receiver
     }
 
     #[cfg(unix)]
@@ -746,5 +1414,355 @@ done
             panic!("expected a lost resume, got {err}");
         };
         assert!(detail.contains("thread not found"), "detail: {detail}");
+    }
+
+    #[test]
+    fn steer_response_must_acknowledge_the_expected_turn() {
+        validate_steer_response(&json!({ "result": { "turnId": "TURN-1" } }), "TURN-1").unwrap();
+        let mismatch =
+            validate_steer_response(&json!({ "result": { "turnId": "TURN-2" } }), "TURN-1")
+                .unwrap_err();
+        assert!(matches!(mismatch, HarnessError::SteeringRejected(_)));
+        let rejected = validate_steer_response(
+            &json!({ "error": { "message": "turn is no longer steerable" } }),
+            "TURN-1",
+        )
+        .unwrap_err();
+        assert!(matches!(rejected, HarnessError::SteeringRejected(_)));
+    }
+
+    #[test]
+    fn native_steer_request_matches_the_verified_json_shape() {
+        let request = steer_request(
+            41,
+            "THREAD-1",
+            "TURN-1",
+            "try the other file",
+            "tidebreak-steer-41",
+        );
+        assert_eq!(request["id"], 41);
+        assert_eq!(request["method"], "turn/steer");
+        assert_eq!(request["params"]["threadId"], "THREAD-1");
+        assert_eq!(request["params"]["expectedTurnId"], "TURN-1");
+        assert_eq!(
+            request["params"]["input"],
+            json!([{
+                "type": "text",
+                "text": "try the other file"
+            }])
+        );
+        assert_eq!(
+            request["params"]["clientUserMessageId"],
+            "tidebreak-steer-41"
+        );
+    }
+
+    #[test]
+    fn only_true_json_rpc_responses_match_waiters() {
+        assert!(!is_rpc_response(&json!({
+            "id": 7,
+            "method": "item/commandExecution/requestApproval",
+            "params": { "itemId": "call-1" }
+        })));
+        assert!(is_rpc_response(&json!({
+            "id": 7,
+            "result": { "turnId": "TURN-1" }
+        })));
+        assert!(is_rpc_response(&json!({
+            "id": "7",
+            "error": { "code": -32602, "message": "rejected" }
+        })));
+    }
+
+    #[tokio::test]
+    async fn same_id_server_request_does_not_resolve_steering() {
+        let sink = Arc::new(RecordingSink::default());
+        let session = unit_session(sink.clone());
+        let receiver = register_pending(
+            &session,
+            7,
+            PendingWriteState::Written,
+            Some(Instant::now() + CONTROL_RPC_TIMEOUT),
+        );
+
+        session
+            .emit_parsed(
+                r#"{"id":7,"method":"item/commandExecution/requestApproval","params":{"itemId":"call-1"}}"#,
+            )
+            .await;
+        assert!(session
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .contains_key(&7));
+
+        session
+            .emit_parsed(r#"{"id":7,"result":{"turnId":"TURN-1"}}"#)
+            .await;
+        receiver.await.unwrap().unwrap();
+        let events = sink.events.lock().expect("codex test events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::UserSteered { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_closes_admission_and_rejects_queued_steering() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let receiver = register_pending(&session, 7, PendingWriteState::Queued, None);
+
+        session
+            .emit_parsed(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"TURN-1","status":"completed"}}}"#,
+            )
+            .await;
+
+        let state = session.control_state.lock().expect("codex control state");
+        assert_eq!(state.turn, ControlTurn::Closed);
+        assert!(state.pending.is_empty());
+        drop(state);
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Err(HarnessError::SteeringRejected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_race_consumes_an_inflight_ack_without_a_steer_event() {
+        let sink = Arc::new(RecordingSink::default());
+        let session = unit_session(sink.clone());
+        let receiver = register_pending(
+            &session,
+            7,
+            PendingWriteState::Writing,
+            Some(Instant::now() + CONTROL_RPC_TIMEOUT),
+        );
+
+        session
+            .emit_parsed(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"TURN-1","status":"completed"}}}"#,
+            )
+            .await;
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Err(HarnessError::SteeringRejected(_))
+        ));
+        assert!(session
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .contains_key(&7));
+
+        session
+            .emit_parsed(r#"{"id":7,"result":{"turnId":"TURN-1"}}"#)
+            .await;
+        assert!(session
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .is_empty());
+        assert!(!sink
+            .events
+            .lock()
+            .expect("codex test events")
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::UserSteered { .. })));
+    }
+
+    #[test]
+    fn cancellation_before_write_removes_the_registration() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let receiver = register_pending(&session, 7, PendingWriteState::Queued, None);
+        drop(receiver);
+        {
+            let _registration = ControlRegistration {
+                session: &session,
+                rpc_id: 7,
+                armed: true,
+            };
+        }
+        assert!(session
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn caller_cancellation_after_native_acceptance_keeps_user_steered() {
+        let sink = Arc::new(RecordingSink::default());
+        let session = unit_session(sink.clone());
+        let receiver = register_pending(
+            &session,
+            7,
+            PendingWriteState::Written,
+            Some(Instant::now() + CONTROL_RPC_TIMEOUT),
+        );
+        drop(receiver);
+
+        session
+            .emit_parsed(r#"{"id":7,"result":{"turnId":"TURN-1"}}"#)
+            .await;
+
+        let events = sink.events.lock().expect("codex test events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::UserSteered { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn user_steered_is_emitted_before_turn_completed() {
+        let sink = Arc::new(RecordingSink::default());
+        let session = unit_session(sink.clone());
+        let receiver = register_pending(
+            &session,
+            7,
+            PendingWriteState::Written,
+            Some(Instant::now() + CONTROL_RPC_TIMEOUT),
+        );
+
+        session
+            .emit_parsed(r#"{"id":7,"result":{"turnId":"TURN-1"}}"#)
+            .await;
+        session
+            .emit_parsed(
+                r#"{"method":"turn/completed","params":{"turn":{"id":"TURN-1","status":"completed"}}}"#,
+            )
+            .await;
+        receiver.await.unwrap().unwrap();
+
+        let events = sink.events.lock().expect("codex test events");
+        let steered = events
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::UserSteered { .. }))
+            .unwrap();
+        let completed = events
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+            .unwrap();
+        assert!(steered < completed);
+    }
+
+    #[tokio::test]
+    async fn rejected_or_mismatched_ack_never_emits_user_steered() {
+        for response in [
+            json!({ "id": 7, "error": { "message": "not steerable" } }),
+            json!({ "id": 7, "result": { "turnId": "TURN-2" } }),
+        ] {
+            let sink = Arc::new(RecordingSink::default());
+            let session = unit_session(sink.clone());
+            let receiver = register_pending(
+                &session,
+                7,
+                PendingWriteState::Written,
+                Some(Instant::now() + CONTROL_RPC_TIMEOUT),
+            );
+            session.emit_parsed(&response.to_string()).await;
+            assert!(matches!(
+                receiver.await.unwrap(),
+                Err(HarnessError::SteeringRejected(_))
+            ));
+            assert!(!sink
+                .events
+                .lock()
+                .expect("codex test events")
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::UserSteered { .. })));
+        }
+    }
+
+    #[tokio::test]
+    async fn control_timeout_cleans_pending_state() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let receiver = register_pending(
+            &session,
+            7,
+            PendingWriteState::Written,
+            Some(Instant::now()),
+        );
+        session.expire_control_requests();
+        assert!(session
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .pending
+            .is_empty());
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Err(HarnessError::SteeringRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_steer_uses_the_active_turn_id_and_waits_for_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_app_server(&binary, FAKE_STEERING_APP_SERVER);
+        let mut spec = spec_for(dir.path(), &binary, None);
+        let sink = Arc::new(RecordingSink::default());
+        spec.sink = sink.clone();
+        spec.extra_env.push((
+            "FAKE_CODEX_STEER".into(),
+            dir.path().join("steer.json").to_string_lossy().into_owned(),
+        ));
+        let session = Arc::new(attach(spec).await.unwrap());
+        let running = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session
+                    .run_turn(TurnInput {
+                        text: "first turn".into(),
+                        model: None,
+                        images: Vec::new(),
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if session.active_control_turn_id().is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake turn was never acknowledged");
+
+        session.steer("try the other file".into()).await.unwrap();
+        running.await.unwrap().unwrap();
+
+        let request: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("steer.json")).unwrap())
+                .unwrap();
+        assert_eq!(request["method"], "turn/steer");
+        assert_eq!(request["params"]["threadId"], "THREAD-1");
+        assert_eq!(request["params"]["expectedTurnId"], "TURN-1");
+        assert_eq!(request["params"]["input"][0]["type"], "text");
+        assert_eq!(request["params"]["input"][0]["text"], "try the other file");
+        let steers: Vec<_> = sink
+            .events
+            .lock()
+            .expect("codex test events")
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::UserSteered { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steers, ["try the other file"]);
     }
 }

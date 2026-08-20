@@ -59,13 +59,14 @@ verified = [
   "approval request item/commandExecution/requestApproval; decide via JSON-RPC result {decision: accept|decline}",
   "turn/completed status: completed | interrupted | failed",
   "commandExecution status: inProgress | completed | declined",
+  "generated non-experimental schema: turn/steer {threadId, expectedTurnId, input:[{type:text,text}], clientUserMessageId} => {turnId}",
 ]
 not_verified = [
   "codex exec --json event vocabulary (probed via --help only; not captured)",
   "deny feedback on item/commandExecution/requestApproval (decision is accept/decline/cancel only; no rejection string)",
   "item/fileChange/requestApproval and item/permissions/requestApproval (not seen in these captures)",
   "legacy execCommandApproval / applyPatchApproval methods (not seen)",
-  "turn/steer mid-turn steering",
+  "live turn/steer capture (wire contract is verified from generated schema, not a captured engine run)",
   "native file-change events (turn/diff/updated, item/fileChange/*)",
   "collaborationMode plan (Plan is mapped to sandbox=read-only instead)",
 ]
