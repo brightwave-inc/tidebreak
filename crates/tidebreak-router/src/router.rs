@@ -485,6 +485,13 @@ fn build_adapter(route: &Route) -> Option<Arc<dyn ModelProvider>> {
             if let Some(base) = &route.base_url {
                 p = p.with_base_url(base.clone());
             }
+            // A hosted machine that resolves Anthropic credentials per caller
+            // supplies a rotating source instead of a key. The adapter then
+            // asks for a bearer at each request, so a token that expires
+            // mid-turn is replaced without rebuilding the route.
+            if let Some(source) = route.token_source.clone() {
+                p = p.with_token_source(source);
+            }
             Some(Arc::new(p))
         }
         #[cfg(not(feature = "anthropic"))]

@@ -9,18 +9,26 @@
 //! The [`ProviderResolver`] seam also lets tests inject a provider directly
 //! instead of standing up a real backend.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use tidebreak_core::{ModelProvider, SecretProvider, Store};
+use tidebreak_core::{ModelProvider, OwnerId, SecretProvider, Store};
 use tidebreak_router::Router;
 
 use crate::provider::UnconfiguredProvider;
 use crate::providers;
 
-/// Cache: fingerprint of the route set + the built provider.
-type CachedProvider = Option<(String, Arc<dyn ModelProvider>)>;
+/// Cache: per caller, the fingerprint of their route set + the built provider.
+///
+/// Keyed by caller because a hosted machine can resolve model credentials per
+/// caller (decision 51). Two callers' route sets fingerprint identically — the
+/// fingerprint records only *that* a live token source exists, never whose —
+/// so one shared slot would hand one caller another caller's credential. The
+/// key keeps them apart. Deployments that resolve no credential per caller use
+/// the single `None` entry and behave exactly as before.
+type CachedProviders = HashMap<Option<OwnerId>, (String, Arc<dyn ModelProvider>)>;
 
 /// Builds the model provider for the next turn.
 #[async_trait]
@@ -28,6 +36,21 @@ pub trait ProviderResolver: Send + Sync {
     /// Resolve the provider. Infallible: with no credentials it returns a
     /// fail-closed provider, so a turn surfaces `TurnFailed` instead of egressing.
     async fn resolve(&self) -> Arc<dyn ModelProvider>;
+
+    /// Resolve the provider for the caller a turn belongs to.
+    ///
+    /// `None` means the caller cannot be named — a system path with no person
+    /// behind it, or a chat whose owner no longer resolves. Implementations
+    /// that resolve credentials per caller must then offer none, so an
+    /// unattributable turn fails closed rather than borrowing someone's
+    /// authority.
+    ///
+    /// The default ignores the caller, which is right for every deployment
+    /// whose credentials are deployment-wide.
+    async fn resolve_for(&self, owner: Option<&OwnerId>) -> Arc<dyn ModelProvider> {
+        let _ = owner;
+        self.resolve().await
+    }
 
     /// Whether public model selections must resolve through the host registry.
     ///
@@ -53,7 +76,8 @@ pub struct ConfiguredResolver {
     chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    cached: Mutex<CachedProvider>,
+    on_behalf_of: Option<Arc<crate::obo_inference::OboInference>>,
+    cached: Mutex<CachedProviders>,
 }
 
 impl ConfiguredResolver {
@@ -79,8 +103,23 @@ impl ConfiguredResolver {
             chatgpt,
             provisioned_policy,
             os_policy,
-            cached: Mutex::new(None),
+            on_behalf_of: None,
+            cached: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Resolve model credentials per caller through `on_behalf_of` wherever the
+    /// deployment states no other inference path (decision 51).
+    ///
+    /// Only a gateway-authenticated hosted machine supplies one. Every other
+    /// deployment leaves this unset and keeps its configured providers.
+    #[must_use]
+    pub(crate) fn with_on_behalf_of_inference(
+        mut self,
+        on_behalf_of: Option<Arc<crate::obo_inference::OboInference>>,
+    ) -> Self {
+        self.on_behalf_of = on_behalf_of;
+        self
     }
 }
 
@@ -90,6 +129,10 @@ pub type KeyedResolver = ConfiguredResolver;
 #[async_trait]
 impl ProviderResolver for ConfiguredResolver {
     async fn resolve(&self) -> Arc<dyn ModelProvider> {
+        self.resolve_for(None).await
+    }
+
+    async fn resolve_for(&self, owner: Option<&OwnerId>) -> Arc<dyn ModelProvider> {
         // A profile that claims to be managed but whose policy cannot be read
         // fails closed: no egress, rather than quietly reverting to BYOK routes.
         let Ok(policy) =
@@ -99,21 +142,39 @@ impl ProviderResolver for ConfiguredResolver {
         };
         let gateway_tokens = self.gateway.route_token_source().await;
         let chatgpt = self.chatgpt.route_auth().await;
+        // Per-caller credentials need a caller. An unnamed turn is offered
+        // none, which fails it closed instead of running it as somebody else.
+        let on_behalf_of = self
+            .on_behalf_of
+            .as_ref()
+            .zip(owner)
+            .and_then(|(inference, owner)| {
+                inference
+                    .token_source_for(owner)
+                    .map(|source| (source, inference.inference_base_url().to_owned()))
+            });
         let routes = providers::collect_routes(
             &*self.store,
             &*self.secrets,
             gateway_tokens,
             chatgpt,
+            on_behalf_of,
             &policy,
         )
         .await;
         let router = Router::build(routes);
         let fingerprint = router.fingerprint().to_string();
 
-        // Reuse the cached provider while the route set is unchanged. The lock
-        // is held only across the cheap clone below — never over an await.
+        // Reuse this caller's cached provider while their route set is
+        // unchanged. The lock is held only across the cheap clone below —
+        // never over an await.
+        let key = self
+            .on_behalf_of
+            .is_some()
+            .then(|| owner.cloned())
+            .flatten();
         let mut cached = self.cached.lock().unwrap();
-        if let Some((cached_fp, provider)) = cached.as_ref() {
+        if let Some((cached_fp, provider)) = cached.get(&key) {
             if *cached_fp == fingerprint {
                 return provider.clone();
             }
@@ -125,7 +186,7 @@ impl ProviderResolver for ConfiguredResolver {
         } else {
             Arc::new(router)
         };
-        *cached = Some((fingerprint, provider.clone()));
+        cached.insert(key, (fingerprint, provider.clone()));
         provider
     }
 

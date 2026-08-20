@@ -930,7 +930,13 @@ impl TurnWorker {
                     }
                 }
             });
-            let provider = self.resolver.resolve().await;
+            // Resolve credentials for the person this turn belongs to. On a
+            // deployment whose credentials are deployment-wide the owner is
+            // ignored; on one that resolves them per caller, an owner that
+            // cannot be named yields no route and fails the turn closed
+            // rather than running it on somebody else's authority.
+            let owner = self.store.chat_owner(chat.id).await.unwrap_or_default();
+            let provider = self.resolver.resolve_for(owner.as_ref()).await;
             let steer = active.steer_inbox();
             let mut agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)
                 .with_approvals(self.approvals.clone())

@@ -743,6 +743,10 @@ impl Store for DbStore {
         ops::conversation::get_chat(self, id, None).await
     }
 
+    async fn chat_owner(&self, id: ChatId) -> Result<Option<OwnerId>> {
+        ops::conversation::chat_owner(self, id).await
+    }
+
     async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
         ops::conversation::get_chat(self, id, Some(owner)).await
     }

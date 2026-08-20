@@ -328,6 +328,20 @@ pub trait Store: Send + Sync {
     /// Fetch a chat by id, or `None` if it doesn't exist.
     async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>>;
 
+    /// Which owner a chat belongs to, or `None` when it does not exist.
+    ///
+    /// For system paths that act on an already-authorized chat id and still
+    /// need to name the person the work is for — a turn worker resolving that
+    /// caller's model credentials, for instance. Request paths scope through
+    /// [`OwnerId`] instead and never need this.
+    ///
+    /// The default answers `None`, which callers must read as "this store
+    /// cannot name an owner", never as "the local owner".
+    async fn chat_owner(&self, id: ChatId) -> Result<Option<OwnerId>> {
+        let _ = id;
+        Ok(None)
+    }
+
     /// List chats, most-recently-created first.
     async fn list_chats(&self) -> Result<Vec<Chat>>;
 

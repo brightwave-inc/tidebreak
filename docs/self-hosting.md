@@ -73,6 +73,23 @@ cluster, set `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` to a cluster-routable HTTPS
 URL. Only the server's principal checks use the override; `/auth/discovery`
 continues to publish the public URL.
 
+In this mode model access needs no configured credential. The server exchanges
+each caller's Gateway token for a short-lived, inference-only token for the
+same user and drives that caller's turns with it, so the Gateway meters every
+turn to the person who ran it and the deployment holds no inference secret to
+rotate. The exchanged tokens stay in the server's memory: they are never
+stored, never logged, and never sent to a client. A caller whose Gateway
+session is revoked loses model access on their next turn, which fails with the
+same sign-in prompt the app already shows; other callers keep working.
+
+A stored provider configuration still wins, and so do the provider environment
+variables. Configure a provider in Settings, or set a credential such as
+`ANTHROPIC_API_KEY` or an endpoint such as `ANTHROPIC_BASE_URL`, and that path
+serves every caller exactly as it does today. Per-caller inference is the
+default only for a provider the deployment states no other path to. It also
+requires Gateway authentication: a server running on static tokens has no
+caller token to exchange and keeps its environment-configured providers.
+
 ## Generating tokens for standalone compatibility
 
 The token file is the credential-to-principal map, and it is also where roles

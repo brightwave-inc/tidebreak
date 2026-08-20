@@ -1920,6 +1920,7 @@ mod tests {
             &*runtime.secrets,
             runtime.route_token_source().await,
             None,
+            None,
             &policy,
         )
         .await;
@@ -3255,6 +3256,7 @@ mod tests {
             &*runtime.secrets,
             runtime.route_token_source().await,
             None,
+            None,
             &policy,
         )
         .await;
@@ -3963,7 +3965,7 @@ mod tests {
         assert!(runtime.route_token_source().await.is_none());
         let policy = runtime.policy().unwrap();
         let routes =
-            providers::collect_routes(&*store, &*runtime.secrets, None, None, &policy).await;
+            providers::collect_routes(&*store, &*runtime.secrets, None, None, None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != tidebreak_router::RouteKind::ModelGateway));
@@ -4060,7 +4062,7 @@ mod tests {
         assert!(runtime.route_token_source().await.is_none());
         let tokens: Arc<dyn BearerTokenSource> = Arc::new(StaticTokens);
         let routes =
-            providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
+            providers::collect_routes(&*store, &*secrets, Some(tokens), None, None, &policy).await;
         assert!(routes
             .iter()
             .all(|route| route.kind != tidebreak_router::RouteKind::ModelGateway));

@@ -1763,7 +1763,7 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
         &crate::managed_policy::NoOsPolicy,
     )
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::Xai);
     assert_eq!(routes[0].base_url, None);
@@ -2725,7 +2725,7 @@ async fn resolver_includes_configured_curated_api_key_providers() {
             &crate::managed_policy::NoOsPolicy,
         )
         .unwrap();
-        let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+        let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].kind, route_kind);
 
@@ -2792,7 +2792,7 @@ async fn openai_compatible_route_is_free_form_fallback() {
         &crate::managed_policy::NoOsPolicy,
     )
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
     let router = tidebreak_router::Router::build(routes);
     assert_eq!(
         router.select("llama-3-local"),
@@ -2842,7 +2842,7 @@ async fn direct_compatible_presets_use_fixed_endpoints_and_distinct_routes() {
         &crate::managed_policy::NoOsPolicy,
     )
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
     let fireworks = routes
         .iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Fireworks)
@@ -2969,7 +2969,7 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
     assert!(model.policy.supports_tools);
     assert!(!model.policy.supports_reasoning);
 
-    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
     let route = routes
         .iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Ollama)
@@ -3072,7 +3072,7 @@ async fn openrouter_uses_its_fixed_endpoint_and_serves_only_configured_models() 
     assert!(!model.policy.supports_reasoning);
     assert!(!model.policy.supports_vendor_web_search);
 
-    let routes = providers::collect_routes(&*store, &*secrets, None, None, &policy).await;
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
     let route = routes
         .iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Openrouter)
@@ -3115,6 +3115,14 @@ impl ScopedEnv {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    /// Clear `key` for the scope, so a test asserts against a deployment that
+    /// states nothing rather than against the developer's own environment.
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::remove_var(key);
         Self { key, previous }
     }
 }
@@ -3192,12 +3200,18 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
     let policy =
         crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-    let kinds: Vec<_> =
-        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy)
-            .await
-            .into_iter()
-            .map(|route| route.kind)
-            .collect();
+    let kinds: Vec<_> = providers::collect_routes(
+        &*store,
+        &*secrets,
+        Some(tokens.clone()),
+        None,
+        None,
+        &policy,
+    )
+    .await
+    .into_iter()
+    .map(|route| route.kind)
+    .collect();
     assert!(kinds.contains(&tidebreak_router::RouteKind::Anthropic));
     assert!(kinds.contains(&tidebreak_router::RouteKind::Gemini));
     assert!(!kinds.contains(&tidebreak_router::RouteKind::ModelGateway));
@@ -3207,8 +3221,15 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
     let policy =
         crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-    let routes =
-        providers::collect_routes(&*store, &*secrets, Some(tokens.clone()), None, &policy).await;
+    let routes = providers::collect_routes(
+        &*store,
+        &*secrets,
+        Some(tokens.clone()),
+        None,
+        None,
+        &policy,
+    )
+    .await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::ModelGateway);
     assert_eq!(
@@ -3235,7 +3256,8 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     )
     .await
     .unwrap();
-    let routes = providers::collect_routes(&*store, &*secrets, Some(tokens), None, &policy).await;
+    let routes =
+        providers::collect_routes(&*store, &*secrets, Some(tokens), None, None, &policy).await;
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::ModelGateway);
 }
@@ -3278,7 +3300,7 @@ async fn a_base_url_environment_fallback_reaches_the_route() {
     let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
     let policy =
         crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-    let route = providers::collect_routes(&*store, &*secrets, None, None, &policy)
+    let route = providers::collect_routes(&*store, &*secrets, None, None, None, &policy)
         .await
         .into_iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
@@ -3297,7 +3319,7 @@ async fn a_base_url_environment_fallback_reaches_the_route() {
     )
     .await
     .unwrap();
-    let route = providers::collect_routes(&*store, &*secrets, None, None, &policy)
+    let route = providers::collect_routes(&*store, &*secrets, None, None, None, &policy)
         .await
         .into_iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
@@ -5612,4 +5634,287 @@ async fn a_plugins_bundled_mcp_server_mounts_only_while_the_plugin_is_enabled() 
         !data.exists(),
         "uninstalling a plugin deletes the writable directory it was given"
     );
+}
+
+/// A stand-in for the caller's rotating gateway credential.
+struct FakeCallerCredential;
+
+#[async_trait::async_trait]
+impl tidebreak_router::BearerTokenSource for FakeCallerCredential {
+    fn binding_id(&self) -> Option<&str> {
+        Some("user:alice")
+    }
+
+    async fn bearer_token(&self) -> Result<String> {
+        Ok("mg_at_inference_for_alice".to_string())
+    }
+}
+
+/// The per-caller inference path a gateway-authenticated hosted machine
+/// offers, as `collect_routes` receives it.
+fn on_behalf_of() -> Option<providers::OnBehalfOfInference> {
+    Some((
+        Arc::new(FakeCallerCredential) as Arc<dyn tidebreak_router::BearerTokenSource>,
+        "https://gateway.example/compat/anthropic".to_string(),
+    ))
+}
+
+/// A store and secrets pair with nothing configured in either.
+async fn empty_deployment(dir: &tempfile::TempDir) -> (Arc<dyn Store>, Arc<dyn SecretProvider>) {
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    (store, Arc::new(MemSecrets::default()))
+}
+
+/// Decision 51, rule 1: with gateway authentication and nothing else stated,
+/// the caller's own credential drives their turns against the gateway's
+/// Anthropic-compatible surface.
+#[tokio::test]
+async fn on_behalf_of_inference_serves_a_deployment_that_states_no_other_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let route = providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy)
+        .await
+        .into_iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
+        .expect("per-caller inference must offer an Anthropic route");
+
+    assert_eq!(
+        route.base_url.as_deref(),
+        Some("https://gateway.example/compat/anthropic")
+    );
+    assert!(
+        route.api_key.is_empty(),
+        "the credential rotates; no key may be snapshotted into the route"
+    );
+    let source = route
+        .token_source
+        .as_ref()
+        .expect("the route must carry the caller's rotating credential");
+    assert_eq!(source.binding_id(), Some("user:alice"));
+    assert!(
+        route
+            .curated_models
+            .iter()
+            .any(|model| model.starts_with("claude-")),
+        "the route must serve the curated Anthropic catalog"
+    );
+}
+
+/// Rule 3: a stored provider configuration always wins, so the deployment's
+/// own credential drives every caller's turns exactly as before.
+#[tokio::test]
+async fn a_stored_provider_configuration_outranks_on_behalf_of_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-stored"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let route = providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy)
+        .await
+        .into_iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
+        .expect("the stored key must still offer an Anthropic route");
+
+    assert_eq!(route.api_key, "sk-stored");
+    assert!(
+        route.token_source.is_none(),
+        "a stored configuration must not be displaced by per-caller inference"
+    );
+}
+
+/// Rule 3: a provider row that disables the provider is a statement too. The
+/// deployment said no, and per-caller inference does not overrule it.
+#[tokio::test]
+async fn a_disabled_provider_row_outranks_on_behalf_of_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: false,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.kind == tidebreak_router::RouteKind::Anthropic),
+        "a disabled provider row must leave the provider unrouted"
+    );
+}
+
+/// Rule 3: the environment fallbacks keep their semantics. An environment
+/// credential names an inference path, so per-caller inference stays out of
+/// the way — including where the environment key alone routes nothing,
+/// because that is the behavior this record leaves in force.
+#[tokio::test]
+async fn an_environment_credential_outranks_on_behalf_of_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::set("ANTHROPIC_API_KEY", "sk-from-the-environment");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
+    assert!(
+        !routes.iter().any(|route| route.token_source.is_some()),
+        "an environment credential must not be displaced by per-caller inference"
+    );
+}
+
+/// Rule 3: an environment base URL names an inference path of its own, even
+/// with no credential beside it, so per-caller inference stays out of the way.
+#[tokio::test]
+async fn an_environment_base_url_outranks_on_behalf_of_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::set("ANTHROPIC_BASE_URL", "https://relay.example/v1");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.kind == tidebreak_router::RouteKind::Anthropic
+                && route.token_source.is_some()),
+        "an environment endpoint must not be displaced by per-caller inference"
+    );
+}
+
+/// Rule 5: without a per-caller credential the deployment routes exactly as
+/// it did before this record — here, not at all.
+#[tokio::test]
+async fn a_deployment_without_per_caller_inference_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let routes = providers::collect_routes(&*store, &*secrets, None, None, None, &policy).await;
+    assert!(
+        routes.is_empty(),
+        "a deployment with no credentials must offer no routes"
+    );
+}
+
+/// The cross-caller invariant the resolver's cache exists to protect: two
+/// callers' route sets fingerprint identically, so a single cached provider
+/// would hand one caller the other's credential.
+#[tokio::test]
+async fn a_cached_provider_is_never_shared_between_callers() {
+    use crate::resolver::ProviderResolver as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+    let inference =
+        Arc::new(crate::obo_inference::OboInference::new("https://gateway.example").unwrap());
+    let alice = tidebreak_core::OwnerId::new("user:alice").unwrap();
+    let bob = tidebreak_core::OwnerId::new("user:bob").unwrap();
+    inference.record_caller(&alice, "mg_at_alice".into());
+    inference.record_caller(&bob, "mg_at_bob".into());
+
+    let resolver = resolver::ConfiguredResolver::new(
+        store.clone(),
+        secrets.clone(),
+        crate::gateway_runtime::GatewayRuntime::new(
+            store.clone(),
+            secrets.clone(),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        ),
+        Arc::new(
+            crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
+        ),
+        crate::managed_policy::MemoryProvisionedPolicy::new(),
+        Arc::new(crate::managed_policy::NoOsPolicy),
+    )
+    .with_on_behalf_of_inference(Some(inference.clone()));
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+
+    let for_alice = resolver.resolve_for(Some(&alice)).await;
+    let for_bob = resolver.resolve_for(Some(&bob)).await;
+    assert_eq!(for_alice.id().0, "router");
+    assert_eq!(for_bob.id().0, "router");
+    assert!(
+        !Arc::ptr_eq(&for_alice, &for_bob),
+        "two callers must not share one built provider"
+    );
+
+    // The same caller reuses their own cached provider.
+    let for_alice_again = resolver.resolve_for(Some(&alice)).await;
+    assert!(Arc::ptr_eq(&for_alice, &for_alice_again));
+
+    // A turn no owner can be named for is offered no credential at all.
+    assert_eq!(resolver.resolve_for(None).await.id().0, "unconfigured");
 }
