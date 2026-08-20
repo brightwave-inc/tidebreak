@@ -1970,11 +1970,18 @@ export class ApiClient {
    * Redirect the in-flight turn. The route answers with an empty status;
    * unsupported engines refuse with `steering_unavailable` rather than queue.
    */
-  steerCodeSession(sessionId: string, message: string): Promise<void> {
+  steerCodeSession(
+    sessionId: string,
+    expectedTurnId: string,
+    guidance: string,
+  ): Promise<void> {
     return this.json(`/code/sessions/${encodeURIComponent(sessionId)}/steer`, {
       method: "POST",
       headers: this.headers(true),
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        expected_turn_id: expectedTurnId,
+        guidance,
+      }),
     });
   }
 

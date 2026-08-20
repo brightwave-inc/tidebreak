@@ -16,7 +16,7 @@ use tidebreak_harness::{
     HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv, SessionSpec, TurnInput,
     TurnOutcome,
 };
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch};
 
 /// Completer that records decisions and unparks a scripted turn.
 ///
@@ -76,6 +76,8 @@ pub(crate) struct ScriptedAdapter {
     events: Vec<HarnessEvent>,
     delay: Duration,
     mid_turn_steering: CapLevel,
+    steering_delay: Duration,
+    steering_rejection: Option<String>,
     structured_approvals: CapLevel,
     auto_mode: CapLevel,
     allow_mode: CapLevel,
@@ -98,6 +100,8 @@ impl ScriptedAdapter {
             events,
             delay: Duration::ZERO,
             mid_turn_steering: CapLevel::Unsupported,
+            steering_delay: Duration::ZERO,
+            steering_rejection: None,
             structured_approvals: CapLevel::Unsupported,
             auto_mode: CapLevel::Unsupported,
             allow_mode: CapLevel::Unsupported,
@@ -177,6 +181,18 @@ impl ScriptedAdapter {
         self
     }
 
+    pub(crate) fn with_steering_delay(mut self, delay: Duration) -> Self {
+        self.mid_turn_steering = CapLevel::Supported;
+        self.steering_delay = delay;
+        self
+    }
+
+    pub(crate) fn with_steering_rejection(mut self, detail: impl Into<String>) -> Self {
+        self.mid_turn_steering = CapLevel::Supported;
+        self.steering_rejection = Some(detail.into());
+        self
+    }
+
     /// Publish this pid for the duration of each turn, the way an adapter
     /// that spawns one child per turn does.
     #[allow(dead_code)]
@@ -251,12 +267,13 @@ impl HarnessAdapter for ScriptedAdapter {
             events: self.events.clone(),
             delay: self.delay,
             mid_turn_steering: self.mid_turn_steering,
+            steering_delay: self.steering_delay,
+            steering_rejection: self.steering_rejection.clone(),
             child_pid: self.child_pid,
             silent_interrupt: self.silent_interrupt,
             pid: ChildPid::new(),
             lost_resume: self.lost_resume.clone(),
             interrupt: Arc::new(AtomicBool::new(false)),
-            steered: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
             unrecognized_per_turn: self.unrecognized_per_turn,
             approver: self.approver.clone(),
@@ -269,12 +286,13 @@ struct ScriptedSession {
     events: Vec<HarnessEvent>,
     delay: Duration,
     mid_turn_steering: CapLevel,
+    steering_delay: Duration,
+    steering_rejection: Option<String>,
     child_pid: Option<i64>,
     silent_interrupt: bool,
     pid: ChildPid,
     lost_resume: Option<String>,
     interrupt: Arc<AtomicBool>,
-    steered: Mutex<Option<String>>,
     unrecognized: AtomicU64,
     unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
@@ -289,9 +307,6 @@ impl ScriptedSession {
             }
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
-            }
-            if let Some(text) = self.steered.lock().await.take() {
-                self.sink.emit(HarnessEvent::UserSteered { text }).await;
             }
             if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
                 self.sink.emit(event.clone()).await;
@@ -372,11 +387,15 @@ impl HarnessSession for ScriptedSession {
 
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
         if self.mid_turn_steering != CapLevel::Supported {
-            return Err(HarnessError::Other(
-                "mid-turn steering is not available on this engine".into(),
-            ));
+            return Err(HarnessError::SteeringUnsupported);
         }
-        *self.steered.lock().await = Some(text);
+        if !self.steering_delay.is_zero() {
+            tokio::time::sleep(self.steering_delay).await;
+        }
+        if let Some(detail) = &self.steering_rejection {
+            return Err(HarnessError::SteeringRejected(detail.clone()));
+        }
+        self.sink.emit(HarnessEvent::UserSteered { text }).await;
         Ok(())
     }
 

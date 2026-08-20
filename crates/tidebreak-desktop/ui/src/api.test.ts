@@ -824,6 +824,23 @@ describe("active turn steering", () => {
       invoked_skills: ["docx"],
     });
   });
+
+  it("binds Code guidance to the exact active turn", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.steerCodeSession("session-1", "turn-1", "change course");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/code/sessions/session-1/steer");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      expected_turn_id: "turn-1",
+      guidance: "change course",
+    });
+  });
 });
 
 describe("historical image API", () => {

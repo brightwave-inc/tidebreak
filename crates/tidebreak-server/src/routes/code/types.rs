@@ -458,7 +458,8 @@ pub struct SubmitTurnAttachment {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SteerBody {
-    pub message: String,
+    pub expected_turn_id: tidebreak_core::CodeTurnId,
+    pub guidance: String,
 }
 
 /// A follow-up parked while the session is already running a turn.

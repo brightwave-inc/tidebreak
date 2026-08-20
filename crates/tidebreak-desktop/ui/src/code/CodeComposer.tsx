@@ -44,6 +44,8 @@ import {
 } from "./labels";
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
+const STEERING_UNAVAILABLE =
+  "Redirect isn’t available for this harness. Choose Queue to send this after the response.";
 
 function appendComposerPrompt(current: string, prompt: string): string {
   const existing = current.trimEnd();
@@ -506,8 +508,9 @@ export function CodeComposer({
     attachments?: readonly { blob_id: string; media_type: string }[],
   ) => Promise<CodeTurnSubmission | void> | void;
   /**
-   * Redirect the in-flight turn. Absent when the harness cannot steer, so a
-   * mid-turn send stays on the queue path.
+   * Redirect the in-flight turn. Absent when the harness cannot steer. The
+   * composer refuses Redirect in that state; Queue is only used when the user
+   * explicitly selected Queue.
    */
   onSteer?: (message: string) => Promise<void>;
   onInterrupt: () => Promise<void> | void;
@@ -524,6 +527,8 @@ export function CodeComposer({
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
+  const draftRef = useRef("");
+  const steerRequestRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const images = useImageAttachments(
     client,
@@ -531,7 +536,6 @@ export function CodeComposer({
     sessionId ? async () => sessionId : undefined,
     "code",
   );
-  const canSteer = onSteer !== undefined;
   const showQueued = queued || followUpQueued;
   const [pathItems, setPathItems] = useState<string[]>([]);
   const searchPathsRef = useRef(searchPaths);
@@ -573,6 +577,17 @@ export function CodeComposer({
       : undefined;
 
   const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
+    steerRequestRef.current += 1;
+    setSteerPending(false);
+    setSteerError(null);
+    setSteerStatus(null);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!pendingPrompt || pendingPrompt.scope !== composerPromptScope) return;
@@ -689,21 +704,35 @@ export function CodeComposer({
   }
 
   async function steer() {
-    const message = draft.trim();
-    if (!message || disabled || !onSteer) return;
+    const submittedDraft = draftRef.current;
+    const message = submittedDraft.trim();
+    if (!message || disabled) return;
+    if (!onSteer) {
+      setSteerStatus(null);
+      setSteerError(STEERING_UNAVAILABLE);
+      setNotice(null);
+      return;
+    }
+    const request = steerRequestRef.current + 1;
+    steerRequestRef.current = request;
     setSteerPending(true);
     setSteerError(null);
     setSteerStatus("Sending guidance…");
     setNotice(null);
     try {
       await onSteer(message);
-      setDraft("");
+      if (steerRequestRef.current !== request) return;
+      if (draftRef.current === submittedDraft) {
+        draftRef.current = "";
+        setDraft("");
+      }
       setSteerStatus("Guidance sent");
     } catch (err) {
+      if (steerRequestRef.current !== request) return;
       setSteerStatus(null);
       setSteerError(err instanceof Error ? err.message : "Could not steer");
     } finally {
-      setSteerPending(false);
+      if (steerRequestRef.current === request) setSteerPending(false);
     }
   }
 
@@ -789,20 +818,21 @@ export function CodeComposer({
             : undefined
         }
         onDraftChange={(value) => {
+          draftRef.current = value;
           setSteerError(null);
           setSteerStatus(null);
           setDraft(value);
         }}
         onSend={submit}
-        onSteer={canSteer ? steer : submit}
+        onSteer={steer}
         onQueue={submit}
         onStop={async () => {
           await onInterrupt();
         }}
         resetKey={sessionId ?? "code"}
-        steerError={canSteer ? steerError : null}
-        steerPending={canSteer ? steerPending : false}
-        steerStatus={canSteer ? steerStatus : null}
+        steerError={steerError}
+        steerPending={steerPending}
+        steerStatus={steerStatus}
       />
       {imageInput && (
         <input
