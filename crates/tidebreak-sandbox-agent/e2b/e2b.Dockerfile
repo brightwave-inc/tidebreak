@@ -7,8 +7,8 @@
 # still gets this image. See README.md for the publish and version-bump flow.
 #
 # Digest-pinned so the template's contents are exactly the image we tested:
-# ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:v0.26.0.
-FROM ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents@sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2
+# ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:main-20260820-0ea836f-r642.
+FROM ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents@sha256:e0caf06b0ecf3f138ef6c11769357533f4dc8843de4f2cc8b01f6e77c0bfcb10
 
 # E2B replaces the image's entrypoint with envd as PID 1 and runs commands as
 # the `user` account out of /home/user — the root the E2B provider's file and

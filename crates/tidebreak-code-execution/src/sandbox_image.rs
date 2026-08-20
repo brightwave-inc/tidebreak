@@ -18,7 +18,7 @@
 /// `repository@sha256:…` ref is content-addressed: the runtime resolves
 /// exactly those bytes or fails, so repointing the tag on the registry
 /// changes nothing here.
-pub(crate) const DOCUMENTS_IMAGE: &str = "ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents@sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2";
+pub(crate) const DOCUMENTS_IMAGE: &str = "ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents@sha256:e0caf06b0ecf3f138ef6c11769357533f4dc8843de4f2cc8b01f6e77c0bfcb10";
 
 /// Resources the image needs beyond a container runtime's stock defaults.
 /// LibreOffice, the Java filters it converts through, and the preinstalled
