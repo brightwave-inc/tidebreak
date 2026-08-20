@@ -222,6 +222,25 @@ describe("layout URLs", () => {
     ).toEqual([{ type: "file", path: "README.md" }]);
   });
 
+  it("restores source control and PR tabs in either editor group", () => {
+    const layout = {
+      tabs: [{ type: "source_control" as const }],
+      activeIndex: 0,
+      fullscreen: false,
+      editorSplit: {
+        tabs: [{ type: "pr" as const }],
+        activeIndex: 0,
+        focused: true,
+      },
+    };
+    expect(searchFromLayout(layout)).toMatchObject({
+      tabs: "source_control",
+      split: "pr",
+      splitFocused: "1",
+    });
+    expect(layoutFromSearch(searchFromLayout(layout))).toEqual(layout);
+  });
+
   it("restores browser tabs in either editor group", () => {
     const layout = {
       tabs: [{ type: "browser" as const, browserId: "browser-primary" }],

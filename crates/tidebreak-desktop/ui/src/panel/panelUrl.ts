@@ -222,7 +222,9 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
       !panel ||
       (panel.type !== "file" &&
         panel.type !== "diff" &&
-        panel.type !== "browser")
+        panel.type !== "browser" &&
+        panel.type !== "source_control" &&
+        panel.type !== "pr")
     ) {
       continue;
     }
