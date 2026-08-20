@@ -998,6 +998,46 @@ describe("CodeWorkspacePage", () => {
     expect(screen.getByTestId("file-viewer")).toHaveTextContent("src/lib.rs");
   });
 
+  it("opens source control and PR details as center tabs from the + menu", async () => {
+    const client = makeClient();
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Source control" }),
+    );
+    // The inspector also names a Source control tab; the center's tab is the
+    // one controlling the primary editor panel.
+    const centerTab = (name: string) =>
+      screen
+        .getAllByRole("tab", { name })
+        .find(
+          (tab) =>
+            tab.getAttribute("aria-controls") ===
+            "code-center-panel-editor-primary",
+        );
+    await waitFor(() =>
+      expect(centerTab("Source control")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    expect(
+      await screen.findByTestId("source-control-panel"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Pull request" }),
+    );
+    await waitFor(() =>
+      expect(centerTab("Pull request")).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(await screen.findByTestId("pr-details-panel")).toBeInTheDocument();
+  });
+
   it("opens, restores, and retitles a browser as a center editor tab", async () => {
     const client = makeClient();
     vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(

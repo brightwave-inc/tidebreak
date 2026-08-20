@@ -56,6 +56,10 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return parseDiffTarget(id);
     case "browser":
       return parseBrowserTarget(id);
+    case "source_control":
+      return id ? null : { type: "source_control" };
+    case "pr":
+      return id ? null : { type: "pr" };
     default:
       // `apps` and `plugins` were panel segments before the libraries became
       // routes of their own. A bare `files` catalog is still retired.
@@ -155,6 +159,10 @@ export function encodePanelSegment(panel: PanelContent): string {
     }
     case "browser":
       return `browser.${encodeURIComponent(panel.browserId)}`;
+    case "source_control":
+      return "source_control";
+    case "pr":
+      return "pr";
   }
 }
 

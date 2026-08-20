@@ -11,6 +11,8 @@ import {
   Copy,
   FileCode,
   FileDiff,
+  GitBranch,
+  GitPullRequest,
   Globe2,
   SquareTerminal,
   ListX,
@@ -77,6 +79,8 @@ export function CodeCenterTabs({
   onNewTab,
   onNewBrowser,
   onNewDiff,
+  onNewSourceControl,
+  onNewPr,
   onNewTerminal,
   browserTitles = {},
   region = "primary",
@@ -104,6 +108,10 @@ export function CodeCenterTabs({
   onNewBrowser?: () => void;
   /** Open the all-changes diff as a center tab. */
   onNewDiff?: () => void;
+  /** Open source control as a center tab. */
+  onNewSourceControl?: () => void;
+  /** Open the pull request's details as a center tab. */
+  onNewPr?: () => void;
   /** Open the workspace terminal. */
   onNewTerminal?: () => void;
   browserTitles?: Readonly<Record<string, string>>;
@@ -252,6 +260,10 @@ export function CodeCenterTabs({
                     <FileDiff className="size-3.5 shrink-0" />
                   ) : panel.type === "browser" ? (
                     <Globe2 className="size-3.5 shrink-0" />
+                  ) : panel.type === "source_control" ? (
+                    <GitBranch className="size-3.5 shrink-0" />
+                  ) : panel.type === "pr" ? (
+                    <GitPullRequest className="size-3.5 shrink-0" />
                   ) : (
                     <FileCode className="size-3.5 shrink-0" />
                   )}
@@ -367,6 +379,18 @@ export function CodeCenterTabs({
               All changes
             </DropdownMenuItem>
           )}
+          {onNewSourceControl && (
+            <DropdownMenuItem onSelect={onNewSourceControl}>
+              <GitBranch />
+              Source control
+            </DropdownMenuItem>
+          )}
+          {onNewPr && (
+            <DropdownMenuItem onSelect={onNewPr}>
+              <GitPullRequest />
+              Pull request
+            </DropdownMenuItem>
+          )}
           {onNewBrowser && (
             <DropdownMenuItem onSelect={onNewBrowser}>
               <Globe2 />
@@ -468,6 +492,12 @@ function centerTabParts(
       name: browserTitles[panel.browserId]?.trim() || "Browser",
       suffix: null,
     };
+  }
+  if (panel.type === "source_control") {
+    return { name: "Source control", suffix: null };
+  }
+  if (panel.type === "pr") {
+    return { name: "Pull request", suffix: null };
   }
   return { name: panel.type, suffix: null };
 }

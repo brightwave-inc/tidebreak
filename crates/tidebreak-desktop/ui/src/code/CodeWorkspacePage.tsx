@@ -90,7 +90,9 @@ const CodeBrowserTab = lazy(async () => {
   return { default: module.CodeBrowserTab };
 });
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector, type InspectorTab } from "./CodeInspector";
+import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
+import { DiffOverview } from "./DiffOverview";
+import { PrCardWithResource } from "./PrCard";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
@@ -496,6 +498,46 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               }
             />
           </Suspense>
+        ) : panel.type === "source_control" ? (
+          <div
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            data-testid="source-control-panel"
+          >
+            {workspace?.status !== "archived" && (
+              <div className="border-b px-3 py-3">
+                <PrCardWithResource
+                  client={client}
+                  workspaceId={workspaceId}
+                  framed={false}
+                  resource={prResource}
+                />
+              </div>
+            )}
+            <DiffOverview
+              client={client}
+              workspaceId={workspaceId}
+              contentRevision={contentRevision}
+              onOpenFile={(path) => openFileDiff(path)}
+            />
+          </div>
+        ) : panel.type === "pr" ? (
+          <div
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+            data-testid="pr-details-panel"
+          >
+            <PrTab
+              client={client}
+              workspaceId={workspaceId}
+              pr={prResource.data?.pr ?? workspace?.pr}
+              branch={workspace?.branch_name}
+              prResource={prResource}
+              onOpenSourceControl={() =>
+                setWorkspaceLayout(
+                  openCodeEditor(layout, { type: "source_control" }, region),
+                )
+              }
+            />
+          </div>
         ) : null}
       </div>
     );
@@ -540,6 +582,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onNewBrowser={() => openBrowser(undefined, "primary")}
         onNewDiff={() =>
           setWorkspaceLayout(openCodeEditor(layout, { type: "diff" }, "primary"))
+        }
+        onNewSourceControl={() =>
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "source_control" }, "primary"),
+          )
+        }
+        onNewPr={() =>
+          setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, "primary"))
         }
         onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
@@ -669,6 +719,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           setWorkspaceLayout(
             openCodeEditor(layout, { type: "diff" }, "secondary"),
           )
+        }
+        onNewSourceControl={() =>
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "source_control" }, "secondary"),
+          )
+        }
+        onNewPr={() =>
+          setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, "secondary"))
         }
         onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
