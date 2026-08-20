@@ -143,7 +143,7 @@ describe("CodeHome", () => {
     );
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading…");
-    expect(screen.queryByText("No repos yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
   });
 
   it("keeps loading after empty repos until the doctor arrives", async () => {
@@ -164,13 +164,15 @@ describe("CodeHome", () => {
     });
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading…");
-    expect(screen.queryByText("No repos yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
   });
 
   it("shows the empty state once repos are empty and a harness is ready", async () => {
     await renderHome();
 
-    expect(await screen.findByText("No repos yet")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Start with a repository" }),
+    ).toBeInTheDocument();
     const main = document.querySelector(".main");
     expect(main).not.toBeNull();
     expect(
@@ -191,7 +193,7 @@ describe("CodeHome", () => {
     expect(
       await screen.findByRole("heading", { name: "Install a coding harness" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("No repos yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
@@ -210,7 +212,7 @@ describe("CodeHome", () => {
     });
 
     expect(await screen.findByRole("heading", { name: "Repos" })).toBeInTheDocument();
-    expect(screen.queryByText("No repos yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { FolderGit2, GitBranch, Plus, Sparkles } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
-  EmptyContent,
-  EmptyDescription,
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
@@ -75,13 +74,21 @@ function CodeHomeBody() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
-      <div>
-        <h1 className="text-2xl font-medium tracking-tight">Code</h1>
-        <p className="text-muted-foreground text-sm">
-          Register a local git repository, then open isolated workspaces on it.
-        </p>
-      </div>
+    <div
+      className={cn(
+        "mx-auto flex min-h-full w-full flex-col gap-8 px-6 py-8",
+        showEmpty ? "max-w-5xl" : "max-w-3xl",
+      )}
+    >
+      {!showEmpty && (
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight">Code</h1>
+          <p className="text-muted-foreground text-sm">
+            Register a local git repository, then open isolated workspaces on
+            it.
+          </p>
+        </header>
+      )}
       {error && <p className="text-sm text-critical">{error}</p>}
       {showLoading && (
         <Empty role="status">
@@ -109,22 +116,9 @@ function CodeHomeBody() {
         </section>
       )}
       {showEmpty && (
-        // Nothing is registered, so the page has exactly one thing to say.
-        // A "Repos" heading over an empty list, under a second heading that
-        // repeats the same instruction, is two sections carrying one message.
-        <Empty>
-          <EmptyHeader>
-            <EmptyTitle>No repos yet</EmptyTitle>
-            <EmptyDescription>
-              Browse a local folder, or clone from a git URL or GitHub.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <Button type="button" onClick={() => setAddOpen(true)}>
-              Add repo
-            </Button>
-          </EmptyContent>
-        </Empty>
+        <div className="flex flex-1 items-center">
+          <CodeRepoEmptyState onAddRepo={() => setAddOpen(true)} />
+        </div>
       )}
       {showRepos && (
         <section className="flex flex-col gap-3">
@@ -174,5 +168,85 @@ function CodeHomeBody() {
       )}
       <AddRepoPalette open={addOpen} onOpenChange={setAddOpen} />
     </div>
+  );
+}
+
+const CODE_ONBOARDING_STEPS = [
+  {
+    icon: FolderGit2,
+    title: "Add a repository",
+    description: "Browse a local folder or clone from a git URL or GitHub.",
+  },
+  {
+    icon: GitBranch,
+    title: "Open a workspace",
+    description: "Give the task an isolated branch and working directory.",
+  },
+  {
+    icon: Sparkles,
+    title: "Start the work",
+    description: "Choose a coding agent and hand it a concrete task.",
+  },
+];
+
+/**
+ * The settled first-run state for code mode.
+ *
+ * Kept presentational so Storybook can show the page without waiting on the
+ * repo catalog and harness doctor that decide when production reaches it.
+ */
+export function CodeRepoEmptyState({ onAddRepo }: { onAddRepo: () => void }) {
+  return (
+    <section
+      className="grid w-full items-center gap-12 py-10 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)] md:gap-16 md:py-16"
+      aria-labelledby="code-empty-title"
+    >
+      <div className="max-w-xl">
+        <div className="mb-5 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <FolderGit2 aria-hidden="true" className="size-4" />
+          <span>Code mode</span>
+        </div>
+        <h1
+          id="code-empty-title"
+          className="max-w-lg text-3xl leading-[1.08] font-semibold tracking-[-0.04em] text-balance sm:text-4xl"
+        >
+          Start with a repository
+        </h1>
+        <p className="mt-4 max-w-lg text-[0.95rem] leading-6 text-muted-foreground text-pretty">
+          Register a local checkout or clone one from a remote. Tidebreak uses
+          it to create isolated workspaces for agent tasks.
+        </p>
+        <div className="mt-7 flex flex-wrap items-center gap-3">
+          <Button type="button" size="lg" onClick={onAddRepo}>
+            <Plus aria-hidden="true" />
+            Add repo
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            Local folder, git URL, or GitHub
+          </span>
+        </div>
+      </div>
+
+      <ol
+        className="relative flex flex-col before:absolute before:top-5 before:bottom-5 before:left-[1.125rem] before:w-px before:bg-border-subtle before:content-['']"
+        aria-label="How code mode starts"
+      >
+        {CODE_ONBOARDING_STEPS.map(({ icon: Icon, title, description }) => (
+          <li key={title} className="relative flex gap-4 pb-7 last:pb-0">
+            <span className="z-10 grid size-9 shrink-0 place-items-center rounded-full border border-border-subtle bg-background text-muted-foreground shadow-xs">
+              <Icon aria-hidden="true" className="size-4" strokeWidth={1.75} />
+            </span>
+            <span className="min-w-0 pt-0.5">
+              <span className="block text-sm font-medium tracking-[-0.01em]">
+                {title}
+              </span>
+              <span className="mt-0.5 block text-[0.8rem] leading-5 text-muted-foreground text-pretty">
+                {description}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }

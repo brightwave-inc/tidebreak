@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   AppWindow,
+  ArrowUpRight,
   GitBranch,
   Globe,
   Scale,
@@ -37,7 +38,6 @@ export type StarterPromptOptions = {
 
 type StarterPrompt = {
   icon: typeof Sparkles;
-  iconClass: string;
   label: string;
   description: string;
   prompt: string;
@@ -54,7 +54,6 @@ type StarterPrompt = {
 const STARTER_PROMPTS: StarterPrompt[] = [
   {
     icon: Globe,
-    iconClass: "text-icon-cyan",
     label: "Brief this week's AI news",
     description: "Search the web, then write a sourced briefing.",
     prompt:
@@ -63,7 +62,6 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: Scale,
-    iconClass: "text-icon-amber",
     label: "Compare two public products",
     description: "Search, tabulate, and recommend with citations.",
     prompt:
@@ -72,7 +70,6 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: AppWindow,
-    iconClass: "text-icon-blue",
     label: "Build a local planner",
     description: "Create a small app in this workspace.",
     prompt:
@@ -80,7 +77,6 @@ const STARTER_PROMPTS: StarterPrompt[] = [
   },
   {
     icon: GitBranch,
-    iconClass: "text-icon-violet",
     label: "Research in parallel",
     description: "Split a briefing across background tasks.",
     prompt:
@@ -102,7 +98,46 @@ export function promptTitle(name: string): string {
 }
 
 const CARD_CLASS =
-  "flex items-center gap-2.5 rounded-lg border border-border-subtle bg-background px-3 py-2.5 text-left text-[0.85rem] font-medium text-foreground transition-colors duration-150 hover:border-border hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25 active:translate-y-px [&_svg]:flex-none";
+  "group flex min-h-[5.25rem] items-start gap-3 rounded-xl bg-muted/35 px-4 py-3.5 text-left text-sm text-foreground ring-1 ring-inset ring-border-subtle transition-[transform,background-color,box-shadow] duration-200 hover:-translate-y-0.5 hover:bg-muted/60 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25 active:translate-y-0";
+
+function PromptCard({
+  icon: Icon,
+  label,
+  description,
+  first,
+  onClick,
+}: {
+  icon: typeof Sparkles;
+  label: string;
+  description?: string;
+  first: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={CARD_CLASS}
+      data-first-task-target={first ? "starter-choice" : undefined}
+      onClick={onClick}
+    >
+      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-background text-muted-foreground shadow-[inset_0_0_0_1px_var(--border-subtle)] transition-colors duration-200 group-hover:text-foreground">
+        <Icon size={17} strokeWidth={1.75} />
+      </span>
+      <span className="min-w-0 flex-1 pt-0.5">
+        <span className="block font-medium tracking-[-0.01em]">{label}</span>
+        {description && (
+          <span className="mt-0.5 block text-[0.8rem] leading-5 font-normal text-muted-foreground">
+            {description}
+          </span>
+        )}
+      </span>
+      <ArrowUpRight
+        aria-hidden="true"
+        className="mt-1 size-4 shrink-0 text-muted-foreground/45 transition-[color,transform] duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-foreground"
+      />
+    </button>
+  );
+}
 
 export function WelcomeState({
   onSelectPrompt,
@@ -193,78 +228,69 @@ export function WelcomeState({
 
   return (
     <section className="welcome" aria-label="Start work">
-      <span className="welcome-mark" aria-hidden="true">
-        <Logomark />
-      </span>
-      <div className="welcome-copy">
-        <h2>{heading}</h2>
-        <p>{description}</p>
-        {managedExecutionOnly && <p>{MANAGED_EXECUTION_DISCLOSURE}</p>}
+      <div className="welcome-intro">
+        <span className="welcome-mark" aria-hidden="true">
+          <Logomark />
+        </span>
+        <div className="welcome-copy">
+          <h2>{heading}</h2>
+          <p>{description}</p>
+          {managedExecutionOnly && (
+            <p className="welcome-disclosure">
+              {MANAGED_EXECUTION_DISCLOSURE}
+            </p>
+          )}
+        </div>
       </div>
       {onStartWalkthrough && (
-        <Button type="button" size="sm" onClick={onStartWalkthrough}>
+        <Button
+          className="self-center"
+          type="button"
+          size="sm"
+          onClick={onStartWalkthrough}
+        >
           Set up your first task
         </Button>
       )}
-      {onSelectPrompt && libraryPrompts.length > 0 && (
+      {onSelectPrompt && (
         <div className="welcome-prompts" data-first-task-target="starters">
-          {libraryPrompts.map((prompt, index) => (
-            <button
-              key={prompt.name}
-              type="button"
-              className={CARD_CLASS}
-              data-first-task-target={index === 0 ? "starter-choice" : undefined}
-              onClick={() => insertLibraryPrompt(prompt.name)}
-            >
-              <Sparkles size={16} className="text-muted-foreground" />
-              <span className="min-w-0">
-                <span className="block">{promptTitle(prompt.name)}</span>
-                {prompt.description && (
-                  <span className="block text-[0.78rem] font-normal text-muted-foreground">
-                    {prompt.description}
-                  </span>
-                )}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-      {onSelectPrompt && libraryPrompts.length === 0 && (
-        <div className="welcome-prompts" data-first-task-target="starters">
-          {STARTER_PROMPTS.map(
-            (
-              {
-                icon: Icon,
-                iconClass,
-                label,
-                description,
-                prompt,
-                enableInternet,
-              },
-              index,
-            ) => (
-              <button
-                key={label}
-                type="button"
-                className={CARD_CLASS}
-                data-first-task-target={index === 0 ? "starter-choice" : undefined}
-                onClick={() =>
-                  onSelectPrompt(
+          {libraryPrompts.length > 0
+            ? libraryPrompts.map((prompt, index) => (
+                <PromptCard
+                  key={prompt.name}
+                  icon={Sparkles}
+                  label={promptTitle(prompt.name)}
+                  description={prompt.description}
+                  first={index === 0}
+                  onClick={() => insertLibraryPrompt(prompt.name)}
+                />
+              ))
+            : STARTER_PROMPTS.map(
+                (
+                  {
+                    icon,
+                    label,
+                    description,
                     prompt,
-                    enableInternet ? { enableInternet: true } : undefined,
-                  )
-                }
-              >
-                <Icon size={16} className={iconClass} />
-                <span className="min-w-0">
-                  <span className="block">{label}</span>
-                  <span className="block text-[0.78rem] font-normal text-muted-foreground">
-                    {description}
-                  </span>
-                </span>
-              </button>
-            ),
-          )}
+                    enableInternet,
+                  },
+                  index,
+                ) => (
+                  <PromptCard
+                    key={label}
+                    icon={icon}
+                    label={label}
+                    description={description}
+                    first={index === 0}
+                    onClick={() =>
+                      onSelectPrompt(
+                        prompt,
+                        enableInternet ? { enableInternet: true } : undefined,
+                      )
+                    }
+                  />
+                ),
+              )}
         </div>
       )}
     </section>
