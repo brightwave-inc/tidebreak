@@ -76,13 +76,19 @@ impl HarnessAdapter for CodexAdapter {
         }
     }
 
-    fn capabilities(&self, _probe: &HarnessProbe) -> HarnessCaps {
+    fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps {
         HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             structured_approvals: CapLevel::Supported,
-            // `turn/steer` exists in the generated schema; not captured.
-            mid_turn_steering: CapLevel::Unknown,
+            // The non-experimental `turn/steer` contract is verified for the
+            // 0.147 line. Keep newer and older installations honest until
+            // their generated schema is checked too.
+            mid_turn_steering: if supports_native_steering(probe.version.as_deref()) {
+                CapLevel::Supported
+            } else {
+                CapLevel::Unknown
+            },
             plan_mode: CapLevel::Supported,
             // `thread/start` sandbox workspace-write + approvalPolicy
             // on-request; supervised by the captured approval channel.
@@ -110,6 +116,22 @@ impl HarnessAdapter for CodexAdapter {
         }
         Ok(Box::new(attach(spec).await?))
     }
+}
+
+fn supports_native_steering(version: Option<&str>) -> bool {
+    version
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .filter_map(|candidate| {
+            let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+            let mut parts = candidate.split('.');
+            let major = parts.next()?.parse::<u64>().ok()?;
+            let minor = parts.next()?.parse::<u64>().ok()?;
+            let patch = parts.next()?.parse::<u64>().ok()?;
+            parts.next().is_none().then_some((major, minor, patch))
+        })
+        .next()
+        .is_some_and(|(major, minor, _)| major == 0 && minor == 147)
 }
 
 /// Ask the same app-server protocol a real session uses. Codex has no
@@ -469,8 +491,36 @@ mod tests {
         assert_eq!(caps.reasoning_levels, CapLevel::Supported);
         assert_eq!(caps.image_input, CapLevel::Unknown);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
-        assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
+        assert_eq!(caps.mid_turn_steering, CapLevel::Supported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn steering_capability_is_gated_to_the_verified_0_147_line() {
+        let caps_for = |version: Option<&str>| {
+            CodexAdapter::new()
+                .capabilities(&HarnessProbe {
+                    found: true,
+                    binary_path: None,
+                    version: version.map(str::to_owned),
+                    authenticated: Some(true),
+                    stderr: String::new(),
+                    env: Vec::new(),
+                    commands: Vec::new(),
+                })
+                .mid_turn_steering
+        };
+
+        assert_eq!(caps_for(Some("codex-cli 0.147.0")), CapLevel::Supported);
+        assert_eq!(caps_for(Some("0.147.9")), CapLevel::Supported);
+        assert_eq!(caps_for(Some("codex-cli 0.146.3")), CapLevel::Unknown);
+        assert_eq!(caps_for(Some("codex-cli 0.148.0")), CapLevel::Unknown);
+        assert_eq!(
+            caps_for(Some("codex-cli 0.147.0-alpha.1")),
+            CapLevel::Unknown
+        );
+        assert_eq!(caps_for(Some("development")), CapLevel::Unknown);
+        assert_eq!(caps_for(None), CapLevel::Unknown);
     }
 
     #[test]

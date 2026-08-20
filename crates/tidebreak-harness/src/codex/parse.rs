@@ -88,6 +88,12 @@ impl CodexStreamParser {
         self.outbound_methods.insert(id_key(id), method.to_owned());
     }
 
+    /// Forget an outbound request that was cancelled or timed out before a
+    /// response could be consumed.
+    pub fn forget_outbound(&mut self, id: &Value) {
+        self.outbound_methods.remove(&id_key(id));
+    }
+
     /// Parse one NDJSON line. Never returns an error: unknown shapes increment
     /// [`Self::unrecognized`].
     pub fn push_line(&mut self, line: &str) -> Vec<HarnessEvent> {
@@ -358,7 +364,7 @@ impl CodexStreamParser {
                 }
                 Vec::new()
             }
-            "initialize" | "turn/interrupt" | "" => Vec::new(),
+            "initialize" | "turn/interrupt" | "turn/steer" | "" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("rpc-result/{other}"), value);
                 Vec::new()
@@ -378,6 +384,18 @@ impl CodexStreamParser {
                 level: HarnessNoticeLevel::Error,
                 message: bound(message, MAX_NOTICE_CHARS),
             }];
+        }
+        if method == "turn/steer" {
+            // The live session routes this response back to the caller that
+            // issued the control RPC. A rejected steer is not a failed turn.
+            return Vec::new();
+        }
+        if method.is_empty() {
+            // A cancelled or timed-out control can answer after its waiter is
+            // gone. An uncorrelated JSON-RPC error is protocol noise, not a
+            // failure of the active user turn.
+            self.count_unrecognized("rpc-error/unmatched", value);
+            return Vec::new();
         }
         vec![HarnessEvent::TurnFailed {
             error: BoundedError {
@@ -566,6 +584,46 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+    }
+
+    #[test]
+    fn a_rejected_steer_does_not_fail_the_active_turn() {
+        let input = r#"
+{"dir":"out","msg":{"id":7,"method":"turn/steer","params":{"threadId":"thread","expectedTurnId":"turn","input":[{"type":"text","text":"redirect"}]}}}
+{"dir":"in","msg":{"id":7,"error":{"code":-32602,"message":"turn is no longer steerable"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"turn":{"id":"turn","status":"completed"}}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 0);
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnFailed { .. }))
+                .count(),
+            0
+        );
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unmatched_rpc_error_does_not_fail_the_active_turn() {
+        let input = r#"
+{"dir":"in","msg":{"id":7,"error":{"code":-32602,"message":"late response"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"turn":{"id":"turn","status":"completed"}}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 1);
+        assert!(!out
+            .events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::TurnFailed { .. })));
         assert!(matches!(
             out.events.last(),
             Some(HarnessEvent::TurnCompleted { .. })
