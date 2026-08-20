@@ -1165,12 +1165,8 @@ async fn fetch_runs(
         );
     }
     if items.is_empty() {
-        if let Err(error) = workflow_runs {
-            return Err(error);
-        }
-        if let Err(error) = deployments {
-            return Err(error);
-        }
+        workflow_runs?;
+        deployments?;
     }
     Ok(items)
 }
