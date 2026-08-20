@@ -4,9 +4,11 @@ import type { ApiClient } from "../api/client";
 import type {
   Attention,
   CodeCloneJobSnapshot,
+  CodeHarnessInstallSnapshot,
   CodeSessionDigest,
   CodeSessionLifecycle,
   CodeUpdateNotice,
+  HarnessKind,
   PullRequestDigest,
 } from "../api/types";
 import {
@@ -34,6 +36,13 @@ export type CodeUpdatesState = {
    */
   childrenByWorkspace: Record<string, Record<string, CodeSessionDigest>>;
   cloneJobs: Record<string, CodeCloneJobSnapshot>;
+  /**
+   * Warm harness installs, keyed by engine. The New Workspace dialog starts
+   * them and reads their phase from here; nothing else depends on them, and a
+   * reconnect drops them because the doctor report is the durable answer for
+   * what is installed.
+   */
+  harnessInstalls: Partial<Record<HarnessKind, CodeHarnessInstallSnapshot>>;
   viewedWorkspaceId: string | null;
 };
 
@@ -41,6 +50,7 @@ export type CodeUpdatesAction =
   | { type: "snapshot"; sessions: CodeSessionDigest[] }
   | { type: "digest"; digest: CodeSessionDigest }
   | { type: "clone_progress"; job: CodeCloneJobSnapshot }
+  | { type: "harness_install"; install: CodeHarnessInstallSnapshot }
   | { type: "view"; workspaceId: string | null }
   | { type: "reset" };
 
@@ -48,6 +58,7 @@ const EMPTY: CodeUpdatesState = {
   byWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
+  harnessInstalls: {},
   viewedWorkspaceId: null,
 };
 
@@ -98,6 +109,14 @@ export function reduceCodeUpdates(
         cloneJobs: {
           ...state.cloneJobs,
           [action.job.id]: action.job,
+        },
+      };
+    case "harness_install":
+      return {
+        ...state,
+        harnessInstalls: {
+          ...state.harnessInstalls,
+          [action.install.kind]: action.install,
         },
       };
     case "view":
@@ -198,6 +217,18 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
         ...(notice.percent !== undefined ? { percent: notice.percent } : {}),
         ...(notice.error !== undefined ? { error: notice.error } : {}),
         ...(notice.repo_id !== undefined ? { repo_id: notice.repo_id } : {}),
+      },
+    };
+  }
+  if (notice.type === "harness_install") {
+    return {
+      type: "harness_install",
+      install: {
+        kind: notice.kind,
+        phase: notice.phase,
+        done: notice.done,
+        ...(notice.version !== undefined ? { version: notice.version } : {}),
+        ...(notice.error !== undefined ? { error: notice.error } : {}),
       },
     };
   }

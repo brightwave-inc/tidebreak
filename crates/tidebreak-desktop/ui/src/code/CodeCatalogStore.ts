@@ -52,6 +52,7 @@ type CodeCatalogStore = CodeCatalogState & {
   refreshDoctor: (
     client: Pick<ApiClient, "refreshHarnessDoctor">,
   ) => Promise<void>;
+  reloadDoctor: (client: Pick<ApiClient, "getHarnessDoctor">) => Promise<void>;
   ensureHarnessModels: (
     client: Pick<ApiClient, "listCodeHarnessModels">,
     kind: HarnessKind,
@@ -147,6 +148,13 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   refreshDoctor: async (client) => {
     const doctor = await client.refreshHarnessDoctor();
     set({ doctor });
+  },
+  // The memoized read, for picking up an engine a warm install just put on
+  // disk. `refreshDoctor` is the doctor's own button: it re-probes every
+  // engine and installs every pin, which is far more than reading one result
+  // that already exists.
+  reloadDoctor: async (client) => {
+    set({ doctor: await client.getHarnessDoctor() });
   },
   ensureHarnessModels: (client, kind) =>
     loadHarnessModels(client, kind, get, false),

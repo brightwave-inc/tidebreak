@@ -24,7 +24,9 @@ pub(crate) use git::{
     merge_workspace_pr, push_workspace, refresh_workspace_pr, run_workspace_action,
     start_workspace_watch, stop_workspace_watch,
 };
-pub(crate) use harnesses::{list_harness_models, list_harnesses, refresh_harnesses};
+pub(crate) use harnesses::{
+    install_harness, list_harness_models, list_harnesses, refresh_harnesses,
+};
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_repos, patch_repo,
     start_clone,
@@ -42,13 +44,13 @@ pub(crate) use terminals::{
 #[allow(unused_imports)]
 pub(crate) use types::{
     CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodePrCommentsSnapshot,
-    CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
-    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
-    CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot,
-    CodeWorkspaceTree, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
-    SequencedCodeEventFrame,
+    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodeHarnessInstallSnapshot,
+    CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug,
+    CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
+    CodeTerminalSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
+    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, HarnessDoctorReport, HarnessModelList,
+    MergeCodePrBody, QueuedCodeTurn, SequencedCodeEventFrame,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;

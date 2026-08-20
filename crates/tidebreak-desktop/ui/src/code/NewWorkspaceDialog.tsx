@@ -33,7 +33,9 @@ import { friendlyErrorMessage } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { HarnessModelMenu } from "./CodeComposer";
+import { HarnessInstallNote } from "./HarnessInstallNote";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
@@ -113,6 +115,8 @@ export function NewWorkspaceDialog({
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
+  const reloadDoctor = useCodeCatalogStore((state) => state.reloadDoctor);
+  const harnessInstalls = useCodeUpdatesStore((state) => state.harnessInstalls);
   const lastCreate = useCodeUiStore((state) => state.lastCreate);
   const rememberCreate = useCodeUiStore((state) => state.rememberCreate);
   const [repoId, setRepoId] = useState("");
@@ -164,6 +168,45 @@ export function NewWorkspaceDialog({
     // mid-open — a workspace created elsewhere must not move this form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, defaultRepoId, repos]);
+
+  // A pin this machine has never installed is minutes of npm. Warming it
+  // when the dialog opens — and again when the engine changes — moves that
+  // off create, where it was a silent stall. The doctor entry is the only
+  // trigger: an engine already on disk is never asked for.
+  const doctorEntry = allHarnesses.find((item) => item.kind === harness);
+  const needsInstall = Boolean(doctorEntry && !doctorEntry.found);
+  const install = harnessInstalls[harness];
+
+  useEffect(() => {
+    if (!open || !needsInstall) return;
+    let cancelled = false;
+    void client.startHarnessInstall(harness).then(
+      (snapshot) => {
+        // The answer is immediate; the phases after it arrive on the updates
+        // socket. Applying it here means the note shows even on the profile
+        // that never opened one.
+        if (!cancelled) {
+          useCodeUpdatesStore
+            .getState()
+            .apply({ type: "harness_install", install: snapshot });
+        }
+      },
+      // Nothing is broken yet: create still reports `harness_not_found` with
+      // the reason, and a member of a shared deployment may not install at
+      // all. A toast on dialog open would be noise either way.
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, harness, needsInstall, open]);
+
+  useEffect(() => {
+    // A finished install leaves the doctor report saying "Not installed", so
+    // the engine would stay unpickable until something re-read it.
+    if (!open || !needsInstall || !install?.done || install.error) return;
+    void reloadDoctor(client).catch(() => {});
+  }, [client, install, needsInstall, open, reloadDoctor]);
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
   const selectedHarness = readyHarnesses.find((entry) => entry.kind === harness);
@@ -335,6 +378,7 @@ export function NewWorkspaceDialog({
               }}
               disabled={creating}
             />
+            <HarnessInstallNote install={install} />
           </div>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Model</span>

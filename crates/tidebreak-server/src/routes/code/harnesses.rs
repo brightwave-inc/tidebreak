@@ -4,7 +4,10 @@ use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::Json;
 
-use super::types::{HarnessDoctorEntry, HarnessDoctorReport, HarnessModel, HarnessModelList};
+use super::types::{
+    CodeHarnessInstallSnapshot, HarnessDoctorEntry, HarnessDoctorReport, HarnessModel,
+    HarnessModelList,
+};
 use tidebreak_core::HarnessKind;
 
 /// The doctor surface, served from the memoized probes (decision 0034).
@@ -20,6 +23,21 @@ pub async fn refresh_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorRep
     code.refresh_pinned_harnesses().await;
     code.invalidate_probes();
     Ok(Json(doctor(&code).await?))
+}
+
+/// Start the pinned install of one engine ahead of a session create, and
+/// report where that install stands.
+///
+/// The New Workspace dialog calls this when it opens and when the engine
+/// changes. A cold pin is minutes of `npm install`; on the create path that
+/// is a silent stall, so it runs here instead and reports on
+/// `WS /code/updates`. Answers immediately in every case — already installed,
+/// already running, or now started — and never installs twice for one pin.
+pub async fn install_harness(
+    code: ScopedCode,
+    Path(kind): Path<HarnessKind>,
+) -> Result<Json<CodeHarnessInstallSnapshot>, ServerError> {
+    Ok(Json(code.start_harness_install(kind)?))
 }
 
 /// Models this harness currently lists. Not on the doctor path.

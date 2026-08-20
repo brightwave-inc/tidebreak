@@ -3,8 +3,10 @@
 //! Each engine is an exact npm package version. Probe and launch use that
 //! copy. The user's PATH is not the engine (decision 0041).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,27 @@ pub fn managed_binary(data_dir: &Path, kind: HarnessKind) -> Option<PathBuf> {
     is_absolute_executable(&binary).then_some(binary)
 }
 
+/// One lock per install directory, so two callers cannot npm-install into it
+/// at once.
+///
+/// A pin now has two installers — the warm install the New Workspace dialog
+/// starts, and the create path's own fallback — and npm has no guard of its
+/// own for two processes writing one `node_modules`. The marker is written
+/// only after a successful install, so a torn tree left by an interleaved run
+/// would be blessed by the next marker write rather than reinstalled. Keying
+/// on the directory rather than the kind keeps two data directories (tests,
+/// profiles) from serializing against each other.
+fn install_lock(dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("harness install locks")
+        .entry(dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 /// Install the pin with the host-verified managed Node runtime's npm if it is
 /// not present.
 ///
@@ -116,6 +139,9 @@ pub fn managed_binary(data_dir: &Path, kind: HarnessKind) -> Option<PathBuf> {
 /// is the digest-gated host-tool broker). This crate deliberately does not
 /// scan `{data_dir}/tools/node`: a sibling directory that merely looks like a
 /// Node install must never become executable code by being newest on disk.
+///
+/// Concurrent calls for one pin are serialized: the first installs and the
+/// rest return the binary it produced.
 pub async fn ensure_installed(
     data_dir: &Path,
     kind: HarnessKind,
@@ -128,6 +154,12 @@ pub async fn ensure_installed(
     }
     let pin = pin_for(kind).ok_or_else(|| format!("{kind} has no pin"))?;
     let dir = install_dir(data_dir, pin);
+    let lock = install_lock(&dir);
+    let _guard = lock.lock().await;
+    // Another caller may have installed this pin while this one waited.
+    if let Some(existing) = managed_binary(data_dir, kind) {
+        return Ok(existing);
+    }
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|err| format!("could not create harness install dir: {err}"))?;
@@ -281,5 +313,36 @@ mod tests {
             .block_on(ensure_installed(tmp.path(), HarnessKind::ClaudeCode, None))
             .unwrap_err();
         assert!(err.contains("managed Node"), "{err}");
+    }
+
+    /// The warm install and the create path's fallback can ask for one pin at
+    /// the same time. Only one of them may be inside the install directory.
+    #[tokio::test]
+    async fn one_pin_directory_admits_one_installer_at_a_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pin = pin_for(HarnessKind::ClaudeCode).unwrap();
+        let dir = install_dir(tmp.path(), pin);
+        let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let installers = (0..4).map(|_| {
+            let (dir, inside, peak) = (dir.clone(), Arc::clone(&inside), Arc::clone(&peak));
+            tokio::spawn(async move {
+                let lock = install_lock(&dir);
+                let _guard = lock.lock().await;
+                let now = inside.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                inside.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        for installer in installers.collect::<Vec<_>>() {
+            installer.await.unwrap();
+        }
+
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A second pin is not held up by the first.
+        let other = install_dir(tmp.path(), pin_for(HarnessKind::Codex).unwrap());
+        assert!(!Arc::ptr_eq(&install_lock(&dir), &install_lock(&other)));
     }
 }

@@ -99,6 +99,7 @@ import {
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
   type CodeCloneJobSnapshot,
+  type CodeHarnessInstallSnapshot,
   type CodeSubscriptionUsage,
   type HarnessDoctorReport,
   type HarnessKind,
@@ -123,6 +124,7 @@ import {
   parseCodeApproval,
   parseCodeCloneDefaults,
   parseCodeCloneJob,
+  parseCodeHarnessInstall,
   parseCodeRepo,
   parseCodeSession,
   parseCodeSessionList,
@@ -1800,6 +1802,27 @@ export class ApiClient {
         ),
       ),
       "harness models",
+    );
+  }
+
+  /**
+   * Warm the pinned install of one engine ahead of a session create.
+   *
+   * Answers as soon as the server knows where the install stands; the phases
+   * that follow arrive on `WS /code/updates`. Safe to call repeatedly — an
+   * installed pin answers `ready` and one already running is not restarted.
+   */
+  async startHarnessInstall(
+    kind: HarnessKind,
+  ): Promise<CodeHarnessInstallSnapshot> {
+    return requireParsed(
+      parseCodeHarnessInstall(
+        await this.json(
+          `/code/harnesses/${encodeURIComponent(kind)}/install`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "harness install",
     );
   }
 

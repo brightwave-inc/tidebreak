@@ -261,6 +261,26 @@ pub struct CodeCloneJobSnapshot {
     pub repo_id: Option<RepoId>,
 }
 
+/// State of one warm harness install, returned by
+/// `POST /code/harnesses/{kind}/install` and restated on the live bus.
+///
+/// `phase` is `installing`, `ready`, or `failed`. npm reports no usable
+/// percentage to a pipe, so there is no bar to show — only which of the three
+/// the engine is in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeHarnessInstallSnapshot {
+    pub kind: HarnessKind,
+    /// The pinned version being installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    pub phase: String,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
 /// Remembered clone destination plus observed `gh` status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeCloneDefaults {
@@ -847,9 +867,31 @@ pub enum CodeUpdateNotice {
         #[ts(optional)]
         repo_id: Option<RepoId>,
     },
+    /// Progress of one warm harness install. Not restated on connect.
+    HarnessInstall {
+        kind: HarnessKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        version: Option<String>,
+        phase: String,
+        done: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        error: Option<String>,
+    },
 }
 
 impl CodeUpdateNotice {
+    pub(crate) fn harness_install(progress: crate::code::bus::HarnessInstallProgress) -> Self {
+        Self::HarnessInstall {
+            kind: progress.kind,
+            version: progress.version,
+            phase: progress.phase,
+            done: progress.done,
+            error: progress.error,
+        }
+    }
+
     pub(crate) fn clone_progress(progress: crate::code::bus::CloneProgress) -> Self {
         Self::CloneProgress {
             job: progress.job,
