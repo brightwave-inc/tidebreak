@@ -11,6 +11,7 @@ import {
   Copy,
   FileCode,
   FileDiff,
+  Globe2,
   ListX,
   MessageSquare,
   MoveLeft,
@@ -67,6 +68,8 @@ export function CodeCenterTabs({
   onCloseEditorsToRight,
   onCopyPath,
   onNewTab,
+  onNewBrowser,
+  browserTitles = {},
   region = "primary",
   showMainAgent = true,
   onMoveEditorToOtherGroup,
@@ -88,6 +91,8 @@ export function CodeCenterTabs({
   onCloseEditorsToRight: (index: number) => void;
   onCopyPath: (path: string) => void;
   onNewTab: () => void;
+  onNewBrowser?: () => void;
+  browserTitles?: Readonly<Record<string, string>>;
   region?: CenterTabRegion;
   showMainAgent?: boolean;
   onMoveEditorToOtherGroup?: (index: number) => void;
@@ -178,7 +183,7 @@ export function CodeCenterTabs({
       )}
       {editorTabs.map((panel, index) => {
         const active = !conversationFocused && index === editorActiveIndex;
-        const { name, suffix } = centerTabParts(panel);
+        const { name, suffix } = centerTabParts(panel, browserTitles);
         const label = suffix ? `${name} ${suffix}` : name;
         const path =
           panel.type === "file" || panel.type === "diff"
@@ -231,12 +236,14 @@ export function CodeCenterTabs({
                 >
                   {panel.type === "diff" ? (
                     <FileDiff className="size-3.5 shrink-0" />
+                  ) : panel.type === "browser" ? (
+                    <Globe2 className="size-3.5 shrink-0" />
                   ) : (
                     <FileCode className="size-3.5 shrink-0" />
                   )}
                   <span
                     className="flex min-w-0 items-baseline gap-1"
-                    title={centerTabTitle(panel)}
+                    title={centerTabTitle(panel, browserTitles)}
                   >
                     <span className="max-w-40 truncate">{name}</span>
                     {/* The suffix stays outside the truncating name. */}
@@ -330,6 +337,20 @@ export function CodeCenterTabs({
       >
         <Plus className="size-3.5" />
       </button>
+      {onNewBrowser && (
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          aria-label="New browser tab"
+          onClick={onNewBrowser}
+        >
+          <Globe2 className="size-3.5" />
+        </button>
+      )}
       {region === "primary" && onSplitActive && (
         <button
           type="button"
@@ -379,10 +400,13 @@ function TabContextMenuContent({
 }
 
 /** The whole path behind a tab whose label is only the file name. */
-function centerTabTitle(panel: PanelContent): string {
+function centerTabTitle(
+  panel: PanelContent,
+  browserTitles: Readonly<Record<string, string>>,
+): string {
   if (panel.type === "file") return panel.path;
   if (panel.type === "diff" && panel.path) return `${panel.path} (diff)`;
-  const { name, suffix } = centerTabParts(panel);
+  const { name, suffix } = centerTabParts(panel, browserTitles);
   return suffix ? `${name} ${suffix}` : name;
 }
 
@@ -390,7 +414,10 @@ function centerTabTitle(panel: PanelContent): string {
  * A tab's label, split into the part that may truncate and the part that may
  * not.
  */
-function centerTabParts(panel: PanelContent): {
+function centerTabParts(
+  panel: PanelContent,
+  browserTitles: Readonly<Record<string, string>>,
+): {
   name: string;
   suffix: string | null;
 } {
@@ -405,6 +432,12 @@ function centerTabParts(panel: PanelContent): {
       };
     }
     return { name: panel.turnId ? "Turn diff" : "Diff", suffix: null };
+  }
+  if (panel.type === "browser") {
+    return {
+      name: browserTitles[panel.browserId]?.trim() || "Browser",
+      suffix: null,
+    };
   }
   return { name: panel.type, suffix: null };
 }

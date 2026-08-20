@@ -52,6 +52,14 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("files")).toBeNull();
   });
 
+  it("round-trips opaque browser tab identities without putting URLs in the layout", () => {
+    const browser = { type: "browser" as const, browserId: "browser_one-2" };
+    expect(encodePanelSegment(browser)).toBe("browser.browser_one-2");
+    expect(parsePanelSegment("browser.browser_one-2")).toEqual(browser);
+    expect(parsePanelSegment("browser")).toBeNull();
+    expect(parsePanelSegment("browser.browser%2Fone.two")).toBeNull();
+  });
+
   // The conversation holds its own region now; a URL still naming it as a
   // panel is describing a tab that does not exist.
   it("no longer reads the conversation as a panel", () => {
@@ -88,6 +96,7 @@ describe("panel URLs", () => {
       { type: "terminal", terminalId: "term-1" },
       { type: "file", path: "src/lib.rs" },
       { type: "diff", path: "src/lib.rs", turnId: "turn-1" },
+      { type: "browser", browserId: "browser-1" },
     ] as const) {
       expect(parsePanelSegment(encodePanelSegment(panel))).toEqual(panel);
     }
@@ -211,5 +220,25 @@ describe("layout URLs", () => {
         split: "file.src%2Flib.rs,file.README.md",
       }).editorSplit?.tabs,
     ).toEqual([{ type: "file", path: "README.md" }]);
+  });
+
+  it("restores browser tabs in either editor group", () => {
+    const layout = {
+      tabs: [{ type: "browser" as const, browserId: "browser-primary" }],
+      activeIndex: 0,
+      fullscreen: false,
+      editorSplit: {
+        tabs: [{ type: "browser" as const, browserId: "browser-secondary" }],
+        activeIndex: 0,
+        focused: true,
+      },
+    };
+
+    expect(searchFromLayout(layout)).toMatchObject({
+      tabs: "browser.browser-primary",
+      split: "browser.browser-secondary",
+      splitFocused: "1",
+    });
+    expect(layoutFromSearch(searchFromLayout(layout))).toEqual(layout);
   });
 });

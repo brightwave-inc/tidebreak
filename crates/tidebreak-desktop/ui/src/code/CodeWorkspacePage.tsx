@@ -33,7 +33,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { PanelLayout } from "@/panel/PanelLayout";
-import type { PanelContent } from "@/panel/panelTypes";
+import type { LayoutState, PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
 import { followScrollBehavior } from "@/ChatScroll";
@@ -48,6 +48,7 @@ import {
 } from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
 import {
+  codeBrowserIds,
   closeAllEditorTabs,
   closeCodeChromeTab,
   closeEditorTab,
@@ -60,6 +61,7 @@ import {
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
+  removedCodeBrowserIds,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
@@ -72,10 +74,19 @@ import {
   SPLIT_EDITOR_PANEL_ID,
 } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
+import { closeCodeBrowser } from "./browser/browserHost";
+import {
+  seedBrowserSession,
+  storedBrowserTitle,
+} from "./browser/browserPersistence";
 
 const FileViewer = lazy(async () => {
   const module = await import("./FileViewer");
   return { default: module.FileViewer };
+});
+const CodeBrowserTab = lazy(async () => {
+  const module = await import("./browser/CodeBrowserTab");
+  return { default: module.CodeBrowserTab };
 });
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector, type InspectorTab } from "./CodeInspector";
@@ -137,7 +148,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const { setLayout } = usePanelNav();
+  const layoutRef = useRef(layout);
+  const previousLayoutRef = useRef(layout);
+  const closedBrowserIdsRef = useRef(new Set<string>());
+  const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
+  const workspaceOverlayOpen = useWorkspaceOverlayOpen();
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore(
     (state) => state.toggleReviewSidebar,
@@ -173,6 +189,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     line: number;
     revision: number;
   } | null>(null);
+  const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
+    () => storedBrowserTitles(layout),
+  );
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const setViewedWorkspace = useCodeUpdatesStore(
     (state) => state.setViewedWorkspace,
@@ -187,6 +206,46 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const rememberedSession = useCodeCatalogStore(
     (state) => state.sessionsByWorkspace[workspaceId] ?? null,
   );
+
+  layoutRef.current = layout;
+
+  const closeBrowserPanels = useCallback((browserIds: readonly string[]) => {
+    for (const browserId of browserIds) {
+      if (closedBrowserIdsRef.current.has(browserId)) continue;
+      closedBrowserIdsRef.current.add(browserId);
+      void closeCodeBrowser(browserId);
+    }
+  }, []);
+
+  function setWorkspaceLayout(next: LayoutState) {
+    setLayout(next);
+  }
+
+  useEffect(() => {
+    const ids = codeBrowserIds(layout);
+    for (const browserId of ids) {
+      closedBrowserIdsRef.current.delete(browserId);
+      workspaceBrowserIdsRef.current.add(browserId);
+    }
+    closeBrowserPanels(removedCodeBrowserIds(previousLayoutRef.current, layout));
+    previousLayoutRef.current = layout;
+    setBrowserTitles((current) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const browserId of ids) {
+        const title = current[browserId] ?? storedBrowserTitle(browserId);
+        next[browserId] = title;
+        if (current[browserId] !== title) changed = true;
+      }
+      if (Object.keys(current).length !== ids.length) changed = true;
+      return changed ? next : current;
+    });
+  }, [closeBrowserPanels, layout]);
+
+  useEffect(() => {
+    workspaceBrowserIdsRef.current = new Set(codeBrowserIds(layoutRef.current));
+    return () => closeBrowserPanels([...workspaceBrowserIdsRef.current]);
+  }, [closeBrowserPanels, workspaceId]);
 
   useEffect(() => {
     setViewedWorkspace(workspaceId);
@@ -295,7 +354,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     : [];
 
   function openTurnDiff(turnId: string) {
-    setLayout(openCodeEditor(layout, { type: "diff", turnId }));
+    setWorkspaceLayout(openCodeEditor(layout, { type: "diff", turnId }));
   }
 
   function openFile(
@@ -312,11 +371,29 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             revision: (current?.revision ?? 0) + 1,
           },
     );
-    setLayout(openCodeEditor(layout, { type: "file", path }, preferredRegion));
+    setWorkspaceLayout(
+      openCodeEditor(layout, { type: "file", path }, preferredRegion),
+    );
   }
 
   function openFileDiff(path: string) {
-    setLayout(openCodeEditor(layout, { type: "diff", path }));
+    setWorkspaceLayout(openCodeEditor(layout, { type: "diff", path }));
+  }
+
+  function openBrowser(url?: string, preferredRegion?: CodeEditorRegion) {
+    const browserId = crypto.randomUUID();
+    const browser = seedBrowserSession({
+      browserId,
+      workspaceId,
+      initialUrl: url,
+    });
+    setBrowserTitles((current) => ({
+      ...current,
+      [browserId]: browser.title || "Browser",
+    }));
+    setWorkspaceLayout(
+      openCodeEditor(layout, { type: "browser", browserId }, preferredRegion),
+    );
   }
 
   function requestNewTab(region: CodeEditorRegion) {
@@ -340,8 +417,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   function dropDraggedEditor(region: CodeEditorRegion) {
     if (!draggedEditor || draggedEditor.region === region) return;
-    setLayout(
-      moveEditorTab(layout, draggedEditor.region, draggedEditor.index, region),
+    setWorkspaceLayout(
+      moveEditorTab(
+        layout,
+        draggedEditor.region,
+        draggedEditor.index,
+        region,
+      ),
     );
     setDraggedEditor(null);
   }
@@ -398,6 +480,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             contentRevision={contentRevision}
             onOpenFile={(path) => openFile(path, undefined, region)}
           />
+        ) : panel.type === "browser" ? (
+          <Suspense fallback={<Skeleton className="h-full w-full" />}>
+            <CodeBrowserTab
+              workspaceId={workspaceId}
+              browserId={panel.browserId}
+              obscured={workspaceOverlayOpen}
+              onTitleChange={(title) =>
+                setBrowserTitles((current) =>
+                  current[panel.browserId] === title
+                    ? current
+                    : { ...current, [panel.browserId]: title },
+                )
+              }
+            />
+          </Suspense>
         ) : null}
       </div>
     );
@@ -417,32 +514,34 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     >
       <CodeCenterTabs
         editorTabs={editorTabs}
+        browserTitles={browserTitles}
         editorActiveIndex={chrome.editors.activeIndex}
         conversationFocused={showingChat}
-        onSelectChat={() => setLayout(focusConversation(layout))}
+        onSelectChat={() => setWorkspaceLayout(focusConversation(layout))}
         onSelectEditor={(index) =>
-          setLayout(focusEditorTab(layout, index, "primary"))
+          setWorkspaceLayout(focusEditorTab(layout, index, "primary"))
         }
         onCloseEditor={(index) =>
-          setLayout(closeEditorTab(layout, index, "primary"))
+          setWorkspaceLayout(closeEditorTab(layout, index, "primary"))
         }
         onCloseAllEditors={() =>
-          setLayout(closeAllEditorTabs(layout, "primary"))
+          setWorkspaceLayout(closeAllEditorTabs(layout, "primary"))
         }
-        onCloseEveryEditor={() => setLayout(closeAllEditorTabs(layout))}
+        onCloseEveryEditor={() => setWorkspaceLayout(closeAllEditorTabs(layout))}
         onCloseOtherEditors={(index) =>
-          setLayout(closeOtherEditorTabs(layout, index, "primary"))
+          setWorkspaceLayout(closeOtherEditorTabs(layout, index, "primary"))
         }
         onCloseEditorsToRight={(index) =>
-          setLayout(closeEditorTabsToRight(layout, index, "primary"))
+          setWorkspaceLayout(closeEditorTabsToRight(layout, index, "primary"))
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("primary")}
+        onNewBrowser={() => openBrowser(undefined, "primary")}
         onMoveEditorToOtherGroup={(index) =>
-          setLayout(moveEditorTab(layout, "primary", index, "secondary"))
+          setWorkspaceLayout(moveEditorTab(layout, "primary", index, "secondary"))
         }
         onSplitActive={() =>
-          setLayout(
+          setWorkspaceLayout(
             moveEditorTab(
               layout,
               "primary",
@@ -465,8 +564,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <PanelLayout
           layout={chrome.panels}
           framed={false}
-          onFocusTab={(index) => setLayout(focusCodeChromeTab(layout, index))}
-          onCloseTab={(index) => setLayout(closeCodeChromeTab(layout, index))}
+          onFocusTab={(index) => setWorkspaceLayout(focusCodeChromeTab(layout, index))}
+          onCloseTab={(index) => setWorkspaceLayout(closeCodeChromeTab(layout, index))}
           renderChat={(visible) => (
             // The panel slot is a plain block. `.chat-pane` claims that height
             // so `.message-view` can grow and the composer stays at the bottom,
@@ -539,30 +638,32 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         region="secondary"
         showMainAgent={false}
         editorTabs={splitEditorTabs}
+        browserTitles={browserTitles}
         editorActiveIndex={chrome.splitEditors.activeIndex}
         conversationFocused={false}
         onSelectChat={() => undefined}
         onSelectEditor={(index) =>
-          setLayout(focusEditorTab(layout, index, "secondary"))
+          setWorkspaceLayout(focusEditorTab(layout, index, "secondary"))
         }
         onCloseEditor={(index) =>
-          setLayout(closeEditorTab(layout, index, "secondary"))
+          setWorkspaceLayout(closeEditorTab(layout, index, "secondary"))
         }
         onCloseAllEditors={() =>
-          setLayout(closeAllEditorTabs(layout, "secondary"))
+          setWorkspaceLayout(closeAllEditorTabs(layout, "secondary"))
         }
         onCloseOtherEditors={(index) =>
-          setLayout(closeOtherEditorTabs(layout, index, "secondary"))
+          setWorkspaceLayout(closeOtherEditorTabs(layout, index, "secondary"))
         }
         onCloseEditorsToRight={(index) =>
-          setLayout(closeEditorTabsToRight(layout, index, "secondary"))
+          setWorkspaceLayout(closeEditorTabsToRight(layout, index, "secondary"))
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("secondary")}
+        onNewBrowser={() => openBrowser(undefined, "secondary")}
         onMoveEditorToOtherGroup={(index) =>
-          setLayout(moveEditorTab(layout, "secondary", index, "primary"))
+          setWorkspaceLayout(moveEditorTab(layout, "secondary", index, "primary"))
         }
-        onCloseGroup={() => setLayout(mergeEditorSplit(layout))}
+        onCloseGroup={() => setWorkspaceLayout(mergeEditorSplit(layout))}
         onDragEditorStart={(index) =>
           setDraggedEditor({ region: "secondary", index })
         }
@@ -614,7 +715,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           client={client}
           workspaceId={workspaceId}
           shortcutHint={shortcutHints.terminal}
-          onClose={() => setLayout(toggleTerminalLayout(layout))}
+          onClose={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
         />
       )}
     </div>
@@ -697,7 +798,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               size="icon-xs"
               aria-pressed={chrome.terminal !== null}
               aria-label="Terminal"
-              onClick={() => setLayout(toggleTerminalLayout(layout))}
+              onClick={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
             >
               <SquareTerminal />
             </Button>
@@ -798,6 +899,56 @@ function useCodeShortcutHints(): { terminal: string; review: string } {
       review: shortcutHint("toggle-code-review", command),
     };
   }, []);
+}
+
+function storedBrowserTitles(layout: LayoutState): Record<string, string> {
+  return Object.fromEntries(
+    codeBrowserIds(layout).map((browserId) => [
+      browserId,
+      storedBrowserTitle(browserId),
+    ]),
+  );
+}
+
+/** Native child webviews must yield whenever a portaled app surface overlaps them. */
+function useWorkspaceOverlayOpen(): boolean {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const selector = [
+      '[role="dialog"][data-state="open"]',
+      '[role="alertdialog"][data-state="open"]',
+      '[role="menu"][data-state="open"]',
+      '[role="listbox"][data-state="open"]',
+    ].join(",");
+    let frame: number | null = null;
+    const update = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        setOpen(document.querySelector(selector) !== null);
+      });
+    };
+    const stateObserver = new MutationObserver(update);
+    stateObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["data-state", "role"],
+      subtree: true,
+    });
+    // Radix portals are direct body children. Keep transcript and editor DOM
+    // churn out of this observer so streaming content does not trigger global
+    // overlay queries.
+    const portalObserver = new MutationObserver(update);
+    portalObserver.observe(document.body, { childList: true });
+    update();
+    return () => {
+      stateObserver.disconnect();
+      portalObserver.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, []);
+
+  return open;
 }
 
 function shortcutHint(id: ShellShortcutAction, command: boolean): string {

@@ -4,6 +4,7 @@ import {
   FileDiff,
   FileText,
   FolderOpen,
+  Globe2,
   Package,
   Shield,
   SquareTerminal,
@@ -45,6 +46,8 @@ function panelTabFallbackLabel(panel: PanelContent): string {
         : panel.turnId
           ? "Turn diff"
           : "Diff";
+    case "browser":
+      return "Browser";
   }
 }
 
@@ -69,6 +72,8 @@ function PanelTabIcon({ panel, active }: { panel: PanelContent; active: boolean 
       return <FileCode className={tone("text-icon-blue")} />;
     case "diff":
       return <FileDiff className={tone("text-icon-violet")} />;
+    case "browser":
+      return <Globe2 className={tone("text-icon-blue")} />;
   }
 }
 

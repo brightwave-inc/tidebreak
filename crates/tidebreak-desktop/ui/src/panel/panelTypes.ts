@@ -28,7 +28,9 @@ export type PanelContent =
   /** One worktree file in the workspace center. */
   | { type: "file"; path: string }
   /** A colored diff in the workspace center. */
-  | { type: "diff"; path?: string; turnId?: string };
+  | { type: "diff"; path?: string; turnId?: string }
+  /** One native browser session in the workspace center. */
+  | { type: "browser"; browserId: string };
 
 export type PanelType = PanelContent["type"];
 
@@ -41,14 +43,14 @@ export type LayoutState = {
   activeIndex: number;
   fullscreen: boolean;
   /**
-   * Code workspace: the conversation tab is selected while file/diff tabs
+   * Code workspace: the conversation tab is selected while editor tabs
    * stay open. Absent everywhere else.
    */
   conversationFocused?: boolean;
   /**
    * Code workspace: a second editor group to the right of the main-agent
-   * group. The transcript itself never moves or mounts twice; only file and
-   * diff tabs are stored here.
+   * group. The transcript itself never moves or mounts twice; only editor
+   * tabs are stored here.
    */
   editorSplit?: {
     tabs: PanelContent[];
@@ -79,6 +81,8 @@ export function panelKey(panel: PanelContent): string {
       return `file:${panel.path}`;
     case "diff":
       return `diff:${panel.turnId ?? ""}:${panel.path ?? ""}`;
+    case "browser":
+      return `browser:${panel.browserId}`;
     default:
       return panel.type;
   }

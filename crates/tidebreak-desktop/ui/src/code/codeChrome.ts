@@ -61,7 +61,30 @@ function isDrawerTab(tab: PanelContent): boolean {
 }
 
 export function isEditorTab(tab: PanelContent): boolean {
-  return tab.type === "file" || tab.type === "diff";
+  return tab.type === "file" || tab.type === "diff" || tab.type === "browser";
+}
+
+export type CodeEditorPanel = Extract<
+  PanelContent,
+  { type: "file" | "diff" | "browser" }
+>;
+
+/** Browser session ids removed by a layout transition, once each. */
+export function removedCodeBrowserIds(
+  previous: LayoutState,
+  next: LayoutState,
+): string[] {
+  const remaining = new Set(codeBrowserIds(next));
+  return codeBrowserIds(previous).filter((id) => !remaining.has(id));
+}
+
+/** Browser session ids owned by either editor group, once each. */
+export function codeBrowserIds(layout: LayoutState): string[] {
+  const ids = new Set<string>();
+  for (const panel of [...layout.tabs, ...(layout.editorSplit?.tabs ?? [])]) {
+    if (panel.type === "browser") ids.add(panel.browserId);
+  }
+  return [...ids];
 }
 
 export type CodeEditorRegion = "primary" | "secondary";
@@ -290,7 +313,7 @@ export function closeEditorTabsToRight(
 /** Open one editor in the group that last had focus, unless a group is named. */
 export function openCodeEditor(
   layout: LayoutState,
-  panel: Extract<PanelContent, { type: "file" | "diff" }>,
+  panel: CodeEditorPanel,
   preferredRegion?: CodeEditorRegion,
 ): LayoutState {
   const key = panelKey(panel);
@@ -371,7 +394,7 @@ export function moveEditorTab(
   const without = closeEditorTab(layout, editorIndex, "secondary");
   return openCodeEditor(
     without,
-    target as Extract<PanelContent, { type: "file" | "diff" }>,
+    target as CodeEditorPanel,
     "primary",
   );
 }
@@ -384,7 +407,7 @@ export function mergeEditorSplit(layout: LayoutState): LayoutState {
   for (const tab of splitTabs) {
     next = openCodeEditor(
       next,
-      tab as Extract<PanelContent, { type: "file" | "diff" }>,
+      tab as CodeEditorPanel,
       "primary",
     );
   }
