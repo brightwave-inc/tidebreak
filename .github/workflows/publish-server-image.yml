@@ -21,18 +21,25 @@ run-name: >-
 #
 # Publishes happen on three triggers:
 #
-#   - a published, non-prerelease GitHub Release, which is the release cadence
-#     and the primary path. `release` events run this file from the default
-#     branch, not from the tag, so a hostile or stale tag YAML cannot publish;
+#   - a release, which is the release cadence and the primary path. release.yml
+#     dispatches this workflow with the tag it just published, because a release
+#     that job publishes raises no `release` event: the PATCH runs on
+#     GITHUB_TOKEN, and GitHub does not start a workflow run from an event that
+#     token created. The `release` trigger below stays declared for a release
+#     someone publishes by hand in the UI, which carries a user token and does
+#     fire. Both land here as the same build, and the per-tag concurrency group
+#     serializes them if a release ever arrives by both routes;
 #   - a weekly scheduled rebuild, so Debian security patches in the runtime
 #     base flush through even when nothing in-repo changes;
 #   - manual dispatch, for retries and backfills. Dispatch takes an optional
 #     release tag; with none, it rebuilds the current latest release, exactly
 #     like the schedule does.
 #
-# Publication source is the default branch only. Manual dispatch and the weekly
-# schedule must run this workflow from that branch, and every publish refuses a
-# revision that is not an ancestor of it. The build checkout does not persist
+# No trigger runs this file from the release tag. `release` events and dispatch
+# both run it from the default branch, so a hostile or stale tag YAML cannot
+# publish. Manual dispatch and the weekly schedule must run this workflow from
+# that branch too, and every publish refuses a revision that is not an ancestor
+# of it. The build checkout does not persist
 # credentials, and deploy/self-host/Dockerfile.dockerignore keeps `.git` and
 # every untracked non-source path out of the `COPY . .` context.
 #
