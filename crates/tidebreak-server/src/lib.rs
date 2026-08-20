@@ -462,6 +462,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::refresh_harnesses),
         )
         .route(
+            "/code/harnesses/{kind}/install",
+            post(routes::code::install_harness),
+        )
+        .route(
             "/code/repos/clone-defaults",
             get(routes::code::clone_defaults),
         )

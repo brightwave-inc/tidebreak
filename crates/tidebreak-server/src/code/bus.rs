@@ -21,7 +21,8 @@ use std::sync::Mutex;
 
 use tidebreak_core::{
     Attention, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
-    CodeWatchState, OwnerId, PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId,
+    CodeWatchState, HarnessKind, OwnerId, PullRequestDigest, RepoId, SequencedCodeEvent,
+    WorkspaceId,
 };
 use tokio::sync::broadcast;
 
@@ -60,6 +61,16 @@ pub(crate) struct CloneProgress {
     pub repo_id: Option<RepoId>,
 }
 
+/// Progress of one warm harness install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HarnessInstallProgress {
+    pub kind: HarnessKind,
+    pub version: Option<String>,
+    pub phase: String,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
 /// One unsequenced notice on the install-wide updates channel.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CodeLiveUpdate {
@@ -68,6 +79,9 @@ pub(crate) enum CodeLiveUpdate {
     Digest(Box<SessionDigest>),
     /// Clone job progress. Not restated on connect.
     CloneProgress(CloneProgress),
+    /// Warm harness install progress. Not restated on connect; the doctor
+    /// report is the durable answer for what is installed.
+    HarnessInstall(HarnessInstallProgress),
 }
 
 /// Per-session broadcast channels for live journal events, plus one digest

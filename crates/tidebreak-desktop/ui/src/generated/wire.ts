@@ -1141,6 +1141,20 @@ export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_s
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
 
 /**
+ * State of one warm harness install, returned by
+ * `POST /code/harnesses/{kind}/install` and restated on the live bus.
+ *
+ * `phase` is `installing`, `ready`, or `failed`. npm reports no usable
+ * percentage to a pipe, so there is no bar to show — only which of the three
+ * the engine is in.
+ */
+export type CodeHarnessInstallSnapshot = { kind: HarnessKind, 
+/**
+ * The pinned version being installed.
+ */
+version?: string, phase: string, done: boolean, error?: string, };
+
+/**
  * How an external agent-engine session handles mutations and approvals.
  *
  * Each adapter maps these onto the engine's native flags. A mode the
@@ -1322,7 +1336,7 @@ watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
  * Harness subagents on this session, present only when any were
  * observed (decision 52).
  */
-subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
+subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.

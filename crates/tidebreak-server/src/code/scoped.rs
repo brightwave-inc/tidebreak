@@ -35,7 +35,9 @@ use super::runtime::{CodeRuntime, RepoRegistration, SubmitTurnOutcome};
 use super::worktree;
 use crate::error::ServerError;
 use crate::principal::AuthContext;
-use crate::routes::code::types::{CodeCloneDefaults, CodeCloneJobSnapshot};
+use crate::routes::code::types::{
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeHarnessInstallSnapshot,
+};
 use crate::state::AppState;
 
 /// Code mode as one authenticated principal may see it.
@@ -465,6 +467,19 @@ impl ScopedCode {
 
     pub(crate) fn invalidate_probes(&self) {
         self.runtime.invalidate_probes();
+    }
+
+    /// Warm the pinned install of one engine. See
+    /// [`CodeRuntime::start_harness_install`].
+    ///
+    /// Progress reaches this principal's `/code/updates` socket; the binary it
+    /// writes belongs to the machine, which is why the route sits on the
+    /// deployment plane beside the doctor's refresh.
+    pub(crate) fn start_harness_install(
+        &self,
+        kind: HarnessKind,
+    ) -> Result<CodeHarnessInstallSnapshot, ServerError> {
+        self.runtime.start_harness_install(&self.owner, kind)
     }
 
     #[cfg(not(test))]

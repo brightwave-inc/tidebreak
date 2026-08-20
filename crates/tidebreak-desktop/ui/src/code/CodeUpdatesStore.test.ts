@@ -33,6 +33,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   byWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
+  harnessInstalls: {},
   viewedWorkspaceId: null,
 };
 
@@ -165,6 +166,40 @@ describe("reduceCodeUpdates", () => {
         percent: 40,
         done: false,
       },
+    });
+    expect(
+      noticeToAction({
+        type: "harness_install",
+        kind: "claude_code",
+        version: "2.1.234",
+        phase: "installing",
+        done: false,
+      }),
+    ).toEqual({
+      type: "harness_install",
+      install: {
+        kind: "claude_code",
+        version: "2.1.234",
+        phase: "installing",
+        done: false,
+      },
+    });
+  });
+
+  it("keeps one install state per engine", () => {
+    const installing = reduceCodeUpdates(EMPTY_STATE, {
+      type: "harness_install",
+      install: { kind: "codex", phase: "installing", done: false },
+    });
+    expect(installing.harnessInstalls.codex?.phase).toBe("installing");
+    const ready = reduceCodeUpdates(installing, {
+      type: "harness_install",
+      install: { kind: "codex", phase: "ready", done: true },
+    });
+    expect(ready.harnessInstalls.codex).toEqual({
+      kind: "codex",
+      phase: "ready",
+      done: true,
     });
   });
 });

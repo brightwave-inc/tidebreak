@@ -48,6 +48,7 @@ import type {
   CodeUpdateNotice,
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
+  CodeHarnessInstallSnapshot,
   CodeSubscriptionUsage,
   PullRequestDigest,
   PullRequestComment,
@@ -91,6 +92,7 @@ import type {
   CodeUpdateNotice as WireCodeUpdateNotice,
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
+  CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
 } from "../generated/wire";
 
 /**
@@ -288,6 +290,35 @@ export function parseCodeCloneJob(value: unknown): CodeCloneJobSnapshot | null {
     ...(value.percent !== undefined ? { percent: value.percent } : {}),
     ...(value.error !== undefined ? { error: value.error } : {}),
     ...(value.repo_id !== undefined ? { repo_id: value.repo_id } : {}),
+  };
+}
+
+export function parseCodeHarnessInstall(
+  value: unknown,
+): CodeHarnessInstallSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeHarnessInstallSnapshot>(value, [
+      "kind",
+      "version",
+      "phase",
+      "done",
+      "error",
+    ]) ||
+    !isMember(value.kind, HARNESS_KINDS) ||
+    typeof value.phase !== "string" ||
+    typeof value.done !== "boolean" ||
+    !optionalString(value.version) ||
+    !optionalString(value.error)
+  ) {
+    return null;
+  }
+  return {
+    kind: value.kind,
+    phase: value.phase,
+    done: value.done,
+    ...(value.version !== undefined ? { version: value.version } : {}),
+    ...(value.error !== undefined ? { error: value.error } : {}),
   };
 }
 
@@ -2064,6 +2095,29 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         ...(value.percent !== undefined ? { percent: value.percent } : {}),
         ...(value.error !== undefined ? { error: value.error } : {}),
         ...(value.repo_id !== undefined ? { repo_id: value.repo_id } : {}),
+      };
+    }
+    case "harness_install": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "harness_install" }>>(
+          value,
+          ["type", "kind", "version", "phase", "done", "error"],
+        ) ||
+        !isMember(value.kind, HARNESS_KINDS) ||
+        typeof value.phase !== "string" ||
+        typeof value.done !== "boolean" ||
+        !optionalString(value.version) ||
+        !optionalString(value.error)
+      ) {
+        return null;
+      }
+      return {
+        type: "harness_install",
+        kind: value.kind,
+        phase: value.phase,
+        done: value.done,
+        ...(value.version !== undefined ? { version: value.version } : {}),
+        ...(value.error !== undefined ? { error: value.error } : {}),
       };
     }
     case "terminal_activity": {

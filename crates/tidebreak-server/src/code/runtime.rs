@@ -1,7 +1,7 @@
 //! Process-wide code-mode runtime: adapters, workers, worktrees, recovery.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,6 +37,7 @@ use super::clone::CloneJobs;
 use super::gh::{
     self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
 };
+use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, journal_event, queue_follow_up, spawn_session_worker, WorkerCommand,
@@ -89,6 +90,17 @@ async fn wait_for_managed_node(
     }
 }
 
+/// Whether a memoized probe still describes the pinned binary on disk.
+///
+/// A probe observes exactly one file, and the pin version is a segment of
+/// that file's path (`{data_dir}/tools/harnesses/{kind}/{version}/…`), so one
+/// path comparison covers both halves of what the probe depends on: the
+/// resolved binary and the pin it came from. A probe that found nothing
+/// describes no install and is always stale.
+fn probe_describes(cached: Option<&HarnessProbe>, installed: &Path) -> bool {
+    cached.is_some_and(|probe| probe.found && probe.binary_path.as_deref() == Some(installed))
+}
+
 /// Optional metadata on `POST /code/repos`. Every field left `None` takes
 /// the value [`CodeRuntime::register_repo`] derives from the checkout.
 #[derive(Debug, Default)]
@@ -126,6 +138,8 @@ pub(crate) struct CodeRuntime {
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
     pr_cache: PrDigestCache,
     pub(crate) clone_jobs: CloneJobs,
+    /// Warm harness installs started ahead of a session create.
+    pub(super) harness_installs: HarnessInstallJobs,
     #[cfg(test)]
     pub(crate) gh_search_path: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
@@ -164,6 +178,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
+            harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
@@ -229,6 +244,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             clone_jobs: CloneJobs::default(),
+            harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             stall_sweep: Mutex::new(None),
@@ -354,6 +370,19 @@ impl CodeRuntime {
         self.probes.lock().expect("harness probes").clear();
     }
 
+    /// Drop the memoized probe for `kind` only when the install it was taken
+    /// against is not the one now on disk.
+    ///
+    /// Session create used to invalidate unconditionally, which charged every
+    /// create a cold probe — a login shell plus a Node CLI start — to observe
+    /// a binary that had not moved since the last one.
+    pub(super) fn invalidate_moved_probe(&self, kind: HarnessKind, installed: &Path) {
+        let mut probes = self.probes.lock().expect("harness probes");
+        if !probe_describes(probes.get(&kind), installed) {
+            probes.remove(&kind);
+        }
+    }
+
     #[cfg_attr(test, allow(dead_code))]
     async fn managed_node_root(&self, retry: bool) -> Result<PathBuf, String> {
         match self.host_tool_broker.as_deref() {
@@ -375,7 +404,7 @@ impl CodeRuntime {
     }
 
     #[cfg_attr(test, allow(dead_code))]
-    async fn ensure_pinned_harness(
+    pub(super) async fn ensure_pinned_harness(
         &self,
         kind: HarnessKind,
         retry_node: bool,
@@ -1030,15 +1059,23 @@ impl CodeRuntime {
         let adapter = self.adapter(harness)?;
         #[cfg(not(test))]
         {
-            if let Err(err) = self.ensure_pinned_harness(harness, false).await {
-                self.record_pin_install(harness, Err(err.clone()));
-                return Err(ServerError::unprocessable_kind(
-                    "harness_not_found",
-                    format!("{harness} could not be installed: {err}"),
-                ));
+            // The warm install the dialog starts usually got here first, in
+            // which case this is a marker read. It stays on the create path
+            // regardless: correctness must not depend on the warm path having
+            // run, and a pin installed here is serialized against that one.
+            match self.ensure_pinned_harness(harness, false).await {
+                Ok(binary) => {
+                    self.record_pin_install(harness, Ok(()));
+                    self.invalidate_moved_probe(harness, &binary);
+                }
+                Err(err) => {
+                    self.record_pin_install(harness, Err(err.clone()));
+                    return Err(ServerError::unprocessable_kind(
+                        "harness_not_found",
+                        format!("{harness} could not be installed: {err}"),
+                    ));
+                }
             }
-            self.record_pin_install(harness, Ok(()));
-            self.probes.lock().expect("harness probes").remove(&harness);
         }
         let probe = self.probe(adapter.as_ref()).await;
         if !probe.found {
@@ -2048,6 +2085,51 @@ fn map_worker(err: WorkerError) -> ServerError {
 impl From<WorktreeError> for ServerError {
     fn from(err: WorktreeError) -> Self {
         map_worktree(err)
+    }
+}
+
+#[cfg(test)]
+mod probe_freshness_tests {
+    use super::*;
+
+    fn probe_at(path: Option<&str>) -> HarnessProbe {
+        HarnessProbe {
+            found: path.is_some(),
+            binary_path: path.map(PathBuf::from),
+            version: Some("2.1.234".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_probe_of_the_installed_binary_is_still_current() {
+        let installed =
+            Path::new("/data/tools/harnesses/claude_code/2.1.234/node_modules/.bin/claude");
+        assert!(probe_describes(
+            Some(&probe_at(installed.to_str())),
+            installed
+        ));
+    }
+
+    #[test]
+    fn a_pin_bump_moves_the_path_and_stales_the_probe() {
+        let previous = probe_at(Some(
+            "/data/tools/harnesses/claude_code/2.1.233/node_modules/.bin/claude",
+        ));
+        assert!(!probe_describes(
+            Some(&previous),
+            Path::new("/data/tools/harnesses/claude_code/2.1.234/node_modules/.bin/claude")
+        ));
+    }
+
+    #[test]
+    fn no_probe_and_a_probe_that_found_nothing_are_both_stale() {
+        let installed = Path::new("/data/tools/harnesses/codex/0.147.0/node_modules/.bin/codex");
+        assert!(!probe_describes(None, installed));
+        assert!(!probe_describes(Some(&probe_at(None)), installed));
     }
 }
 

@@ -643,4 +643,30 @@ describe("clone wire parsers", () => {
       repo_id: "repo-1",
     });
   });
+
+  it("accepts a harness_install update notice and refuses an unknown engine", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "harness_install",
+        kind: "claude_code",
+        version: "2.1.234",
+        phase: "installing",
+        done: false,
+      }),
+    ).toEqual({
+      type: "harness_install",
+      kind: "claude_code",
+      version: "2.1.234",
+      phase: "installing",
+      done: false,
+    });
+    expect(
+      parseCodeUpdateNotice({
+        type: "harness_install",
+        kind: "not_an_engine",
+        phase: "installing",
+        done: false,
+      }),
+    ).toBeNull();
+  });
 });
