@@ -71,3 +71,9 @@
 **/.next/**
 **/.git
 **/.git/**
+
+# Rust sources are reviewed compile inputs, so a module whose name matches a
+# credential pattern above — src/web_search/credentials.rs is real — stays in
+# the context. This wins because it is last; every non-source file the block
+# above denies stays denied.
+!crates/*/src/**/*.rs
