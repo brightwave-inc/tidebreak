@@ -1,9 +1,10 @@
 import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useLayoutState } from "@/panel/usePanelNav";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import { AddRepoPalette } from "./AddRepoPalette";
@@ -22,6 +23,8 @@ import {
 } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
 import { arrangeWorkspaces } from "./workspaceCards";
+import { prWorkflowPrompt } from "./prActions";
+import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
 
 /**
  * The code-mode rail: one toolbar, then workspace cards.
@@ -65,6 +68,7 @@ export function CodeSidebar() {
   );
   const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
   const prefs = useCodeUiStore((state) => state.railPrefs);
+  const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const terminalOpen =
@@ -184,6 +188,55 @@ export function CodeSidebar() {
                       search: { task: sessionId },
                     })
                   }
+                  onWorkflowAction={(action: WorkspaceWorkflowAction) => {
+                    if (action === "open_pr") {
+                      run("open-pr", {
+                        workspace,
+                        title: digest?.title ?? workspace.title,
+                        pr,
+                        session: sessions[workspace.id],
+                      });
+                      return;
+                    }
+                    if (action === "watch_and_fix") {
+                      void client
+                        .startCodeWatch(workspace.id)
+                        .then(() => toast.success("Watching the pull request"))
+                        .catch((error) =>
+                          toast.error(
+                            friendlyErrorMessage(
+                              error,
+                              "Could not start the watch",
+                            ),
+                          ),
+                        );
+                      return;
+                    }
+                    if (
+                      action === "open_source" ||
+                      action === "push" ||
+                      action === "create_pr"
+                    ) {
+                      // Local-git stages never arise from the digest-only
+                      // model; the workspace page is where they resolve.
+                      void navigate({
+                        to: "/code/w/$workspaceId",
+                        params: { workspaceId: workspace.id },
+                      });
+                      return;
+                    }
+                    if (!pr) return;
+                    // Same prepared prompt the header control composes; the
+                    // navigation makes the started turn visible.
+                    if (!runComposerPrompt(workspace.id, prWorkflowPrompt(action, pr))) {
+                      toast.error("Another agent action is already running");
+                      return;
+                    }
+                    void navigate({
+                      to: "/code/w/$workspaceId",
+                      params: { workspaceId: workspace.id },
+                    });
+                  }}
                   onCommand={(command) =>
                     run(command, {
                       workspace,

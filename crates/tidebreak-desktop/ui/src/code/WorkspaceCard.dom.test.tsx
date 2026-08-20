@@ -100,7 +100,7 @@ describe("WorkspaceCard", () => {
 
     // The panel says what the row cannot: full branch, checks, the PR.
     expect(screen.getByText("tidebreak/fix-login")).toBeInTheDocument();
-    expect(screen.getByText("8 passing, 1 pending")).toBeInTheDocument();
+    expect(screen.getByText(/8 passing, 1 pending/)).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Open pull request #184" }),
@@ -108,6 +108,38 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("open-pr");
     // Panel actions never double as "open the workspace".
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("speaks the header control's workflow vocabulary from the panel", async () => {
+    const user = userEvent.setup();
+    const onWorkflowAction = vi.fn();
+    render(
+      <WorkspaceCard
+        workspace={{
+          ...workspace,
+          pr: { ...pr, mergeable: "conflicting", checks_summary: undefined },
+        }}
+        digest={undefined}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: true, archived: false })}
+        detailDefaultOpen
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+        onWorkflowAction={onWorkflowAction}
+      />,
+    );
+
+    // Same model, same label table as WorkspaceWorkflowControl: a
+    // conflicting PR's one obvious action is resolving the conflicts.
+    await user.click(
+      screen.getByRole("button", { name: "Resolve conflicts" }),
+    );
+    expect(onWorkflowAction).toHaveBeenCalledWith("resolve_conflicts");
   });
 
   it("leads an archived workspace's panel with Restore", async () => {

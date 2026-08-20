@@ -23,16 +23,20 @@ import type {
 } from "../api/types";
 import { AttentionBadge } from "./AttentionBadge";
 import { HARNESS_ICONS } from "./HarnessPicker";
-import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
+import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
 import type { WorkspaceCommand } from "./workspaceActions";
+import {
+  workspaceWorkflowActionLabel,
+  workspaceWorkflowModel,
+  type WorkspaceWorkflowAction,
+  type WorkspaceWorkflowTone,
+} from "./workspaceWorkflow";
 import {
   formatCompactAge,
   isSessionRowWorthy,
   middleTruncate,
-  PR_CHIP_TONE_CLASSES,
   PR_ICON_TONE_CLASSES,
   prTone,
-  prToneLabel,
   repoAccentClass,
   sessionRowLabel,
   watchRowLabel,
@@ -73,6 +77,7 @@ export function WorkspaceCard({
   onOpen,
   onCommand,
   onOpenChildSession,
+  onWorkflowAction,
 }: {
   workspace: CodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
@@ -90,6 +95,12 @@ export function WorkspaceCard({
   onOpen: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onOpenChildSession?: (sessionId: string) => void;
+  /**
+   * Run a PR workflow action from the panel — the same vocabulary the
+   * workspace header's workflow control speaks (merge, resolve conflicts,
+   * fix CI, …). Omitting it hides the workflow buttons.
+   */
+  onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
   // The digest restates the title on every notice, so a background rename
   // lands here without a catalog refresh.
@@ -134,7 +145,7 @@ export function WorkspaceCard({
                   // Put-away work reads as put away, without becoming
                   // unreadable.
                   archived && "opacity-70",
-                  FOCUS_RING,
+                  FOCUS_RING_INSET,
                   HOVER_TINT,
                 )}
                 onClick={onOpen}
@@ -195,7 +206,16 @@ export function WorkspaceCard({
               title={title}
               pr={pr}
               archived={archived}
+              watchActive={childSessions.some(
+                (child) =>
+                  child.watch_state === "watching" ||
+                  child.watch_state === "fixing" ||
+                  child.watch_state === "blocked" ||
+                  (child.watch_state === undefined &&
+                    child.lifecycle === "running"),
+              )}
               onCommand={onCommand}
+              onWorkflowAction={onWorkflowAction}
             />
           </HoverCardContent>
         </HoverCard>
@@ -225,7 +245,7 @@ export function WorkspaceCard({
             title={child.watch_detail ?? undefined}
             className={cn(
               "flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 pl-6 text-left text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground",
-              FOCUS_RING_TIGHT,
+              FOCUS_RING_INSET,
               HOVER_TINT,
             )}
             onClick={() => onOpenChildSession?.(child.session)}
@@ -244,10 +264,20 @@ export function WorkspaceCard({
   );
 }
 
+const PANEL_TONE_CLASS: Record<WorkspaceWorkflowTone, string> = {
+  neutral: "text-muted-foreground",
+  ready: "text-success",
+  pending: "text-info-foreground",
+  warning: "text-warning",
+  critical: "text-critical",
+};
+
 /**
  * The hover panel: what the row would say if it had room, plus the action
- * the state calls for. The pull request owns the footer — that is the thing
- * a supervisor most often needs one click away from the rail.
+ * the state calls for. The pull-request footer speaks the same workflow
+ * vocabulary as the workspace header's control — one model
+ * (`workspaceWorkflowModel`), one label table, one prompt builder — driven
+ * here from the digest alone so the rail never shells out to `gh`.
  */
 function WorkspaceDetailPanel({
   workspace,
@@ -257,7 +287,9 @@ function WorkspaceDetailPanel({
   title,
   pr,
   archived,
+  watchActive,
   onCommand,
+  onWorkflowAction,
 }: {
   workspace: CodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
@@ -266,7 +298,9 @@ function WorkspaceDetailPanel({
   title: string;
   pr: PullRequestDigest | undefined;
   archived: boolean;
+  watchActive: boolean;
   onCommand: (command: WorkspaceCommand["id"]) => void;
+  onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
   const HarnessIcon = session ? HARNESS_ICONS[session.harness_kind] : null;
   const needsYou =
@@ -281,6 +315,14 @@ function WorkspaceDetailPanel({
     ? (workspace.archived_at ?? workspace.created_at)
     : (session?.created_at ?? workspace.created_at);
   const age = formatCompactAge(stamp);
+  // The header control's model, from the digest-only path. While a watch is
+  // driving the worktree, agent actions would contend with it — same
+  // suppression the header applies.
+  const model = pr && !archived ? workspaceWorkflowModel(null, pr) : null;
+  const primary =
+    model && !(watchActive && model.primary !== "open_pr")
+      ? model.primary
+      : undefined;
 
   return (
     <div className="flex flex-col">
@@ -321,30 +363,49 @@ function WorkspaceDetailPanel({
             </p>
           )
         )}
-        {pr?.checks_summary && (
-          <p className="text-xs text-muted-foreground">{pr.checks_summary}</p>
+        {model && (
+          <p className="flex min-w-0 items-center gap-1.5 text-xs">
+            <GitPullRequest
+              className={cn("size-3.5 shrink-0", PANEL_TONE_CLASS[model.tone])}
+              aria-hidden
+            />
+            <span className={cn("shrink-0 font-medium", PANEL_TONE_CLASS[model.tone])}>
+              {model.summary}
+            </span>
+            {pr?.checks_summary && (
+              <span className="min-w-0 truncate text-muted-foreground">
+                · {pr.checks_summary}
+              </span>
+            )}
+          </p>
         )}
       </div>
       <div className="flex items-center gap-2 border-t px-3 py-2">
-        {pr && (
+        {primary && onWorkflowAction && (
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="gap-1.5"
+            title={model?.detail}
+            onClick={() => onWorkflowAction(primary)}
+          >
+            {workspaceWorkflowActionLabel(primary, model!.stage)}
+          </Button>
+        )}
+        {pr && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="gap-1"
             aria-label={`Open pull request #${pr.number}`}
             onClick={() => onCommand("open-pr")}
           >
-            <GitPullRequest className={PR_ICON_TONE_CLASSES[prTone(pr)]} />
+            <GitPullRequest
+              className={cn("size-3.5", PR_ICON_TONE_CLASSES[prTone(pr)])}
+              aria-hidden
+            />
             #{pr.number}
-            <span
-              className={cn(
-                "rounded-sm px-1.5 py-px text-[10px] font-medium",
-                PR_CHIP_TONE_CLASSES[prTone(pr)],
-              )}
-            >
-              {prToneLabel(pr)}
-            </span>
             <ExternalLink className="size-3 text-muted-foreground" aria-hidden />
           </Button>
         )}

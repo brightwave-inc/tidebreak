@@ -69,6 +69,39 @@ export const DetailPanel: Story = {
       hasSession: true,
     }),
     detailDefaultOpen: true,
+    onWorkflowAction: fn(),
+  },
+};
+
+/** One click from the rail: an approved, green PR offers Merge. */
+export const DetailPanelReadyToMerge: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: {
+        ...openPrDigest,
+        review_decision: "approved",
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+        checks_summary: "9 passing",
+      },
+    },
+    commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
+    onWorkflowAction: fn(),
+  },
+};
+
+/** A conflicting PR leads with Resolve conflicts, same as the header. */
+export const DetailPanelConflicts: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: { ...openPrDigest, mergeable: "conflicting" },
+    },
+    commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
+    onWorkflowAction: fn(),
   },
 };
 
