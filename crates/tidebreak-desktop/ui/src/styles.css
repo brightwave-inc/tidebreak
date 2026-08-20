@@ -4,9 +4,9 @@
 @plugin "tailwindcss-animate";
 
 /* The semantic status vocabulary is a contract: every tone ships its full
-   utility quad even when no component currently uses a member, so downstream
-   consumers of the compiled stylesheet (the synced design system) can rely on
-   the whole family rather than whichever members the app happens to use. */
+   utility quad even when no component currently uses a member, so components
+   and development stories can rely on the whole family rather than whichever
+   members the app happens to use today. */
 @source inline("text-{success,warning,critical,info}");
 @source inline("text-{success,warning,critical,info}-foreground");
 @source inline("text-{success,warning,critical,info}-foreground-muted");

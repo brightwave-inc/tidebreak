@@ -25,6 +25,17 @@ is React/TypeScript under `crates/tidebreak-desktop/ui`.
   ready PR lands when its lanes go green.
 - This is a public repository. No secrets, no private design docs.
 
+## Desktop UI workflow
+
+- When adding or changing a reusable visual component or a meaningful UI state,
+  add or update its Storybook story under
+  `crates/tidebreak-desktop/ui/src/stories/`.
+- Show the states that matter for evaluation, including loading, empty, success,
+  failure, and compact variants when they apply. Reuse the typed Storybook
+  fixtures instead of duplicating ad hoc sample data.
+- Run `pnpm storybook` from `crates/tidebreak-desktop/ui` while developing UI,
+  and run `pnpm storybook:build` before publishing relevant UI changes.
+
 ## Pointers
 
 - Humans and commit/PR titles: [`CONTRIBUTING.md`](CONTRIBUTING.md)
