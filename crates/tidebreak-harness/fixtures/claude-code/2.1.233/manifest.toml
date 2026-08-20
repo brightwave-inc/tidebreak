@@ -20,6 +20,10 @@ scenarios = [
   "approval-request",
   "approval-allow",
   "approval-deny-with-feedback",
+  # Synthesized (not captured) from the documented `parent_tool_use_id`
+  # tagging every stream line carries: a `Task` call spans a subagent and its
+  # nested events name the spanning call (decision 52).
+  "subagent-task",
 ]
 
 [redaction]

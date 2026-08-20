@@ -327,6 +327,7 @@ impl OpencodeStreamParser {
                 } else {
                     vec![HarnessEvent::AssistantMessage {
                         text: bound(text, MAX_EVENT_TEXT_CHARS),
+                        parent_call_id: None,
                     }]
                 }
             }
@@ -384,6 +385,7 @@ impl OpencodeStreamParser {
                     call_id,
                     name: name.clone(),
                     detail: tool_detail(&name, &input),
+                    parent_call_id: None,
                 }]
             }
             "completed" | "error" => {
@@ -396,6 +398,7 @@ impl OpencodeStreamParser {
                         call_id: call_id.clone(),
                         name: name.clone(),
                         detail: tool_detail(&name, &input),
+                        parent_call_id: None,
                     });
                 }
                 let error = state.get("error").and_then(Value::as_str).unwrap_or("");
@@ -424,6 +427,7 @@ impl OpencodeStreamParser {
                     outcome,
                     preview: bound(preview, MAX_PREVIEW_CHARS),
                     detail: (detail.specificity() > 0).then_some(detail),
+                    parent_call_id: None,
                 });
                 events
             }

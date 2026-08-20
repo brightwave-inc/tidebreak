@@ -842,6 +842,7 @@ pub(crate) enum CodeSession {
     AttentionState,
     AttentionSource,
     UnrecognizedEventCount,
+    Subagents,
     CreatedAt,
     Owner,
 }

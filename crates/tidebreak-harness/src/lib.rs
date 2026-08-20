@@ -69,6 +69,10 @@ pub enum HarnessEvent {
     AssistantMessage {
         /// The message text.
         text: String,
+        /// The `Task` call this message ran inside, when the engine tagged it
+        /// as a subagent's (decision 52). Absent on the parent's own messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// A chunk of reasoning text.
     ReasoningDelta {
@@ -83,6 +87,10 @@ pub enum HarnessEvent {
         name: String,
         /// Display-oriented classification.
         detail: ToolDetail,
+        /// The `Task` call this call ran inside, when the engine tagged it
+        /// as a subagent's (decision 52). Absent on the parent's own calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// A tool call finished.
     ToolCompleted {
@@ -99,6 +107,10 @@ pub enum HarnessEvent {
         /// it. `None` when the adapter never sees final arguments.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<ToolDetail>,
+        /// The `Task` call this call ran inside, when the engine tagged it
+        /// as a subagent's (decision 52). Absent on the parent's own calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// A file changed.
     FileChanged {

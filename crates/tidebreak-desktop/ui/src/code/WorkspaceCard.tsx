@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CircleAlert, CornerDownRight, ExternalLink, Eye, GitPullRequest, SquareTerminal } from "lucide-react";
+import { Bot, CircleAlert, CornerDownRight, ExternalLink, Eye, GitPullRequest, SquareTerminal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import type {
   CodeSessionDigest,
   CodeSessionSnapshot,
+  CodeSubagentStatus,
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
@@ -260,9 +261,48 @@ export function WorkspaceCard({
             />
           </button>
         ))}
+
+      {/*
+        Harness subagents ride the interactive digest as a bounded list
+        (ADR 0052). Opening one opens the workspace; the sub-transcript
+        filter (events whose parent_call_id matches) is a later slice.
+      */}
+      {density === "detailed" &&
+        (digest?.subagents ?? []).map((subagent) => (
+          <button
+            key={subagent.call_id}
+            type="button"
+            aria-label={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
+            className={cn(
+              "flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 pl-6 text-left text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground",
+              FOCUS_RING_INSET,
+              HOVER_TINT,
+            )}
+            onClick={onOpen}
+          >
+            <CornerDownRight className="size-3 shrink-0 opacity-50" aria-hidden />
+            <Bot className="size-3 shrink-0" aria-hidden />
+            <span className="truncate">
+              {subagent.name} ·{" "}
+              <span
+                className={
+                  subagent.status === "failed" ? "text-critical" : undefined
+                }
+              >
+                {SUBAGENT_STATUS_LABELS[subagent.status]}
+              </span>
+            </span>
+          </button>
+        ))}
     </div>
   );
 }
+
+const SUBAGENT_STATUS_LABELS: Record<CodeSubagentStatus, string> = {
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+};
 
 const PANEL_TONE_CLASS: Record<WorkspaceWorkflowTone, string> = {
   neutral: "text-muted-foreground",

@@ -1728,6 +1728,8 @@ pub mod code_session {
         pub attention_state: Json,
         pub attention_source: String,
         pub unrecognized_event_count: i64,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub subagents: Option<Json>,
         pub created_at: DateTimeUtc,
     }
 

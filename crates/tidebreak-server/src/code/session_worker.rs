@@ -24,13 +24,14 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     append_event, bump_spawn_epoch, get_open_turn, get_session, get_session_all_owners,
-    insert_approval, insert_turn, next_turn_ordinal, save_session, save_turn, CodeJournalError,
+    insert_approval, insert_turn, next_turn_ordinal, save_session, save_turn,
+    set_session_subagents, CodeJournalError,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, BlobStore, BoundedError, CodeApproval, CodeApprovalId,
-    CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, DbStore, FenceReason,
-    HarnessNoticeLevel, OwnerId,
+    bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
+    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
+    CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -107,6 +108,11 @@ pub(crate) struct LiveSink {
     /// The engine's own count is cumulative for as long as it is attached, and
     /// the sink is created once per attachment, so the two share a lifetime.
     flushed_unrecognized: AtomicU64,
+    /// Harness subagents observed on this session (decision 52), the
+    /// in-memory copy of the row's list so a `Task` boundary never
+    /// read-modify-writes the row per event. Persisted through the targeted
+    /// [`set_session_subagents`] write on each boundary.
+    subagents: std::sync::Mutex<Vec<CodeSubagentSummary>>,
 }
 
 impl LiveSink {
@@ -120,6 +126,71 @@ impl LiveSink {
     fn take_unrecognized_delta(&self, total: u64) -> u64 {
         let flushed = self.flushed_unrecognized.swap(total, Ordering::SeqCst);
         total.saturating_sub(flushed)
+    }
+
+    /// Track subagent spans (decision 52): a top-level `Task` call opens one,
+    /// its completion closes it. Boundaries are rare, so each one persists the
+    /// list through the targeted write and restates the session's digest.
+    async fn note_subagent_boundary(&self, event: &CodeEvent) {
+        let changed = match event {
+            CodeEvent::ToolStarted {
+                call_id,
+                name,
+                detail,
+                parent_call_id: None,
+            } if name == "Task" => {
+                let mut subagents = self.subagents.lock().expect("code sink subagents");
+                let display = if detail.subject().trim().is_empty() {
+                    name.clone()
+                } else {
+                    detail.subject().to_owned()
+                };
+                subagents.retain(|entry| entry.call_id != *call_id);
+                subagents.push(CodeSubagentSummary {
+                    call_id: call_id.clone(),
+                    name: display,
+                    status: CodeSubagentStatus::Running,
+                });
+                bound_subagents(&mut subagents);
+                Some(subagents.clone())
+            }
+            CodeEvent::ToolCompleted {
+                call_id,
+                outcome,
+                detail,
+                ..
+            } => {
+                let mut subagents = self.subagents.lock().expect("code sink subagents");
+                match subagents.iter_mut().find(|entry| entry.call_id == *call_id) {
+                    Some(entry) => {
+                        entry.status = match outcome {
+                            ToolOutcome::Succeeded => CodeSubagentStatus::Done,
+                            ToolOutcome::Failed | ToolOutcome::Denied => CodeSubagentStatus::Failed,
+                        };
+                        // The started call streams in before its arguments, so
+                        // the description often lands only on the completion's
+                        // corrected detail. Better a late name than none.
+                        if let Some(subject) = detail
+                            .as_ref()
+                            .map(|detail| detail.subject().trim())
+                            .filter(|subject| !subject.is_empty())
+                        {
+                            entry.name = subject.to_owned();
+                        }
+                        Some(subagents.clone())
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(subagents) = changed else {
+            return;
+        };
+        let _ = set_session_subagents(&self.db, &self.owner, self.session_id, &subagents).await;
+        if let Ok(Some(session)) = get_session(&self.db, &self.owner, self.session_id).await {
+            super::attention::emit_digest(&self.db, &self.bus, &session).await;
+        }
     }
 
     async fn record_approval(
@@ -195,6 +266,7 @@ impl HarnessEventSink for LiveSink {
         let Some(code_event) = map_event(event, turn_id) else {
             return;
         };
+        self.note_subagent_boundary(&code_event).await;
         match persist_and_publish(
             &self.db,
             &self.bus,
@@ -857,6 +929,7 @@ pub(crate) fn sink_for(
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: Option<CodeTurnId>,
+    subagents: Vec<CodeSubagentSummary>,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
         db,
@@ -866,6 +939,7 @@ pub(crate) fn sink_for(
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
         flushed_unrecognized: AtomicU64::new(0),
+        subagents: std::sync::Mutex::new(subagents),
     })
 }
 
@@ -1073,27 +1147,37 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
         },
         HarnessEvent::TurnStarted => CodeEvent::TurnStarted { turn_id: turn_id? },
         HarnessEvent::AssistantDelta { text } => CodeEvent::AssistantDelta { text },
-        HarnessEvent::AssistantMessage { text } => CodeEvent::AssistantMessage { text },
+        HarnessEvent::AssistantMessage {
+            text,
+            parent_call_id,
+        } => CodeEvent::AssistantMessage {
+            text,
+            parent_call_id,
+        },
         HarnessEvent::ReasoningDelta { text } => CodeEvent::ReasoningDelta { text },
         HarnessEvent::ToolStarted {
             call_id,
             name,
             detail,
+            parent_call_id,
         } => CodeEvent::ToolStarted {
             call_id,
             name,
             detail,
+            parent_call_id,
         },
         HarnessEvent::ToolCompleted {
             call_id,
             outcome,
             preview,
             detail,
+            parent_call_id,
         } => CodeEvent::ToolCompleted {
             call_id,
             outcome,
             preview,
             detail,
+            parent_call_id,
         },
         HarnessEvent::FileChanged {
             path,

@@ -390,6 +390,7 @@ mod tests {
                 spawn_epoch: 1,
                 attention: Attention::working(AttentionSource::Lifecycle),
                 unrecognized_event_count: 0,
+                subagents: Vec::new(),
                 created_at: now(),
             },
         )
@@ -498,6 +499,7 @@ mod tests {
             session_id,
             session.spawn_epoch,
             None,
+            session.subagents.clone(),
         );
         let child_pid = i64::from(std::process::id());
         let engine = crate::scripted_harness::ScriptedAdapter::new(vec![

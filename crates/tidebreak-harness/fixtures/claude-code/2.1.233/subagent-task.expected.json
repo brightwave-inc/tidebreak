@@ -1,0 +1,62 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "9f4a2c10-5a51-4a2e-9f6d-3f2c7f7a1b22"
+  },
+  {
+    "type": "assistant_message",
+    "text": "Delegating the search to a subagent."
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01TaskSpan",
+    "name": "Task",
+    "detail": {
+      "kind": "other",
+      "summary": "Find the config parser (general-purpose)"
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "toolu_01ChildRead",
+    "name": "Read",
+    "detail": {
+      "kind": "file_read",
+      "path": "/workspace/src/config.rs"
+    },
+    "parent_call_id": "toolu_01TaskSpan"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01ChildRead",
+    "outcome": "succeeded",
+    "preview": "1\tpub fn parse() {}\n",
+    "parent_call_id": "toolu_01TaskSpan"
+  },
+  {
+    "type": "assistant_message",
+    "text": "The parser lives in src/config.rs.",
+    "parent_call_id": "toolu_01TaskSpan"
+  },
+  {
+    "type": "tool_completed",
+    "call_id": "toolu_01TaskSpan",
+    "outcome": "succeeded",
+    "preview": "The parser lives in src/config.rs."
+  },
+  {
+    "type": "assistant_message",
+    "text": "The subagent found the parser in src/config.rs."
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 8,
+      "output_tokens": 76,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    }
+  }
+]

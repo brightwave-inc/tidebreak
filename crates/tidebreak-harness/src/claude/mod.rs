@@ -284,7 +284,7 @@ mod tests {
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            HarnessEvent::AssistantMessage { text } if text.contains("DENIED")
+            HarnessEvent::AssistantMessage { text, .. } if text.contains("DENIED")
         )));
     }
 
@@ -307,6 +307,47 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             HarnessEvent::ToolStarted { name, .. } if name == "Write"
+        )));
+    }
+
+    #[test]
+    fn fixture_replay_subagent_task() {
+        // Synthesized fixture: a `Task` call spans a subagent (decision 52).
+        // Nested lines carry the spanning call's id in `parent_tool_use_id`;
+        // the parent's own lines say null.
+        let (events, unrecognized) = replay("subagent-task");
+        assert_eq!(unrecognized, 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted { call_id, name, detail, parent_call_id: None }
+                if call_id == "toolu_01TaskSpan"
+                    && name == "Task"
+                    && detail.subject() == "Find the config parser (general-purpose)"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted { name, parent_call_id: Some(parent), .. }
+                if name == "Read" && parent == "toolu_01TaskSpan"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted { call_id, parent_call_id: Some(parent), .. }
+                if call_id == "toolu_01ChildRead" && parent == "toolu_01TaskSpan"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::AssistantMessage { parent_call_id: Some(parent), .. }
+                if parent == "toolu_01TaskSpan"
+        )));
+        // The Task's own result closes the span with no parent of its own.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: tidebreak_core::ToolOutcome::Succeeded,
+                parent_call_id: None,
+                ..
+            } if call_id == "toolu_01TaskSpan"
         )));
     }
 

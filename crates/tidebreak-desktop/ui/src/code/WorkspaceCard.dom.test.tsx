@@ -221,4 +221,56 @@ describe("WorkspaceCard", () => {
     // also open the workspace.
     expect(onOpen).not.toHaveBeenCalled();
   });
+
+  it("renders harness subagents as child rows that open the workspace", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 3,
+      subagents: [
+        {
+          call_id: "toolu_task_1",
+          name: "Find the config parser",
+          status: "running",
+        },
+        { call_id: "toolu_task_2", name: "Run the flaky suite", status: "failed" },
+      ],
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: false, archived: false })}
+        onOpen={onOpen}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    // Both rows render with their status; a failed one still names itself.
+    expect(
+      screen.getByRole("button", {
+        name: "Subagent for Fix login: Run the flaky suite, Failed",
+      }),
+    ).toBeInTheDocument();
+    // Opening a subagent opens the workspace — the filtered sub-transcript
+    // view is a later slice (ADR 0052).
+    await user.click(
+      screen.getByRole("button", {
+        name: "Subagent for Fix login: Find the config parser, Running",
+      }),
+    );
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
 });

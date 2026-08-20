@@ -1078,6 +1078,7 @@ impl CodeRuntime {
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,
+            subagents: Vec::new(),
             created_at: Utc::now(),
         };
         insert_session(&self.db, &session).await?;
@@ -1681,6 +1682,7 @@ impl CodeRuntime {
             session.id,
             attached.spawn_epoch,
             None,
+            attached.subagents.clone(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
         let spec = SessionSpec {

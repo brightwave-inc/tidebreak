@@ -908,7 +908,12 @@ text: string, } | { "type": "assistant_message",
 /**
  * The message text.
  */
-text: string, } | { "type": "reasoning_delta", 
+text: string, 
+/**
+ * The `Task` call this message ran inside, when a harness subagent
+ * produced it (decision 52). Absent on the parent's own messages.
+ */
+parent_call_id?: string, } | { "type": "reasoning_delta", 
 /**
  * The reasoning fragment.
  */
@@ -924,7 +929,12 @@ name: string,
 /**
  * Display-oriented classification.
  */
-detail: ToolDetail, } | { "type": "tool_completed", 
+detail: ToolDetail, 
+/**
+ * The `Task` call this call ran inside, when a harness subagent
+ * issued it (decision 52). Absent on the parent's own calls.
+ */
+parent_call_id?: string, } | { "type": "tool_completed", 
 /**
  * Engine-native call id.
  */
@@ -946,7 +956,12 @@ preview: string,
  * and renderers merge it into the started call. It is `None` when
  * the engine's completion payload carries no arguments.
  */
-detail?: ToolDetail, } | { "type": "file_changed", 
+detail?: ToolDetail, 
+/**
+ * The `Task` call this call ran inside, when a harness subagent
+ * issued it (decision 52). Absent on the parent's own calls.
+ */
+parent_call_id?: string, } | { "type": "file_changed", 
 /**
  * Path relative to the worktree, when the engine reports one.
  */
@@ -1170,7 +1185,12 @@ export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, };
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, 
+/**
+ * Harness subagents on this session, present only when any were
+ * observed (decision 52).
+ */
+subagents?: Array<CodeSubagentSummary>, };
 
 /**
  * Identifies one durable conversation with an external agent engine.
@@ -1191,6 +1211,32 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
  * One durable conversation with an external agent engine.
  */
 export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+
+/**
+ * Status of a harness subagent, derived from its spanning `Task` call
+ * (decision 52): the call's start is the subagent's start, its result is
+ * the end and outcome.
+ */
+export type CodeSubagentStatus = "running" | "done" | "failed";
+
+/**
+ * One harness subagent on a session, tracked for rail visibility. Not a
+ * session: the harness owns its lifecycle, so the server can neither steer
+ * nor resume it (decision 52).
+ */
+export type CodeSubagentSummary = { 
+/**
+ * The spanning `Task` call's engine-native id.
+ */
+call_id: string, 
+/**
+ * Display name: the Task's description or the tool name.
+ */
+name: string, 
+/**
+ * Status derived from the spanning call.
+ */
+status: CodeSubagentStatus, };
 
 /**
  * Unsequenced activity notice published on the updates channel.
@@ -1271,7 +1317,12 @@ pr_state?: PullRequestDigest,
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, 
+/**
+ * Harness subagents on this session, present only when any were
+ * observed (decision 52).
+ */
+subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.

@@ -2,14 +2,14 @@ use super::temp_store;
 use crate::code::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
     CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-    HarnessKind, RepoId, WorkspaceId,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
+    CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
     insert_approval, insert_repo, insert_session, insert_turn, insert_workspace, list_approvals,
-    list_events, list_repos, list_sessions, list_turns, save_session, set_workspace_title_if,
-    CodeJournalError,
+    list_events, list_repos, list_sessions, list_turns, save_session, set_session_subagents,
+    set_workspace_title_if, CodeJournalError,
 };
 use crate::OwnerId;
 use chrono::Utc;
@@ -93,6 +93,7 @@ async fn seed_owner(
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,
+            subagents: Vec::new(),
             created_at: now(),
         },
     )
@@ -121,6 +122,50 @@ async fn seed_owner(
     .await
     .unwrap();
     (session_id, turn_id)
+}
+
+/// Subagent visibility rides the session row (decision 52): the targeted
+/// write must round-trip, survive a full-row save from a stale in-memory
+/// copy, and read back empty for rows that never had any.
+#[tokio::test]
+async fn session_subagents_round_trip_through_the_targeted_write() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(session.subagents.is_empty());
+    let subagents = vec![CodeSubagentSummary {
+        call_id: "toolu_task".into(),
+        name: "Find the config parser".into(),
+        status: CodeSubagentStatus::Running,
+    }];
+    assert!(
+        set_session_subagents(&store, &owner, session_id, &subagents)
+            .await
+            .unwrap()
+    );
+    // A concurrent full-row save from a copy that predates the targeted
+    // write must not clobber the list.
+    assert!(save_session(&store, &session).await.unwrap());
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .subagents,
+        subagents
+    );
+    // Another owner's session is indistinguishable from a missing one.
+    assert!(!set_session_subagents(
+        &store,
+        &OwnerId::new("other").unwrap(),
+        session_id,
+        &subagents
+    )
+    .await
+    .unwrap());
 }
 
 /// Background workspace naming writes through this swap: it must replace
@@ -791,6 +836,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,
+            subagents: Vec::new(),
             created_at: now(),
         },
     )

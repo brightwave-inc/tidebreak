@@ -591,6 +591,48 @@ pub struct CodeWorkspace {
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Most subagent rows kept on one session. Done entries fall off first.
+pub const MAX_SESSION_SUBAGENTS: usize = 8;
+
+/// Status of a harness subagent, derived from its spanning `Task` call
+/// (decision 52): the call's start is the subagent's start, its result is
+/// the end and outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeSubagentStatus {
+    /// The spanning `Task` call has started and not yet resolved.
+    Running,
+    /// The spanning call succeeded.
+    Done,
+    /// The spanning call failed or was denied.
+    Failed,
+}
+
+/// One harness subagent on a session, tracked for rail visibility. Not a
+/// session: the harness owns its lifecycle, so the server can neither steer
+/// nor resume it (decision 52).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeSubagentSummary {
+    /// The spanning `Task` call's engine-native id.
+    pub call_id: String,
+    /// Display name: the Task's description or the tool name.
+    pub name: String,
+    /// Status derived from the spanning call.
+    pub status: CodeSubagentStatus,
+}
+
+/// Keep the session's subagent list within [`MAX_SESSION_SUBAGENTS`],
+/// dropping the oldest Done entries first, then the oldest of the rest.
+pub fn bound_subagents(subagents: &mut Vec<CodeSubagentSummary>) {
+    while subagents.len() > MAX_SESSION_SUBAGENTS {
+        let victim = subagents
+            .iter()
+            .position(|entry| entry.status == CodeSubagentStatus::Done)
+            .unwrap_or(0);
+        subagents.remove(victim);
+    }
+}
+
 /// Persisted session record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeSession {
@@ -624,6 +666,9 @@ pub struct CodeSession {
     pub attention: Attention,
     /// Count of unrecognized engine events observed this session.
     pub unrecognized_event_count: i64,
+    /// Harness subagents observed on this session, bounded (decision 52).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<CodeSubagentSummary>,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
 }

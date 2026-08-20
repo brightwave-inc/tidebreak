@@ -175,6 +175,9 @@ pub(super) fn code_session_table() -> TableCreateStatement {
                 .not_null()
                 .default(0),
         )
+        // Harness subagents observed on the session (decision 52). Nullable
+        // JSON list; NULL and `[]` both read as "none".
+        .col(ColumnDef::new(CodeSession::Subagents).json_binary())
         .col(
             ColumnDef::new(CodeSession::CreatedAt)
                 .timestamp_with_time_zone()
