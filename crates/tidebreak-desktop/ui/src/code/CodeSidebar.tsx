@@ -298,8 +298,10 @@ function SidebarEmptyAction({
 /**
  * One workspace on the expanded rail: title + attention, repo chip + branch,
  * trailing glyphs, and a nested session row when something is live.
+ *
+ * Exported for Storybook; the rail is its only product caller.
  */
-function WorkspaceCard({
+export function WorkspaceCard({
   workspace,
   digest,
   session,
