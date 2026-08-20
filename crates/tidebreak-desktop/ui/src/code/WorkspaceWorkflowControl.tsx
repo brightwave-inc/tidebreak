@@ -38,16 +38,8 @@ import {
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
-  type WorkspaceWorkflowTone,
 } from "./workspaceWorkflow";
-
-const TONE_CLASS: Record<WorkspaceWorkflowTone, string> = {
-  neutral: "text-foreground-subtle",
-  ready: "text-success",
-  pending: "text-info-foreground",
-  warning: "text-warning",
-  critical: "text-critical",
-};
+import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 
 /**
  * Compact workspace workflow control for the top chrome.
@@ -239,12 +231,12 @@ export function WorkspaceWorkflowControl({
           >
             {model.pr ? (
               <GitPullRequest
-                className={cn("size-3.5 shrink-0", TONE_CLASS[model.tone])}
+                className={cn("size-3.5 shrink-0", STATUS_MARK[model.tone])}
                 aria-hidden
               />
             ) : (
               <GitBranch
-                className={cn("size-3.5 shrink-0", TONE_CLASS[model.tone])}
+                className={cn("size-3.5 shrink-0", STATUS_MARK[model.tone])}
                 aria-hidden
               />
             )}
@@ -281,7 +273,7 @@ export function WorkspaceWorkflowControl({
             <span
               className={cn(
                 "mt-0.5 grid size-6 shrink-0 place-items-center rounded-md bg-muted/60",
-                TONE_CLASS[model.tone],
+                STATUS_MARK[model.tone],
               )}
             >
               {model.pr ? (
@@ -384,8 +376,8 @@ export function WorkspaceWorkflowControl({
                       className={cn(
                         "shrink-0 text-[11px] font-medium",
                         check.bucket === "fail"
-                          ? "text-critical"
-                          : "text-info-foreground",
+                          ? STATUS_TEXT.critical
+                          : STATUS_TEXT.pending,
                       )}
                     >
                       {check.bucket === "fail" ? "Failed" : "Pending"}
@@ -470,8 +462,8 @@ export function WorkspaceWorkflowControl({
             <CircleDotDashed
               className={cn(
                 watch.state === "blocked"
-                  ? "text-warning"
-                  : "text-info-foreground",
+                  ? STATUS_MARK.warning
+                  : STATUS_MARK.pending,
               )}
               aria-hidden
             />

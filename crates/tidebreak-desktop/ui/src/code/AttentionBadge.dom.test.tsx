@@ -44,11 +44,25 @@ const cases: Array<{ attention: Attention; label: string; type: string }> = [
 ];
 
 describe("AttentionBadge", () => {
-  it("renders nothing for Working", () => {
+  it("renders no pill for Working", () => {
     const { container } = render(
       <AttentionBadge attention={{ state: { type: "working" }, source: "lifecycle" }} />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // A compact dot is often a row's only state. Working drawing as nothing here
+  // made a busy agent look idle, which is the one confusion worth a test.
+  it("renders a moving dot for Working when compact", () => {
+    render(
+      <AttentionBadge
+        compact
+        attention={{ state: { type: "working" }, source: "lifecycle" }}
+      />,
+    );
+    const dot = screen.getByLabelText("Working");
+    expect(dot).toHaveAttribute("data-attention", "working");
+    expect(dot).toHaveClass("animate-pulse");
   });
 
   it.each(cases)("renders $type with its label", ({ attention, label, type }) => {

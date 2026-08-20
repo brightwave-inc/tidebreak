@@ -21,6 +21,8 @@ const badgeVariants = cva(
         critical:
           "border-transparent bg-critical-background text-critical-foreground-muted",
         info: "border-transparent bg-info-background text-info-foreground-muted",
+        merged:
+          "border-transparent bg-merged-background text-merged-foreground-muted",
       },
       size: {
         default: "px-2.5 py-0.5 font-semibold",

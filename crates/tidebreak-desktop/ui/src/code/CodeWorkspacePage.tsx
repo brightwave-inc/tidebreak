@@ -53,6 +53,7 @@ import {
   type ShellShortcutAction,
 } from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
+import { STATUS_MARK } from "./statusTone";
 import {
   codeBrowserIds,
   closeAllEditorTabs,
@@ -1777,7 +1778,7 @@ function WatchTaskBar({
       <CircleDotDashed
         className={cn(
           "size-3.5 shrink-0",
-          watch?.state === "blocked" ? "text-warning" : "text-info-foreground",
+          watch?.state === "blocked" ? STATUS_MARK.warning : STATUS_MARK.pending,
         )}
         aria-hidden
       />

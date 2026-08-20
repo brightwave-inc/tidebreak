@@ -71,6 +71,14 @@
   --info-foreground-muted: color-mix(in oklch, var(--info-foreground) 75%, transparent);
   --info-background: oklch(0.951 0.026 236.824);
   --info-border: oklch(0.391 0.09 240.876);
+  /* Merged is a status, not a brand color: a merged PR is a settled outcome
+     distinct from both success and closed. GitHub's purple, on the same rungs
+     as the ramps above so it can be used interchangeably with them. */
+  --merged: oklch(0.541 0.281 293.009);
+  --merged-foreground: oklch(0.432 0.232 292.759);
+  --merged-foreground-muted: color-mix(in oklch, var(--merged-foreground) 75%, transparent);
+  --merged-background: oklch(0.943 0.029 294.588);
+  --merged-border: oklch(0.432 0.232 292.759);
 
   /* Citations retain a visible highlight without introducing a second accent. */
   --brand-accent: oklch(0.9 0 0);
@@ -184,6 +192,11 @@
   --info-foreground-muted: color-mix(in oklch, var(--info-foreground) 75%, transparent);
   --info-background: oklch(0.391 0.09 240.876);
   --info-border: oklch(0.746 0.16 232.661);
+  --merged: oklch(0.702 0.183 293.541);
+  --merged-foreground: oklch(0.943 0.029 294.588);
+  --merged-foreground-muted: color-mix(in oklch, var(--merged-foreground) 75%, transparent);
+  --merged-background: oklch(0.432 0.232 292.759);
+  --merged-border: oklch(0.702 0.183 293.541);
 
   --brand-accent: oklch(0.32 0 0);
   --citation-mark: oklch(0.34 0 0);
@@ -261,6 +274,12 @@
   --color-info-foreground-muted: var(--info-foreground-muted);
   --color-info-background: var(--info-background);
   --color-info-border: var(--info-border);
+
+  --color-merged: var(--merged);
+  --color-merged-foreground: var(--merged-foreground);
+  --color-merged-foreground-muted: var(--merged-foreground-muted);
+  --color-merged-background: var(--merged-background);
+  --color-merged-border: var(--merged-border);
 
   --color-brand-accent: var(--brand-accent);
 

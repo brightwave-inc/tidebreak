@@ -38,8 +38,14 @@ import {
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
-  type WorkspaceWorkflowTone,
 } from "./workspaceWorkflow";
+import {
+  digestStatusTone,
+  STATUS_MARK,
+  STATUS_MOTION,
+  STATUS_TEXT,
+  type StatusTone,
+} from "./statusTone";
 import {
   formatCompactAge,
   isSessionRowWorthy,
@@ -148,7 +154,9 @@ export function WorkspaceCard({
                 )}
                 {digest?.attention.state.type === "needs_you" &&
                   digest.attention.state.source === "structured" && (
-                    <CircleAlert className="size-3 text-critical" />
+                    <CircleAlert
+                      className={cn("size-3", STATUS_MARK.critical)}
+                    />
                   )}
               </span>
             </span>
@@ -221,9 +229,7 @@ export function WorkspaceCard({
                 key={subagent.call_id}
                 label={subagent.name}
                 status={SUBAGENT_STATUS_LABELS[subagent.status]}
-                statusTone={
-                  subagent.status === "failed" ? "critical" : "neutral"
-                }
+                statusTone={SUBAGENT_STATUS_TONES[subagent.status]}
                 ariaLabel={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
                 icon={<Bot />}
                 onClick={() => onOpenSubagent?.(subagent.call_id)}
@@ -241,12 +247,10 @@ const SUBAGENT_STATUS_LABELS: Record<CodeSubagentStatus, string> = {
   failed: "Failed",
 };
 
-const TONE_CLASS: Record<WorkspaceWorkflowTone, string> = {
-  neutral: "text-muted-foreground",
-  ready: "text-success-foreground",
-  pending: "text-info-foreground",
-  warning: "text-warning-foreground",
-  critical: "text-critical-foreground",
+const SUBAGENT_STATUS_TONES: Record<CodeSubagentStatus, StatusTone> = {
+  running: "running",
+  done: "neutral",
+  failed: "critical",
 };
 
 function WorkspaceStateLine({
@@ -305,7 +309,7 @@ function WorkspaceStateLine({
             type="button"
             className={cn(
               "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-medium hover:bg-muted",
-              TONE_CLASS[model.tone],
+              STATUS_TEXT[model.tone],
               FOCUS_RING_INSET,
               HOVER_TINT,
             )}
@@ -395,24 +399,37 @@ function WorkspaceActivityLine({
   const terminalOnly = terminalOpen && !needsYou && !sessionLine;
   if (!needsYou && !sessionLine && !terminalOnly) return null;
   const ActivityIcon = digest ? sessionActivityIcon(digest) : null;
+  const running = digestStatusTone(digest) === "running";
 
   return (
     <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-[11px] text-muted-foreground">
       {needsYou ? (
-        <CircleAlert className="size-3 shrink-0 text-critical" aria-hidden />
+        <CircleAlert
+          className={cn("size-3 shrink-0", STATUS_TEXT.critical)}
+          aria-hidden
+        />
       ) : session && HarnessIcon ? (
+        // A brand mark, so it keeps its own identity: the running tone goes
+        // on the label beside it, never on the engine's logo.
         <span title={HARNESS_LABELS[session.harness_kind]}>
           <HarnessIcon className="size-3 shrink-0" aria-hidden />
         </span>
       ) : terminalOnly ? (
         <SquareTerminal className="size-3 shrink-0" aria-hidden />
       ) : ActivityIcon ? (
-        <ActivityIcon className="size-3 shrink-0" aria-hidden />
+        <ActivityIcon
+          className={cn(
+            "size-3 shrink-0",
+            running && [STATUS_TEXT.running, STATUS_MOTION.running],
+          )}
+          aria-hidden
+        />
       ) : null}
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
-          needsYou && "text-critical-foreground",
+          needsYou && STATUS_TEXT.critical,
+          running && STATUS_TEXT.running,
         )}
       >
         {needsYou ?? (sessionLine || "Terminal open")}
@@ -459,7 +476,7 @@ function WorkspaceChildRow({
 }: {
   label: string;
   status?: string;
-  statusTone?: "neutral" | "critical";
+  statusTone?: StatusTone;
   ariaLabel: string;
   icon: ReactNode;
   attention?: CodeSessionDigest["attention"];
@@ -482,12 +499,7 @@ function WorkspaceChildRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {status && (
-        <span
-          className={cn(
-            "shrink-0",
-            statusTone === "critical" && "text-critical",
-          )}
-        >
+        <span className={cn("shrink-0", STATUS_TEXT[statusTone])}>
           {status}
         </span>
       )}
