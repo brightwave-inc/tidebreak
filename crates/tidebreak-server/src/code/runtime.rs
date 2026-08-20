@@ -34,6 +34,7 @@ use super::checkpoint::{
     sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
 };
 use super::clone::CloneJobs;
+use super::delivery::DeliveryCache;
 use super::gh::{
     self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
 };
@@ -140,6 +141,7 @@ pub(crate) struct CodeRuntime {
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
     pr_cache: PrDigestCache,
+    pub(crate) delivery_cache: DeliveryCache,
     pub(crate) clone_jobs: CloneJobs,
     /// Warm harness installs started ahead of a session create.
     pub(super) harness_installs: HarnessInstallJobs,
@@ -182,6 +184,7 @@ impl CodeRuntime {
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
@@ -249,6 +252,7 @@ impl CodeRuntime {
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
@@ -1004,7 +1008,7 @@ impl CodeRuntime {
         Ok(workspace)
     }
 
-    fn gh_search_path_owned(&self) -> Option<String> {
+    pub(crate) fn gh_search_path_owned(&self) -> Option<String> {
         #[cfg(test)]
         {
             return self.gh_search_path.lock().expect("gh search path").clone();

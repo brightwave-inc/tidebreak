@@ -27,6 +27,7 @@ import {
   closeFocusedCodeTab,
   toggleTerminalLayout,
 } from "./code/codeChrome";
+import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import {
   codeRepoIdFromPath,
@@ -94,7 +95,7 @@ function GatedShellHooks({
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, chatId);
   useShellShortcuts(shortcuts, shortcutMode);
-  return null;
+  return <CodeDeliveryMonitor client={client} />;
 }
 
 /**

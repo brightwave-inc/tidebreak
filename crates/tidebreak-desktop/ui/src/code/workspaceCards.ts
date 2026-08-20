@@ -184,22 +184,17 @@ export type ArrangedWorkspaceGroup = {
  * repo catalog order, and status rank — never catalog array order or digest
  * insertion order.
  *
- * Archived workspaces are off the rail unless asked for; when shown, they
- * are one trailing group in every mode rather than woven back into their
- * repo, so put-away work never interleaves with live triage.
+ * Archived workspaces are always off the rail. Their full catalog lives on
+ * the dedicated Archive page, so put-away work never interleaves with live
+ * triage.
  */
 export function arrangeWorkspaces(
   mode: WorkspaceSortMode,
   repos: readonly CodeRepoSnapshot[],
   workspaces: readonly CodeWorkspaceSnapshot[],
   digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
-  options?: { showArchived?: boolean },
 ): ArrangedWorkspaceGroup[] {
-  const groups = arrangeLiveWorkspaces(mode, repos, workspaces, digests);
-  if (!options?.showArchived) return groups;
-  const archived = listArchivedWorkspaces(workspaces);
-  if (archived.length === 0) return groups;
-  return [...groups, { key: "archived", label: "Archived", workspaces: archived }];
+  return arrangeLiveWorkspaces(mode, repos, workspaces, digests);
 }
 
 function arrangeLiveWorkspaces(

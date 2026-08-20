@@ -12,6 +12,12 @@ import {
   parseCodeSession,
   parseCodeSessionList,
   parseCodeSubscriptionUsage,
+  parseCodeDeliveryActionResult,
+  parseCodeDeliveryPullRequestDetail,
+  parseCodeDeliveryPullRequestsPage,
+  parseCodeDeliveryRepositories,
+  parseCodeDeliveryRunDetail,
+  parseCodeDeliveryRunsPage,
   parseCodeUpdateNotice,
   parseCodeWorktreeRoot,
   parseCodeTerminal,
@@ -28,6 +34,85 @@ import {
   parseCodeWorkspacePr,
   parseCodePrComments,
 } from "./parsers";
+
+const DELIVERY_CAPABILITY = {
+  found: true,
+  authenticated: true,
+  viewer_login: "mara",
+  remediation: "",
+};
+
+const DELIVERY_REPOSITORY = {
+  host: "github.com",
+  owner: "brightwave-inc",
+  name: "tidebreak",
+  name_with_owner: "brightwave-inc/tidebreak",
+  url: "https://github.com/brightwave-inc/tidebreak",
+  default_branch: "main",
+  tidebreak_repo_id: "repo-1",
+};
+
+const DELIVERY_WORKSPACE_LINK = {
+  workspace_id: "ws-1",
+  repo_id: "repo-1",
+  title: "Delivery center",
+  branch_name: "thet/delivery-center",
+  status: "active",
+  exact: true,
+};
+
+const DELIVERY_PR = {
+  id: "github.com/brightwave-inc/tidebreak#2248",
+  repository: DELIVERY_REPOSITORY,
+  number: 2248,
+  url: "https://github.com/brightwave-inc/tidebreak/pull/2248",
+  title: "Build the delivery center",
+  state: "open",
+  draft: false,
+  author: "mara",
+  author_avatar_url: "https://avatars.githubusercontent.com/u/1?v=4",
+  head_branch: "thet/delivery-center",
+  base_branch: "main",
+  head_sha: "abc123",
+  review_decision: "changes_requested",
+  mergeable: "mergeable",
+  merge_state_status: "blocked",
+  auto_merge_enabled: false,
+  checks: [
+    {
+      name: "desktop / storybook",
+      bucket: "fail",
+      detail: "completed",
+      url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
+      workflow_run_id: 77,
+    },
+  ],
+  attention_reasons: ["changes_requested", "checks_failed"],
+  ready_to_merge: false,
+  workspace_links: [DELIVERY_WORKSPACE_LINK],
+  created_at: "2026-08-19T12:00:00.000Z",
+  updated_at: "2026-08-20T12:00:00.000Z",
+};
+
+const DELIVERY_RUN = {
+  id: "github.com/brightwave-inc/tidebreak:workflow_run:77",
+  repository: DELIVERY_REPOSITORY,
+  kind: "workflow_run",
+  github_id: 77,
+  name: "Desktop CI",
+  url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
+  status: "completed",
+  conclusion: "failure",
+  workflow: "Desktop CI",
+  branch: "thet/delivery-center",
+  sha: "abc123",
+  event: "pull_request",
+  actor: "mara",
+  attention_reasons: ["failure"],
+  workspace_links: [DELIVERY_WORKSPACE_LINK],
+  created_at: "2026-08-20T11:00:00.000Z",
+  updated_at: "2026-08-20T12:05:00.000Z",
+};
 
 const SESSION = {
   id: "sess-1",
@@ -714,6 +799,161 @@ describe("clone wire parsers", () => {
         phase: "installing",
         done: false,
       }),
+    ).toBeNull();
+  });
+});
+
+describe("code delivery wire parsers", () => {
+  it("accepts a repositories snapshot with partial source errors", () => {
+    const snapshot = {
+      capability: DELIVERY_CAPABILITY,
+      repositories: [DELIVERY_REPOSITORY],
+      errors: [
+        {
+          repository: {
+            host: "github.com",
+            owner: "brightwave-inc",
+            name: "private-repo",
+          },
+          kind: "forbidden",
+          message: "Repository access is unavailable.",
+        },
+      ],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+
+    expect(parseCodeDeliveryRepositories(snapshot)).toEqual(snapshot);
+  });
+
+  it("accepts pull request pages and full details", () => {
+    const page = {
+      capability: DELIVERY_CAPABILITY,
+      items: [DELIVERY_PR],
+      next_cursor: "next-pr-page",
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+    const detail = {
+      summary: DELIVERY_PR,
+      body: "A cross-repository view of delivery state.",
+      labels: ["desktop", "ui"],
+      assignees: ["mara"],
+      changed_files: 8,
+      additions: 640,
+      deletions: 91,
+      comments: [
+        {
+          kind: "inline",
+          id: "comment-1",
+          author: "devon",
+          url: "https://github.com/brightwave-inc/tidebreak/pull/2248#discussion_r1",
+          created_at: "2026-08-20T12:07:00.000Z",
+          body: "Keep this state visible at narrow widths.",
+          path: "src/code/CodeDeliveryPage.tsx",
+          line: 420,
+        },
+      ],
+      can_mark_ready: false,
+      can_merge: false,
+      can_rerun_failed: true,
+    };
+
+    expect(parseCodeDeliveryPullRequestsPage(page)).toEqual(page);
+    expect(parseCodeDeliveryPullRequestDetail(detail)).toEqual(detail);
+  });
+
+  it("accepts run pages and details for Actions and deployments", () => {
+    const deployment = {
+      ...DELIVERY_RUN,
+      id: "github.com/brightwave-inc/tidebreak:deployment:91",
+      kind: "deployment",
+      github_id: 91,
+      name: "Production",
+      url: "https://github.com/brightwave-inc/tidebreak/deployments/activity_log?environment=production",
+      status: "failure",
+      environment: "production",
+      attention_reasons: ["failure"],
+    };
+    const page = {
+      capability: DELIVERY_CAPABILITY,
+      items: [DELIVERY_RUN, deployment],
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+    const detail = {
+      summary: DELIVERY_RUN,
+      jobs: [
+        {
+          id: 801,
+          name: "storybook",
+          status: "completed",
+          conclusion: "failure",
+          url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77/job/801",
+          started_at: "2026-08-20T11:02:00.000Z",
+          completed_at: "2026-08-20T11:08:00.000Z",
+          failed_steps: ["Build Storybook"],
+        },
+      ],
+      deployment_statuses: [
+        {
+          id: 901,
+          state: "failure",
+          description: "Production health check failed.",
+          environment_url: "https://tidebreak.example.com",
+          log_url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
+          created_at: "2026-08-20T12:04:00.000Z",
+        },
+      ],
+      can_rerun_failed: true,
+    };
+
+    expect(parseCodeDeliveryRunsPage(page)).toEqual(page);
+    expect(parseCodeDeliveryRunDetail(detail)).toEqual(detail);
+  });
+
+  it("rejects malformed nested delivery rows instead of dropping them", () => {
+    expect(
+      parseCodeDeliveryPullRequestsPage({
+        capability: DELIVERY_CAPABILITY,
+        items: [
+          {
+            ...DELIVERY_PR,
+            checks: [{ ...DELIVERY_PR.checks[0], bucket: "flaky" }],
+          },
+        ],
+        errors: [],
+        fetched_at: "2026-08-20T12:10:00.000Z",
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeDeliveryRunDetail({
+        summary: DELIVERY_RUN,
+        jobs: [
+          {
+            id: 801,
+            name: "storybook",
+            status: "completed",
+            url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77/job/801",
+            started_at: null,
+            completed_at: null,
+            failed_steps: [7],
+          },
+        ],
+        deployment_statuses: [],
+        can_rerun_failed: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts a bounded action result", () => {
+    expect(
+      parseCodeDeliveryActionResult({
+        success: true,
+        message: "Auto-merge enabled.",
+      }),
+    ).toEqual({ success: true, message: "Auto-merge enabled." });
+    expect(
+      parseCodeDeliveryActionResult({ success: "yes", message: "done" }),
     ).toBeNull();
   });
 });

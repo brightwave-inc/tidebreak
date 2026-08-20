@@ -729,6 +729,38 @@ pub fn app(state: AppState) -> Router {
         .route("/code/harnesses", get(routes::code::list_harnesses))
         .route("/code/usage", get(routes::code::subscription_usage))
         .route(
+            "/code/delivery/repositories",
+            get(routes::code::discover_delivery_repositories),
+        )
+        .route(
+            "/code/delivery/repositories/resolve",
+            post(routes::code::resolve_delivery_repositories),
+        )
+        .route(
+            "/code/delivery/pull-requests/query",
+            post(routes::code::query_delivery_pull_requests),
+        )
+        .route(
+            "/code/delivery/pull-requests/detail",
+            post(routes::code::delivery_pull_request_detail),
+        )
+        .route(
+            "/code/delivery/pull-requests/action",
+            post(routes::code::act_on_delivery_pull_request),
+        )
+        .route(
+            "/code/delivery/runs/query",
+            post(routes::code::query_delivery_runs),
+        )
+        .route(
+            "/code/delivery/runs/detail",
+            post(routes::code::delivery_run_detail),
+        )
+        .route(
+            "/code/delivery/runs/action",
+            post(routes::code::act_on_delivery_run),
+        )
+        .route(
             "/code/harnesses/{kind}/models",
             get(routes::code::list_harness_models),
         )

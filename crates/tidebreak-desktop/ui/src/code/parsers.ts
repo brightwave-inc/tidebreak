@@ -52,6 +52,25 @@ import type {
   CodeHarnessInstallSnapshot,
   CodeWorktreeRoot,
   CodeSubscriptionUsage,
+  CodeDeliveryActionResult,
+  CodeDeliveryCheck,
+  CodeDeliveryDeploymentStatus,
+  CodeDeliveryPrAttentionReason,
+  CodeDeliveryPullRequestDetail,
+  CodeDeliveryPullRequestSummary,
+  CodeDeliveryPullRequestsPage,
+  CodeDeliveryRepositoriesSnapshot,
+  CodeDeliveryRunDetail,
+  CodeDeliveryRunAttentionReason,
+  CodeDeliveryRunKind,
+  CodeDeliveryRunSummary,
+  CodeDeliveryRunsPage,
+  CodeDeliverySourceError,
+  CodeDeliveryWorkflowJob,
+  CodeDeliveryWorkspaceLink,
+  CodeGitHubCapability,
+  CodeGitHubRepositoryRef,
+  CodeGitHubRepositoryTarget,
   PullRequestDigest,
   PullRequestComment,
   PullRequestCommentKind,
@@ -96,6 +115,22 @@ import type {
   CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   CodeWorktreeRoot as WireCodeWorktreeRoot,
+  CodeDeliveryActionResult as WireCodeDeliveryActionResult,
+  CodeDeliveryCheck as WireCodeDeliveryCheck,
+  CodeDeliveryDeploymentStatus as WireCodeDeliveryDeploymentStatus,
+  CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
+  CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
+  CodeDeliveryPullRequestsPage as WireCodeDeliveryPullRequestsPage,
+  CodeDeliveryRepositoriesSnapshot as WireCodeDeliveryRepositoriesSnapshot,
+  CodeDeliveryRunDetail as WireCodeDeliveryRunDetail,
+  CodeDeliveryRunSummary as WireCodeDeliveryRunSummary,
+  CodeDeliveryRunsPage as WireCodeDeliveryRunsPage,
+  CodeDeliverySourceError as WireCodeDeliverySourceError,
+  CodeDeliveryWorkflowJob as WireCodeDeliveryWorkflowJob,
+  CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
+  CodeGitHubCapability as WireCodeGitHubCapability,
+  CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
+  CodeGitHubRepositoryTarget as WireCodeGitHubRepositoryTarget,
 } from "../generated/wire";
 
 /**
@@ -191,6 +226,695 @@ const USAGE_SOURCES = new Set<CodeSubscriptionUsage["source"]>([
   "direct",
   "unavailable",
 ]);
+const DELIVERY_CHECK_BUCKETS = new Set<CodeDeliveryCheck["bucket"]>([
+  "pass",
+  "pending",
+  "fail",
+  "skipped",
+]);
+const DELIVERY_PR_ATTENTION_REASONS =
+  new Set<CodeDeliveryPrAttentionReason>([
+    "changes_requested",
+    "checks_failed",
+    "conflicts",
+    "behind",
+    "blocked",
+  ]);
+const DELIVERY_RUN_KINDS = new Set<CodeDeliveryRunKind>([
+  "workflow_run",
+  "deployment",
+]);
+const DELIVERY_RUN_ATTENTION_REASONS =
+  new Set<CodeDeliveryRunAttentionReason>([
+    "failure",
+    "timed_out",
+    "action_required",
+    "startup_failure",
+  ]);
+
+function parseCodeGitHubRepositoryTarget(
+  value: unknown,
+): CodeGitHubRepositoryTarget | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeGitHubRepositoryTarget>(value, [
+      "host",
+      "owner",
+      "name",
+    ]) ||
+    !nonEmpty(value.host) ||
+    !nonEmpty(value.owner) ||
+    !nonEmpty(value.name)
+  ) {
+    return null;
+  }
+  return { host: value.host, owner: value.owner, name: value.name };
+}
+
+function parseCodeGitHubRepositoryRef(
+  value: unknown,
+): CodeGitHubRepositoryRef | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeGitHubRepositoryRef>(value, [
+      "host",
+      "owner",
+      "name",
+      "name_with_owner",
+      "url",
+      "default_branch",
+      "tidebreak_repo_id",
+    ]) ||
+    !nonEmpty(value.host) ||
+    !nonEmpty(value.owner) ||
+    !nonEmpty(value.name) ||
+    !nonEmpty(value.name_with_owner) ||
+    !nonEmpty(value.url) ||
+    !optionalString(value.default_branch) ||
+    !optionalString(value.tidebreak_repo_id)
+  ) {
+    return null;
+  }
+  return {
+    host: value.host,
+    owner: value.owner,
+    name: value.name,
+    name_with_owner: value.name_with_owner,
+    url: value.url,
+    ...(value.default_branch !== undefined
+      ? { default_branch: value.default_branch }
+      : {}),
+    ...(value.tidebreak_repo_id !== undefined
+      ? { tidebreak_repo_id: value.tidebreak_repo_id }
+      : {}),
+  };
+}
+
+function parseCodeGitHubCapability(value: unknown): CodeGitHubCapability | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeGitHubCapability>(value, [
+      "found",
+      "authenticated",
+      "viewer_login",
+      "remediation",
+    ]) ||
+    typeof value.found !== "boolean" ||
+    (value.authenticated !== undefined &&
+      typeof value.authenticated !== "boolean") ||
+    !optionalString(value.viewer_login) ||
+    typeof value.remediation !== "string"
+  ) {
+    return null;
+  }
+  return {
+    found: value.found,
+    remediation: value.remediation,
+    ...(value.authenticated !== undefined
+      ? { authenticated: value.authenticated }
+      : {}),
+    ...(value.viewer_login !== undefined
+      ? { viewer_login: value.viewer_login }
+      : {}),
+  };
+}
+
+function parseCodeDeliverySourceError(
+  value: unknown,
+): CodeDeliverySourceError | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliverySourceError>(value, [
+      "repository",
+      "kind",
+      "message",
+      "retry_at",
+    ]) ||
+    !nonEmpty(value.kind) ||
+    typeof value.message !== "string" ||
+    !optionalString(value.retry_at)
+  ) {
+    return null;
+  }
+  const repository =
+    value.repository === undefined
+      ? undefined
+      : parseCodeGitHubRepositoryTarget(value.repository);
+  if (value.repository !== undefined && !repository) return null;
+  return {
+    kind: value.kind,
+    message: value.message,
+    ...(repository ? { repository } : {}),
+    ...(value.retry_at !== undefined ? { retry_at: value.retry_at } : {}),
+  };
+}
+
+function parseCodeDeliveryWorkspaceLink(
+  value: unknown,
+): CodeDeliveryWorkspaceLink | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryWorkspaceLink>(value, [
+      "workspace_id",
+      "repo_id",
+      "title",
+      "branch_name",
+      "status",
+      "exact",
+    ]) ||
+    !nonEmpty(value.workspace_id) ||
+    !nonEmpty(value.repo_id) ||
+    !nonEmpty(value.title) ||
+    !nonEmpty(value.branch_name) ||
+    !isMember(value.status, WORKSPACE_STATUSES) ||
+    typeof value.exact !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    workspace_id: value.workspace_id,
+    repo_id: value.repo_id,
+    title: value.title,
+    branch_name: value.branch_name,
+    status: value.status,
+    exact: value.exact,
+  };
+}
+
+function parseCodeDeliveryCheck(value: unknown): CodeDeliveryCheck | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryCheck>(value, [
+      "name",
+      "bucket",
+      "detail",
+      "url",
+      "workflow_run_id",
+    ]) ||
+    !nonEmpty(value.name) ||
+    !isMember(value.bucket, DELIVERY_CHECK_BUCKETS) ||
+    !optionalString(value.detail) ||
+    !optionalString(value.url) ||
+    (value.workflow_run_id !== undefined &&
+      !isPositiveInteger(value.workflow_run_id))
+  ) {
+    return null;
+  }
+  return {
+    name: value.name,
+    bucket: value.bucket,
+    ...(value.detail !== undefined ? { detail: value.detail } : {}),
+    ...(value.url !== undefined ? { url: value.url } : {}),
+    ...(value.workflow_run_id !== undefined
+      ? { workflow_run_id: value.workflow_run_id }
+      : {}),
+  };
+}
+
+function parseCodeDeliveryPullRequestSummary(
+  value: unknown,
+): CodeDeliveryPullRequestSummary | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryPullRequestSummary>(value, [
+      "id",
+      "repository",
+      "number",
+      "url",
+      "title",
+      "state",
+      "draft",
+      "author",
+      "author_avatar_url",
+      "head_branch",
+      "base_branch",
+      "head_sha",
+      "review_decision",
+      "mergeable",
+      "merge_state_status",
+      "auto_merge_enabled",
+      "checks",
+      "attention_reasons",
+      "ready_to_merge",
+      "workspace_links",
+      "created_at",
+      "updated_at",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !isPositiveInteger(value.number) ||
+    !nonEmpty(value.url) ||
+    !nonEmpty(value.title) ||
+    !nonEmpty(value.state) ||
+    typeof value.draft !== "boolean" ||
+    !optionalString(value.author) ||
+    !optionalString(value.author_avatar_url) ||
+    !nonEmpty(value.head_branch) ||
+    !nonEmpty(value.base_branch) ||
+    !optionalString(value.head_sha) ||
+    !optionalString(value.review_decision) ||
+    !optionalString(value.mergeable) ||
+    !optionalString(value.merge_state_status) ||
+    typeof value.auto_merge_enabled !== "boolean" ||
+    !Array.isArray(value.checks) ||
+    !Array.isArray(value.attention_reasons) ||
+    !value.attention_reasons.every((reason) =>
+      isMember(reason, DELIVERY_PR_ATTENTION_REASONS),
+    ) ||
+    typeof value.ready_to_merge !== "boolean" ||
+    !Array.isArray(value.workspace_links) ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at)
+  ) {
+    return null;
+  }
+  const repository = parseCodeGitHubRepositoryRef(value.repository);
+  if (!repository) return null;
+  const checks: CodeDeliveryCheck[] = [];
+  for (const item of value.checks) {
+    const check = parseCodeDeliveryCheck(item);
+    if (!check) return null;
+    checks.push(check);
+  }
+  const workspace_links: CodeDeliveryWorkspaceLink[] = [];
+  for (const item of value.workspace_links) {
+    const link = parseCodeDeliveryWorkspaceLink(item);
+    if (!link) return null;
+    workspace_links.push(link);
+  }
+  return {
+    id: value.id,
+    repository,
+    number: value.number,
+    url: value.url,
+    title: value.title,
+    state: value.state,
+    draft: value.draft,
+    head_branch: value.head_branch,
+    base_branch: value.base_branch,
+    auto_merge_enabled: value.auto_merge_enabled,
+    checks,
+    attention_reasons: [...value.attention_reasons],
+    ready_to_merge: value.ready_to_merge,
+    workspace_links,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    ...(value.author !== undefined ? { author: value.author } : {}),
+    ...(value.author_avatar_url !== undefined
+      ? { author_avatar_url: value.author_avatar_url }
+      : {}),
+    ...(value.head_sha !== undefined ? { head_sha: value.head_sha } : {}),
+    ...(value.review_decision !== undefined
+      ? { review_decision: value.review_decision }
+      : {}),
+    ...(value.mergeable !== undefined
+      ? { mergeable: value.mergeable }
+      : {}),
+    ...(value.merge_state_status !== undefined
+      ? { merge_state_status: value.merge_state_status }
+      : {}),
+  };
+}
+
+function parseDeliveryErrors(value: unknown): CodeDeliverySourceError[] | null {
+  if (!Array.isArray(value)) return null;
+  const errors: CodeDeliverySourceError[] = [];
+  for (const item of value) {
+    const error = parseCodeDeliverySourceError(item);
+    if (!error) return null;
+    errors.push(error);
+  }
+  return errors;
+}
+
+export function parseCodeDeliveryRepositories(
+  value: unknown,
+): CodeDeliveryRepositoriesSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryRepositoriesSnapshot>(value, [
+      "capability",
+      "repositories",
+      "errors",
+      "fetched_at",
+    ]) ||
+    !Array.isArray(value.repositories) ||
+    !nonEmpty(value.fetched_at)
+  ) {
+    return null;
+  }
+  const capability = parseCodeGitHubCapability(value.capability);
+  const errors = parseDeliveryErrors(value.errors);
+  if (!capability || !errors) return null;
+  const repositories: CodeGitHubRepositoryRef[] = [];
+  for (const item of value.repositories) {
+    const repository = parseCodeGitHubRepositoryRef(item);
+    if (!repository) return null;
+    repositories.push(repository);
+  }
+  return { capability, repositories, errors, fetched_at: value.fetched_at };
+}
+
+export function parseCodeDeliveryPullRequestsPage(
+  value: unknown,
+): CodeDeliveryPullRequestsPage | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryPullRequestsPage>(value, [
+      "capability",
+      "items",
+      "next_cursor",
+      "errors",
+      "fetched_at",
+    ]) ||
+    !Array.isArray(value.items) ||
+    !optionalString(value.next_cursor) ||
+    !nonEmpty(value.fetched_at)
+  ) {
+    return null;
+  }
+  const capability = parseCodeGitHubCapability(value.capability);
+  const errors = parseDeliveryErrors(value.errors);
+  if (!capability || !errors) return null;
+  const items: CodeDeliveryPullRequestSummary[] = [];
+  for (const item of value.items) {
+    const summary = parseCodeDeliveryPullRequestSummary(item);
+    if (!summary) return null;
+    items.push(summary);
+  }
+  return {
+    capability,
+    items,
+    errors,
+    fetched_at: value.fetched_at,
+    ...(value.next_cursor !== undefined
+      ? { next_cursor: value.next_cursor }
+      : {}),
+  };
+}
+
+export function parseCodeDeliveryPullRequestDetail(
+  value: unknown,
+): CodeDeliveryPullRequestDetail | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryPullRequestDetail>(value, [
+      "summary",
+      "body",
+      "labels",
+      "assignees",
+      "changed_files",
+      "additions",
+      "deletions",
+      "comments",
+      "can_mark_ready",
+      "can_merge",
+      "can_rerun_failed",
+    ]) ||
+    typeof value.body !== "string" ||
+    !Array.isArray(value.labels) ||
+    !value.labels.every((item) => typeof item === "string") ||
+    !Array.isArray(value.assignees) ||
+    !value.assignees.every((item) => typeof item === "string") ||
+    !isNonNegativeInteger(value.changed_files) ||
+    !isNonNegativeInteger(value.additions) ||
+    !isNonNegativeInteger(value.deletions) ||
+    !Array.isArray(value.comments) ||
+    typeof value.can_mark_ready !== "boolean" ||
+    typeof value.can_merge !== "boolean" ||
+    typeof value.can_rerun_failed !== "boolean"
+  ) {
+    return null;
+  }
+  const summary = parseCodeDeliveryPullRequestSummary(value.summary);
+  if (!summary) return null;
+  const comments: PullRequestComment[] = [];
+  for (const item of value.comments) {
+    const comment = parsePullRequestComment(item);
+    if (!comment) return null;
+    comments.push(comment);
+  }
+  return {
+    summary,
+    body: value.body,
+    labels: [...value.labels],
+    assignees: [...value.assignees],
+    changed_files: value.changed_files,
+    additions: value.additions,
+    deletions: value.deletions,
+    comments,
+    can_mark_ready: value.can_mark_ready,
+    can_merge: value.can_merge,
+    can_rerun_failed: value.can_rerun_failed,
+  };
+}
+
+function parseCodeDeliveryRunSummary(
+  value: unknown,
+): CodeDeliveryRunSummary | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryRunSummary>(value, [
+      "id",
+      "repository",
+      "kind",
+      "github_id",
+      "name",
+      "url",
+      "status",
+      "conclusion",
+      "workflow",
+      "environment",
+      "branch",
+      "sha",
+      "event",
+      "actor",
+      "attention_reasons",
+      "workspace_links",
+      "created_at",
+      "updated_at",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !isMember(value.kind, DELIVERY_RUN_KINDS) ||
+    !isPositiveInteger(value.github_id) ||
+    !nonEmpty(value.name) ||
+    !nonEmpty(value.url) ||
+    !nonEmpty(value.status) ||
+    !optionalString(value.conclusion) ||
+    !optionalString(value.workflow) ||
+    !optionalString(value.environment) ||
+    !optionalString(value.branch) ||
+    !optionalString(value.sha) ||
+    !optionalString(value.event) ||
+    !optionalString(value.actor) ||
+    !Array.isArray(value.attention_reasons) ||
+    !value.attention_reasons.every((reason) =>
+      isMember(reason, DELIVERY_RUN_ATTENTION_REASONS),
+    ) ||
+    !Array.isArray(value.workspace_links) ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at)
+  ) {
+    return null;
+  }
+  const repository = parseCodeGitHubRepositoryRef(value.repository);
+  if (!repository) return null;
+  const workspace_links: CodeDeliveryWorkspaceLink[] = [];
+  for (const item of value.workspace_links) {
+    const link = parseCodeDeliveryWorkspaceLink(item);
+    if (!link) return null;
+    workspace_links.push(link);
+  }
+  return {
+    id: value.id,
+    repository,
+    kind: value.kind,
+    github_id: value.github_id,
+    name: value.name,
+    url: value.url,
+    status: value.status,
+    attention_reasons: [...value.attention_reasons],
+    workspace_links,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    ...(value.conclusion !== undefined
+      ? { conclusion: value.conclusion }
+      : {}),
+    ...(value.workflow !== undefined ? { workflow: value.workflow } : {}),
+    ...(value.environment !== undefined
+      ? { environment: value.environment }
+      : {}),
+    ...(value.branch !== undefined ? { branch: value.branch } : {}),
+    ...(value.sha !== undefined ? { sha: value.sha } : {}),
+    ...(value.event !== undefined ? { event: value.event } : {}),
+    ...(value.actor !== undefined ? { actor: value.actor } : {}),
+  };
+}
+
+export function parseCodeDeliveryRunsPage(
+  value: unknown,
+): CodeDeliveryRunsPage | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryRunsPage>(value, [
+      "capability",
+      "items",
+      "next_cursor",
+      "errors",
+      "fetched_at",
+    ]) ||
+    !Array.isArray(value.items) ||
+    !optionalString(value.next_cursor) ||
+    !nonEmpty(value.fetched_at)
+  ) {
+    return null;
+  }
+  const capability = parseCodeGitHubCapability(value.capability);
+  const errors = parseDeliveryErrors(value.errors);
+  if (!capability || !errors) return null;
+  const items: CodeDeliveryRunSummary[] = [];
+  for (const item of value.items) {
+    const summary = parseCodeDeliveryRunSummary(item);
+    if (!summary) return null;
+    items.push(summary);
+  }
+  return {
+    capability,
+    items,
+    errors,
+    fetched_at: value.fetched_at,
+    ...(value.next_cursor !== undefined
+      ? { next_cursor: value.next_cursor }
+      : {}),
+  };
+}
+
+function parseCodeDeliveryWorkflowJob(
+  value: unknown,
+): CodeDeliveryWorkflowJob | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryWorkflowJob>(value, [
+      "id",
+      "name",
+      "status",
+      "conclusion",
+      "url",
+      "started_at",
+      "completed_at",
+      "failed_steps",
+    ]) ||
+    !isPositiveInteger(value.id) ||
+    !nonEmpty(value.name) ||
+    !nonEmpty(value.status) ||
+    !optionalString(value.conclusion) ||
+    !nonEmpty(value.url) ||
+    !nullableString(value.started_at) ||
+    !nullableString(value.completed_at) ||
+    !Array.isArray(value.failed_steps) ||
+    !value.failed_steps.every((item) => typeof item === "string")
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    status: value.status,
+    url: value.url,
+    started_at: value.started_at,
+    completed_at: value.completed_at,
+    failed_steps: [...value.failed_steps],
+    ...(value.conclusion !== undefined
+      ? { conclusion: value.conclusion }
+      : {}),
+  };
+}
+
+function parseCodeDeliveryDeploymentStatus(
+  value: unknown,
+): CodeDeliveryDeploymentStatus | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryDeploymentStatus>(value, [
+      "id",
+      "state",
+      "description",
+      "environment_url",
+      "log_url",
+      "created_at",
+    ]) ||
+    !isPositiveInteger(value.id) ||
+    !nonEmpty(value.state) ||
+    typeof value.description !== "string" ||
+    !optionalString(value.environment_url) ||
+    !optionalString(value.log_url) ||
+    !nonEmpty(value.created_at)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    state: value.state,
+    description: value.description,
+    created_at: value.created_at,
+    ...(value.environment_url !== undefined
+      ? { environment_url: value.environment_url }
+      : {}),
+    ...(value.log_url !== undefined ? { log_url: value.log_url } : {}),
+  };
+}
+
+export function parseCodeDeliveryRunDetail(
+  value: unknown,
+): CodeDeliveryRunDetail | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryRunDetail>(value, [
+      "summary",
+      "jobs",
+      "deployment_statuses",
+      "can_rerun_failed",
+    ]) ||
+    !Array.isArray(value.jobs) ||
+    !Array.isArray(value.deployment_statuses) ||
+    typeof value.can_rerun_failed !== "boolean"
+  ) {
+    return null;
+  }
+  const summary = parseCodeDeliveryRunSummary(value.summary);
+  if (!summary) return null;
+  const jobs: CodeDeliveryWorkflowJob[] = [];
+  for (const item of value.jobs) {
+    const job = parseCodeDeliveryWorkflowJob(item);
+    if (!job) return null;
+    jobs.push(job);
+  }
+  const deployment_statuses: CodeDeliveryDeploymentStatus[] = [];
+  for (const item of value.deployment_statuses) {
+    const status = parseCodeDeliveryDeploymentStatus(item);
+    if (!status) return null;
+    deployment_statuses.push(status);
+  }
+  return {
+    summary,
+    jobs,
+    deployment_statuses,
+    can_rerun_failed: value.can_rerun_failed,
+  };
+}
+
+export function parseCodeDeliveryActionResult(
+  value: unknown,
+): CodeDeliveryActionResult | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryActionResult>(value, ["success", "message"]) ||
+    typeof value.success !== "boolean" ||
+    typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  return { success: value.success, message: value.message };
+}
 
 export function parseCodeSubscriptionUsage(
   value: unknown,
@@ -1936,6 +2660,10 @@ function optionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
 }
 
+function nullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
 function isMember<T extends string>(
   value: unknown,
   allowed: ReadonlySet<T>,
@@ -1945,6 +2673,14 @@ function isMember<T extends string>(
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
 /** `undefined` stays undefined; a present list must be well-formed. */

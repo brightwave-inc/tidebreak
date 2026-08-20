@@ -10,6 +10,7 @@ import {
   arrangeWorkspaces,
   formatCompactAge,
   groupWorkspacesByRepo,
+  listArchivedWorkspaces,
   middleTruncate,
   prChipTone,
   sessionActivityLabel,
@@ -147,16 +148,13 @@ describe("arrangeWorkspaces", () => {
         pr_state: { number: 12, state: "open" },
       }),
     };
-    const groups = arrangeWorkspaces("by-status", repos, listed, digests, {
-      showArchived: true,
-    });
+    const groups = arrangeWorkspaces("by-status", repos, listed, digests);
     expect(
       groups.map((group) => [group.key, group.workspaces.map((item) => item.id)]),
     ).toEqual([
       ["needs_you", ["ws-app-old"]],
       ["running", ["ws-lib"]],
       ["pr_open", ["ws-app-new"]],
-      ["archived", ["ws-archived"]],
     ]);
   });
 
@@ -167,7 +165,7 @@ describe("arrangeWorkspaces", () => {
     }
   });
 
-  it("appends one trailing archived shelf when asked, newest put-away first", () => {
+  it("keeps archive ordering available to the dedicated archive page", () => {
     const rows = [
       ...listed,
       {
@@ -175,14 +173,8 @@ describe("arrangeWorkspaces", () => {
         archived_at: "2026-08-18T00:00:00.000Z",
       },
     ];
-    const groups = arrangeWorkspaces("by-repo", repos, rows, {}, {
-      showArchived: true,
-    });
-    const last = groups[groups.length - 1];
-    expect(last?.key).toBe("archived");
-    expect(last?.label).toBe("Archived");
     // archived_at orders the shelf; rows without it fall back to created_at.
-    expect(last?.workspaces.map((item) => item.id)).toEqual([
+    expect(listArchivedWorkspaces(rows).map((item) => item.id)).toEqual([
       "ws-archived-late",
       "ws-archived",
     ]);

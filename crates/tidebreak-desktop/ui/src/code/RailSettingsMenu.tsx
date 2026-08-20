@@ -21,7 +21,7 @@ import {
 } from "./workspaceCards";
 
 /**
- * The rail's one settings surface: order, density, card meta, archived shelf.
+ * The rail's one settings surface: order, density, and card metadata.
  *
  * A popover with real controls, not a menu: sort and density are radio
  * choices and the meta rows are switches, none of which a `DropdownMenu`
@@ -66,7 +66,7 @@ export function RailSettingsMenu() {
         side="right"
         align="start"
         sideOffset={8}
-        className="flex w-60 flex-col gap-3 p-3"
+        className="flex w-[22rem] max-w-[calc(100vw-24px)] flex-col gap-3 p-3"
       >
         <div className="flex flex-col gap-1.5">
           <span className="text-[11px] font-medium text-muted-foreground">
@@ -100,11 +100,6 @@ export function RailSettingsMenu() {
             label="Branch on cards"
             checked={prefs.showBranch}
             onCheckedChange={(showBranch) => setRailPrefs({ showBranch })}
-          />
-          <PrefSwitch
-            label="Show archived"
-            checked={prefs.showArchived}
-            onCheckedChange={(showArchived) => setRailPrefs({ showArchived })}
           />
         </div>
       </PopoverContent>

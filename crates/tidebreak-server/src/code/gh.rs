@@ -1482,7 +1482,7 @@ async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Strin
 /// arguments so no automation path can ever merge a PR; the one allowed merge
 /// entry point is [`run_gh_user_merge`], reachable only from the dedicated
 /// user-initiated merge operation. GraphQL is refused on every runner.
-async fn run_gh(
+pub(crate) async fn run_gh(
     cwd: &Path,
     binary: &Path,
     args: &[&str],
@@ -1496,6 +1496,160 @@ async fn run_gh(
         return Err("refusing to run a merge or GraphQL gh command".into());
     }
     spawn_gh(cwd, binary, args, limit).await
+}
+
+/// Mark one repository-qualified draft pull request ready for review.
+///
+/// This is a user-initiated state change, but not a merge. It stays on the
+/// general runner so the merge-only runner remains incapable of doing
+/// anything else.
+pub(crate) async fn mark_pull_request_ready(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    run_gh(
+        Path::new("."),
+        &binary,
+        &["pr", "ready", &number, "--repo", &repository],
+        GH_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| classify_observed_gh(error, &observation))
+}
+
+/// Repository-qualified merge for a PR that may not have a local Tidebreak
+/// workspace. The runner still admits only `gh pr merge` argv.
+pub(crate) async fn merge_pull_request_target(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    method: MergeMethod,
+    auto: bool,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    let mut args = vec![
+        "pr".to_owned(),
+        "merge".to_owned(),
+        number,
+        "--repo".to_owned(),
+        repository,
+        method.flag().to_owned(),
+    ];
+    if auto {
+        args.push("--auto".to_owned());
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_gh_user_merge(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(classify_merge_error)
+}
+
+/// Current host head SHA for an expected-head fence immediately before merge.
+pub(crate) async fn pull_request_head_sha(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    search_path: Option<&str>,
+) -> Result<String, GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    let raw = run_gh(
+        Path::new("."),
+        &binary,
+        &[
+            "pr",
+            "view",
+            &number,
+            "--repo",
+            &repository,
+            "--json",
+            "headRefOid",
+        ],
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(|error| classify_observed_gh(error, &observation))?;
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("headRefOid")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| GhError::user("GitHub did not report the pull request head SHA"))
+}
+
+/// Rerun only the failed jobs from one Actions workflow run.
+pub(crate) async fn rerun_failed_jobs(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
+    let mut args = vec![
+        "api".to_owned(),
+        "--method".to_owned(),
+        "POST".to_owned(),
+        endpoint,
+    ];
+    if host != "github.com" {
+        args.extend(["--hostname".to_owned(), host.to_owned()]);
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_gh(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(|error| classify_observed_gh(error, &observation))
+}
+
+pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
+    if host == "github.com" {
+        format!("{owner}/{repo}")
+    } else {
+        format!("{host}/{owner}/{repo}")
+    }
+}
+
+fn classify_observed_gh(error: String, observation: &GhObservation) -> GhError {
+    let lower = error.to_ascii_lowercase();
+    if observation.authenticated != Some(true)
+        || lower.contains("not logged")
+        || lower.contains("not signed")
+        || lower.contains("authentication")
+        || lower.contains("http 401")
+    {
+        return GhError::GhSignedOut {
+            instructions: if observation.remediation.is_empty() {
+                "gh is not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into()
+            } else {
+                observation.remediation.clone()
+            },
+        };
+    }
+    GhError::user(format!("gh failed: {error}"))
 }
 
 /// Runner reserved for the user-initiated merge endpoint. It runs only
