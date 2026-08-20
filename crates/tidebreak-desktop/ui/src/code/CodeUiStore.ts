@@ -17,7 +17,7 @@ const TERMINAL_DRAWER_HEIGHTS_KEY = "tidebreak.code-terminal-drawer-heights";
 
 /**
  * How the reader shaped the workspace rail: order, card density, which meta
- * the cards draw, and whether the archived shelf shows. One blob, one writer —
+ * the cards draw. One blob, one writer —
  * per-key storage is how preferences drift into half-migrated states.
  */
 export type CodeRailPrefs = {
@@ -26,7 +26,6 @@ export type CodeRailPrefs = {
   /** Suppressed per-card in by-repo order regardless; this is the reader's say. */
   showRepoChip: boolean;
   showBranch: boolean;
-  showArchived: boolean;
 };
 
 export const DEFAULT_RAIL_PREFS: CodeRailPrefs = {
@@ -34,7 +33,6 @@ export const DEFAULT_RAIL_PREFS: CodeRailPrefs = {
   density: "detailed",
   showRepoChip: true,
   showBranch: false,
-  showArchived: false,
 };
 
 /** What the reader picked the last time they created a workspace. */
@@ -141,7 +139,6 @@ function readStoredRailPrefs(): CodeRailPrefs {
           : DEFAULT_RAIL_PREFS.density,
       showRepoChip: flag(record.showRepoChip, DEFAULT_RAIL_PREFS.showRepoChip),
       showBranch: flag(record.showBranch, DEFAULT_RAIL_PREFS.showBranch),
-      showArchived: flag(record.showArchived, DEFAULT_RAIL_PREFS.showArchived),
     };
   } catch {
     return DEFAULT_RAIL_PREFS;

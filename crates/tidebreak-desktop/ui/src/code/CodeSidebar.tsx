@@ -1,18 +1,27 @@
 import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { Archive, Bell, GitPullRequest, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useLayoutState } from "@/panel/usePanelNav";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
+import { SidebarButton } from "@/sidebar/primitives";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeModeSwitch } from "./CodeModeSwitch";
+import {
+  unreadCodeDeliveryNotifications,
+  useCodeDeliveryStore,
+} from "./CodeDeliveryStore";
 import { CodeSubscriptionUsage } from "./CodeSubscriptionUsage";
 import { useCodeUiStore } from "./CodeUiStore";
-import { connectCodeUpdates, useCodeUpdatesStore, watchChildren } from "./CodeUpdatesStore";
+import {
+  connectCodeUpdates,
+  useCodeUpdatesStore,
+  watchChildren,
+} from "./CodeUpdatesStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { RailSettingsMenu } from "./RailSettingsMenu";
@@ -69,6 +78,9 @@ export function CodeSidebar() {
   const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
   const prefs = useCodeUiStore((state) => state.railPrefs);
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
+  const unreadNotifications = useCodeDeliveryStore((state) =>
+    unreadCodeDeliveryNotifications(state),
+  );
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const terminalOpen =
@@ -89,11 +101,23 @@ export function CodeSidebar() {
     repos,
     workspaces,
     digests,
-    { showArchived: prefs.showArchived },
   );
 
   return (
-    <SidebarFrame footer={<CodeSubscriptionUsage />}>
+    <SidebarFrame
+      footer={
+        <>
+          <CodeUtilityLinks
+            pathname={pathname}
+            unreadNotifications={unreadNotifications}
+            onNavigate={(to) => void navigate({ to })}
+          />
+          <div className="mt-1 border-t border-border-subtle pt-1">
+            <CodeSubscriptionUsage />
+          </div>
+        </>
+      }
+    >
       <CodeModeSwitch />
 
       <div className="px-2 pt-1">
@@ -284,6 +308,64 @@ export function CodeSidebar() {
       />
       <AddRepoPalette open={addRepoOpen} onOpenChange={setAddRepoOpen} />
     </SidebarFrame>
+  );
+}
+
+function CodeUtilityLinks({
+  pathname,
+  unreadNotifications,
+  onNavigate,
+}: {
+  pathname: string;
+  unreadNotifications: number;
+  onNavigate: (
+    to:
+      | "/code/delivery/pull-requests"
+      | "/code/archive"
+      | "/code/notifications",
+  ) => void;
+}) {
+  const links = [
+    {
+      label: "Delivery",
+      to: "/code/delivery/pull-requests" as const,
+      active: pathname.startsWith("/code/delivery/"),
+      icon: GitPullRequest,
+    },
+    {
+      label: "Archive",
+      to: "/code/archive" as const,
+      active: pathname === "/code/archive",
+      icon: Archive,
+    },
+    {
+      label: "Notifications",
+      to: "/code/notifications" as const,
+      active: pathname === "/code/notifications",
+      icon: Bell,
+    },
+  ];
+  return (
+    <div className="flex flex-col gap-0.5">
+      {links.map((link) => (
+        <SidebarButton
+          key={link.to}
+          type="button"
+          aria-current={link.active ? "page" : undefined}
+          data-active={link.active || undefined}
+          className="data-[active]:bg-muted"
+          onClick={() => onNavigate(link.to)}
+        >
+          <link.icon />
+          <span className="min-w-0 flex-1 truncate">{link.label}</span>
+          {link.to === "/code/notifications" && unreadNotifications > 0 && (
+            <span className="min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-[10px] font-medium leading-none text-primary-foreground">
+              {unreadNotifications > 99 ? "99+" : unreadNotifications}
+            </span>
+          )}
+        </SidebarButton>
+      ))}
+    </div>
   );
 }
 

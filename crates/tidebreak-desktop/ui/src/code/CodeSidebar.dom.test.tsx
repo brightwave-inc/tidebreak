@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeDeliveryStore } from "./CodeDeliveryStore";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
@@ -123,6 +124,7 @@ const app: AppContextValue = {
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
+  useCodeDeliveryStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({ railPrefs: DEFAULT_RAIL_PREFS });
@@ -155,6 +157,11 @@ describe("CodeSidebar", () => {
       screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delivery" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Notifications" }),
+    ).toBeInTheDocument();
     expect(
       await screen.findByRole("button", {
         name: "Subscription usage, highest window 91% used",

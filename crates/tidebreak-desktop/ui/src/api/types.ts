@@ -29,6 +29,33 @@ import {
   type SpecPreviewOperation as WireSpecPreviewOperation,
   type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
   type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
+  type CodeDeliveryActionResult as WireCodeDeliveryActionResult,
+  type CodeDeliveryCheck as WireCodeDeliveryCheck,
+  type CodeDeliveryDeploymentStatus as WireCodeDeliveryDeploymentStatus,
+  type CodeDeliveryPrAttentionReason as WireCodeDeliveryPrAttentionReason,
+  type CodeDeliveryPullRequestAction as WireCodeDeliveryPullRequestAction,
+  type CodeDeliveryPullRequestActionBody as WireCodeDeliveryPullRequestActionBody,
+  type CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
+  type CodeDeliveryPullRequestQuery as WireCodeDeliveryPullRequestQuery,
+  type CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
+  type CodeDeliveryPullRequestTarget as WireCodeDeliveryPullRequestTarget,
+  type CodeDeliveryPullRequestsPage as WireCodeDeliveryPullRequestsPage,
+  type CodeDeliveryRepositoriesSnapshot as WireCodeDeliveryRepositoriesSnapshot,
+  type CodeDeliveryRunAction as WireCodeDeliveryRunAction,
+  type CodeDeliveryRunActionBody as WireCodeDeliveryRunActionBody,
+  type CodeDeliveryRunAttentionReason as WireCodeDeliveryRunAttentionReason,
+  type CodeDeliveryRunDetail as WireCodeDeliveryRunDetail,
+  type CodeDeliveryRunKind as WireCodeDeliveryRunKind,
+  type CodeDeliveryRunQuery as WireCodeDeliveryRunQuery,
+  type CodeDeliveryRunSummary as WireCodeDeliveryRunSummary,
+  type CodeDeliveryRunTarget as WireCodeDeliveryRunTarget,
+  type CodeDeliveryRunsPage as WireCodeDeliveryRunsPage,
+  type CodeDeliverySourceError as WireCodeDeliverySourceError,
+  type CodeDeliveryWorkflowJob as WireCodeDeliveryWorkflowJob,
+  type CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
+  type CodeGitHubCapability as WireCodeGitHubCapability,
+  type CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
+  type CodeGitHubRepositoryTarget as WireCodeGitHubRepositoryTarget,
   type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
@@ -1044,6 +1071,35 @@ export type FileDownloadProgress = {
 /** A registered local git repository. */
 export type CodeRepoSnapshot = WireCodeRepoSnapshot;
 export type RepoId = WireRepoId;
+
+/** GitHub-only install-wide delivery contracts. */
+export type CodeGitHubCapability = WireCodeGitHubCapability;
+export type CodeGitHubRepositoryRef = WireCodeGitHubRepositoryRef;
+export type CodeGitHubRepositoryTarget = WireCodeGitHubRepositoryTarget;
+export type CodeDeliverySourceError = WireCodeDeliverySourceError;
+export type CodeDeliveryWorkspaceLink = WireCodeDeliveryWorkspaceLink;
+export type CodeDeliveryCheck = WireCodeDeliveryCheck;
+export type CodeDeliveryPrAttentionReason = WireCodeDeliveryPrAttentionReason;
+export type CodeDeliveryPullRequestSummary = WireCodeDeliveryPullRequestSummary;
+export type CodeDeliveryPullRequestDetail = WireCodeDeliveryPullRequestDetail;
+export type CodeDeliveryPullRequestQuery = WireCodeDeliveryPullRequestQuery;
+export type CodeDeliveryPullRequestsPage = WireCodeDeliveryPullRequestsPage;
+export type CodeDeliveryPullRequestTarget = WireCodeDeliveryPullRequestTarget;
+export type CodeDeliveryPullRequestAction = WireCodeDeliveryPullRequestAction;
+export type CodeDeliveryPullRequestActionBody = WireCodeDeliveryPullRequestActionBody;
+export type CodeDeliveryRunKind = WireCodeDeliveryRunKind;
+export type CodeDeliveryRunAttentionReason = WireCodeDeliveryRunAttentionReason;
+export type CodeDeliveryRunSummary = WireCodeDeliveryRunSummary;
+export type CodeDeliveryRunDetail = WireCodeDeliveryRunDetail;
+export type CodeDeliveryRunQuery = WireCodeDeliveryRunQuery;
+export type CodeDeliveryRunsPage = WireCodeDeliveryRunsPage;
+export type CodeDeliveryRunTarget = WireCodeDeliveryRunTarget;
+export type CodeDeliveryRunAction = WireCodeDeliveryRunAction;
+export type CodeDeliveryRunActionBody = WireCodeDeliveryRunActionBody;
+export type CodeDeliveryWorkflowJob = WireCodeDeliveryWorkflowJob;
+export type CodeDeliveryDeploymentStatus = WireCodeDeliveryDeploymentStatus;
+export type CodeDeliveryRepositoriesSnapshot = WireCodeDeliveryRepositoriesSnapshot;
+export type CodeDeliveryActionResult = WireCodeDeliveryActionResult;
 
 /** One isolated worktree + branch on a repo. */
 export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;

@@ -493,6 +493,426 @@ pub struct CodePrCommentsSnapshot {
     pub comments: Vec<tidebreak_core::PullRequestComment>,
 }
 
+/// GitHub repository identity used by the install-wide delivery surfaces.
+///
+/// `host` keeps GitHub Enterprise repositories distinct without introducing a
+/// generic provider abstraction. `tidebreak_repo_id` is present only when the
+/// repository was resolved from the current owner's registered local catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGitHubRepositoryRef {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+    pub name_with_owner: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tidebreak_repo_id: Option<RepoId>,
+}
+
+/// Minimal repository selector accepted by delivery query and action routes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGitHubRepositoryTarget {
+    #[serde(default = "default_github_host")]
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+fn default_github_host() -> String {
+    "github.com".to_owned()
+}
+
+/// Whether the local GitHub CLI can serve delivery requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeGitHubCapability {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub authenticated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub viewer_login: Option<String>,
+    pub remediation: String,
+}
+
+/// One repository-level failure in an otherwise usable aggregate response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliverySourceError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository: Option<CodeGitHubRepositoryTarget>,
+    pub kind: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Registered repositories that resolve to GitHub, plus partial failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryRepositoriesSnapshot {
+    pub capability: CodeGitHubCapability,
+    pub repositories: Vec<CodeGitHubRepositoryRef>,
+    pub errors: Vec<CodeDeliverySourceError>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Body for validating manually tracked GitHub repositories. Values may be
+/// `owner/repo`, `host/owner/repo`, or a GitHub HTTPS/SSH URL.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveCodeDeliveryRepositoriesBody {
+    pub repositories: Vec<String>,
+}
+
+/// One Tidebreak workspace that plausibly produced a remote delivery item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryWorkspaceLink {
+    pub workspace_id: WorkspaceId,
+    pub repo_id: RepoId,
+    pub title: String,
+    pub branch_name: String,
+    pub status: CodeWorkspaceStatus,
+    pub exact: bool,
+}
+
+/// Why an open pull request belongs in the default Needs attention view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeDeliveryPrAttentionReason {
+    ChangesRequested,
+    ChecksFailed,
+    Conflicts,
+    Behind,
+    Blocked,
+}
+
+/// One CI check, enriched with the workflow run that can be rerun when known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryCheck {
+    pub name: String,
+    pub bucket: tidebreak_core::PullRequestCheckBucket,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_run_id: Option<u64>,
+}
+
+/// Pull request row shared by the overview and notification monitor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryPullRequestSummary {
+    pub id: String,
+    pub repository: CodeGitHubRepositoryRef,
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub draft: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author_avatar_url: Option<String>,
+    pub head_branch: String,
+    pub base_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mergeable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merge_state_status: Option<String>,
+    pub auto_merge_enabled: bool,
+    pub checks: Vec<CodeDeliveryCheck>,
+    pub attention_reasons: Vec<CodeDeliveryPrAttentionReason>,
+    pub ready_to_merge: bool,
+    pub workspace_links: Vec<CodeDeliveryWorkspaceLink>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Server-side PR query. Saved views are client-owned; their resolved filters
+/// are sent here so paging remains bounded across many repositories.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryPullRequestQuery {
+    pub repositories: Vec<CodeGitHubRepositoryTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub review_states: Vec<String>,
+    #[serde(default)]
+    pub check_states: Vec<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub attention_only: bool,
+    #[serde(default)]
+    pub ready_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tidebreak_linked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub updated_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub limit: Option<u16>,
+}
+
+/// One page of pull requests, with repository-local failures kept alongside
+/// the usable rows instead of failing the entire cross-repository query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryPullRequestsPage {
+    pub capability: CodeGitHubCapability,
+    pub items: Vec<CodeDeliveryPullRequestSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+    pub errors: Vec<CodeDeliverySourceError>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Target for a pull-request detail read or action.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryPullRequestTarget {
+    pub repository: CodeGitHubRepositoryTarget,
+    pub number: u64,
+}
+
+/// Full PR drawer payload. Conversation entries retain the existing bounded
+/// comment contract used by workspace PRs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryPullRequestDetail {
+    pub summary: CodeDeliveryPullRequestSummary,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub changed_files: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub comments: Vec<tidebreak_core::PullRequestComment>,
+    pub can_mark_ready: bool,
+    pub can_merge: bool,
+    pub can_rerun_failed: bool,
+}
+
+/// User-initiated global PR action. Code-changing actions deliberately do not
+/// exist here; they remain workspace-scoped agent prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CodeDeliveryPullRequestAction {
+    MarkReady,
+    Merge {
+        method: CodePrMergeMethod,
+        #[serde(default)]
+        auto: bool,
+        expected_head_sha: String,
+    },
+    RerunFailed {
+        workflow_run_ids: Vec<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryPullRequestActionBody {
+    pub target: CodeDeliveryPullRequestTarget,
+    pub action: CodeDeliveryPullRequestAction,
+}
+
+/// Successful delivery mutation; callers refresh the affected detail after
+/// showing this bounded result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryActionResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeDeliveryRunKind {
+    WorkflowRun,
+    Deployment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeDeliveryRunAttentionReason {
+    Failure,
+    TimedOut,
+    ActionRequired,
+    StartupFailure,
+}
+
+/// Normalized Actions workflow run or GitHub deployment row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryRunSummary {
+    pub id: String,
+    pub repository: CodeGitHubRepositoryRef,
+    pub kind: CodeDeliveryRunKind,
+    pub github_id: u64,
+    pub name: String,
+    pub url: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub conclusion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor: Option<String>,
+    pub attention_reasons: Vec<CodeDeliveryRunAttentionReason>,
+    pub workspace_links: Vec<CodeDeliveryWorkspaceLink>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryRunQuery {
+    pub repositories: Vec<CodeGitHubRepositoryTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub kinds: Vec<CodeDeliveryRunKind>,
+    #[serde(default)]
+    pub statuses: Vec<String>,
+    #[serde(default)]
+    pub conclusions: Vec<String>,
+    #[serde(default)]
+    pub workflows: Vec<String>,
+    #[serde(default)]
+    pub environments: Vec<String>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub actors: Vec<String>,
+    #[serde(default)]
+    pub attention_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tidebreak_linked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub created_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub limit: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryRunsPage {
+    pub capability: CodeGitHubCapability,
+    pub items: Vec<CodeDeliveryRunSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+    pub errors: Vec<CodeDeliverySourceError>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryRunTarget {
+    pub repository: CodeGitHubRepositoryTarget,
+    pub kind: CodeDeliveryRunKind,
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryWorkflowJob {
+    pub id: u64,
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub conclusion: Option<String>,
+    pub url: String,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub failed_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryDeploymentStatus {
+    pub id: u64,
+    pub state: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environment_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub log_url: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryRunDetail {
+    pub summary: CodeDeliveryRunSummary,
+    pub jobs: Vec<CodeDeliveryWorkflowJob>,
+    pub deployment_statuses: Vec<CodeDeliveryDeploymentStatus>,
+    pub can_rerun_failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CodeDeliveryRunAction {
+    RerunFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeDeliveryRunActionBody {
+    pub target: CodeDeliveryRunTarget,
+    pub action: CodeDeliveryRunAction,
+}
+
 /// Bounded output of one named quick action. Never journaled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeActionSnapshot {

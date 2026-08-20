@@ -7,6 +7,7 @@
 //! `require_admin`.
 
 mod approvals;
+mod delivery;
 mod git;
 mod harnesses;
 mod repos;
@@ -20,6 +21,13 @@ mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use approvals::{decide_approval, list_approvals};
+pub(crate) use delivery::{
+    act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,
+    discover_repositories as discover_delivery_repositories,
+    pull_request_detail as delivery_pull_request_detail,
+    query_pull_requests as query_delivery_pull_requests, query_runs as query_delivery_runs,
+    resolve_repositories as resolve_delivery_repositories, run_detail as delivery_run_detail,
+};
 pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,
     merge_workspace_pr, push_workspace, refresh_workspace_pr, run_workspace_action,
@@ -45,13 +53,17 @@ pub(crate) use terminals::{
 #[allow(unused_imports)]
 pub(crate) use types::{
     CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeFileChange, CodeHarnessInstallSnapshot,
-    CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug,
-    CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
-    CodeTerminalSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, HarnessDoctorReport,
-    HarnessModelList, MergeCodePrBody, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeDeliveryActionResult,
+    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
+    CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
+    CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
+    CodeDeliveryRunsPage, CodeFileChange, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot,
+    CodePushSnapshot, CodeRepoSnapshot, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
+    CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot,
+    CodeWorkspaceTree, CodeWorktreeRoot, HarnessDoctorReport, HarnessModelList, MergeCodePrBody,
+    QueuedCodeTurn, ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame,
     SetCodeWorktreeRootBody,
 };
 pub(crate) use updates::code_updates;

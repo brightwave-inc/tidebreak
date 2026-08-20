@@ -102,6 +102,18 @@ import {
   type CodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot,
   type CodeSubscriptionUsage,
+  type CodeDeliveryActionResult,
+  type CodeDeliveryPullRequestActionBody,
+  type CodeDeliveryPullRequestDetail,
+  type CodeDeliveryPullRequestQuery,
+  type CodeDeliveryPullRequestTarget,
+  type CodeDeliveryPullRequestsPage,
+  type CodeDeliveryRepositoriesSnapshot,
+  type CodeDeliveryRunActionBody,
+  type CodeDeliveryRunDetail,
+  type CodeDeliveryRunQuery,
+  type CodeDeliveryRunTarget,
+  type CodeDeliveryRunsPage,
   type HarnessDoctorReport,
   type HarnessKind,
   type SequencedCodeEventFrame,
@@ -153,6 +165,12 @@ import {
   parseSequencedCodeEvent,
   parseCodeUpdateNotice,
   parseCodeSubscriptionUsage,
+  parseCodeDeliveryActionResult,
+  parseCodeDeliveryPullRequestDetail,
+  parseCodeDeliveryPullRequestsPage,
+  parseCodeDeliveryRepositories,
+  parseCodeDeliveryRunDetail,
+  parseCodeDeliveryRunsPage,
 } from "../code/parsers";
 
 const WS_HANDSHAKE = "tidebreak-v1";
@@ -1666,6 +1684,122 @@ export class ApiClient {
       }
     };
     return socket;
+  }
+
+  async getCodeDeliveryRepositories(): Promise<CodeDeliveryRepositoriesSnapshot> {
+    return requireParsed(
+      parseCodeDeliveryRepositories(
+        await this.json("/code/delivery/repositories", {
+          headers: this.headers(),
+        }),
+      ),
+      "code delivery repositories",
+    );
+  }
+
+  async resolveCodeDeliveryRepositories(
+    repositories: string[],
+  ): Promise<CodeDeliveryRepositoriesSnapshot> {
+    return requireParsed(
+      parseCodeDeliveryRepositories(
+        await this.json("/code/delivery/repositories/resolve", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ repositories }),
+        }),
+      ),
+      "code delivery repositories",
+    );
+  }
+
+  async queryCodeDeliveryPullRequests(
+    query: CodeDeliveryPullRequestQuery,
+  ): Promise<CodeDeliveryPullRequestsPage> {
+    return requireParsed(
+      parseCodeDeliveryPullRequestsPage(
+        await this.json("/code/delivery/pull-requests/query", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(query),
+        }),
+      ),
+      "code delivery pull requests",
+    );
+  }
+
+  async getCodeDeliveryPullRequestDetail(
+    target: CodeDeliveryPullRequestTarget,
+  ): Promise<CodeDeliveryPullRequestDetail> {
+    return requireParsed(
+      parseCodeDeliveryPullRequestDetail(
+        await this.json("/code/delivery/pull-requests/detail", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(target),
+        }),
+      ),
+      "code delivery pull request detail",
+    );
+  }
+
+  async runCodeDeliveryPullRequestAction(
+    body: CodeDeliveryPullRequestActionBody,
+  ): Promise<CodeDeliveryActionResult> {
+    return requireParsed(
+      parseCodeDeliveryActionResult(
+        await this.json("/code/delivery/pull-requests/action", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code delivery pull request action",
+    );
+  }
+
+  async queryCodeDeliveryRuns(
+    query: CodeDeliveryRunQuery,
+  ): Promise<CodeDeliveryRunsPage> {
+    return requireParsed(
+      parseCodeDeliveryRunsPage(
+        await this.json("/code/delivery/runs/query", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(query),
+        }),
+      ),
+      "code delivery runs",
+    );
+  }
+
+  async getCodeDeliveryRunDetail(
+    target: CodeDeliveryRunTarget,
+  ): Promise<CodeDeliveryRunDetail> {
+    return requireParsed(
+      parseCodeDeliveryRunDetail(
+        await this.json("/code/delivery/runs/detail", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(target),
+        }),
+      ),
+      "code delivery run detail",
+    );
+  }
+
+  async runCodeDeliveryRunAction(
+    body: CodeDeliveryRunActionBody,
+  ): Promise<CodeDeliveryActionResult> {
+    return requireParsed(
+      parseCodeDeliveryActionResult(
+        await this.json("/code/delivery/runs/action", {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(body),
+        }),
+      ),
+      "code delivery run action",
+    );
   }
 
   async listCodeRepos(): Promise<CodeRepoSnapshot[]> {

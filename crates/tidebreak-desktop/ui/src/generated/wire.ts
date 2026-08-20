@@ -878,6 +878,98 @@ export type CodeCloneJobSnapshot = { id: string, phase: string, percent?: number
 export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat, };
 
 /**
+ * Successful delivery mutation; callers refresh the affected detail after
+ * showing this bounded result.
+ */
+export type CodeDeliveryActionResult = { success: boolean, message: string, };
+
+/**
+ * One CI check, enriched with the workflow run that can be rerun when known.
+ */
+export type CodeDeliveryCheck = { name: string, bucket: PullRequestCheckBucket, detail?: string, url?: string, workflow_run_id?: number, };
+
+export type CodeDeliveryDeploymentStatus = { id: number, state: string, description: string, environment_url?: string, log_url?: string, created_at: string, };
+
+/**
+ * Why an open pull request belongs in the default Needs attention view.
+ */
+export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed" | "conflicts" | "behind" | "blocked";
+
+/**
+ * User-initiated global PR action. Code-changing actions deliberately do not
+ * exist here; they remain workspace-scoped agent prompts.
+ */
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, expected_head_sha: string, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, };
+
+export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullRequestTarget, action: CodeDeliveryPullRequestAction, };
+
+/**
+ * Full PR drawer payload. Conversation entries retain the existing bounded
+ * comment contract used by workspace PRs.
+ */
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, changed_files: number, additions: number, deletions: number, comments: Array<PullRequestComment>, can_mark_ready: boolean, can_merge: boolean, can_rerun_failed: boolean, };
+
+/**
+ * Server-side PR query. Saved views are client-owned; their resolved filters
+ * are sent here so paging remains bounded across many repositories.
+ */
+export type CodeDeliveryPullRequestQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, states: Array<string>, review_states: Array<string>, check_states: Array<string>, authors: Array<string>, attention_only: boolean, ready_only: boolean, tidebreak_linked?: boolean, updated_after?: string, cursor?: string, limit?: number, };
+
+/**
+ * Pull request row shared by the overview and notification monitor.
+ */
+export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, created_at: string, updated_at: string, };
+
+/**
+ * Target for a pull-request detail read or action.
+ */
+export type CodeDeliveryPullRequestTarget = { repository: CodeGitHubRepositoryTarget, number: number, };
+
+/**
+ * One page of pull requests, with repository-local failures kept alongside
+ * the usable rows instead of failing the entire cross-repository query.
+ */
+export type CodeDeliveryPullRequestsPage = { capability: CodeGitHubCapability, items: Array<CodeDeliveryPullRequestSummary>, next_cursor?: string, errors: Array<CodeDeliverySourceError>, fetched_at: string, };
+
+/**
+ * Registered repositories that resolve to GitHub, plus partial failures.
+ */
+export type CodeDeliveryRepositoriesSnapshot = { capability: CodeGitHubCapability, repositories: Array<CodeGitHubRepositoryRef>, errors: Array<CodeDeliverySourceError>, fetched_at: string, };
+
+export type CodeDeliveryRunAction = { "type": "rerun_failed" };
+
+export type CodeDeliveryRunActionBody = { target: CodeDeliveryRunTarget, action: CodeDeliveryRunAction, };
+
+export type CodeDeliveryRunAttentionReason = "failure" | "timed_out" | "action_required" | "startup_failure";
+
+export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean, };
+
+export type CodeDeliveryRunKind = "workflow_run" | "deployment";
+
+export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number, };
+
+/**
+ * Normalized Actions workflow run or GitHub deployment row.
+ */
+export type CodeDeliveryRunSummary = { id: string, repository: CodeGitHubRepositoryRef, kind: CodeDeliveryRunKind, github_id: number, name: string, url: string, status: string, conclusion?: string, workflow?: string, environment?: string, branch?: string, sha?: string, event?: string, actor?: string, attention_reasons: Array<CodeDeliveryRunAttentionReason>, workspace_links: Array<CodeDeliveryWorkspaceLink>, created_at: string, updated_at: string, };
+
+export type CodeDeliveryRunTarget = { repository: CodeGitHubRepositoryTarget, kind: CodeDeliveryRunKind, id: number, };
+
+export type CodeDeliveryRunsPage = { capability: CodeGitHubCapability, items: Array<CodeDeliveryRunSummary>, next_cursor?: string, errors: Array<CodeDeliverySourceError>, fetched_at: string, };
+
+/**
+ * One repository-level failure in an otherwise usable aggregate response.
+ */
+export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget, kind: string, message: string, retry_at?: string, };
+
+export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string, conclusion?: string, url: string, started_at: string | null, completed_at: string | null, failed_steps: Array<string>, };
+
+/**
+ * One Tidebreak workspace that plausibly produced a remote delivery item.
+ */
+export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean, };
+
+/**
  * One event in an external agent-engine session's journal.
  *
  * Serialized as an internally-tagged union (a `type` field selects the
@@ -1139,6 +1231,25 @@ export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_s
  * One changed path in a workspace or turn file list.
  */
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
+
+/**
+ * Whether the local GitHub CLI can serve delivery requests.
+ */
+export type CodeGitHubCapability = { found: boolean, authenticated?: boolean, viewer_login?: string, remediation: string, };
+
+/**
+ * GitHub repository identity used by the install-wide delivery surfaces.
+ *
+ * `host` keeps GitHub Enterprise repositories distinct without introducing a
+ * generic provider abstraction. `tidebreak_repo_id` is present only when the
+ * repository was resolved from the current owner's registered local catalog.
+ */
+export type CodeGitHubRepositoryRef = { host: string, owner: string, name: string, name_with_owner: string, url: string, default_branch?: string, tidebreak_repo_id?: RepoId, };
+
+/**
+ * Minimal repository selector accepted by delivery query and action routes.
+ */
+export type CodeGitHubRepositoryTarget = { host: string, owner: string, name: string, };
 
 /**
  * State of one warm harness install, returned by
@@ -3249,6 +3360,12 @@ export type RepoId = string;
  * (or whether) to map it to a local picker location.
  */
 export type RequestedFolderHint = "documents" | "downloads";
+
+/**
+ * Body for validating manually tracked GitHub repositories. Values may be
+ * `owner/repo`, `host/owner/repo`, or a GitHub HTTPS/SSH URL.
+ */
+export type ResolveCodeDeliveryRepositoriesBody = { repositories: Array<string>, };
 
 /**
  * Whether a `rest_api` record's referenced credential currently resolves.

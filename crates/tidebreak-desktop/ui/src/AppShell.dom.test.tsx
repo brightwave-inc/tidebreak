@@ -147,6 +147,15 @@ vi.mock("./api", () => ({
     getHarnessDoctor = getHarnessDoctor;
     getCodeWorktreeRoot = getCodeWorktreeRoot;
     listCodeHarnessModels = listCodeHarnessModels;
+    getCodeDeliveryRepositories = vi.fn(async () => ({
+      capability: {
+        found: false,
+        remediation: "GitHub CLI is not available in this test.",
+      },
+      repositories: [],
+      errors: [],
+      fetched_at: "2026-08-20T12:00:00.000Z",
+    }));
     openCodeUpdates = vi.fn(() => ({
       close() {},
       addEventListener() {},

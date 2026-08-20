@@ -436,6 +436,29 @@ mod tests {
         // The merge request body, so the renderer sends exactly the accepted
         // method vocabulary.
         generate::collect_from::<crate::routes::code::MergeCodePrBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryRepositoriesSnapshot>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::ResolveCodeDeliveryRepositoriesBody>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestQuery>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestsPage>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestTarget>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestDetail>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestActionBody>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::routes::code::CodeDeliveryRunQuery>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryRunsPage>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryRunTarget>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryRunDetail>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryRunActionBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeDeliveryActionResult>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeActionSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeCloneJobSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeHarnessInstallSnapshot>(&cfg, &mut out);

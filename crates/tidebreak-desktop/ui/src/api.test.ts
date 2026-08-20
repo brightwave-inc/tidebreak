@@ -1728,3 +1728,252 @@ describe("restoring a workspace", () => {
     });
   });
 });
+
+describe("code delivery API", () => {
+  const capability = {
+    found: true,
+    authenticated: true,
+    viewer_login: "mara",
+    remediation: "",
+  };
+  const repository = {
+    host: "github.com",
+    owner: "brightwave-inc",
+    name: "tidebreak",
+    name_with_owner: "brightwave-inc/tidebreak",
+    url: "https://github.com/brightwave-inc/tidebreak",
+    default_branch: "main",
+    tidebreak_repo_id: "repo-1",
+  };
+  const target = {
+    host: repository.host,
+    owner: repository.owner,
+    name: repository.name,
+  };
+  const pullRequest = {
+    id: "github.com/brightwave-inc/tidebreak#2248",
+    repository,
+    number: 2248,
+    url: "https://github.com/brightwave-inc/tidebreak/pull/2248",
+    title: "Build the delivery center",
+    state: "open",
+    draft: false,
+    head_branch: "thet/delivery-center",
+    base_branch: "main",
+    head_sha: "abc123",
+    auto_merge_enabled: false,
+    checks: [],
+    attention_reasons: [],
+    ready_to_merge: true,
+    workspace_links: [],
+    created_at: "2026-08-19T12:00:00.000Z",
+    updated_at: "2026-08-20T12:00:00.000Z",
+  };
+  const run = {
+    id: "github.com/brightwave-inc/tidebreak:workflow_run:77",
+    repository,
+    kind: "workflow_run",
+    github_id: 77,
+    name: "Desktop CI",
+    url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
+    status: "completed",
+    conclusion: "failure",
+    attention_reasons: ["failure"],
+    workspace_links: [],
+    created_at: "2026-08-20T11:00:00.000Z",
+    updated_at: "2026-08-20T12:05:00.000Z",
+  };
+
+  it("uses the repository discovery and resolution routes", async () => {
+    const snapshot = {
+      capability,
+      repositories: [repository],
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(snapshot), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(snapshot), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(client.getCodeDeliveryRepositories()).resolves.toEqual(snapshot);
+    await expect(
+      client.resolveCodeDeliveryRepositories([
+        "brightwave-inc/tidebreak",
+        "github.com/brightwave-inc/docs",
+      ]),
+    ).resolves.toEqual(snapshot);
+
+    const [listUrl, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(listUrl).toBe("http://127.0.0.1/code/delivery/repositories");
+    expect(listInit.method ?? "GET").toBe("GET");
+
+    const [resolveUrl, resolveInit] = fetchMock.mock.calls[1] as [
+      string,
+      RequestInit,
+    ];
+    expect(resolveUrl).toBe(
+      "http://127.0.0.1/code/delivery/repositories/resolve",
+    );
+    expect(resolveInit.method).toBe("POST");
+    expect(JSON.parse(String(resolveInit.body))).toEqual({
+      repositories: [
+        "brightwave-inc/tidebreak",
+        "github.com/brightwave-inc/docs",
+      ],
+    });
+  });
+
+  it("posts pull request queries, details, and actions without rewriting bodies", async () => {
+    const page = {
+      capability,
+      items: [pullRequest],
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+    const detail = {
+      summary: pullRequest,
+      body: "Delivery overview.",
+      labels: [],
+      assignees: [],
+      changed_files: 3,
+      additions: 24,
+      deletions: 6,
+      comments: [],
+      can_mark_ready: false,
+      can_merge: true,
+      can_rerun_failed: false,
+    };
+    const actionResult = { success: true, message: "Merged pull request #2248." };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(page), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(detail), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(actionResult), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const query = {
+      repositories: [target],
+      search: "delivery",
+      states: ["open"],
+      review_states: ["approved"],
+      check_states: ["pass"],
+      authors: ["mara"],
+      attention_only: false,
+      ready_only: true,
+      tidebreak_linked: true,
+      cursor: "next-pr-page",
+      limit: 50,
+    };
+    const prTarget = { repository: target, number: 2248 };
+    const action = {
+      target: prTarget,
+      action: {
+        type: "merge" as const,
+        method: "squash" as const,
+        auto: true,
+        expected_head_sha: "abc123",
+      },
+    };
+
+    await expect(client.queryCodeDeliveryPullRequests(query)).resolves.toEqual(page);
+    await expect(client.getCodeDeliveryPullRequestDetail(prTarget)).resolves.toEqual(
+      detail,
+    );
+    await expect(client.runCodeDeliveryPullRequestAction(action)).resolves.toEqual(
+      actionResult,
+    );
+
+    const expected = [
+      ["/code/delivery/pull-requests/query", query],
+      ["/code/delivery/pull-requests/detail", prTarget],
+      ["/code/delivery/pull-requests/action", action],
+    ] as const;
+    expected.forEach(([path, body], index) => {
+      const [url, init] = fetchMock.mock.calls[index] as [string, RequestInit];
+      expect(url).toBe(`http://127.0.0.1${path}`);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toEqual(body);
+    });
+  });
+
+  it("posts combined run and deployment queries, details, and actions", async () => {
+    const page = {
+      capability,
+      items: [run],
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+    const detail = {
+      summary: run,
+      jobs: [],
+      deployment_statuses: [],
+      can_rerun_failed: true,
+    };
+    const actionResult = { success: true, message: "Failed jobs queued." };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(page), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(detail), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(actionResult), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const query = {
+      repositories: [target],
+      search: "Desktop",
+      kinds: ["workflow_run" as const, "deployment" as const],
+      statuses: ["completed"],
+      conclusions: ["failure"],
+      workflows: ["Desktop CI"],
+      environments: ["production"],
+      branches: ["main"],
+      events: ["push"],
+      actors: ["mara"],
+      attention_only: true,
+      tidebreak_linked: false,
+      created_after: "2026-08-19T12:00:00.000Z",
+      limit: 100,
+    };
+    const runTarget = {
+      repository: target,
+      kind: "workflow_run" as const,
+      id: 77,
+    };
+    const action = {
+      target: runTarget,
+      action: { type: "rerun_failed" as const },
+    };
+
+    await expect(client.queryCodeDeliveryRuns(query)).resolves.toEqual(page);
+    await expect(client.getCodeDeliveryRunDetail(runTarget)).resolves.toEqual(detail);
+    await expect(client.runCodeDeliveryRunAction(action)).resolves.toEqual(
+      actionResult,
+    );
+
+    const expected = [
+      ["/code/delivery/runs/query", query],
+      ["/code/delivery/runs/detail", runTarget],
+      ["/code/delivery/runs/action", action],
+    ] as const;
+    expected.forEach(([path, body], index) => {
+      const [url, init] = fetchMock.mock.calls[index] as [string, RequestInit];
+      expect(url).toBe(`http://127.0.0.1${path}`);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toEqual(body);
+    });
+  });
+});

@@ -30,13 +30,18 @@ use tidebreak_harness::ApprovalDecision;
 
 use super::checkpoint::ChangedFile;
 use super::clone::CloneRequest;
+use super::delivery;
 use super::gh::{self, ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
 use super::runtime::{CodeRuntime, RepoRegistration, SubmitTurnOutcome};
 use super::worktree;
 use crate::error::ServerError;
 use crate::principal::AuthContext;
 use crate::routes::code::types::{
-    CodeCloneDefaults, CodeCloneJobSnapshot, CodeHarnessInstallSnapshot,
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeDeliveryActionResult,
+    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
+    CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
+    CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
+    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, ResolveCodeDeliveryRepositoriesBody,
 };
 use crate::state::AppState;
 
@@ -117,6 +122,66 @@ impl ScopedCode {
         id: uuid::Uuid,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
         self.runtime.get_clone_job(id)
+    }
+
+    // ------------------------------------------------------------------
+    // Install-wide GitHub delivery views. Remote state is live and cached;
+    // workspace correlation remains scoped to this owner.
+    // ------------------------------------------------------------------
+
+    pub(crate) async fn discover_delivery_repositories(
+        &self,
+    ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
+        delivery::discover_repositories(&self.runtime, &self.owner).await
+    }
+
+    pub(crate) async fn resolve_delivery_repositories(
+        &self,
+        body: ResolveCodeDeliveryRepositoriesBody,
+    ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
+        delivery::resolve_repositories(&self.runtime, body).await
+    }
+
+    pub(crate) async fn query_delivery_pull_requests(
+        &self,
+        query: CodeDeliveryPullRequestQuery,
+    ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
+        delivery::query_pull_requests(&self.runtime, &self.owner, query).await
+    }
+
+    pub(crate) async fn delivery_pull_request_detail(
+        &self,
+        target: CodeDeliveryPullRequestTarget,
+    ) -> Result<CodeDeliveryPullRequestDetail, ServerError> {
+        delivery::pull_request_detail(&self.runtime, &self.owner, target).await
+    }
+
+    pub(crate) async fn act_on_delivery_pull_request(
+        &self,
+        body: CodeDeliveryPullRequestActionBody,
+    ) -> Result<CodeDeliveryActionResult, ServerError> {
+        delivery::act_on_pull_request(&self.runtime, body).await
+    }
+
+    pub(crate) async fn query_delivery_runs(
+        &self,
+        query: CodeDeliveryRunQuery,
+    ) -> Result<CodeDeliveryRunsPage, ServerError> {
+        delivery::query_runs(&self.runtime, &self.owner, query).await
+    }
+
+    pub(crate) async fn delivery_run_detail(
+        &self,
+        target: CodeDeliveryRunTarget,
+    ) -> Result<CodeDeliveryRunDetail, ServerError> {
+        delivery::run_detail(&self.runtime, &self.owner, target).await
+    }
+
+    pub(crate) async fn act_on_delivery_run(
+        &self,
+        body: CodeDeliveryRunActionBody,
+    ) -> Result<CodeDeliveryActionResult, ServerError> {
+        delivery::act_on_run(&self.runtime, body).await
     }
 
     pub(crate) async fn worktree_root(

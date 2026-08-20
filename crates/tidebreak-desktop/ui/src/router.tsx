@@ -22,6 +22,9 @@ import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
+import { CodeArchivePage } from "./code/CodeArchivePage";
+import { CodeDeliveryPage } from "./code/CodeDeliveryPage";
+import { CodeNotificationsPage } from "./code/CodeNotificationsPage";
 import { CodeRepoPage } from "./code/CodeRepoPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
@@ -210,6 +213,30 @@ const codeWorkspaceRoute = createRoute({
   component: CodeWorkspaceRouteComponent,
 });
 
+const codeDeliveryPullRequestsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/delivery/pull-requests",
+  component: () => <CodeDeliveryPage surface="pull_requests" />,
+});
+
+const codeDeliveryRunsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/delivery/runs",
+  component: () => <CodeDeliveryPage surface="runs" />,
+});
+
+const codeArchiveRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/archive",
+  component: CodeArchivePage,
+});
+
+const codeNotificationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/notifications",
+  component: CodeNotificationsPage,
+});
+
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
   return <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />;
@@ -317,6 +344,10 @@ export const routeTree = rootRoute.addChildren([
   codeRoute,
   codeRepoRoute,
   codeWorkspaceRoute,
+  codeDeliveryPullRequestsRoute,
+  codeDeliveryRunsRoute,
+  codeArchiveRoute,
+  codeNotificationsRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,
