@@ -313,10 +313,19 @@ fn signal_process_group(process_group: libc::pid_t, signal: libc::c_int) -> io::
     }
 
     let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
+    match error.raw_os_error() {
+        // The group is gone entirely.
+        Some(libc::ESRCH) => Ok(()),
+        // macOS answers EPERM, not ESRCH, for a group whose only members
+        // are unreaped zombies: signals cannot be posted to a zombie, and
+        // the group still exists through it, so the kernel reports the
+        // delivery as refused. The leader is deliberately kept unreaped to
+        // pin the group id (see [`ProcessTreeChild::interrupt`]), so an
+        // engine that exits just as a stop arrives lands exactly here.
+        // Nothing is left to signal; the caller's wait() reports the true
+        // exit.
+        Some(libc::EPERM) if cfg!(target_os = "macos") => Ok(()),
+        _ => Err(error),
     }
 }
 
@@ -591,6 +600,26 @@ mod unix_process_tree_tests {
 
     const ASSERTION_TIMEOUT: Duration = Duration::from_secs(5);
     const INTERRUPT_GRACE: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn interrupting_after_the_tree_already_exited_is_not_an_error() {
+        // The leader stays unreaped to pin the group id, and macOS reports
+        // EPERM for a group holding only zombies. A stop racing an engine
+        // that just finished must succeed, not surface a permission error.
+        let mut command = Command::new("/usr/bin/true");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = spawn_process_tree(&mut command).unwrap();
+        sleep(Duration::from_millis(300)).await;
+
+        let status = timeout(ASSERTION_TIMEOUT, child.interrupt(INTERRUPT_GRACE))
+            .await
+            .expect("interrupt of an exited tree completed")
+            .unwrap();
+        assert!(status.success(), "true exited nonzero: {status:?}");
+    }
 
     #[tokio::test]
     async fn interrupting_a_process_tree_stops_an_int_ignoring_descendant() {
