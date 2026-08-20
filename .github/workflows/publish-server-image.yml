@@ -259,13 +259,22 @@ jobs:
         run: |
           docker build \
             --file deploy/self-host/Dockerfile \
+            --build-arg "TIDEBREAK_VERSION=$VERSION" \
             --tag "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" \
             .
 
       - name: Smoke test the built binary
         run: |
-          docker run --rm --entrypoint /usr/local/bin/tidebreak \
-            "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" --version
+          # Proves the binary executes on this architecture, and that it
+          # carries the release it claims to. A published image whose version
+          # is a guess is worse than one that cannot answer.
+          reported="$(docker run --rm --entrypoint /usr/local/bin/tidebreak \
+            "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" --version)"
+          echo "$reported"
+          [[ "$reported" = "tidebreak $VERSION" ]] || {
+            echo "Expected 'tidebreak $VERSION'." >&2
+            exit 1
+          }
 
       - name: Push the per-architecture tag
         run: docker push "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}"

@@ -33,6 +33,13 @@ WORKDIR /src
 # every path the workspace manifests reference.
 COPY . .
 
+# The release this image carries, reported by `tidebreak --version`. The
+# workspace manifest stays at 0.0.0, so without this the binary cannot state
+# which release it is. The default is the honest answer for a local build; the
+# publish workflow passes the release tag. Docker exposes an ARG to the RUN
+# below as an environment variable, which is where `option_env!` reads it.
+ARG TIDEBREAK_VERSION="0.0.0-unreleased"
+
 # `--features tidebreak-server/postgres` reaches through the CLI into the
 # server crate's feature, because the feature lives there and the CLI takes
 # tidebreak-server with default features. Without it the self-host boot has no
