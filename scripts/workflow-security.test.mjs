@@ -287,6 +287,45 @@ test("release-drafter retains a stable draft tag after formatting", () => {
   assert.match(draftJob, /jq -r \.action/);
 });
 
+test("publishing a release dispatches the server image build", () => {
+  // A release this workflow publishes raises no `release` event, because the
+  // PATCH that publishes it runs on GITHUB_TOKEN. Relying on the declared
+  // `release` trigger alone shipped a release with no server image and no
+  // failed run to notice. The dispatch is the working path; assert it stays.
+  const finalizeJob = workflowJob(workflows["release.yml"], "finalize_release");
+  assert.match(finalizeJob, /actions: write/);
+  const dispatchAt = finalizeJob.indexOf(
+    "gh workflow run publish-server-image.yml",
+  );
+  assert.notEqual(
+    dispatchAt,
+    -1,
+    "finalize_release must dispatch the server image build",
+  );
+  assert.match(
+    finalizeJob.slice(dispatchAt, dispatchAt + 200),
+    /--field "release_tag=\$RELEASE_TAG"/,
+  );
+
+  // Dispatch only on the draft-to-published transition. Re-running the release
+  // workflow against an already-published release must not rebuild an image,
+  // because a version tag that exists on GHCR fails the publish.
+  const dispatchStep = finalizeJob.slice(
+    finalizeJob.lastIndexOf("- name:", dispatchAt),
+    dispatchAt,
+  );
+  assert.match(
+    dispatchStep,
+    /if: \$\{\{ needs\.validate\.outputs\.draft == 'true' \}\}/,
+  );
+
+  // The declared trigger stays for a release published by hand in the UI.
+  assert.match(
+    workflows["publish-server-image.yml"],
+    /^on:\n {2}release:\n {4}types: \[published\]$/m,
+  );
+});
+
 test("workflow container images are pinned by digest", () => {
   for (const [name, source] of Object.entries(workflows)) {
     for (const match of source.matchAll(/^\s*image:\s*([^\s#]+)/gm)) {

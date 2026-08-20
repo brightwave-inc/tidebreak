@@ -2424,6 +2424,22 @@ jobs:
             '.published_at | select(type == "string" and length > 0)' \
             <<<"$release_json")"
           echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
+      - name: Publish the server image for this release
+        if: ${{ needs.validate.outputs.draft == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          # publish-server-image.yml declares `on: release: [published]`, but
+          # that trigger cannot fire for a release this job publishes: the
+          # PATCH above runs on GITHUB_TOKEN, and GitHub does not start a
+          # workflow run from an event that token created. workflow_dispatch is
+          # one of the two exceptions to that rule, so dispatch it explicitly.
+          # The release trigger stays declared for a release someone publishes
+          # by hand in the UI, which carries a user token and does fire.
+          gh workflow run publish-server-image.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main --field "release_tag=$RELEASE_TAG"
+
       - name: Refresh the next release draft
         if: ${{ needs.validate.outputs.draft == 'true' }}
         env:
