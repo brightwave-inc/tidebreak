@@ -99,6 +99,43 @@ struct DocumentSummaryRow {
     updated_at: chrono::DateTime<Utc>,
 }
 
+/// How long a SQLite writer waits for the write lock before it gives up.
+///
+/// sqlx defaults to 5s, which a real turn write can exceed while a fleet runs;
+/// waiting is better than surfacing "database is locked" to the caller.
+#[cfg(feature = "sqlite")]
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Apply the write policy that a `PRAGMA` at connect time cannot.
+///
+/// Constraint: `synchronous` and `busy_timeout` are per-connection settings,
+/// so a pool larger than one connection only honours them if they ride the
+/// connect options. `journal_mode` is the exception — it is a persistent
+/// file-level setting, which is why WAL stays a one-shot `PRAGMA` below.
+///
+/// `synchronous=NORMAL` is the standard WAL pairing: WAL already keeps a
+/// commit durable across a process crash, and the default `FULL` buys
+/// durability across a power loss by fsyncing every commit — expensive on
+/// macOS, and it lengthens every write while SQLite's single writer is the
+/// contended resource (#2316).
+///
+/// SeaORM only applies this hook to the SQLite driver, so it is a no-op for a
+/// Postgres self-host.
+#[cfg(feature = "sqlite")]
+fn with_sqlite_write_policy(mut options: ConnectOptions) -> ConnectOptions {
+    options.map_sqlx_sqlite_opts(|sqlite| {
+        sqlite
+            .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Normal)
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+    });
+    options
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn with_sqlite_write_policy(options: ConnectOptions) -> ConnectOptions {
+    options
+}
+
 impl DbStore {
     /// Connect to `url` and run migrations. For a SQLite file that should be
     /// created if missing, include `?mode=rwc` (e.g.
@@ -113,6 +150,7 @@ impl DbStore {
     /// hosts and integration fixtures that need deliberate pool sizing or
     /// timeout policy rather than SeaORM's defaults.
     pub async fn connect_with_options(options: ConnectOptions) -> Result<Self> {
+        let options = with_sqlite_write_policy(options);
         let conn = Database::connect(options).await.map_err(store_err)?;
         // WAL lets a reader (e.g. the UI listing chats) proceed concurrently
         // with a writer (a turn appending messages). SQLite-only; it's a

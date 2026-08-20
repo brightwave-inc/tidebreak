@@ -662,6 +662,21 @@ pub(in crate::db) async fn claim_agent_run(
         max_running_per_chat,
     )?;
 
+    // Idle fast path. Every branch of the scan below acts only on a background
+    // run in one of `SCANNABLE_CLAIM_STATUSES`, so when none exists the scan
+    // has nothing to decide — but the durable claim lock it would take to
+    // discover that is an `UPDATE`, which makes an idle poll a write
+    // transaction on SQLite's single writer. Fleet-wide, those polls serialize
+    // behind real turn writes, hold their pooled connection while they wait,
+    // and starve every other request in the process (#2316).
+    //
+    // Reading it outside the lock is safe: the locked scan below stays the
+    // authority for every decision, and a run that appears right after this
+    // check is claimed by the next poll (the worker also wakes on notify).
+    if !any_scannable_agent_run_on(&store.conn).await? {
+        return Ok(None);
+    }
+
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_agent_run_claim_lock(&transaction).await?;
@@ -1270,6 +1285,49 @@ pub(in crate::db) async fn reclaim_container_agent_run(
 /// is enough; past it the row only exists to be swept.
 const EMPTY_CLAIM_SCAN_RETENTION: chrono::Duration = chrono::Duration::hours(1);
 
+/// How often an empty scan is allowed to write a no-work receipt.
+///
+/// Constraint: a receipt per empty scan puts one delete and one insert on
+/// SQLite's single writer every few seconds per worker, which is what
+/// serializes idle polling behind real turn writes and drains the pool
+/// (#2316). One receipt per window keeps the table bounded and keeps the
+/// evidence that scans ran (#1455) at a cost the write path does not notice.
+///
+/// What it gives up is exact-retry replay for a token whose scan skipped the
+/// write. That is safe: a retry that finds work instead claims it under the
+/// same token, which is a valid outcome for a request whose response was
+/// lost, and no caller retries an empty scan with the same token today —
+/// every worker draws a fresh one per poll.
+const EMPTY_CLAIM_SCAN_WRITE_CADENCE: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Statuses the claim scan can act on.
+///
+/// Constraint: keep this the union of the statuses the branches of
+/// [`claim_agent_run`] filter on. It is what lets an idle poll answer "nothing
+/// to do" from a read instead of a write transaction. `needs_input` is
+/// deliberately absent: it is not terminal, but no scan branch advances it.
+const SCANNABLE_CLAIM_STATUSES: [&str; 5] = [
+    AgentRunStatus::Queued.as_str(),
+    AgentRunStatus::Running.as_str(),
+    AgentRunStatus::Cancelling.as_str(),
+    AgentRunStatus::Waiting.as_str(),
+    AgentRunStatus::RetryWait.as_str(),
+];
+
+/// Whether any background run is in a state the claim scan could act on.
+async fn any_scannable_agent_run_on<C>(conn: &C) -> Result<bool>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    Ok(entities::agent_run::Entity::find()
+        .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
+        .filter(entities::agent_run::Column::Status.is_in(SCANNABLE_CLAIM_STATUSES))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some())
+}
+
 async fn record_empty_claim_scan_on<C>(
     conn: &C,
     lease_token: uuid::Uuid,
@@ -1278,6 +1336,36 @@ async fn record_empty_claim_scan_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
+    // A saturated fleet reaches this branch on every poll of every worker, so
+    // keep the write to one receipt per cadence window and let the other scans
+    // stay read-only (#2316). Existence reads decide it, and they short-circuit
+    // on the first row instead of sorting the table — which matters on a
+    // database that accreted receipts before #1455 was fixed.
+    let current_receipt = entities::agent_run_claim::Entity::find()
+        .filter(entities::agent_run_claim::Column::AgentRunId.is_null())
+        .filter(
+            entities::agent_run_claim::Column::ClaimedAt.gt(now - EMPTY_CLAIM_SCAN_WRITE_CADENCE),
+        )
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    if current_receipt.is_some() {
+        // A receipt for this window already stands. Write anyway if the sweep
+        // has something to take, so a database carrying old receipts converges
+        // on one delete rather than keeping them forever.
+        let sweepable = entities::agent_run_claim::Entity::find()
+            .filter(entities::agent_run_claim::Column::AgentRunId.is_null())
+            .filter(
+                entities::agent_run_claim::Column::ClaimedAt.lt(now - EMPTY_CLAIM_SCAN_RETENTION),
+            )
+            .one(conn)
+            .await
+            .map_err(store_err)?;
+        if sweepable.is_none() {
+            return Ok(());
+        }
+    }
+
     // An idle worker polls every few seconds and would otherwise accrete one
     // NULL-run receipt per empty scan forever (#1455). Prune expired ones
     // before inserting the new one so the table stays bounded by the
@@ -2020,13 +2108,7 @@ where
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::Tier.eq(AgentRunTier::Background.as_str()))
         .filter(entities::agent_run::Column::Id.in_subquery(admitted_child_id_subquery()))
-        .filter(entities::agent_run::Column::Status.is_in([
-            AgentRunStatus::Queued.as_str(),
-            AgentRunStatus::Running.as_str(),
-            AgentRunStatus::Cancelling.as_str(),
-            AgentRunStatus::Waiting.as_str(),
-            AgentRunStatus::RetryWait.as_str(),
-        ]))
+        .filter(entities::agent_run::Column::Status.is_in(SCANNABLE_CLAIM_STATUSES))
         .filter(entities::agent_run::Column::DeadlineAt.lte(now))
         .filter(entities::agent_run::Column::UpdatedAt.lte(now))
         .order_by_asc(entities::agent_run::Column::DeadlineAt)

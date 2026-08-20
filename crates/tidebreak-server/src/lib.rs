@@ -1967,7 +1967,10 @@ async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
             // authenticator is configured before the shared store exists.
             // State assembly constructs the live verifier used by requests.
             auth::PrincipalAuthenticator::from_config(config)?;
-            let store = tidebreak_core::DbStore::connect(&config.database_url()?).await?;
+            let store = tidebreak_core::DbStore::connect_with_options(host_connect_options(
+                &config.database_url()?,
+            ))
+            .await?;
             Ok(Arc::new(store))
         }
         // An unknown future profile has chosen neither a store nor an
@@ -1976,6 +1979,37 @@ async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
             "no store backend is wired for this profile",
         )),
     }
+}
+
+/// How many pooled connections a host process opens.
+///
+/// Constraint: SeaORM gives a SQLite pool one connection unless it is told
+/// otherwise, so a single slow write blocks every other request in the
+/// process — including the four sequential store calls that create a
+/// workspace, which is how a ~0.3s `git worktree add` turned into minutes
+/// (#2316). WAL lets readers run beside the writer, so a modest pool is
+/// enough for interactive requests to pass a stalled one. Keep it fixed: this
+/// is a floor for responsiveness, not a tuning surface.
+const HOST_MAX_CONNECTIONS: u32 = 8;
+
+/// How long a request waits for a pooled connection before it fails.
+///
+/// Explicit rather than inherited: waits at exactly sqlx's 30s default are
+/// what the starved pool looked like in the logs, and a caller that has
+/// waited this long is better served by an error it can report than by a
+/// dialog that never resolves.
+const HOST_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Build the connect options every host store opens with.
+pub(crate) fn host_connect_options(url: &str) -> sea_orm::ConnectOptions {
+    let mut options = sea_orm::ConnectOptions::new(url.to_owned());
+    options
+        .max_connections(HOST_MAX_CONNECTIONS)
+        // Keep one connection warm so an idle profile does not pay reconnect
+        // latency on the first interactive request.
+        .min_connections(1)
+        .acquire_timeout(HOST_ACQUIRE_TIMEOUT);
+    options
 }
 
 #[cfg(test)]

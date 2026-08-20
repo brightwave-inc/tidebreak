@@ -1275,7 +1275,46 @@ async fn sandbox_claims_are_exact_reclaimable_and_heartbeatable() {
 }
 
 #[tokio::test]
-async fn idle_polling_does_not_accrete_empty_claim_scan_rows() {
+async fn idle_polling_does_not_touch_the_write_path() {
+    let (_dir, store) = temp_store().await;
+
+    // Stand in for a receipt an earlier empty poll left behind (#1455).
+    let stale_token = uuid::Uuid::new_v4();
+    crate::db::entities::agent_run_claim::ActiveModel {
+        token: Set(stale_token),
+        agent_run_id: Set(None),
+        attempt_count: Set(None),
+        claim_count: Set(None),
+        claimed_at: Set(Utc::now() - Duration::hours(2)),
+        lease_expires_at: Set(None),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+
+    // Nothing is claimable, which is what an idle worker's poll sees.
+    for _ in 0..3 {
+        assert!(store
+            .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 4, 2)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    // No write at all — not even the sweep. An idle poll must not take the
+    // single SQLite writer away from real work (#2316); the sweep rides the
+    // next scan that has a reason to write.
+    let remaining = crate::db::entities::agent_run_claim::Entity::find()
+        .filter(crate::db::entities::agent_run_claim::Column::AgentRunId.is_null())
+        .all(&store.conn)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].token, stale_token);
+}
+
+#[tokio::test]
+async fn saturated_polling_does_not_accrete_empty_claim_scan_rows() {
     let (_dir, store) = temp_store().await;
 
     // Stand in for a receipt an idle worker's earlier empty poll would have
@@ -1294,22 +1333,62 @@ async fn idle_polling_does_not_accrete_empty_claim_scan_rows() {
     .await
     .unwrap();
 
-    // An idle worker poll with nothing to claim.
+    // Fill the single scheduler slot so every later poll scans and finds
+    // nothing claimable — the shape a running fleet holds for minutes.
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    admit_sandbox_for_test(&store, chat.id, "occupy the only slot").await;
     assert!(store
-        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(1), 4, 2)
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(5), 1, 1)
         .await
         .unwrap()
-        .is_none());
+        .is_some());
+
+    for _ in 0..3 {
+        assert!(store
+            .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(5), 1, 1)
+            .await
+            .unwrap()
+            .is_none());
+    }
 
     let remaining = crate::db::entities::agent_run_claim::Entity::find()
         .filter(crate::db::entities::agent_run_claim::Column::AgentRunId.is_null())
         .all(&store.conn)
         .await
         .unwrap();
-    // The stale receipt was swept; only the poll's own fresh receipt remains,
-    // so an idle worker no longer accretes rows without bound.
+    // The stale receipt was swept, and the three scans wrote one receipt
+    // between them rather than one each: the table stays bounded (#1455) and
+    // polling stays off the write path (#2316).
     assert_eq!(remaining.len(), 1);
     assert_ne!(remaining[0].token, stale_token);
+
+    // A receipt that ages past retention while a current one stands still gets
+    // swept, so a database that accreted receipts before #1455 converges
+    // instead of carrying them forever.
+    let aged_token = uuid::Uuid::new_v4();
+    crate::db::entities::agent_run_claim::ActiveModel {
+        token: Set(aged_token),
+        agent_run_id: Set(None),
+        attempt_count: Set(None),
+        claim_count: Set(None),
+        claimed_at: Set(Utc::now() - Duration::hours(3)),
+        lease_expires_at: Set(None),
+    }
+    .insert(&store.conn)
+    .await
+    .unwrap();
+    assert!(store
+        .claim_agent_run(uuid::Uuid::new_v4(), Duration::minutes(5), 1, 1)
+        .await
+        .unwrap()
+        .is_none());
+    let swept = crate::db::entities::agent_run_claim::Entity::find()
+        .filter(crate::db::entities::agent_run_claim::Column::AgentRunId.is_null())
+        .all(&store.conn)
+        .await
+        .unwrap();
+    assert!(swept.iter().all(|receipt| receipt.token != aged_token));
 }
 
 #[tokio::test]
