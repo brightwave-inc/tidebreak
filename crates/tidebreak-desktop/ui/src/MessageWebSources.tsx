@@ -55,7 +55,7 @@ export function MessageWebSources({
           title={source.label}
           aria-label={source.label}
           className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-card px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          onClick={() => void openSource(source.url)}
+          onClick={() => void openWebSource(source.url)}
         >
           <DomainFavicon url={source.url} className="size-3" />
           <span className="truncate">{source.domain}</span>
@@ -75,7 +75,7 @@ export function MessageWebSources({
 }
 
 /** Native opener first; `window.open` only works in a plain browser tab. */
-async function openSource(url: string): Promise<void> {
+export async function openWebSource(url: string): Promise<void> {
   if (!(await openExternal(url).catch(() => false))) {
     window.open(url, "_blank", "noreferrer,noopener");
   }

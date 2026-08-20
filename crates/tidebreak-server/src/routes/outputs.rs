@@ -18,6 +18,8 @@
 //! and all: this is a transport move, and a field rename here would be a second
 //! change wearing the first one's clothes.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::extract::State;
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -25,8 +27,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
-    deliverable_media_type, media_type_is_text, revision_byte_ceiling, AgentError, ChatId,
-    OutputId, OutputRecord, OutputRevision, OutputRevisionId,
+    deliverable_media_type, media_type_is_text, revision_byte_ceiling, AgentError,
+    AssistantCitationId, ChatId, ChatTranscriptSnapshot, CitationLocator, DocumentId, OutputId,
+    OutputRecord, OutputRevision, OutputRevisionId, ResultEntryKind, ToolCallRecord,
+    ToolCallStatus, ToolResultPreview, TurnId, WEB_SEARCH_TOOL,
 };
 
 use crate::error::ServerError;
@@ -43,6 +47,9 @@ const MAX_DELIVERABLES: usize = 100;
 /// Characters of text a preview carries. Bigger outputs are read through the
 /// content route.
 const MAX_PREVIEW_CHARACTERS: usize = 100_000;
+/// Most durable evidence references projected onto one revision. Document
+/// citations take precedence over web-search rows when a turn retrieved more.
+const MAX_OUTPUT_REVISION_SOURCES: usize = 20;
 
 /// Body ceiling for a user edit. The stored ceiling for a text output is 512
 /// KiB; the request carries that content JSON-escaped, so the transport limit
@@ -102,6 +109,30 @@ pub struct OutputRevisionInfo {
     /// `backgroundAgent` (a run), or `user` (an edit or a restore).
     produced_by: &'static str,
     is_current: bool,
+    /// Durable evidence retrieved by the foreground turn that produced this
+    /// revision. User and background-run revisions have no turn, so they carry
+    /// an empty list rather than borrowing evidence from another producer.
+    sources: Vec<OutputRevisionSource>,
+}
+
+/// One durable evidence reference belonging to a revision's producing turn.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum OutputRevisionSource {
+    Document {
+        citation_id: AssistantCitationId,
+        document_id: DocumentId,
+        locator: CitationLocator,
+    },
+    Web {
+        url: String,
+        label: String,
+        domain: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -267,6 +298,15 @@ pub async fn list_chat_output_revisions(
         .await
         .map_err(ServerError::not_found)?;
     let revisions = state.store.list_output_revisions(output.id).await?;
+    let sources_by_turn = if revisions.iter().any(|revision| revision.turn_id.is_some()) {
+        let (transcript, tool_calls) = tokio::try_join!(
+            store.get_chat_transcript(chat_id),
+            store.list_tool_calls(chat_id),
+        )?;
+        output_revision_sources(transcript.as_ref(), &tool_calls)
+    } else {
+        HashMap::new()
+    };
     Ok(Json(OutputRevisionsCatalog {
         output_id: output.id,
         revisions: revisions
@@ -284,9 +324,106 @@ pub async fn list_chat_output_revisions(
                     "user"
                 },
                 is_current: revision.id == output.current_revision,
+                sources: revision
+                    .turn_id
+                    .and_then(|turn_id| sources_by_turn.get(&turn_id).cloned())
+                    .unwrap_or_default(),
             })
             .collect(),
     }))
+}
+
+#[derive(Default)]
+struct RevisionSources {
+    values: Vec<OutputRevisionSource>,
+    documents: HashSet<(DocumentId, CitationLocator)>,
+    web_urls: HashSet<String>,
+}
+
+/// Group the conversation's durable evidence by the exact turn that retrieved
+/// it. This is a read-time projection: citations and tool previews remain the
+/// authorities, so a revision can never invent or retain a second copy of a
+/// source that diverges from the transcript.
+fn output_revision_sources(
+    transcript: Option<&ChatTranscriptSnapshot>,
+    tool_calls: &[ToolCallRecord],
+) -> HashMap<TurnId, Vec<OutputRevisionSource>> {
+    let mut by_turn: HashMap<TurnId, RevisionSources> = HashMap::new();
+
+    if let Some(transcript) = transcript {
+        let message_turns = transcript
+            .messages
+            .iter()
+            .map(|message| (message.id, message.turn_id))
+            .collect::<HashMap<_, _>>();
+        for snapshot in &transcript.citations {
+            let Some(turn_id) = message_turns.get(&snapshot.message_id).copied() else {
+                continue;
+            };
+            let sources = by_turn.entry(turn_id).or_default();
+            let citation = &snapshot.citation;
+            let key = (citation.document_id, citation.locator.clone());
+            if sources.values.len() < MAX_OUTPUT_REVISION_SOURCES && sources.documents.insert(key) {
+                sources.values.push(OutputRevisionSource::Document {
+                    citation_id: citation.id,
+                    document_id: citation.document_id,
+                    locator: citation.locator.clone(),
+                });
+            }
+        }
+    }
+
+    // Document citations are inserted first on purpose. Search results fill
+    // the remaining bounded slots in durable call/result order.
+    for call in tool_calls {
+        if call.name != WEB_SEARCH_TOOL || call.status != ToolCallStatus::Completed {
+            continue;
+        }
+        let Some(ToolResultPreview::Entries { entries, .. }) = call.result_preview.as_ref() else {
+            continue;
+        };
+        let sources = by_turn.entry(call.turn_id).or_default();
+        for entry in entries {
+            if sources.values.len() >= MAX_OUTPUT_REVISION_SOURCES {
+                break;
+            }
+            if entry.kind != ResultEntryKind::Link {
+                continue;
+            }
+            let Some(url) = entry.url.as_deref() else {
+                continue;
+            };
+            let Some(domain) = web_domain(url) else {
+                continue;
+            };
+            if !sources.web_urls.insert(url.to_owned()) {
+                continue;
+            }
+            sources.values.push(OutputRevisionSource::Web {
+                url: url.to_owned(),
+                label: if entry.label.is_empty() {
+                    url.to_owned()
+                } else {
+                    entry.label.clone()
+                },
+                domain,
+            });
+        }
+    }
+
+    by_turn
+        .into_iter()
+        .map(|(turn_id, sources)| (turn_id, sources.values))
+        .collect()
+}
+
+fn web_domain(value: &str) -> Option<String> {
+    let parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    Some(host.strip_prefix("www.").unwrap_or(host).to_owned())
 }
 
 /// `POST /chats/{chat_id}/outputs/{output_id}/revisions/{revision_id}/restore`

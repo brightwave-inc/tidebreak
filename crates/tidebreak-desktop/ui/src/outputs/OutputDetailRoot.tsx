@@ -37,9 +37,12 @@ import {
   useNativePickerLatch,
 } from "@/NativePickerLatch";
 import { PanelFrame } from "@/panel/PanelFrame";
+import { useSourceNav } from "@/panel/SourceNav";
 import { usePanelNav } from "@/panel/usePanelNav";
+import { openWebSource } from "@/MessageWebSources";
 import { OutputContent } from "./OutputContent";
 import { outputTypeLabel } from "./outputFormat";
+import { OutputRevisionSources } from "./OutputRevisionSources";
 import { exportFailureMessage, friendlyOutputError } from "./OutputsView";
 
 export type OutputDetailApis = {
@@ -108,6 +111,7 @@ export function OutputDetailRoot({
   apis?: OutputDetailApis;
 }) {
   const { openPanel } = usePanelNav();
+  const sourceNav = useSourceNav();
   const [preview, setPreview] = useState<DeliverablePreview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -147,10 +151,42 @@ export function OutputDetailRoot({
           setLoadError(friendlyOutputError(caught, "Could not preview that output."));
         }
       });
+    void apis
+      .listRevisions(chatId, outputId)
+      .then((catalog) => {
+        if (!cancelled) setRevisions(catalog.revisions);
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setRevisions([]);
+          toast.error(
+            friendlyOutputError(
+              caught,
+              "Could not load this output's versions or sources.",
+            ),
+          );
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, [apis, chatId, outputId]);
+
+  async function refreshRevisions() {
+    setRevisions(null);
+    try {
+      const catalog = await apis.listRevisions(chatId, outputId);
+      setRevisions(catalog.revisions);
+    } catch (caught) {
+      setRevisions([]);
+      toast.error(
+        friendlyOutputError(
+          caught,
+          "Could not load this output's versions or sources.",
+        ),
+      );
+    }
+  }
 
   async function onSave() {
     if (saving) return;
@@ -213,7 +249,7 @@ export function OutputDetailRoot({
         return;
       }
       setPreview(result.preview);
-      setRevisions(null);
+      void refreshRevisions();
       setEditor(null);
       setEditConflict(false);
       toast.success(
@@ -242,7 +278,7 @@ export function OutputDetailRoot({
     try {
       const next = await apis.read(chatId, outputId);
       setPreview(next);
-      setRevisions(null);
+      void refreshRevisions();
       setEditConflict(false);
       setEditor(
         next.truncated || !isEditableTextMediaType(next.mediaType)
@@ -256,18 +292,11 @@ export function OutputDetailRoot({
     }
   }
 
-  async function onHistoryOpenChange(open: boolean) {
+  function onHistoryOpenChange(open: boolean) {
     setHistoryOpen(open);
-    if (!open) return;
-    try {
-      const catalog = await apis.listRevisions(chatId, outputId);
-      setRevisions(catalog.revisions);
-    } catch (caught) {
-      setHistoryOpen(false);
-      toast.error(
-        friendlyOutputError(caught, "Could not load this output's versions."),
-      );
-    }
+    // An empty catalog is the failure sentinel: a valid output always has at
+    // least one revision. Opening history is the reader's explicit retry.
+    if (open && revisions?.length === 0) void refreshRevisions();
   }
 
   async function onViewRevision(revision: OutputRevisionInfo) {
@@ -296,7 +325,7 @@ export function OutputDetailRoot({
       const restoredOrdinal = previewRevision.ordinal;
       setPreviewRevision(null);
       setRevisionPreview(null);
-      setRevisions(null);
+      void refreshRevisions();
       const next = await apis.read(chatId, outputId);
       setPreview(next);
       toast.success(`Restored version ${restoredOrdinal} as the latest version.`);
@@ -308,6 +337,8 @@ export function OutputDetailRoot({
   }
 
   const viewing = previewRevision ? revisionPreview : preview;
+  const displayedRevision =
+    previewRevision ?? revisions?.find((revision) => revision.isCurrent) ?? null;
   const showHistory = (preview?.revisionCount ?? 0) > 1;
   // A truncated preview is not the whole file, so editing it would quietly drop
   // whatever the preview left out. Save As… still exports the complete file.
@@ -379,7 +410,7 @@ export function OutputDetailRoot({
             {showHistory && (
               <Popover
                 open={historyOpen}
-                onOpenChange={(open) => void onHistoryOpenChange(open)}
+                onOpenChange={onHistoryOpenChange}
               >
                 <WithTooltip label="Version history">
                   <PopoverTrigger asChild>
@@ -523,7 +554,24 @@ export function OutputDetailRoot({
           <div className="shrink-0 px-6 pt-4 text-xs text-muted-foreground">
             {outputTypeLabel(viewing.mediaType)}
           </div>
-          <OutputContent chatId={chatId} preview={viewing} />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <OutputContent chatId={chatId} preview={viewing} />
+            {displayedRevision && (
+              <OutputRevisionSources
+                sources={displayedRevision.sources}
+                onOpenDocument={
+                  sourceNav
+                    ? (source) =>
+                        sourceNav.openCitation({
+                          documentId: source.documentId,
+                          citationId: source.citationId,
+                        })
+                    : undefined
+                }
+                onOpenWeb={(url) => void openWebSource(url)}
+              />
+            )}
+          </div>
         </>
       ) : (
         <p className="p-6 text-sm text-muted-foreground" role="status">

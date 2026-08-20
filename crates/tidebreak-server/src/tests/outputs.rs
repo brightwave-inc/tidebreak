@@ -1,7 +1,11 @@
 use super::*;
 
 use tidebreak_code_execution::ExecutionWorkspaceId;
-use tidebreak_core::{AgentRunId, OutputId, OutputRevisionId};
+use tidebreak_core::{
+    AgentRunId, AssistantCitationInput, CitationLocator, CreateOutput, DeliverableKind, DocumentId,
+    DocumentUpsert, MessageId, NewOutputRevision, OutputId, OutputRevisionId, ResultEntry,
+    ResultEntryKind, ToolResultPreview, TurnId,
+};
 
 /// GET one route with this test's bearer.
 async fn get(router: &Router, bearer: &str, uri: &str) -> axum::response::Response {
@@ -140,9 +144,11 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
             .unwrap_or_else(|| panic!("revision {id} should still be in the history"))
     };
     assert_eq!(by_id(first_revision)["producedBy"], "backgroundAgent");
+    assert_eq!(by_id(first_revision)["sources"], serde_json::json!([]));
     assert_eq!(by_id(first_revision)["ordinal"], 1);
     assert_eq!(by_id(first_revision)["isCurrent"], false);
     assert_eq!(by_id(edited_revision)["producedBy"], "user");
+    assert_eq!(by_id(edited_revision)["sources"], serde_json::json!([]));
     assert_eq!(by_id(edited_revision)["isCurrent"], true);
 
     // Restoring is append-only: the earlier revision keeps its own bytes, and
@@ -225,4 +231,203 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
         .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn a_foreground_revision_projects_only_its_turns_durable_evidence() {
+    let (router, token, store, dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    store
+        .accept_turn(turn_id, chat.id, "fake", "write the sourced brief")
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now();
+    let document_id = DocumentId::new();
+    store
+        .upsert_document(&DocumentUpsert {
+            id: document_id,
+            project_id: None,
+            chat_id: Some(chat.id),
+            origin_uri: None,
+            media_type: "text/plain".into(),
+            title: Some("Quarterly filing".into()),
+            canonical_text: "Revenue increased in the quarter.".into(),
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let citation = AssistantCitationInput {
+        document_id,
+        locator: CitationLocator::Lines { start: 1, end: 1 },
+    };
+    store
+        .append_assistant_message_with_citations(
+            &Message {
+                id: MessageId::new(),
+                chat_id: chat.id,
+                turn_id,
+                role: Role::Assistant,
+                content: tidebreak_core::format_citation_directive(
+                    "Revenue increased",
+                    document_id,
+                    &citation.locator,
+                ),
+                llm_content: None,
+                reasoning: Default::default(),
+                created_at: now,
+            },
+            std::slice::from_ref(&citation),
+        )
+        .await
+        .unwrap();
+
+    let web_call_id = CallId::new();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: web_call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "search-1".into(),
+            name: tidebreak_core::WEB_SEARCH_TOOL.into(),
+            arguments: serde_json::json!({"query": "quarterly revenue"}),
+            raw_arguments: None,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: now,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    let web_preview = ToolResultPreview::Entries {
+        entries: vec![ResultEntry::new(ResultEntryKind::Link, "SEC filing")
+            .with_detail("sec.gov")
+            .with_web_url("https://www.sec.gov/example")],
+        failures: Vec::new(),
+        elided: 0,
+    };
+    store
+        .resolve_server_tool_call_with_artifacts(
+            web_call_id,
+            &ToolCallResolution::Completed {
+                result: "search complete".into(),
+            },
+            now,
+            Some(&web_preview),
+        )
+        .await
+        .unwrap();
+
+    // A completed non-search tool can retain a link-shaped row, but it is not
+    // retrieval evidence for the output and must not be projected as a source.
+    let unrelated_call_id = CallId::new();
+    store
+        .accept_tool_call(&ToolCallRecord {
+            id: unrelated_call_id,
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "read-1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "notes.md"}),
+            raw_arguments: None,
+            execution: ToolCallExecution::Server,
+            status: ToolCallStatus::Pending,
+            result: None,
+            result_preview: None,
+            provider_replay: None,
+            error_code: None,
+            error_detail: None,
+            client_executor_id: None,
+            client_lease_expires_at: None,
+            created_at: now,
+            resolved_at: None,
+        })
+        .await
+        .unwrap();
+    let unrelated_preview = ToolResultPreview::Entries {
+        entries: vec![
+            ResultEntry::new(ResultEntryKind::Link, "Not a search source")
+                .with_web_url("https://example.com/not-evidence"),
+        ],
+        failures: Vec::new(),
+        elided: 0,
+    };
+    store
+        .resolve_server_tool_call_with_artifacts(
+            unrelated_call_id,
+            &ToolCallResolution::Completed {
+                result: "read complete".into(),
+            },
+            now,
+            Some(&unrelated_preview),
+        )
+        .await
+        .unwrap();
+
+    let output_id = OutputId::new();
+    let revision_id = OutputRevisionId::new();
+    let bytes = b"# Revenue\n\nRevenue increased.\n";
+    store
+        .create_output(&CreateOutput {
+            id: output_id,
+            chat_id: chat.id,
+            filename: "Revenue brief.md".into(),
+            kind: DeliverableKind::Text,
+            revision: NewOutputRevision {
+                id: revision_id,
+                byte_len: bytes.len() as u64,
+                sha256: [0; 32],
+                turn_id: Some(turn_id),
+                producing_run_id: None,
+                created_at: now,
+            },
+        })
+        .await
+        .unwrap();
+    let revision_path = dir.path().join("scratch").join(chat.id.to_string()).join(
+        tidebreak_core::output_revision_relative_path(output_id, revision_id),
+    );
+    std::fs::create_dir_all(revision_path.parent().unwrap()).unwrap();
+    std::fs::write(revision_path, bytes).unwrap();
+
+    let history: serde_json::Value = json_body(
+        get(
+            &router,
+            &bearer,
+            &format!("/chats/{}/outputs/{output_id}/revisions", chat.id),
+        )
+        .await,
+    )
+    .await;
+    let sources = history["revisions"][0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["kind"], "document");
+    assert_eq!(sources[0]["documentId"], document_id.to_string());
+    assert_eq!(
+        sources[0]["locator"],
+        serde_json::json!({
+            "kind": "lines",
+            "start": 1,
+            "end": 1,
+        })
+    );
+    assert_eq!(
+        sources[1],
+        serde_json::json!({
+            "kind": "web",
+            "url": "https://www.sec.gov/example",
+            "label": "SEC filing",
+            "domain": "sec.gov",
+        })
+    );
+    assert!(!history.to_string().contains("not-evidence"));
 }

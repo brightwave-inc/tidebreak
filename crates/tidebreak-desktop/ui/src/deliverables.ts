@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { CitationLocator } from "@/api";
+
 /**
  * Conversation outputs are read and edited over the server's HTTP routes, the
  * same ones a headless client uses — only the native save dialog still goes
@@ -124,6 +126,9 @@ const MAX_PREVIEW_CHARACTERS = 100_000;
 const MAX_DELIVERABLE_BYTES = 512 * 1024;
 const MAX_BINARY_DELIVERABLE_BYTES = 16 * 1024 * 1024;
 const MAX_OUTPUT_REVISIONS = 100;
+const MAX_OUTPUT_REVISION_SOURCES = 20;
+const MAX_SOURCE_LABEL_CHARACTERS = 512;
+const MAX_SOURCE_URL_CHARACTERS = 2 * 1024;
 
 export function isTextDeliverableMediaType(
   value: string,
@@ -256,7 +261,22 @@ export type OutputRevisionInfo = {
   createdAt: string;
   producedBy: "agent" | "backgroundAgent" | "user";
   isCurrent: boolean;
+  sources: OutputRevisionSource[];
 };
+
+export type OutputRevisionSource =
+  | {
+      kind: "document";
+      citationId: string;
+      documentId: string;
+      locator: CitationLocator;
+    }
+  | {
+      kind: "web";
+      url: string;
+      label: string;
+      domain: string;
+    };
 
 export type OutputRevisionsCatalog = {
   outputId: string;
@@ -330,6 +350,7 @@ export function parseOutputRevisionsCatalog(
         "createdAt",
         "producedBy",
         "isCurrent",
+        "sources",
       ]) ||
       !isOpaqueId(row.revisionId) ||
       typeof row.ordinal !== "number" ||
@@ -344,10 +365,13 @@ export function parseOutputRevisionsCatalog(
       (row.producedBy !== "agent" &&
         row.producedBy !== "backgroundAgent" &&
         row.producedBy !== "user") ||
-      typeof row.isCurrent !== "boolean"
+      typeof row.isCurrent !== "boolean" ||
+      !Array.isArray(row.sources) ||
+      row.sources.length > MAX_OUTPUT_REVISION_SOURCES
     ) {
       throw new Error("Invalid output versions response");
     }
+    const sources = row.sources.map(parseOutputRevisionSource);
     return {
       revisionId: row.revisionId,
       ordinal: row.ordinal,
@@ -355,9 +379,103 @@ export function parseOutputRevisionsCatalog(
       createdAt: row.createdAt,
       producedBy: row.producedBy,
       isCurrent: row.isCurrent,
+      sources,
     };
   });
   return { outputId: value.outputId, revisions };
+}
+
+function parseOutputRevisionSource(value: unknown): OutputRevisionSource {
+  if (!isRecord(value)) throw new Error("Invalid output versions response");
+  if (value.kind === "document") {
+    if (
+      !isExactRecord(value, ["kind", "citationId", "documentId", "locator"]) ||
+      !isOpaqueId(value.citationId) ||
+      !isOpaqueId(value.documentId) ||
+      !isCitationLocator(value.locator)
+    ) {
+      throw new Error("Invalid output versions response");
+    }
+    return {
+      kind: "document",
+      citationId: value.citationId,
+      documentId: value.documentId,
+      locator: value.locator,
+    };
+  }
+  if (
+    value.kind !== "web" ||
+    !isExactRecord(value, ["kind", "url", "label", "domain"]) ||
+    !isWebSourceUrl(value.url) ||
+    !isBoundedSourceText(value.label) ||
+    !isBoundedSourceText(value.domain)
+  ) {
+    throw new Error("Invalid output versions response");
+  }
+  return {
+    kind: "web",
+    url: value.url,
+    label: value.label,
+    domain: value.domain,
+  };
+}
+
+function isCitationLocator(value: unknown): value is CitationLocator {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  const positiveInteger = (candidate: unknown): candidate is number =>
+    typeof candidate === "number" &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 1 &&
+    candidate <= 10_000_000;
+  switch (value.kind) {
+    case "document":
+      return isExactRecord(value, ["kind"]);
+    case "page":
+      return isExactRecord(value, ["kind", "page"]) && positiveInteger(value.page);
+    case "pages":
+    case "lines":
+      return (
+        isExactRecord(value, ["kind", "start", "end"]) &&
+        positiveInteger(value.start) &&
+        positiveInteger(value.end) &&
+        value.start <= value.end
+      );
+    case "sheet":
+      return (
+        isExactRecord(value, ["kind", "sheet", "cells"]) &&
+        typeof value.sheet === "string" &&
+        value.sheet.length > 0 &&
+        value.sheet.length <= 120 &&
+        !/\p{Cc}/u.test(value.sheet) &&
+        (value.cells === null ||
+          (typeof value.cells === "string" &&
+            value.cells.length > 0 &&
+            value.cells.length <= 32))
+      );
+    default:
+      return false;
+  }
+}
+
+function isWebSourceUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > MAX_SOURCE_URL_CHARACTERS) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isBoundedSourceText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SOURCE_LABEL_CHARACTERS &&
+    !/\p{Cc}/u.test(value)
+  );
 }
 
 export async function exportDeliverable(
