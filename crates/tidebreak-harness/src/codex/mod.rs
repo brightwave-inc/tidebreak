@@ -130,6 +130,7 @@ fn supports_native_steering(version: Option<&str>) -> bool {
             let patch = parts.next()?.parse::<u64>().ok()?;
             parts.next().is_none().then_some((major, minor, patch))
         })
+        .next()
         .is_some_and(|(major, minor, _)| major == 0 && minor == 147)
 }
 
