@@ -504,6 +504,12 @@ function closeLayoutTab(layout: LayoutState, index: number): LayoutState {
   };
 }
 
+/** Open the terminal drawer; a no-op when it is already in the layout. */
+export function openTerminalLayout(layout: LayoutState): LayoutState {
+  if (layout.tabs.some((tab) => tab.type === "terminal")) return layout;
+  return toggleTerminalLayout(layout);
+}
+
 /** Open the terminal drawer, or close it if it is already in the layout. */
 export function toggleTerminalLayout(layout: LayoutState): LayoutState {
   const index = layout.tabs.findIndex((tab) => tab.type === "terminal");

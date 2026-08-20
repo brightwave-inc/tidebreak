@@ -63,6 +63,7 @@ import {
   openCodeEditor,
   removedCodeBrowserIds,
   splitCodeChromeLayout,
+  openTerminalLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
 import {
@@ -537,6 +538,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("primary")}
         onNewBrowser={() => openBrowser(undefined, "primary")}
+        onNewDiff={() =>
+          setWorkspaceLayout(openCodeEditor(layout, { type: "diff" }, "primary"))
+        }
+        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "primary", index, "secondary"))
         }
@@ -660,6 +665,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("secondary")}
         onNewBrowser={() => openBrowser(undefined, "secondary")}
+        onNewDiff={() =>
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "diff" }, "secondary"),
+          )
+        }
+        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "secondary", index, "primary"))
         }
