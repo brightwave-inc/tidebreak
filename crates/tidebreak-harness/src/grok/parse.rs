@@ -180,6 +180,7 @@ impl GrokStreamParser {
             call_id,
             name: name.clone(),
             detail: tool_detail(&name, value.get("kind").and_then(Value::as_str), &input),
+            parent_call_id: None,
         }]
     }
 
@@ -218,6 +219,7 @@ impl GrokStreamParser {
             // call names its subject. `tool_call_update` repeats no arguments
             // at all, so there is nothing to correct it with.
             detail: None,
+            parent_call_id: None,
         }]
     }
 
@@ -303,6 +305,7 @@ impl GrokStreamParser {
         let text = std::mem::take(&mut self.pending_text);
         vec![HarnessEvent::AssistantMessage {
             text: bound(&text, MAX_EVENT_TEXT_CHARS),
+            parent_call_id: None,
         }]
     }
 

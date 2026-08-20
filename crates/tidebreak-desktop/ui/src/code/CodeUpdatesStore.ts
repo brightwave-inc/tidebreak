@@ -182,6 +182,9 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
         ...(notice.watch_cycles !== undefined
           ? { watch_cycles: notice.watch_cycles }
           : {}),
+        ...(notice.subagents !== undefined
+          ? { subagents: notice.subagents }
+          : {}),
       },
     };
   }

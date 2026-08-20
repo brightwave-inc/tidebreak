@@ -6,9 +6,10 @@ use ts_rs::TS;
 use tidebreak_core::{
     Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
     CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle,
-    CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId, WorkspaceId,
+    CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch,
+    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
+    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId,
+    WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -759,6 +760,11 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub watch_cycles: Option<i64>,
+    /// Harness subagents on this session, present only when any were
+    /// observed (decision 52).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub subagents: Option<Vec<CodeSubagentSummary>>,
 }
 
 impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
@@ -775,6 +781,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             watch_state: digest.watch_state,
             watch_detail: digest.watch_detail,
             watch_cycles: digest.watch_cycles,
+            subagents: digest.subagents,
         }
     }
 }
@@ -814,6 +821,11 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         watch_cycles: Option<i64>,
+        /// Harness subagents on this session, present only when any were
+        /// observed (decision 52).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        subagents: Option<Vec<CodeSubagentSummary>>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -863,6 +875,7 @@ impl CodeUpdateNotice {
             watch_state: wire.watch_state,
             watch_detail: wire.watch_detail,
             watch_cycles: wire.watch_cycles,
+            subagents: wire.subagents,
         }
     }
 }

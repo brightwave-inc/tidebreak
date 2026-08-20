@@ -5,7 +5,8 @@ use sea_orm::{
 
 use crate::code::{
     Attention, AttentionSource, AttentionState, CodePermissionMode, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, FenceReason, HarnessKind, WorkspaceId,
+    CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary, FenceReason, HarnessKind,
+    WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -36,6 +37,11 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         attention_state: Set(serde_json::to_value(&session.attention.state)?),
         attention_source: Set(session.attention.source.as_str().to_owned()),
         unrecognized_event_count: Set(session.unrecognized_event_count),
+        subagents: Set(if session.subagents.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(&session.subagents)?)
+        }),
         created_at: Set(session.created_at),
     }
     .insert(&store.conn)
@@ -197,7 +203,10 @@ pub async fn list_sessions_by_lifecycle_all_owners(
         .collect()
 }
 
-/// Persist mutable session fields. `id`, `workspace_id`, and `created_at` stay as stored.
+/// Persist mutable session fields. `id`, `workspace_id`, `created_at`, and
+/// `subagents` stay as stored — the subagent list has its own targeted write
+/// ([`set_session_subagents`]) so a full-row save from a stale in-memory copy
+/// cannot clobber it.
 ///
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
@@ -287,6 +296,33 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
     Ok(true)
 }
 
+/// Replace one session's subagent list (decision 52). A targeted write so
+/// the event sink never read-modify-writes the whole row against the
+/// worker's concurrent full-row saves. Returns `false` when the row is gone
+/// or belongs to another owner.
+pub async fn set_session_subagents(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    subagents: &[CodeSubagentSummary],
+) -> Result<bool> {
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::Subagents,
+            sea_orm::sea_query::Expr::value(if subagents.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_value(subagents)?)
+            }),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {
     let harness_kind = HarnessKind::from_str(&row.harness_kind).ok_or_else(|| {
         AgentError::Store(format!(
@@ -327,6 +363,14 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         })?),
         None => None,
     };
+    let subagents = match row.subagents {
+        Some(value) => {
+            serde_json::from_value::<Vec<CodeSubagentSummary>>(value).map_err(|err| {
+                AgentError::Store(format!("code_session {} subagents: {err}", row.id))
+            })?
+        }
+        None => Vec::new(),
+    };
     Ok(CodeSession {
         id: CodeSessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
@@ -343,6 +387,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         spawn_epoch: row.spawn_epoch,
         attention: Attention::new(state, source),
         unrecognized_event_count: row.unrecognized_event_count,
+        subagents,
         created_at: row.created_at,
     })
 }

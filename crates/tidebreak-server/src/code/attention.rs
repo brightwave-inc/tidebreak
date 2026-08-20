@@ -347,6 +347,11 @@ async fn build_digest(
         watch_state: watch.as_ref().map(|watch| watch.state),
         watch_detail: watch.as_ref().and_then(|watch| watch.detail.clone()),
         watch_cycles: watch.as_ref().map(|watch| watch.cycles),
+        subagents: if session.subagents.is_empty() {
+            None
+        } else {
+            Some(session.subagents.clone())
+        },
     })
 }
 
@@ -427,6 +432,7 @@ mod tests {
             spawn_epoch: 1,
             attention,
             unrecognized_event_count: 0,
+            subagents: Vec::new(),
             created_at: Utc::now(),
         }
     }

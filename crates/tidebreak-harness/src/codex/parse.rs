@@ -271,6 +271,7 @@ impl CodexStreamParser {
                 } else {
                     vec![HarnessEvent::AssistantMessage {
                         text: bound(text, MAX_EVENT_TEXT_CHARS),
+                        parent_call_id: None,
                     }]
                 }
             }
@@ -440,6 +441,7 @@ impl CodexStreamParser {
             call_id,
             name: "commandExecution".into(),
             detail: command_detail(item),
+            parent_call_id: None,
         }]
     }
 
@@ -472,6 +474,7 @@ impl CodexStreamParser {
             outcome,
             preview: bound(preview, MAX_PREVIEW_CHARS),
             detail: (detail.specificity() > 0).then_some(detail),
+            parent_call_id: None,
         }]
     }
 

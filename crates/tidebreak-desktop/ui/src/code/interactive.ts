@@ -20,6 +20,14 @@ export const FOCUS_RING_TIGHT =
   "ring-offset-background focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-offset-0 focus-visible:outline-none";
 
 /**
+ * Focus ring for full-width rail rows. Any ring outside the box reads as a
+ * glowing border around the card; an inset hairline marks the row without
+ * outlining it.
+ */
+export const FOCUS_RING_INSET =
+  "ring-inset focus-visible:ring-ring/60 focus-visible:ring-1 focus-visible:outline-none";
+
+/**
  * The hover colour change, at the reveal tempo and off under reduced motion.
  *
  * `motion-safe` rather than `motion-reduce:transition-none` because the tint

@@ -200,7 +200,8 @@ impl ClaudeStreamParser {
             "content_block_start" => {
                 let block = event.get("content_block").cloned().unwrap_or(Value::Null);
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    return self.emit_tool_started(&block);
+                    let parent = parent_call_id(value);
+                    return self.emit_tool_started(&block, parent);
                 }
                 Vec::new()
             }
@@ -214,6 +215,9 @@ impl ClaudeStreamParser {
 
     fn parse_assistant(&mut self, value: &Value) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
+        // Every line a subagent produces carries the parent `Task` call's id
+        // at the top level (decision 52); the parent's own lines say null.
+        let parent = parent_call_id(value);
         let content = value
             .pointer("/message/content")
             .and_then(Value::as_array)
@@ -226,11 +230,12 @@ impl ClaudeStreamParser {
                     if !text.is_empty() {
                         events.push(HarnessEvent::AssistantMessage {
                             text: bound(text, MAX_EVENT_TEXT_CHARS),
+                            parent_call_id: parent.clone(),
                         });
                     }
                 }
                 Some("tool_use") => {
-                    events.extend(self.emit_tool_started(&block));
+                    events.extend(self.emit_tool_started(&block, parent.clone()));
                 }
                 Some("thinking") => {}
                 Some(other) => {
@@ -244,6 +249,7 @@ impl ClaudeStreamParser {
 
     fn parse_user(&mut self, value: &Value) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
+        let parent = parent_call_id(value);
         let content = match value.get("message") {
             Some(Value::Object(map)) => map.get("content").cloned().unwrap_or(Value::Null),
             Some(other) => other.clone(),
@@ -275,6 +281,7 @@ impl ClaudeStreamParser {
                             },
                             preview,
                             detail,
+                            parent_call_id: parent.clone(),
                         });
                     }
                 }
@@ -326,7 +333,7 @@ impl ClaudeStreamParser {
         }]
     }
 
-    fn emit_tool_started(&mut self, block: &Value) -> Vec<HarnessEvent> {
+    fn emit_tool_started(&mut self, block: &Value, parent: Option<String>) -> Vec<HarnessEvent> {
         let call_id = block
             .get("id")
             .and_then(Value::as_str)
@@ -346,9 +353,15 @@ impl ClaudeStreamParser {
         // arguments stream in after it, so the first view of a call names
         // nothing. The `assistant` message repeats the same block with the
         // assembled input; that later view is the correction, and it rides
-        // the call's `ToolCompleted`.
+        // the call's `ToolCompleted`. A `Task` detail stays `Other` at both
+        // views (equal specificity), so it upgrades on any change: the
+        // assembled description is the subagent's display name (decision 52).
         if let Some(started) = self.started_tools.get(&call_id) {
-            if detail.specificity() > started.specificity() {
+            let corrected = detail.specificity() > started.specificity()
+                || (name == "Task"
+                    && detail != *started
+                    && detail.specificity() >= started.specificity());
+            if corrected {
                 self.started_tools.insert(call_id.clone(), detail.clone());
                 self.late_details.insert(call_id, detail);
             }
@@ -359,6 +372,7 @@ impl ClaudeStreamParser {
             call_id,
             name,
             detail,
+            parent_call_id: parent,
         }]
     }
 
@@ -374,6 +388,16 @@ impl ClaudeStreamParser {
             "unrecognized engine event"
         );
     }
+}
+
+/// The top-level `parent_tool_use_id` a subagent's lines carry. The parent's
+/// own lines say null, which reads as `None`.
+fn parent_call_id(value: &Value) -> Option<String> {
+    value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 fn tool_detail(name: &str, input: &Value) -> ToolDetail {
@@ -406,6 +430,27 @@ fn tool_detail(name: &str, input: &Value) -> ToolDetail {
                 .unwrap_or(name)
                 .to_owned(),
         },
+        // A `Task` call spans a subagent (decision 52). Its description is
+        // the name a rail row shows, so surface it over the bare tool name.
+        "Task" => {
+            let description = input
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty());
+            let subagent_type = input
+                .get("subagent_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty());
+            let summary = match (description, subagent_type) {
+                (Some(description), Some(kind)) => format!("{description} ({kind})"),
+                (Some(description), None) => description.to_owned(),
+                (None, Some(kind)) => kind.to_owned(),
+                (None, None) => name.to_owned(),
+            };
+            ToolDetail::Other { summary }
+        }
         _ => ToolDetail::Other {
             summary: name.to_owned(),
         },

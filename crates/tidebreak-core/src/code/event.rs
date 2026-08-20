@@ -224,6 +224,11 @@ pub enum CodeEvent {
     AssistantMessage {
         /// The message text.
         text: String,
+        /// The `Task` call this message ran inside, when a harness subagent
+        /// produced it (decision 52). Absent on the parent's own messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        parent_call_id: Option<String>,
     },
     /// A chunk of reasoning/thinking text, where the engine reports it.
     ReasoningDelta {
@@ -238,6 +243,11 @@ pub enum CodeEvent {
         name: String,
         /// Display-oriented classification.
         detail: ToolDetail,
+        /// The `Task` call this call ran inside, when a harness subagent
+        /// issued it (decision 52). Absent on the parent's own calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        parent_call_id: Option<String>,
     },
     /// A tool call finished.
     ToolCompleted {
@@ -257,6 +267,11 @@ pub enum CodeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         detail: Option<ToolDetail>,
+        /// The `Task` call this call ran inside, when a harness subagent
+        /// issued it (decision 52). Absent on the parent's own calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        parent_call_id: Option<String>,
     },
     /// A file changed. The diff body is loaded from a bounded GET route.
     FileChanged {
@@ -387,6 +402,7 @@ mod tests {
             },
             CodeEvent::AssistantMessage {
                 text: "hello from fixture".into(),
+                parent_call_id: None,
             },
             CodeEvent::ReasoningDelta {
                 text: "thinking".into(),
@@ -397,6 +413,7 @@ mod tests {
                 detail: ToolDetail::FileRead {
                     path: "README.md".into(),
                 },
+                parent_call_id: None,
             },
             CodeEvent::ToolCompleted {
                 call_id: "toolu_1".into(),
@@ -405,6 +422,7 @@ mod tests {
                 detail: Some(ToolDetail::FileRead {
                     path: "README.md".into(),
                 }),
+                parent_call_id: None,
             },
             CodeEvent::FileChanged {
                 path: "src/lib.rs".into(),

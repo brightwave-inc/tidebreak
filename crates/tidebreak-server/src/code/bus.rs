@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tidebreak_core::{
-    Attention, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWatchState, OwnerId,
-    PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId,
+    Attention, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
+    CodeWatchState, OwnerId, PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId,
 };
 use tokio::sync::broadcast;
 
@@ -44,6 +44,9 @@ pub(crate) struct SessionDigest {
     pub watch_state: Option<CodeWatchState>,
     pub watch_detail: Option<String>,
     pub watch_cycles: Option<i64>,
+    /// Harness subagents on this session, set only when any were observed
+    /// (decision 52). Bounded on the session row.
+    pub subagents: Option<Vec<CodeSubagentSummary>>,
 }
 
 /// Progress of one in-flight `git clone` job.

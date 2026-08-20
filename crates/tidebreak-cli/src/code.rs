@@ -1123,7 +1123,7 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
             let _ = stdout.flush();
             return !text.ends_with('\n');
         }
-        CodeEvent::AssistantMessage { text } => {
+        CodeEvent::AssistantMessage { text, .. } => {
             // Deltas already painted the same words; reprinting them as
             // `pingping` is the usual stream+final pair.
             if *streamed_text {

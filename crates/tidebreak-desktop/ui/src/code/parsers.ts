@@ -43,6 +43,8 @@ import type {
   ToolDetail,
   ToolOutcome,
   CodeSessionDigest,
+  CodeSubagentStatus,
+  CodeSubagentSummary,
   CodeUpdateNotice,
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
@@ -132,6 +134,11 @@ const WATCH_STATES = new Set<CodeWatchState>([
   "blocked",
   "done",
   "stopped",
+  "failed",
+]);
+const SUBAGENT_STATUSES = new Set<CodeSubagentStatus>([
+  "running",
+  "done",
   "failed",
 ]);
 const WORKSPACE_STATUSES = new Set<CodeWorkspaceStatus>([
@@ -1482,7 +1489,6 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       }
       return { type: "turn_started", turn_id: value.turn_id };
     case "assistant_delta":
-    case "assistant_message":
     case "reasoning_delta":
     case "user_steered":
       if (
@@ -1492,6 +1498,22 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         return null;
       }
       return { type: value.type, text: value.text } as CodeEvent;
+    case "assistant_message":
+      // A subagent's message names its spanning `Task` call (ADR 0052).
+      if (
+        !onlyKeys(value, ["type", "text", "parent_call_id"]) ||
+        typeof value.text !== "string" ||
+        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
+      ) {
+        return null;
+      }
+      return {
+        type: "assistant_message",
+        text: value.text,
+        ...(value.parent_call_id !== undefined
+          ? { parent_call_id: value.parent_call_id }
+          : {}),
+      };
     case "tool_started": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "tool_started" }>>(value, [
@@ -1499,9 +1521,11 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "call_id",
           "name",
           "detail",
+          "parent_call_id",
         ]) ||
         !nonEmpty(value.call_id) ||
-        !nonEmpty(value.name)
+        !nonEmpty(value.name) ||
+        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
       ) {
         return null;
       }
@@ -1512,6 +1536,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         call_id: value.call_id,
         name: value.name,
         detail,
+        ...(value.parent_call_id !== undefined
+          ? { parent_call_id: value.parent_call_id }
+          : {}),
       };
     }
     case "tool_completed": {
@@ -1522,10 +1549,12 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "outcome",
           "preview",
           "detail",
+          "parent_call_id",
         ]) ||
         !nonEmpty(value.call_id) ||
         !isMember(value.outcome, TOOL_OUTCOMES) ||
-        typeof value.preview !== "string"
+        typeof value.preview !== "string" ||
+        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
       ) {
         return null;
       }
@@ -1544,6 +1573,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         outcome: value.outcome,
         preview: value.preview,
         ...(detail ? { detail } : {}),
+        ...(value.parent_call_id !== undefined
+          ? { parent_call_id: value.parent_call_id }
+          : {}),
       };
     }
     case "turn_completed": {
@@ -1840,6 +1872,29 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+/** `undefined` stays undefined; a present list must be well-formed. */
+function parseSubagents(value: unknown): CodeSubagentSummary[] | null {
+  if (!Array.isArray(value)) return null;
+  const subagents: CodeSubagentSummary[] = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys<CodeSubagentSummary>(item, ["call_id", "name", "status"]) ||
+      !nonEmpty(item.call_id) ||
+      typeof item.name !== "string" ||
+      !isMember(item.status, SUBAGENT_STATUSES)
+    ) {
+      return null;
+    }
+    subagents.push({
+      call_id: item.call_id,
+      name: item.name,
+      status: item.status,
+    });
+  }
+  return subagents;
+}
+
 export function parseCodeSessionDigest(
   value: unknown,
 ): CodeSessionDigest | null {
@@ -1857,6 +1912,7 @@ export function parseCodeSessionDigest(
       "watch_state",
       "watch_detail",
       "watch_cycles",
+      "subagents",
     ]) ||
     !nonEmpty(value.workspace) ||
     !nonEmpty(value.session) ||
@@ -1876,6 +1932,9 @@ export function parseCodeSessionDigest(
   const pr_state =
     value.pr_state === undefined ? undefined : parsePrState(value.pr_state);
   if (value.pr_state !== undefined && !pr_state) return null;
+  const subagents =
+    value.subagents === undefined ? undefined : parseSubagents(value.subagents);
+  if (value.subagents !== undefined && !subagents) return null;
   return {
     workspace: value.workspace,
     session: value.session,
@@ -1894,6 +1953,7 @@ export function parseCodeSessionDigest(
     ...(value.watch_cycles !== undefined
       ? { watch_cycles: value.watch_cycles }
       : {}),
+    ...(subagents ? { subagents } : {}),
   };
 }
 
@@ -1933,6 +1993,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "watch_state",
           "watch_detail",
           "watch_cycles",
+          "subagents",
         ]) ||
         !nonEmpty(value.workspace) ||
         !nonEmpty(value.session) ||
@@ -1953,6 +2014,11 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
       const pr_state =
         value.pr_state === undefined ? undefined : parsePrState(value.pr_state);
       if (value.pr_state !== undefined && !pr_state) return null;
+      const subagents =
+        value.subagents === undefined
+          ? undefined
+          : parseSubagents(value.subagents);
+      if (value.subagents !== undefined && !subagents) return null;
       return {
         type: "digest",
         workspace: value.workspace,
@@ -1972,6 +2038,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         ...(value.watch_cycles !== undefined
           ? { watch_cycles: value.watch_cycles }
           : {}),
+        ...(subagents ? { subagents } : {}),
       };
     }
     case "clone_progress": {

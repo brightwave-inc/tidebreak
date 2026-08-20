@@ -100,7 +100,7 @@ describe("WorkspaceCard", () => {
 
     // The panel says what the row cannot: full branch, checks, the PR.
     expect(screen.getByText("tidebreak/fix-login")).toBeInTheDocument();
-    expect(screen.getByText("8 passing, 1 pending")).toBeInTheDocument();
+    expect(screen.getByText(/8 passing, 1 pending/)).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Open pull request #184" }),
@@ -108,6 +108,38 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("open-pr");
     // Panel actions never double as "open the workspace".
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("speaks the header control's workflow vocabulary from the panel", async () => {
+    const user = userEvent.setup();
+    const onWorkflowAction = vi.fn();
+    render(
+      <WorkspaceCard
+        workspace={{
+          ...workspace,
+          pr: { ...pr, mergeable: "conflicting", checks_summary: undefined },
+        }}
+        digest={undefined}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: true, archived: false })}
+        detailDefaultOpen
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+        onWorkflowAction={onWorkflowAction}
+      />,
+    );
+
+    // Same model, same label table as WorkspaceWorkflowControl: a
+    // conflicting PR's one obvious action is resolving the conflicts.
+    await user.click(
+      screen.getByRole("button", { name: "Resolve conflicts" }),
+    );
+    expect(onWorkflowAction).toHaveBeenCalledWith("resolve_conflicts");
   });
 
   it("leads an archived workspace's panel with Restore", async () => {
@@ -188,5 +220,57 @@ describe("WorkspaceCard", () => {
     // The child row is a sibling of the row button; opening it must not
     // also open the workspace.
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("renders harness subagents as child rows that open the workspace", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 3,
+      subagents: [
+        {
+          call_id: "toolu_task_1",
+          name: "Find the config parser",
+          status: "running",
+        },
+        { call_id: "toolu_task_2", name: "Run the flaky suite", status: "failed" },
+      ],
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: false, archived: false })}
+        onOpen={onOpen}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    // Both rows render with their status; a failed one still names itself.
+    expect(
+      screen.getByRole("button", {
+        name: "Subagent for Fix login: Run the flaky suite, Failed",
+      }),
+    ).toBeInTheDocument();
+    // Opening a subagent opens the workspace — the filtered sub-transcript
+    // view is a later slice (ADR 0052).
+    await user.click(
+      screen.getByRole("button", {
+        name: "Subagent for Fix login: Find the config parser, Running",
+      }),
+    );
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 });

@@ -375,6 +375,31 @@ export const watchDigest: CodeSessionDigest = codeDigest({
   turn_count: 2,
 });
 
+/**
+ * An interactive digest carrying harness subagents (decision 52): one still
+ * running, one done, one failed — the three row states the rail shows.
+ */
+export const subagentsDigest: CodeSessionDigest = codeDigest({
+  turn_count: 3,
+  subagents: [
+    {
+      call_id: "toolu_task_running",
+      name: "Audit the migration plan (general-purpose)",
+      status: "running",
+    },
+    {
+      call_id: "toolu_task_done",
+      name: "Find the config parser",
+      status: "done",
+    },
+    {
+      call_id: "toolu_task_failed",
+      name: "Run the flaky suite",
+      status: "failed",
+    },
+  ],
+});
+
 /** Workspace PR digests, one per chip tone. */
 export const openPrDigest: PullRequestDigest = {
   number: 184,

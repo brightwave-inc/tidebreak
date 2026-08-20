@@ -771,6 +771,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,
+            subagents: Vec::new(),
             created_at: now,
         },
     )
