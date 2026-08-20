@@ -8,7 +8,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
-import type { PanelSearch } from "../panel/panelUrl";
+import { panelSearchFrom, type PanelSearch } from "../panel/panelUrl";
 
 /**
  * Renders a component inside a router shaped like the real one, so anything
@@ -73,20 +73,8 @@ export async function renderWithRouter(
   const codeWorkspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
-    validateSearch: (search: Record<string, unknown>): PanelSearch => ({
-      tabs: typeof search.tabs === "string" ? search.tabs : undefined,
-      active: typeof search.active === "string" ? search.active : undefined,
-      fullscreen: typeof search.fullscreen === "string" ? search.fullscreen : undefined,
-      split: typeof search.split === "string" ? search.split : undefined,
-      splitActive:
-        typeof search.splitActive === "string" ? search.splitActive : undefined,
-      splitFocused:
-        typeof search.splitFocused === "string"
-          ? search.splitFocused
-          : undefined,
-      left: typeof search.left === "string" ? search.left : undefined,
-      right: typeof search.right === "string" ? search.right : undefined,
-    }),
+    validateSearch: (search: Record<string, unknown>): PanelSearch =>
+      panelSearchFrom(search),
     component: () => <>{ui}</>,
   });
 

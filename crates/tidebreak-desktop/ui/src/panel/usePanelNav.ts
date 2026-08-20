@@ -46,8 +46,12 @@ export function usePanelNav() {
       void navigate({
         to: "/code/w/$workspaceId",
         params: { workspaceId },
-        // Layout writes must not evict which task is attached.
-        search: { ...searchFromLayout(next), task: search.task },
+        // Layout writes must not evict which child view is attached.
+        search: {
+          ...searchFromLayout(next),
+          task: search.task,
+          subagent: search.subagent,
+        },
       });
     } else if (chatId) {
       void navigate({

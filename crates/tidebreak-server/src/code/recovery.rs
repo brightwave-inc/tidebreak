@@ -10,15 +10,17 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_turn,
+    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_session, save_turn,
+    set_session_subagents,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
-    CodeTurnStatus, DbStore, FenceReason,
+    CodeSubagentStatus, CodeTurnStatus, DbStore, FenceReason,
 };
 
-use super::attention::{persist_session, replace_attention};
+use super::attention::{emit_digest, persist_session, replace_attention};
 use super::bus::CodeEventBus;
+use super::session_worker::settle_running_subagents;
 
 /// What boot recovery did to one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +75,7 @@ pub(crate) async fn fence_session(
         session.harness_resume_ref = None;
     }
     session.lifecycle = CodeSessionLifecycle::Fenced;
+    settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
     session.fence_reason = Some(reason.clone());
     session.child_pid = None;
     replace_attention(
@@ -83,8 +86,31 @@ pub(crate) async fn fence_session(
         ),
         false,
     );
-    persist_session(store, bus, session).await?;
+    persist_recovery_session(store, bus, session).await?;
     Ok(())
+}
+
+/// Recovery owns both the lifecycle transition and the matching subagent
+/// settlement. A normal full-row session save deliberately leaves subagents
+/// untouched so stale worker copies cannot clobber the event sink's targeted
+/// writes, so this path performs the two guarded writes explicitly and only
+/// publishes the digest after both have landed.
+async fn persist_recovery_session(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    session: &CodeSession,
+) -> Result<bool, tidebreak_core::AgentError> {
+    if !save_session(store, session).await? {
+        return Ok(false);
+    }
+    if !set_session_subagents(store, &session.owner, session.id, &session.subagents).await? {
+        return Err(tidebreak_core::AgentError::Store(format!(
+            "code session {} disappeared while recovery settled subagents",
+            session.id
+        )));
+    }
+    emit_digest(store, bus, session).await;
+    Ok(true)
 }
 
 /// Resolve a fenced session after an explicit user reap. Never signals.
@@ -114,6 +140,7 @@ async fn recover_one(
     let Some(pid) = session.child_pid else {
         // No recorded pid: treat as dead. Never invent a pid to probe.
         interrupt_open_turn(store, &session).await?;
+        settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
         session.lifecycle = CodeSessionLifecycle::Idle;
         session.child_pid = None;
         replace_attention(
@@ -124,7 +151,7 @@ async fn recover_one(
             ),
             false,
         );
-        persist_session(store, bus, &session).await?;
+        persist_recovery_session(store, bus, &session).await?;
         return Ok(Some(RecoveryAction::Interrupted {
             session: session.id.to_string(),
         }));
@@ -132,6 +159,7 @@ async fn recover_one(
     match probe(pid) {
         PidLiveness::Dead => {
             interrupt_open_turn(store, &session).await?;
+            settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
             session.lifecycle = CodeSessionLifecycle::Idle;
             session.child_pid = None;
             replace_attention(
@@ -142,12 +170,13 @@ async fn recover_one(
                 ),
                 false,
             );
-            persist_session(store, bus, &session).await?;
+            persist_recovery_session(store, bus, &session).await?;
             Ok(Some(RecoveryAction::Interrupted {
                 session: session.id.to_string(),
             }))
         }
         PidLiveness::Alive => {
+            settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
             session.lifecycle = CodeSessionLifecycle::Fenced;
             session.fence_reason = Some(FenceReason::OrphanAlive);
             replace_attention(
@@ -160,7 +189,7 @@ async fn recover_one(
                 ),
                 false,
             );
-            persist_session(store, bus, &session).await?;
+            persist_recovery_session(store, bus, &session).await?;
             Ok(Some(RecoveryAction::Fenced {
                 session: session.id.to_string(),
             }))
@@ -282,15 +311,40 @@ mod tests {
     use std::sync::Arc;
     use tidebreak_core::db::code::{
         get_session, get_turn, insert_repo, insert_session, insert_turn, insert_workspace,
+        set_session_subagents,
     };
     use tidebreak_core::{
-        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeSessionKind, CodeTurn,
-        CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeSessionKind,
+        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
+        RepoId, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
     fn now() -> chrono::DateTime<Utc> {
         Utc::now()
+    }
+
+    async fn seed_running_subagent(store: &DbStore, session_id: CodeSessionId) {
+        set_session_subagents(
+            store,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            &[CodeSubagentSummary {
+                call_id: "task-running".into(),
+                name: "Still working".into(),
+                status: CodeSubagentStatus::Running,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn assert_subagent_failed(store: &DbStore, session_id: CodeSessionId) {
+        let session = get_session(store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.subagents[0].status, CodeSubagentStatus::Failed);
     }
 
     async fn seeded_running(
@@ -402,6 +456,7 @@ mod tests {
     #[tokio::test]
     async fn dead_pid_closes_the_open_turn_as_interrupted() {
         let (_dir, store, session_id, turn_id) = seeded_running(Some(9_999_991)).await;
+        seed_running_subagent(&store, session_id).await;
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Dead)
             .await
@@ -427,6 +482,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        assert_subagent_failed(&store, session_id).await;
+    }
+
+    #[tokio::test]
+    async fn missing_pid_settles_running_subagents_as_failed() {
+        let (_dir, store, session_id, turn_id) = seeded_running(None).await;
+        seed_running_subagent(&store, session_id).await;
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_| {
+            panic!("a missing pid must not be probed")
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Interrupted { .. }]
+        ));
+        assert_eq!(
+            get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            CodeTurnStatus::Interrupted
+        );
+        assert_subagent_failed(&store, session_id).await;
     }
 
     #[tokio::test]
@@ -438,6 +519,7 @@ mod tests {
             .expect("spawn decoy");
         let decoy_pid = i64::from(decoy.id());
         let (_dir, store, session_id, turn_id) = seeded_running(Some(decoy_pid)).await;
+        seed_running_subagent(&store, session_id).await;
         let flag = signaled.clone();
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, move |pid| {
@@ -470,6 +552,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_subagent_failed(&store, session_id).await;
         assert!(
             decoy.try_wait().ok().flatten().is_none(),
             "decoy must still be alive — recovery must not signal it"
@@ -477,6 +560,28 @@ mod tests {
         let _ = signaled;
         let _ = decoy.kill();
         let _ = decoy.wait();
+    }
+
+    #[tokio::test]
+    async fn runtime_fence_settles_running_subagents_as_failed() {
+        let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Running).await;
+        seed_running_subagent(&store, session_id).await;
+        let mut session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let bus = crate::code::bus::CodeEventBus::default();
+        fence_session(
+            &store,
+            &bus,
+            &mut session,
+            FenceReason::ResumeLost {
+                detail: "resume token rejected".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_subagent_failed(&store, session_id).await;
     }
 
     #[tokio::test]

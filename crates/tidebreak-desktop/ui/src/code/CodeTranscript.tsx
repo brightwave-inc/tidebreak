@@ -56,6 +56,7 @@ export function CodeTranscript({
   streamStalled = false,
   animateStreaming = true,
   onOpenTurnDiff,
+  emptyState,
   sessionId,
   onReveal,
   scrollRef,
@@ -81,6 +82,8 @@ export function CodeTranscript({
   animateStreaming?: boolean;
   /** Scope the review sidebar to one turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Copy for a filtered/read-only transcript with no captured rows. */
+  emptyState?: { title: string; description: string };
   sessionId?: string;
   /**
    * The reader opened or closed something inline.
@@ -112,14 +115,22 @@ export function CodeTranscript({
   // are already chosen, so this is the one instruction left plus what the
   // first turn will produce.
   if (items.length === 0) {
+    const title = emptyState?.title ?? "Send a message to start a turn.";
+    const description =
+      emptyState?.description ??
+      "The engine's replies, the tools it runs, and the files it changes all land here.";
     return (
       <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
         <div className="flex max-w-sm flex-col items-center gap-1 text-center text-balance">
-          <p className="text-sm font-medium">Send a message to start a turn.</p>
+          <p className="text-sm font-medium">{title}</p>
           <p className="text-muted-foreground text-[13.5px] leading-relaxed">
-            The engine's replies, the tools it runs, and the files it changes
-            all land here.
+            {description}
           </p>
+          {busy && (
+            <div className="mt-3">
+              <AssistantWorkingIndicator />
+            </div>
+          )}
         </div>
       </div>
     );

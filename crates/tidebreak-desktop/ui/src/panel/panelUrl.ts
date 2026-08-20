@@ -185,12 +185,46 @@ export type PanelSearch = {
    */
   task?: string;
   /**
+   * Code workspace: the spanning Task call whose attributed transcript is
+   * being inspected inside the parent conversation.
+   */
+  subagent?: string;
+  /**
    * The retired pair-of-slots grammar. Read on the way in so older links and
    * already-open windows still land somewhere; never written back out.
    */
   left?: string;
   right?: string;
 };
+
+/**
+ * Normalize the router's untyped search record into the panel address shared
+ * by the app, tests, and Storybook. Child transcript addresses are trimmed,
+ * and only one may occupy the conversation seat: a watch task swaps sessions,
+ * while a subagent filters the mounted parent session, so `task` wins when a
+ * hand-edited URL contains both.
+ */
+export function panelSearchFrom(search: Record<string, unknown>): PanelSearch {
+  const text = (value: unknown) =>
+    typeof value === "string" ? value : undefined;
+  const address = (value: unknown) => {
+    const parsed = text(value)?.trim();
+    return parsed ? parsed : undefined;
+  };
+  const task = address(search.task);
+  return {
+    tabs: text(search.tabs),
+    active: text(search.active),
+    fullscreen: text(search.fullscreen),
+    split: text(search.split),
+    splitActive: text(search.splitActive),
+    splitFocused: text(search.splitFocused),
+    task,
+    subagent: task ? undefined : address(search.subagent),
+    left: text(search.left),
+    right: text(search.right),
+  };
+}
 
 const TAB_SEPARATOR = ",";
 

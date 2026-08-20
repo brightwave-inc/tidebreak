@@ -129,8 +129,10 @@ impl LiveSink {
     }
 
     /// Track subagent spans (decision 52): a top-level `Task` call opens one,
-    /// its completion closes it. Boundaries are rare, so each one persists the
-    /// list through the targeted write and restates the session's digest.
+    /// its completion closes it. A terminal parent turn also settles any child
+    /// whose own completion was lost, so the rail never claims work survived a
+    /// turn that has already ended. Boundaries are rare, so each one persists
+    /// the list through the targeted write and restates the session's digest.
     async fn note_subagent_boundary(&self, event: &CodeEvent) {
         let changed = match event {
             CodeEvent::ToolStarted {
@@ -181,6 +183,16 @@ impl LiveSink {
                     }
                     None => None,
                 }
+            }
+            CodeEvent::TurnCompleted { .. } => {
+                let mut subagents = self.subagents.lock().expect("code sink subagents");
+                settle_running_subagents(&mut subagents, CodeSubagentStatus::Done)
+                    .then(|| subagents.clone())
+            }
+            CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted => {
+                let mut subagents = self.subagents.lock().expect("code sink subagents");
+                settle_running_subagents(&mut subagents, CodeSubagentStatus::Failed)
+                    .then(|| subagents.clone())
             }
             _ => None,
         };
@@ -244,6 +256,27 @@ impl LiveSink {
         )
         .await;
     }
+}
+
+/// Settle every still-running child at a parent lifecycle boundary.
+///
+/// A harness can lose the final `Task` result when its process exits or the
+/// app restarts. The parent boundary is still authoritative: success means the
+/// child stopped without an observed failure, while failure/interruption means
+/// its unfinished work cannot honestly remain Running.
+pub(crate) fn settle_running_subagents(
+    subagents: &mut [CodeSubagentSummary],
+    status: CodeSubagentStatus,
+) -> bool {
+    debug_assert!(status != CodeSubagentStatus::Running);
+    let mut changed = false;
+    for subagent in subagents {
+        if subagent.status == CodeSubagentStatus::Running {
+            subagent.status = status;
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[async_trait]
@@ -738,6 +771,7 @@ async fn drive_turn(
                 turn.status = status;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
+                sink.note_subagent_boundary(&event).await;
                 let _ = persist_and_publish(
                     db,
                     bus,
@@ -754,17 +788,19 @@ async fn drive_turn(
                 turn.status = CodeTurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
+                let event = CodeEvent::TurnFailed {
+                    error: BoundedError {
+                        message: err.to_string(),
+                    },
+                };
+                sink.note_subagent_boundary(&event).await;
                 let _ = persist_and_publish(
                     db,
                     bus,
                     &session.owner,
                     session.id,
                     session.spawn_epoch,
-                    CodeEvent::TurnFailed {
-                        error: BoundedError {
-                            message: err.to_string(),
-                        },
-                    },
+                    event,
                 )
                 .await;
             }
@@ -1239,6 +1275,190 @@ impl From<HarnessError> for WorkerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use tidebreak_core::db::code::{get_session, insert_repo, insert_session, insert_workspace};
+    use tidebreak_core::{
+        CodePermissionMode, CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace,
+        CodeWorkspaceStatus, HarnessKind, RepoId, ToolDetail, WorkspaceId,
+    };
+
+    fn subagent(call_id: &str, status: CodeSubagentStatus) -> CodeSubagentSummary {
+        CodeSubagentSummary {
+            call_id: call_id.into(),
+            name: call_id.into(),
+            status,
+        }
+    }
+
+    #[test]
+    fn parent_boundaries_settle_only_running_subagents() {
+        let mut completed = vec![
+            subagent("running", CodeSubagentStatus::Running),
+            subagent("done", CodeSubagentStatus::Done),
+            subagent("failed", CodeSubagentStatus::Failed),
+        ];
+        assert!(settle_running_subagents(
+            &mut completed,
+            CodeSubagentStatus::Done
+        ));
+        assert_eq!(completed[0].status, CodeSubagentStatus::Done);
+        assert_eq!(completed[1].status, CodeSubagentStatus::Done);
+        assert_eq!(completed[2].status, CodeSubagentStatus::Failed);
+        assert!(!settle_running_subagents(
+            &mut completed,
+            CodeSubagentStatus::Failed
+        ));
+
+        let mut failed = vec![subagent("running", CodeSubagentStatus::Running)];
+        assert!(settle_running_subagents(
+            &mut failed,
+            CodeSubagentStatus::Failed
+        ));
+        assert_eq!(failed[0].status, CodeSubagentStatus::Failed);
+    }
+
+    async fn seeded_sink() -> (
+        tempfile::TempDir,
+        Arc<DbStore>,
+        Arc<LiveSink>,
+        CodeSessionId,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("t.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let owner = OwnerId::local();
+        let repo_id = RepoId::new();
+        insert_repo(
+            &store,
+            &CodeRepo {
+                id: repo_id,
+                owner: owner.clone(),
+                root_path: directory.path().join("repo").display().to_string(),
+                display_name: "example".into(),
+                default_base_ref: "main".into(),
+                branch_prefix: "tidebreak/".into(),
+                setup_script: None,
+                archive_script: None,
+                quick_actions: Vec::new(),
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let workspace_id = WorkspaceId::new();
+        insert_workspace(
+            &store,
+            &CodeWorkspace {
+                id: workspace_id,
+                owner: owner.clone(),
+                repo_id,
+                title: "first".into(),
+                worktree_path: directory.path().join("wt").display().to_string(),
+                branch_name: "tidebreak/first".into(),
+                base_ref: "main".into(),
+                status: CodeWorkspaceStatus::Active,
+                pr: None,
+                created_at: Utc::now(),
+                archived_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session_id = CodeSessionId::new();
+        insert_session(
+            &store,
+            &CodeSession {
+                id: session_id,
+                owner: owner.clone(),
+                workspace_id,
+                kind: CodeSessionKind::Interactive,
+                harness_kind: HarnessKind::ClaudeCode,
+                harness_version: Some("2.1.237".into()),
+                harness_resume_ref: None,
+                permission_mode: CodePermissionMode::Plan,
+                model: None,
+                lifecycle: CodeSessionLifecycle::Running,
+                fence_reason: None,
+                child_pid: None,
+                spawn_epoch: 1,
+                attention: Attention::working(AttentionSource::Lifecycle),
+                unrecognized_event_count: 0,
+                subagents: Vec::new(),
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let sink = sink_for(
+            store.clone(),
+            Arc::new(CodeEventBus::default()),
+            owner,
+            session_id,
+            1,
+            None,
+            Vec::new(),
+        );
+        (directory, store, sink, session_id)
+    }
+
+    #[tokio::test]
+    async fn sink_settles_unclosed_tasks_at_each_terminal_parent_boundary() {
+        let (_directory, store, sink, session_id) = seeded_sink().await;
+        let cases = [
+            (
+                "completed",
+                HarnessEvent::TurnCompleted {
+                    usage: CodeUsage::default(),
+                },
+                CodeSubagentStatus::Done,
+            ),
+            (
+                "failed",
+                HarnessEvent::TurnFailed {
+                    error: BoundedError {
+                        message: "engine failed".into(),
+                    },
+                },
+                CodeSubagentStatus::Failed,
+            ),
+            (
+                "interrupted",
+                HarnessEvent::TurnInterrupted,
+                CodeSubagentStatus::Failed,
+            ),
+        ];
+
+        for (call_id, boundary, expected) in cases {
+            sink.emit(HarnessEvent::ToolStarted {
+                call_id: call_id.into(),
+                name: "Task".into(),
+                detail: ToolDetail::Other {
+                    summary: format!("{call_id} child"),
+                },
+                parent_call_id: None,
+            })
+            .await;
+            sink.emit(boundary).await;
+            let session = get_session(&store, &OwnerId::local(), session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                session
+                    .subagents
+                    .iter()
+                    .find(|entry| entry.call_id == call_id)
+                    .map(|entry| entry.status),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn cap_raw_truncates_on_a_char_boundary() {

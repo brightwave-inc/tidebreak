@@ -191,6 +191,13 @@ export function CodeSidebar() {
                       search: { task: sessionId },
                     })
                   }
+                  onOpenSubagent={(callId) =>
+                    void navigate({
+                      to: "/code/w/$workspaceId",
+                      params: { workspaceId: workspace.id },
+                      search: { subagent: callId },
+                    })
+                  }
                   onWorkflowAction={(action: WorkspaceWorkflowAction) => {
                     if (action === "open_pr") {
                       run("open-pr", {

@@ -79,7 +79,7 @@ const client = {
     gh_found: false,
     gh_remediation: "gh is not installed.",
   })),
-  openCodeUpdates: vi.fn(() => {
+  openCodeUpdates: vi.fn((_onNotice: (notice: unknown) => void) => {
     return {
       close() {},
       addEventListener() {},
@@ -238,5 +238,62 @@ describe("CodeSidebar", () => {
 
     fireEvent.keyDown(archive, { key: "Escape" });
     await waitFor(() => expect(card).toHaveFocus());
+  });
+
+  it("opens a harness subagent through the filtered workspace address", async () => {
+    client.openCodeUpdates.mockImplementationOnce((onNotice) => {
+      queueMicrotask(() =>
+        onNotice({
+          type: "snapshot",
+          sessions: [
+            {
+              workspace: "ws-1",
+              session: "sess-1",
+              kind: "interactive",
+              lifecycle: "running",
+              attention: {
+                state: { type: "working" },
+                source: "lifecycle",
+              },
+              title: "Fix login",
+              turn_count: 2,
+              activity: "subagents",
+              subagents: [
+                {
+                  call_id: "toolu-task-1",
+                  name: "Audit the parser",
+                  status: "running",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      return {
+        close() {},
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as WebSocket;
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Subagent for Fix login: Audit the parser, Running",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/code/w/ws-1");
+      expect(router.state.location.search).toMatchObject({
+        subagent: "toolu-task-1",
+      });
+      expect(router.state.location.search).not.toHaveProperty("task");
+    });
   });
 });

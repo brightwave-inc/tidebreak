@@ -13,7 +13,7 @@ import { ChatRoute } from "./ChatRoute";
 import { HomeRoute } from "./HomeRoute";
 import { InboxView } from "./InboxView";
 import { useManagedPolicy } from "./managedPolicy";
-import type { PanelSearch } from "./panel/panelUrl";
+import { panelSearchFrom, type PanelSearch } from "./panel/panelUrl";
 import { PluginsPage } from "./plugins/PluginsPage";
 import { ProjectFilesView } from "./ProjectFilesView";
 import { useProjectListStore } from "./ProjectListStore";
@@ -32,27 +32,6 @@ const rootRoute = createRootRoute({ component: AppShell });
  * the parked call the transcript should reveal.
  */
 type ChatSearch = PanelSearch & { focus?: string; at?: string };
-
-/**
- * The layout params, kept as strings for the panel parser to make sense of.
- * `left` and `right` are the retired grammar, read so an older link or an
- * already-open window still restores; the router rewrites them to `tabs` the
- * first time the layout changes.
- */
-function panelSearchFrom(search: Record<string, unknown>): PanelSearch {
-  const text = (value: unknown) => (typeof value === "string" ? value : undefined);
-  return {
-    tabs: text(search.tabs),
-    active: text(search.active),
-    fullscreen: text(search.fullscreen),
-    split: text(search.split),
-    splitActive: text(search.splitActive),
-    splitFocused: text(search.splitFocused),
-    task: text(search.task),
-    left: text(search.left),
-    right: text(search.right),
-  };
-}
 
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -226,13 +205,8 @@ function CodeRepoRouteComponent() {
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/w/$workspaceId",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): PanelSearch & { task?: string } => ({
-    ...panelSearchFrom(search),
-    // A child task's session attached in place of the conversation.
-    task: typeof search.task === "string" ? search.task : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): PanelSearch =>
+    panelSearchFrom(search),
   component: CodeWorkspaceRouteComponent,
 });
 

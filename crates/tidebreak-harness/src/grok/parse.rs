@@ -1,10 +1,11 @@
 //! Parse captured Grok CLI `streaming-json` lines into [`HarnessEvent`]s.
 //!
-//! Written only against the checked-in fixtures under `fixtures/grok/1.0.4/`.
+//! Written only against the checked-in fixtures under `fixtures/grok/1.0.4/`
+//! and the supplemental subagent projection under `fixtures/grok/1.0.5/`.
 //! Unknown event types increment a counter and are logged (size-capped). They
 //! are never fatal and never dropped silently.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use tidebreak_core::{
@@ -25,6 +26,9 @@ pub struct GrokStreamParser {
     version: String,
     started_tools: HashSet<String>,
     completed_tools: HashSet<String>,
+    pending_spawns: HashMap<String, PendingSpawn>,
+    companion_calls: HashMap<String, Vec<CompanionTarget>>,
+    settled_subagents: HashSet<String>,
     emitted_session: bool,
     last_usage: CodeUsage,
     pending_text: String,
@@ -38,11 +42,27 @@ impl Default for GrokStreamParser {
             version: "unknown".into(),
             started_tools: HashSet::new(),
             completed_tools: HashSet::new(),
+            pending_spawns: HashMap::new(),
+            companion_calls: HashMap::new(),
+            settled_subagents: HashSet::new(),
             emitted_session: false,
             last_usage: CodeUsage::default(),
             pending_text: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpawn {
+    detail: ToolDetail,
+    background: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CompanionTarget {
+    task_id: String,
+    parent_call_id: String,
+    call_id: String,
 }
 
 /// Result of parsing a whole fixture or a finished stream.
@@ -176,6 +196,37 @@ impl GrokStreamParser {
             .unwrap_or("unknown")
             .to_owned();
         let input = value.get("rawInput").cloned().unwrap_or(Value::Null);
+        // Grok's background spawn call resolves immediately with a durable
+        // `subagent_id`; that id, not this four-millisecond launcher call, is
+        // the spanning identity later output/kill tools address. Delay the
+        // normalized Task start until the completion frame reveals it.
+        if name == "spawn_subagent" {
+            self.pending_spawns.insert(
+                call_id,
+                PendingSpawn {
+                    detail: subagent_detail(&input),
+                    background: input
+                        .get("background")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                },
+            );
+            return Vec::new();
+        }
+
+        let targets = companion_targets(&call_id, &input);
+        if !targets.is_empty() && is_subagent_companion(&name) {
+            self.companion_calls.insert(call_id, targets.clone());
+            return targets
+                .into_iter()
+                .map(|target| HarnessEvent::ToolStarted {
+                    call_id: target.call_id,
+                    name: name.clone(),
+                    detail: companion_detail(&name, &target.task_id),
+                    parent_call_id: Some(target.parent_call_id),
+                })
+                .collect();
+        }
         vec![HarnessEvent::ToolStarted {
             call_id,
             name: name.clone(),
@@ -190,6 +241,18 @@ impl GrokStreamParser {
         // It carries no state we normalize, so dropping it is a deliberate
         // no-op rather than an unrecognized event.
         let Some(status) = value.get("status").and_then(Value::as_str) else {
+            if let Some(call_id) = value.get("toolCallId").and_then(Value::as_str) {
+                if let Some(spawn) = self.pending_spawns.get_mut(call_id) {
+                    if let Some(input) = value.get("rawInput") {
+                        spawn.detail = subagent_detail(input);
+                        spawn.background |= input
+                            .get("run_in_background")
+                            .or_else(|| input.get("background"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                    }
+                }
+            }
             return Vec::new();
         };
         let call_id = value
@@ -211,6 +274,15 @@ impl GrokStreamParser {
                 return Vec::new();
             }
         };
+
+        if let Some(spawn) = self.pending_spawns.remove(&call_id) {
+            return self.complete_spawn(&call_id, spawn, outcome, preview);
+        }
+
+        if let Some(targets) = self.companion_calls.remove(&call_id) {
+            return self.complete_companion(value, targets, outcome, &preview);
+        }
+
         vec![HarnessEvent::ToolCompleted {
             call_id,
             outcome,
@@ -221,6 +293,94 @@ impl GrokStreamParser {
             detail: None,
             parent_call_id: None,
         }]
+    }
+
+    fn complete_spawn(
+        &mut self,
+        launcher_call_id: &str,
+        spawn: PendingSpawn,
+        outcome: ToolOutcome,
+        preview: String,
+    ) -> Vec<HarnessEvent> {
+        let subagent_id = subagent_id_from(preview.as_str());
+        let task_call_id = subagent_id
+            .clone()
+            .unwrap_or_else(|| launcher_call_id.to_owned());
+        let mut events = vec![HarnessEvent::ToolStarted {
+            call_id: task_call_id.clone(),
+            name: "Task".into(),
+            detail: spawn.detail,
+            parent_call_id: None,
+        }];
+
+        let started_in_background = spawn.background
+            || preview
+                .to_ascii_lowercase()
+                .contains("subagent started in background");
+        if outcome == ToolOutcome::Succeeded && subagent_id.is_some() && started_in_background {
+            return events;
+        }
+
+        if outcome == ToolOutcome::Succeeded && !preview.trim().is_empty() {
+            events.push(HarnessEvent::AssistantMessage {
+                text: bound(&preview, MAX_EVENT_TEXT_CHARS),
+                parent_call_id: Some(task_call_id.clone()),
+            });
+        }
+        self.settled_subagents.insert(task_call_id.clone());
+        events.push(HarnessEvent::ToolCompleted {
+            call_id: task_call_id,
+            outcome,
+            preview,
+            detail: None,
+            parent_call_id: None,
+        });
+        events
+    }
+
+    fn complete_companion(
+        &mut self,
+        value: &Value,
+        targets: Vec<CompanionTarget>,
+        outcome: ToolOutcome,
+        fallback_preview: &str,
+    ) -> Vec<HarnessEvent> {
+        let mut events = Vec::new();
+        let allow_unkeyed_result = targets.len() == 1;
+        for target in targets {
+            let result = task_result(value, &target.task_id, allow_unkeyed_result);
+            let preview = result
+                .and_then(task_result_preview)
+                .unwrap_or_else(|| fallback_preview.to_owned());
+            events.push(HarnessEvent::ToolCompleted {
+                call_id: target.call_id,
+                outcome,
+                preview: bound(&preview, MAX_PREVIEW_CHARS),
+                detail: None,
+                parent_call_id: Some(target.parent_call_id.clone()),
+            });
+
+            let Some(task_outcome) = result.and_then(task_result_outcome) else {
+                continue;
+            };
+            if !self.settled_subagents.insert(target.parent_call_id.clone()) {
+                continue;
+            }
+            if !preview.trim().is_empty() {
+                events.push(HarnessEvent::AssistantMessage {
+                    text: bound(&preview, MAX_EVENT_TEXT_CHARS),
+                    parent_call_id: Some(target.parent_call_id.clone()),
+                });
+            }
+            events.push(HarnessEvent::ToolCompleted {
+                call_id: target.parent_call_id,
+                outcome: task_outcome,
+                preview: bound(&preview, MAX_PREVIEW_CHARS),
+                detail: None,
+                parent_call_id: None,
+            });
+        }
+        events
     }
 
     fn parse_usage(&mut self, value: &Value) -> Vec<HarnessEvent> {
@@ -363,6 +523,135 @@ fn tool_detail(name: &str, kind: Option<&str>, input: &Value) -> ToolDetail {
     }
 }
 
+fn subagent_detail(input: &Value) -> ToolDetail {
+    let description = input
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            input
+                .get("prompt")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("Subagent");
+    let kind = input
+        .get("subagent_type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    ToolDetail::Other {
+        summary: match kind {
+            Some(kind) => format!("{description} ({kind})"),
+            None => description.to_owned(),
+        },
+    }
+}
+
+fn is_subagent_companion(name: &str) -> bool {
+    matches!(
+        name,
+        "get_command_or_subagent_output"
+            | "wait_commands_or_subagents"
+            | "kill_command_or_subagent"
+    )
+}
+
+fn companion_targets(call_id: &str, input: &Value) -> Vec<CompanionTarget> {
+    let mut task_ids = Vec::new();
+    if let Some(task_id) = input.get("task_id").and_then(Value::as_str) {
+        task_ids.push(task_id);
+    }
+    if let Some(values) = input.get("task_ids").and_then(Value::as_array) {
+        task_ids.extend(values.iter().filter_map(Value::as_str));
+    }
+    task_ids
+        .into_iter()
+        .filter(|task_id| looks_like_subagent_id(task_id))
+        .map(|task_id| CompanionTarget {
+            task_id: task_id.to_owned(),
+            parent_call_id: task_id.to_owned(),
+            call_id: format!("{call_id}:{task_id}"),
+        })
+        .collect()
+}
+
+fn looks_like_subagent_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes.get(index) == Some(&b'-'))
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+}
+
+fn companion_detail(name: &str, task_id: &str) -> ToolDetail {
+    let action = match name {
+        "kill_command_or_subagent" => "Cancel subagent",
+        "wait_commands_or_subagents" => "Wait for subagent",
+        _ => "Check subagent output",
+    };
+    ToolDetail::Other {
+        summary: format!("{action} {}", &task_id[..8.min(task_id.len())]),
+    }
+}
+
+fn subagent_id_from(preview: &str) -> Option<String> {
+    preview.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("subagent_id:")
+            .map(str::trim)
+            .filter(|value| looks_like_subagent_id(value))
+            .map(str::to_owned)
+    })
+}
+
+fn task_result<'a>(
+    value: &'a Value,
+    task_id: &str,
+    allow_unkeyed_result: bool,
+) -> Option<&'a Value> {
+    if let Some(results) = value
+        .pointer("/rawOutput/MultiResult/results")
+        .and_then(Value::as_array)
+    {
+        return results
+            .iter()
+            .find(|result| result.get("task_id").and_then(Value::as_str) == Some(task_id));
+    }
+    let result = value.pointer("/rawOutput/Result")?;
+    match result.get("task_id").and_then(Value::as_str) {
+        Some(result_task_id) if result_task_id == task_id => Some(result),
+        None if allow_unkeyed_result => Some(result),
+        _ => None,
+    }
+}
+
+fn task_result_preview(result: &Value) -> Option<String> {
+    result
+        .get("output")
+        .or_else(|| result.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn task_result_outcome(result: &Value) -> Option<ToolOutcome> {
+    match result
+        .get("status")
+        .or_else(|| result.get("outcome"))
+        .and_then(Value::as_str)
+    {
+        Some("completed" | "success" | "succeeded") => Some(ToolOutcome::Succeeded),
+        Some("failed" | "not_found" | "cancelled" | "canceled" | "killed") => {
+            Some(ToolOutcome::Failed)
+        }
+        Some("running" | "pending") | None => None,
+        Some(_) => None,
+    }
+}
+
 fn tool_preview(value: &Value) -> String {
     if let Some(text) = content_text(value.get("content")) {
         if !text.is_empty() {
@@ -477,5 +766,23 @@ mod tests {
             out.events.last(),
             Some(HarnessEvent::TurnCompleted { .. })
         ));
+    }
+
+    #[test]
+    fn a_single_unkeyed_kill_result_settles_the_addressed_subagent() {
+        let input = r#"
+{"type":"tool_call","toolCallId":"call-kill","toolName":"kill_command_or_subagent","rawInput":{"task_id":"01a02025-bcce-7723-a8f6-27e6f2a6a856"}}
+{"type":"tool_call_update","toolCallId":"call-kill","status":"completed","rawOutput":{"Result":{"outcome":"killed"}}}
+"#;
+        let out = GrokStreamParser::parse_ndjson(input);
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Failed,
+                parent_call_id: None,
+                ..
+            } if call_id == "01a02025-bcce-7723-a8f6-27e6f2a6a856"
+        )));
     }
 }

@@ -250,9 +250,10 @@ describe("WorkspaceCard", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("renders harness subagents as child rows that open the workspace", async () => {
+  it("renders harness subagents as child rows that open their filtered transcript", async () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
+    const onOpenSubagent = vi.fn();
     const digest: CodeSessionDigest = {
       workspace: workspace.id,
       session: "sess-1",
@@ -282,6 +283,7 @@ describe("WorkspaceCard", () => {
         visibleMeta={{ repoChip: true, branch: false }}
         commands={workspaceCommands({ hasPr: false, archived: false })}
         onOpen={onOpen}
+        onOpenSubagent={onOpenSubagent}
         onCommand={vi.fn()}
       />,
     );
@@ -292,13 +294,12 @@ describe("WorkspaceCard", () => {
         name: "Subagent for Fix login: Run the flaky suite, Failed",
       }),
     ).toBeInTheDocument();
-    // Opening a subagent opens the workspace — the filtered sub-transcript
-    // view is a later slice (ADR 0052).
     await user.click(
       screen.getByRole("button", {
         name: "Subagent for Fix login: Find the config parser, Running",
       }),
     );
-    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpenSubagent).toHaveBeenCalledWith("toolu_task_1");
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });
