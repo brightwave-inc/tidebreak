@@ -640,18 +640,22 @@ export function CodeComposer({
         ? [{ blob_id: item.attachmentId, media_type: item.mediaType ?? "image/png" }]
         : [],
     );
+    const held = images.attachments;
     setDraft("");
     setNotice(null);
+    // Chips leave with the draft, not after the server answers. Waiting made
+    // a sent turn look like it had failed to take the images.
+    images.clear();
     try {
       const outcome =
         attachments.length > 0
           ? await onSend(message, attachments)
           : await onSend(message);
-      images.clear();
       if (outcome && outcome.kind === "queued") {
         setFollowUpQueued(true);
       }
     } catch (err) {
+      images.restore(held);
       setNotice({
         text:
           err instanceof HttpError && err.kind === "queue_full"

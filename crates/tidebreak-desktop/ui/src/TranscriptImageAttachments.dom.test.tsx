@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranscriptImageAttachments } from "./TranscriptImageAttachments";
 
@@ -36,9 +37,11 @@ describe("TranscriptImageAttachments served content type", () => {
       />,
     );
 
-    const rendered = await screen.findByRole("img", {
-      name: "Attached image 1: 320 by 240 pixels",
+    const toggle = await screen.findByRole("button", {
+      name: "Expand attached image 1: 320 by 240 pixels",
     });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const rendered = toggle.querySelector("img");
     expect(rendered).toHaveAttribute("src", "blob:transcript-image");
   });
 
@@ -63,5 +66,38 @@ describe("TranscriptImageAttachments served content type", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("img")).toBeNull();
     expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("starts collapsed and expands on click", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:transcript-image"),
+      revokeObjectURL: vi.fn(),
+    });
+    const client = {
+      getChatImageAttachment: vi.fn(
+        async () => new Blob(["pixels"], { type: "image/png" }),
+      ),
+    };
+    render(
+      <TranscriptImageAttachments
+        client={client}
+        chatId="chat-1"
+        images={[image]}
+      />,
+    );
+
+    const toggle = await screen.findByRole("button", {
+      name: "Expand attached image 1: 320 by 240 pixels",
+    });
+    expect(toggle).not.toHaveClass("is-expanded");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveClass("is-expanded");
+    expect(toggle).toHaveAccessibleName(
+      "Collapse attached image 1: 320 by 240 pixels",
+    );
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 });

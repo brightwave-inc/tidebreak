@@ -265,4 +265,25 @@ describe("useImageAttachments", () => {
     expect(result.current.attachments).toEqual([]);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview");
   });
+
+  it("puts ready chips back after a refused send without their local preview", async () => {
+    const { result } = renderHook(() => useImageAttachments(client, "chat-1"));
+
+    act(() => result.current.attachFiles([png()]));
+    await waitFor(() => expect(FakeUpload.opened).toHaveLength(1));
+    act(() => FakeUpload.opened[0].finish(201, PUBLISHED));
+    await waitFor(() =>
+      expect(result.current.attachments[0].status).toBe("ready"),
+    );
+    const held = result.current.attachments;
+
+    act(() => result.current.clear());
+    act(() => result.current.restore(held));
+    expect(result.current.attachments).toHaveLength(1);
+    expect(result.current.attachments[0]).toMatchObject({
+      status: "ready",
+      previewUrl: null,
+      attachmentId: ATTACHMENT_ID,
+    });
+  });
 });

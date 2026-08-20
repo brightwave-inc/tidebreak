@@ -389,6 +389,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         ),
       () => {
         setComposerDraft("");
+        images.clear();
         composerDraftActions.setFolders(chatId, []);
         voice.resetInputUsed();
       },
@@ -483,7 +484,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const turnId = crypto.randomUUID();
     terminalHydrationGenerationRef.current += 1;
     const optimisticId = nextId();
-    if (fromComposer) setComposerDraft("");
+    const heldImages = fromComposer ? images.attachments : [];
+    if (fromComposer) {
+      setComposerDraft("");
+      images.clear();
+    }
     updateSession((session) => ({
       ...session,
       busy: true,
@@ -514,13 +519,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         voiceInputUsed,
       );
       // Only once the turn is durably accepted, and only for what the composer
-      // actually contributed. A refused send — an image the selected model
-      // cannot read, or a skill this install can no longer run — must leave the
-      // attachments and the pills where the reader can fix the problem and try
-      // again; a retry must not throw away attachments the reader has queued
-      // for their *next* message.
+      // actually contributed. Images already left the strip with the draft;
+      // files, skills, and folders wait so a refused send can still retry.
       if (fromComposer) {
-        images.clear();
         setComposerFiles(() => []);
         composerDraftActions.setSkills(chatId, []);
         composerDraftActions.setFolders(chatId, []);
@@ -528,9 +529,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       }
     } catch (err) {
       // Nothing was accepted, so the message has to go back to where it can be
-      // fixed and sent again: the text returns to the composer and the
-      // optimistic bubble — which no turn will ever answer — comes out of the
-      // transcript. Attachments are already left in place for the same reason.
+      // fixed and sent again: the text and images return to the composer and
+      // the optimistic bubble — which no turn will ever answer — comes out of
+      // the transcript.
+      if (fromComposer) images.restore(heldImages);
       updateSession((session) => ({
         ...session,
         busy: false,

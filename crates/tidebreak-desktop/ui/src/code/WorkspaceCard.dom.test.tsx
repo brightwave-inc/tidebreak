@@ -7,6 +7,7 @@ import { workspaceCommands } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
 import type {
   CodeSessionDigest,
+  CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
@@ -167,6 +168,38 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 
+  it("detailed idle cards still show the harness and lifecycle", () => {
+    const session: CodeSessionSnapshot = {
+      id: "sess-1",
+      workspace_id: workspace.id,
+      kind: "interactive",
+      harness_kind: "claude_code",
+      permission_mode: "ask",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={undefined}
+        session={session}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: false, archived: false })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Idle")).toBeInTheDocument();
+    expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
+  });
+
   it("compact keeps the one-line read and the complete label", () => {
     renderCard({ density: "compact" });
 
@@ -177,8 +210,8 @@ describe("WorkspaceCard", () => {
   });
 
   it.each([
-    ["shell", "Shell running - 3 turns"],
-    ["monitor", "Monitoring - 3 turns"],
+    ["shell", "Shell running · 3 turns"],
+    ["monitor", "Monitoring · 3 turns"],
   ] as const)("renders %s activity as its own workspace state", (activity, label) => {
     const digest: CodeSessionDigest = {
       workspace: workspace.id,
@@ -208,6 +241,52 @@ describe("WorkspaceCard", () => {
 
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.queryByText(/Agent working/)).not.toBeInTheDocument();
+  });
+
+  it("detailed running cards lead with the harness mark and turn count", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 1,
+      activity: "agent",
+    };
+    const session: CodeSessionSnapshot = {
+      id: "sess-1",
+      workspace_id: workspace.id,
+      kind: "interactive",
+      harness_kind: "claude_code",
+      permission_mode: "ask",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={session}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: true }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
   });
 
   it("renders a watch task as its own clickable child row", async () => {
