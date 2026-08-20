@@ -3240,6 +3240,71 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
     assert_eq!(routes[0].kind, tidebreak_router::RouteKind::ModelGateway);
 }
 
+/// A deployment with no stored endpoint takes its provider base URL from the
+/// environment, and a stored endpoint still wins over it.
+#[tokio::test]
+async fn a_base_url_environment_fallback_reaches_the_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}/test.db?mode=rwc",
+            dir.path().display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let secrets: Arc<dyn SecretProvider> = Arc::new(MemSecrets::default());
+    providers::write_credential(
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderCredential::api_key("sk-stored"),
+    )
+    .await
+    .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _env = ENV_LOCK.lock().await;
+    let _base_url = ScopedEnv::set("ANTHROPIC_BASE_URL", "https://relay.example/v1");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+    let route = providers::collect_routes(&*store, &*secrets, None, None, &policy)
+        .await
+        .into_iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
+        .expect("the stored key must offer an Anthropic route");
+    assert_eq!(route.base_url.as_deref(), Some("https://relay.example/v1"));
+
+    // A stored endpoint outranks the variable.
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://stored.example/v1".to_string()),
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let route = providers::collect_routes(&*store, &*secrets, None, None, &policy)
+        .await
+        .into_iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
+        .expect("the stored key must offer an Anthropic route");
+    assert_eq!(route.base_url.as_deref(), Some("https://stored.example/v1"));
+}
+
 /// The resolver's fail-closed branch: a profile whose stored policy exists
 /// but cannot be read must resolve to no egress, not to its BYOK routes.
 #[tokio::test]
