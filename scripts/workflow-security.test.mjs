@@ -729,6 +729,7 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
     "!crates/tidebreak-sandbox-agent/documents-requirements.txt",
     "!skills/*/SKILL.md",
     "!plugins/*/PLUGIN.md",
+    "!crates/*/src/**/*.rs",
   ]) {
     assert.ok(dockerIgnore.includes(`${required}\n`), `missing allow rule ${required}`);
   }
@@ -789,6 +790,9 @@ test(
       "crates/demo/Cargo.toml",
       "crates/demo/build.rs",
       "crates/demo/src/lib.rs",
+      // A source module named like a credential file must survive the deny
+      // block: tidebreak-server has src/web_search/credentials.rs for real.
+      "crates/demo/src/web/credentials.rs",
       "crates/tidebreak-code-execution/baseline_python_deps.txt",
       "crates/tidebreak-sandbox-agent/documents-requirements.txt",
       "skills/demo/SKILL.md",
@@ -805,6 +809,7 @@ test(
       "crates/demo/src/deep/.harmless-hidden-file",
       "skills/demo/.draft",
       "plugins/demo/credentials.json",
+      "crates/demo/src/credentials.json",
       "outside/secret.txt",
     ];
 
