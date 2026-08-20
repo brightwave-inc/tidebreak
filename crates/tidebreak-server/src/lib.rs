@@ -784,8 +784,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/code/workspaces/{id}/watch",
-            post(routes::code::start_workspace_watch)
-                .delete(routes::code::stop_workspace_watch),
+            post(routes::code::start_workspace_watch).delete(routes::code::stop_workspace_watch),
         )
         .route(
             "/code/workspaces/{id}/actions/{name}",

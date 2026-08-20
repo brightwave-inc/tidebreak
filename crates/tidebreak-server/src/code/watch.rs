@@ -704,7 +704,10 @@ mod tests {
     fn behind_is_actionable_and_queue_waits() {
         let mut pr = base_pr();
         pr.merge_state_status = Some("behind".to_owned());
-        assert_eq!(assess(&pr), WatchAssessment::Actionable(WatchReason::Behind));
+        assert_eq!(
+            assess(&pr),
+            WatchAssessment::Actionable(WatchReason::Behind)
+        );
         let mut pr = base_pr();
         pr.in_merge_queue = Some(true);
         assert_eq!(assess(&pr), WatchAssessment::Waiting);

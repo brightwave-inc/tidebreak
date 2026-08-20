@@ -2,9 +2,8 @@ use super::temp_store;
 use crate::code::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
     CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle,
-    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId,
-    WorkspaceId,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
+    HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,

@@ -435,14 +435,10 @@ pub(super) fn code_watch_table() -> TableCreateStatement {
                 .from(CodeWatch::Table, CodeWatch::SessionId)
                 .to(CodeSession::Table, CodeSession::Id),
         )
-        .check(Expr::col(CodeWatch::State).is_in([
-            "watching",
-            "fixing",
-            "blocked",
-            "done",
-            "stopped",
-            "failed",
-        ]))
+        .check(
+            Expr::col(CodeWatch::State)
+                .is_in(["watching", "fixing", "blocked", "done", "stopped", "failed"]),
+        )
         .check(Expr::col(CodeWatch::PrNumber).gte(1))
         .check(Expr::col(CodeWatch::Cycles).gte(0))
         .to_owned()
