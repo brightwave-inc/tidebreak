@@ -82,10 +82,31 @@ pub(crate) enum WorkerError {
 pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
     pub commands: mpsc::Sender<WorkerCommand>,
-    /// Single follow-up parked while a turn is running (queue-default).
-    pub pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
-    pub wake: Arc<Notify>,
+    pub queue: TurnQueue,
     pub sink: Arc<LiveSink>,
+}
+
+/// How a worker gets its next turn, and when it may start one.
+///
+/// `pending` and `wake` are this session's own single follow-up slot
+/// (record 9). `worktree` is shared with every other session in the
+/// workspace, and holding it is what keeps two agents from editing one
+/// checkout at the same time (record 54).
+#[derive(Clone)]
+pub(crate) struct TurnQueue {
+    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
+    wake: Arc<Notify>,
+    worktree: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl TurnQueue {
+    fn new(worktree: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            pending: Arc::new(std::sync::Mutex::new(None)),
+            wake: Arc::new(Notify::new()),
+            worktree,
+        }
+    }
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -324,30 +345,34 @@ impl HarnessEventSink for LiveSink {
     }
 }
 
+/// Start the worker for a session.
+///
+/// `worktree_turn` is the workspace's turn lock, shared with every other
+/// session in the same checkout. The worker holds it for the length of a
+/// turn, which is what keeps two agents from editing one worktree at once;
+/// see record 54.
 pub(crate) fn spawn_session_worker(
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     blobs: Option<Arc<dyn BlobStore>>,
+    worktree_turn: Arc<tokio::sync::Mutex<()>>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
-    let pending = Arc::new(std::sync::Mutex::new(None));
-    let wake = Arc::new(Notify::new());
+    let queue = TurnQueue::new(worktree_turn);
     tokio::spawn(run_worker(
         session,
         engine,
         sink.clone(),
-        pending.clone(),
-        wake.clone(),
+        queue.clone(),
         blobs,
         rx,
     ));
     WorkerHandle {
         spawn_epoch,
         commands: tx,
-        pending,
-        wake,
+        queue,
         sink,
     }
 }
@@ -359,7 +384,7 @@ pub(crate) fn queue_follow_up(
     model: Option<String>,
     attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 ) -> bool {
-    let mut pending = handle.pending.lock().expect("code turn queue");
+    let mut pending = handle.queue.pending.lock().expect("code turn queue");
     if pending.is_some() {
         return false;
     }
@@ -368,7 +393,7 @@ pub(crate) fn queue_follow_up(
         model,
         attachments,
     });
-    handle.wake.notify_one();
+    handle.queue.wake.notify_one();
     true
 }
 
@@ -376,8 +401,7 @@ async fn run_worker(
     mut session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
-    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
-    wake: Arc<Notify>,
+    queue: TurnQueue,
     blobs: Option<Arc<dyn BlobStore>>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
@@ -394,13 +418,13 @@ async fn run_worker(
             &mut session,
             engine.as_ref(),
             &sink,
-            &pending,
+            &queue,
             blobs.as_deref(),
             &mut commands,
         )
         .await;
         tokio::select! {
-            _ = wake.notified() => {}
+            _ = queue.wake.notified() => {}
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn {
                     message,
@@ -414,6 +438,7 @@ async fn run_worker(
                         &sink,
                         blobs.as_deref(),
                         &mut commands,
+                        &queue.worktree,
                         QueuedFollowUp {
                             message,
                             model,
@@ -547,16 +572,25 @@ async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    pending: &Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
+    queue: &TurnQueue,
     blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
-        let next = pending.lock().expect("code turn queue").take();
+        let next = queue.pending.lock().expect("code turn queue").take();
         let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(session, engine, sink, blobs, commands, follow_up).await;
+        let _ = drive_turn(
+            session,
+            engine,
+            sink,
+            blobs,
+            commands,
+            &queue.worktree,
+            follow_up,
+        )
+        .await;
     }
 }
 
@@ -566,6 +600,7 @@ async fn drive_turn(
     sink: &LiveSink,
     blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
+    worktree_turn: &tokio::sync::Mutex<()>,
     QueuedFollowUp {
         message,
         model,
@@ -588,6 +623,18 @@ async fn drive_turn(
         return Err(WorkerError::Conflict("session has ended".into()));
     }
     let images = hydrate_turn_images(blobs, &attachments).await?;
+
+    // The workspace's checkout takes one turn at a time (record 54). Waiting
+    // here rather than refusing is what makes a second agent usable: the
+    // reader already sees the message as queued, and it runs when the sibling
+    // turn ends. Blobs are hydrated first so a decode never holds the tree.
+    let _worktree = worktree_turn.lock().await;
+    // Ending a session during that wait has to win. The lifecycle checks above
+    // read a session that may be minutes stale by now.
+    if session_was_ended(&sink.db, session).await {
+        return Err(WorkerError::Conflict("session has ended".into()));
+    }
+
     if let Some(model) = model.clone() {
         session.model = Some(model);
     }

@@ -1032,6 +1032,158 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
 }
 
 #[tokio::test]
+async fn a_workspace_runs_several_agents_that_take_turns_on_one_worktree() {
+    // Record 54: conversations are unlimited, the checkout is not. A send to a
+    // session whose sibling is mid-turn has to queue rather than run, or the
+    // two harnesses edit the same files at once.
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_millis(120)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let created = client
+            .post(format!(
+                "http://{addr}/code/workspaces/{}/sessions",
+                json_id(&workspace)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "harness": "claude_code",
+                "permission_mode": "plan",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            created.status(),
+            reqwest::StatusCode::CREATED,
+            "a second agent in one workspace must create"
+        );
+        let body: serde_json::Value = created.json().await.unwrap();
+        ids.push(json_id(&body).to_owned());
+    }
+    assert_ne!(ids[0], ids[1]);
+
+    let first_id = ids[0].clone();
+    let first = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{first_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let first_parsed: CodeSessionId = ids[0].parse().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row = tidebreak_core::db::code::get_session(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                first_parsed,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if row.lifecycle == CodeSessionLifecycle::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first agent never reached Running");
+
+    let sibling = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "second" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sibling.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "a send while a sibling holds the worktree must queue, not run"
+    );
+
+    assert_eq!(first.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let second_parsed: CodeSessionId = ids[1].parse().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let first_turns = tidebreak_core::db::code::list_turns(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                first_parsed,
+            )
+            .await
+            .unwrap();
+            let second_turns = tidebreak_core::db::code::list_turns(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                second_parsed,
+            )
+            .await
+            .unwrap();
+            if second_turns.first().map(|turn| turn.status) == Some(CodeTurnStatus::Completed) {
+                let first_end = first_turns[0].ended_at.expect("the first turn ended");
+                assert!(
+                    second_turns[0].started_at >= first_end,
+                    "the sibling's turn must start after the worktree frees"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the queued sibling turn never ran");
+}
+
+#[tokio::test]
+async fn a_workspace_still_holds_only_one_watch_session() {
+    // Watch keeps its cap: the fix loop belongs to the workspace, not to one
+    // agent, so a second one would double every push. Record 54 lifted the cap
+    // on interactive sessions only.
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id: WorkspaceId = json_id(&workspace).parse().unwrap();
+    let owner = tidebreak_core::OwnerId::local();
+
+    let watch = |()| {
+        runtime.create_session_of_kind(
+            &owner,
+            workspace_id,
+            tidebreak_core::CodeSessionKind::Watch,
+            HarnessKind::ClaudeCode,
+            CodePermissionMode::Plan,
+            None,
+        )
+    };
+    watch(()).await.expect("the first watch session creates");
+    let second = watch(()).await.expect_err("a second watch must be refused");
+    assert!(
+        format!("{second:?}").contains("session_exists"),
+        "unexpected error: {second:?}"
+    );
+}
+
+#[tokio::test]
 async fn unsupported_explicit_steer_is_refused_without_queueing() {
     let (router, token, runtime, dir) = code_app_with(
         ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_millis(40)),

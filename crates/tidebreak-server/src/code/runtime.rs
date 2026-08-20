@@ -140,6 +140,14 @@ pub(crate) struct CodeRuntime {
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    /// One turn at a time per worktree, shared by every session in it.
+    ///
+    /// Sessions in a workspace share one checkout, so their turns cannot
+    /// overlap: two harnesses editing the same files, and two checkpoints
+    /// racing for `.git/index.lock`, is corruption rather than concurrency.
+    /// A worker takes the workspace's lock for the length of a turn, so a
+    /// sibling's turn starts after this one ends. See record 54.
+    worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     pr_cache: PrDigestCache,
     pub(crate) delivery_cache: DeliveryCache,
     pub(crate) clone_jobs: CloneJobs,
@@ -183,6 +191,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            worktree_turns: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -251,6 +260,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            worktree_turns: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
@@ -762,6 +772,13 @@ impl CodeRuntime {
         workspace.status = CodeWorkspaceStatus::Archived;
         workspace.archived_at = Some(Utc::now());
         save_workspace(&self.db, &workspace).await?;
+        // The checkout is gone and every session on it has ended, so nothing
+        // can take this workspace's turn lock again. Restore mints a fresh
+        // one on the first session it starts.
+        self.worktree_turns
+            .lock()
+            .expect("worktree turn locks")
+            .remove(&workspace.id);
         Ok(workspace)
     }
 
@@ -1038,11 +1055,11 @@ impl CodeRuntime {
 
     /// Shared create path for interactive sessions and watch sessions.
     ///
-    /// One active session per workspace *per kind*: a watch session shares
-    /// the worktree with the conversation it forked from, so the guard keeps
-    /// one of each rather than one in total. The watch sweep serializes fix
-    /// turns against interactive turns before submitting.
-    pub(super) async fn create_session_of_kind(
+    /// A workspace holds any number of interactive sessions and at most one
+    /// watch session, so the guard below covers watch only. The worktree they
+    /// share is protected by the per-workspace turn lock rather than by a cap
+    /// on conversations; see record 54.
+    pub(crate) async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -1058,18 +1075,17 @@ impl CodeRuntime {
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
-        let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
-        if existing
-            .iter()
-            .any(|session| session.lifecycle != CodeSessionLifecycle::Ended && session.kind == kind)
-        {
-            return Err(ServerError::conflict_kind(
-                "session_exists",
-                match kind {
-                    CodeSessionKind::Interactive => "this workspace already has an active session",
-                    CodeSessionKind::Watch => "this workspace already has an active watch session",
-                },
-            ));
+        if kind == CodeSessionKind::Watch {
+            let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
+            if existing.iter().any(|session| {
+                session.lifecycle != CodeSessionLifecycle::Ended
+                    && session.kind == CodeSessionKind::Watch
+            }) {
+                return Err(ServerError::conflict_kind(
+                    "session_exists",
+                    "this workspace already has an active watch session",
+                ));
+            }
         }
         let adapter = self.adapter(harness)?;
         #[cfg(not(test))]
@@ -1237,8 +1253,14 @@ impl CodeRuntime {
         // Queue-default (0009): a send while a turn is in flight parks one
         // follow-up. This does not consult mid_turn_steering — that cap
         // gates the separate /steer route only.
+        //
+        // A sibling session's turn counts as in flight too. The workspace's
+        // sessions share one checkout and take turns on it (record 54), so a
+        // send that would only wait on the turn lock parks here instead and
+        // the route answers promptly.
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
-            || get_open_turn(&self.db, owner, id).await?.is_some();
+            || get_open_turn(&self.db, owner, id).await?.is_some()
+            || self.workspace_turn_running(owner, &session).await?;
         if in_flight {
             if !queue_follow_up(&handle, message, session.model.clone(), attachments) {
                 return Err(ServerError::conflict_kind(
@@ -1264,6 +1286,22 @@ impl CodeRuntime {
             .map_err(|_| ServerError::internal("session worker dropped the turn"))?
             .map_err(map_worker)?;
         Ok(SubmitTurnOutcome::Ran(Box::new(turn)))
+    }
+
+    /// Whether another session in this session's workspace is mid-turn.
+    ///
+    /// A pre-filter, not the guarantee: the turn lock in the worker is what
+    /// actually serializes the checkout. This only keeps a send that would
+    /// block on that lock from holding its route open (record 54).
+    async fn workspace_turn_running(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
+    ) -> Result<bool, ServerError> {
+        let siblings = list_sessions_for_workspace(&self.db, owner, session.workspace_id).await?;
+        Ok(siblings.iter().any(|other| {
+            other.id != session.id && other.lifecycle == CodeSessionLifecycle::Running
+        }))
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
@@ -1781,7 +1819,13 @@ impl CodeRuntime {
             attached.harness_resume_ref = Some(resume);
         }
         super::attention::persist_session(&self.db, &self.bus, &attached).await?;
-        let handle = spawn_session_worker(attached.clone(), engine, sink, Some(self.blobs.clone()));
+        let handle = spawn_session_worker(
+            attached.clone(),
+            engine,
+            sink,
+            Some(self.blobs.clone()),
+            self.worktree_turn_lock(attached.workspace_id),
+        );
         self.workers
             .lock()
             .expect("code workers")
@@ -1804,6 +1848,23 @@ impl CodeRuntime {
         Ok(attached)
     }
 
+    /// The turn lock for a workspace, minted on first use.
+    ///
+    /// Every session in the workspace hands the same `Arc` to its worker, so
+    /// the lock outlives any one session and a worker recovered after a
+    /// restart rejoins the same queue. See record 54.
+    pub(super) fn worktree_turn_lock(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.worktree_turns
+            .lock()
+            .expect("worktree turn locks")
+            .entry(workspace_id)
+            .or_default()
+            .clone()
+    }
+
     fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
         self.workers
             .lock()
@@ -1812,8 +1873,7 @@ impl CodeRuntime {
             .map(|handle| WorkerHandle {
                 spawn_epoch: handle.spawn_epoch,
                 commands: handle.commands.clone(),
-                pending: handle.pending.clone(),
-                wake: handle.wake.clone(),
+                queue: handle.queue.clone(),
                 sink: handle.sink.clone(),
             })
             .ok_or_else(|| {
