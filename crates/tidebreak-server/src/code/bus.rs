@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tidebreak_core::{
-    Attention, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
-    CodeWatchState, HarnessKind, OwnerId, PullRequestDigest, RepoId, SequencedCodeEvent,
-    WorkspaceId,
+    Attention, CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
+    CodeSubagentSummary, CodeWatchState, HarnessKind, OwnerId, PullRequestDigest, RepoId,
+    SequencedCodeEvent, WorkspaceId,
 };
 use tokio::sync::broadcast;
 
@@ -39,6 +39,9 @@ pub(crate) struct SessionDigest {
     pub attention: Attention,
     pub title: String,
     pub turn_count: i64,
+    /// What the live turn is occupied with. Set only while lifecycle is
+    /// running; older clients safely fall back to a generic running label.
+    pub activity: Option<CodeSessionActivity>,
     pub pr_state: Option<PullRequestDigest>,
     /// Watch progress, set only when `kind` is `Watch`. Lifecycle words
     /// undersell a watch ("running" for hours); these say what it is doing.

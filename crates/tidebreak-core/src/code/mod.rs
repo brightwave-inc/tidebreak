@@ -471,10 +471,23 @@ pub struct PullRequestDigest {
 pub struct PullRequestComment {
     /// Where on the PR the comment lives.
     pub kind: PullRequestCommentKind,
+    /// Stable host identifier, normalized to text across GraphQL and REST
+    /// comment shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
     /// Author login, when the host reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub author: Option<String>,
+    /// Author avatar URL, when the host reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_url: Option<String>,
+    /// Host page for the comment or review, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub url: Option<String>,
     /// Host creation timestamp, verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -606,6 +619,29 @@ pub enum CodeSubagentStatus {
     Done,
     /// The spanning call failed or was denied.
     Failed,
+}
+
+/// What a running interactive session is actually occupied with. This is
+/// intentionally coarser than a transcript tool name: list surfaces need to
+/// distinguish agent generation, a shell, a passive monitor, and delegated
+/// work without leaking command text into every digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeSessionActivity {
+    /// The model is reasoning or composing its next response.
+    Agent,
+    /// A command process is still running.
+    Shell,
+    /// A wait/output/monitor tool is observing background work.
+    Monitor,
+    /// One or more harness-owned subagents are still running.
+    Subagents,
+    /// A file read or edit is still in flight.
+    File,
+    /// A search is still in flight.
+    Search,
+    /// Another tool is still in flight.
+    Tool,
 }
 
 /// One harness subagent on a session, tracked for rail visibility. Not a

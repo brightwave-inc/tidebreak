@@ -112,6 +112,7 @@ import {
   type CodeSessionId as WireCodeSessionId,
   type CodeSessionKind as WireCodeSessionKind,
   type CodeSessionLifecycle as WireCodeSessionLifecycle,
+  type CodeSessionActivity as WireCodeSessionActivity,
   type CodeSessionSnapshot as WireCodeSessionSnapshot,
   type CodeSubagentStatus as WireCodeSubagentStatus,
   type CodeSubagentSummary as WireCodeSubagentSummary,
@@ -1080,6 +1081,7 @@ export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
 /** One durable watch task on a workspace's pull request. */
 export type CodeWatchSnapshot = WireCodeWatchSnapshot;
 export type CodeWatchState = WireCodeWatchState;
+export type CodeSessionActivity = WireCodeSessionActivity;
 /** A harness subagent riding a session's digest (ADR 0052). */
 export type CodeSubagentSummary = WireCodeSubagentSummary;
 export type CodeSubagentStatus = WireCodeSubagentStatus;

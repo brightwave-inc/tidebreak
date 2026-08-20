@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
+import { writeEditorTabDrag } from "./editorDrag";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 /** Ids the strip and the two center panels agree on, so tabs name panels. */
@@ -159,9 +160,10 @@ export function CodeCenterTabs({
 
   return (
     <div
-      className="flex shrink-0 items-center gap-1 overflow-x-auto border-b px-2 py-1"
+      className="workspace-pane-tabs flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-border-subtle bg-page-background/55 px-2"
       role="tablist"
       aria-label={region === "primary" ? "Workspace center" : "Workspace split"}
+      data-region={region}
     >
       {showMainAgent && (
         <ContextMenu>
@@ -177,12 +179,12 @@ export function CodeCenterTabs({
                 tabRefs.current[0] = node;
               }}
               className={cn(
-                "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
+                "flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-[background-color,color,box-shadow,transform] duration-150 active:translate-y-px",
                 FOCUS_RING_TIGHT,
                 HOVER_TINT,
                 conversationFocused
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                  ? "bg-background text-foreground shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
+                  : "text-muted-foreground hover:bg-background/65 hover:text-foreground",
               )}
               onClick={onSelectChat}
               onKeyDown={(event) => onKeyDown(event, 0)}
@@ -220,16 +222,14 @@ export function CodeCenterTabs({
                 role="presentation"
                 draggable
                 className={cn(
-                  "flex min-w-0 shrink-0 cursor-grab items-center rounded-md pr-1 active:cursor-grabbing",
+                  "flex h-8 min-w-0 shrink-0 cursor-grab items-center rounded-lg pr-1 transition-[background-color,box-shadow,transform] duration-150 active:cursor-grabbing active:translate-y-px",
                   HOVER_TINT,
-                  active ? "bg-muted" : "hover:bg-muted/60",
+                  active
+                    ? "bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
+                    : "hover:bg-background/65",
                 )}
                 onDragStart={(event: DragEvent<HTMLDivElement>) => {
-                  event.dataTransfer.effectAllowed = "move";
-                  event.dataTransfer.setData(
-                    "text/plain",
-                    `${region}:${index}`,
-                  );
+                  writeEditorTabDrag(event.dataTransfer, { region, index });
                   onDragEditorStart?.(index);
                 }}
                 onDragEnd={onDragEditorEnd}
@@ -246,7 +246,7 @@ export function CodeCenterTabs({
                     tabRefs.current[index + tabOffset] = node;
                   }}
                   className={cn(
-                    "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pr-1 pl-2 text-xs font-medium",
+                    "flex h-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg pr-1 pl-2.5 text-xs font-medium",
                     FOCUS_RING_TIGHT,
                     HOVER_TINT,
                     active ? "text-foreground" : "text-muted-foreground",
@@ -279,7 +279,7 @@ export function CodeCenterTabs({
                 <button
                   type="button"
                   className={cn(
-                    "text-muted-foreground hover:text-foreground grid size-4 shrink-0 cursor-pointer place-items-center rounded-sm",
+                    "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
                     FOCUS_RING_TIGHT,
                     HOVER_TINT,
                   )}
@@ -359,7 +359,7 @@ export function CodeCenterTabs({
           <button
             type="button"
             className={cn(
-              "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+              "text-muted-foreground hover:bg-background hover:text-foreground grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg transition-transform active:translate-y-px",
               FOCUS_RING_TIGHT,
               HOVER_TINT,
             )}
@@ -409,7 +409,7 @@ export function CodeCenterTabs({
         <button
           type="button"
           className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-6 shrink-0 cursor-pointer place-items-center rounded-md disabled:cursor-default disabled:opacity-40",
+            "text-muted-foreground hover:bg-background hover:text-foreground grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg transition-transform active:translate-y-px disabled:cursor-default disabled:opacity-40 disabled:active:translate-y-0",
             FOCUS_RING_TIGHT,
             HOVER_TINT,
           )}
@@ -424,7 +424,7 @@ export function CodeCenterTabs({
         <button
           type="button"
           className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground ml-auto grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
+            "text-muted-foreground hover:bg-background hover:text-foreground ml-auto grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg transition-transform active:translate-y-px",
             FOCUS_RING_TIGHT,
             HOVER_TINT,
           )}

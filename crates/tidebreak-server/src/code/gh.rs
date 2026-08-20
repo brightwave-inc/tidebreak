@@ -515,6 +515,15 @@ pub(crate) fn parse_pr_view_comments(
             .filter(|inner| !inner.is_empty())
             .map(ToOwned::to_owned)
     };
+    let avatar = |value: &serde_json::Value| {
+        value
+            .get("author")
+            .and_then(|author| author.get("avatarUrl").or_else(|| author.get("avatar_url")))
+            .and_then(|inner| inner.as_str())
+            .filter(|inner| !inner.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let id = |value: &serde_json::Value| json_id(value.get("id"));
     for item in parsed
         .get("comments")
         .and_then(|value| value.as_array())
@@ -526,7 +535,10 @@ pub(crate) fn parse_pr_view_comments(
         };
         comments.push(PullRequestComment {
             kind: PullRequestCommentKind::Issue,
+            id: id(item),
             author: login(item),
+            avatar_url: avatar(item),
+            url: text(item, "url"),
             created_at: text(item, "createdAt"),
             body,
             review_state: None,
@@ -547,7 +559,10 @@ pub(crate) fn parse_pr_view_comments(
         };
         comments.push(PullRequestComment {
             kind: PullRequestCommentKind::Review,
+            id: id(item),
             author: login(item),
+            avatar_url: avatar(item),
+            url: text(item, "url"),
             created_at: text(item, "submittedAt").or_else(|| text(item, "createdAt")),
             body,
             review_state: text(item, "state").map(|state| state.to_ascii_lowercase()),
@@ -581,12 +596,20 @@ pub(crate) fn parse_review_comments(json: &str) -> Vec<tidebreak_core::PullReque
         };
         comments.push(PullRequestComment {
             kind: PullRequestCommentKind::Inline,
+            id: json_id(item.get("id")),
             author: item
                 .get("user")
                 .and_then(|user| user.get("login"))
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
+            avatar_url: item
+                .get("user")
+                .and_then(|user| user.get("avatar_url"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            url: text("html_url"),
             created_at: text("created_at"),
             body: body.to_owned(),
             review_state: None,
@@ -598,6 +621,14 @@ pub(crate) fn parse_review_comments(json: &str) -> Vec<tidebreak_core::PullReque
         });
     }
     comments
+}
+
+fn json_id(value: Option<&serde_json::Value>) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 /// Run one named quick action in the worktree. Output is not journaled.
@@ -2150,7 +2181,7 @@ exit 3
         let view = r#"{
             "number": 12,
             "comments": [
-                {"author": {"login": "alice"}, "createdAt": "2026-08-16T10:00:00Z", "body": "looks close"},
+                {"id": "IC_kwDO1", "author": {"login": "alice", "avatarUrl": "https://avatars.githubusercontent.com/u/1"}, "url": "https://github.com/example/app/pull/12#issuecomment-1", "createdAt": "2026-08-16T10:00:00Z", "body": "looks close"},
                 {"body": ""}
             ],
             "reviews": [
@@ -2162,7 +2193,16 @@ exit 3
         assert_eq!(number, Some(12));
         assert_eq!(comments.len(), 2, "empty bodies are dropped: {comments:?}");
         assert_eq!(comments[0].kind, PullRequestCommentKind::Issue);
+        assert_eq!(comments[0].id.as_deref(), Some("IC_kwDO1"));
         assert_eq!(comments[0].author.as_deref(), Some("alice"));
+        assert_eq!(
+            comments[0].avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/1")
+        );
+        assert_eq!(
+            comments[0].url.as_deref(),
+            Some("https://github.com/example/app/pull/12#issuecomment-1")
+        );
         assert_eq!(comments[0].body, "looks close");
         assert_eq!(comments[1].kind, PullRequestCommentKind::Review);
         assert_eq!(
@@ -2175,13 +2215,18 @@ exit 3
         );
 
         let rest = r#"[
-            {"user": {"login": "bob"}, "created_at": "2026-08-16T12:00:00Z", "body": "rename this", "path": "src/lib.rs", "line": 42},
+            {"id": 99, "html_url": "https://github.com/example/app/pull/12#discussion_r99", "user": {"login": "bob", "avatar_url": "https://avatars.githubusercontent.com/u/2"}, "created_at": "2026-08-16T12:00:00Z", "body": "rename this", "path": "src/lib.rs", "line": 42},
             {"user": {"login": "bob"}, "body": "outdated hunk", "path": "src/old.rs", "line": null, "original_line": 7},
             {"body": ""}
         ]"#;
         let inline = parse_review_comments(rest);
         assert_eq!(inline.len(), 2);
         assert_eq!(inline[0].kind, PullRequestCommentKind::Inline);
+        assert_eq!(inline[0].id.as_deref(), Some("99"));
+        assert_eq!(
+            inline[0].url.as_deref(),
+            Some("https://github.com/example/app/pull/12#discussion_r99")
+        );
         assert_eq!(inline[0].path.as_deref(), Some("src/lib.rs"));
         assert_eq!(inline[0].line, Some(42));
         assert_eq!(inline[1].line, Some(7), "falls back to original_line");

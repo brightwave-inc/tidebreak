@@ -96,27 +96,30 @@ export function CodeSidebar() {
     <SidebarFrame footer={<CodeSubscriptionUsage />}>
       <CodeModeSwitch />
 
-      <div className="flex items-center gap-0.5 px-1.5 pb-1">
-        <RepoSwitcherPopover repos={repos} />
-        <div className="flex-1" />
-        <RailSettingsMenu />
+      <div className="px-2 pt-1">
         <button
           type="button"
           className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1",
+            "flex h-9 w-full cursor-pointer items-center gap-2 rounded-xl border border-border-subtle bg-background px-2.5 text-left text-[13px] font-medium shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_5%,transparent)] hover:bg-muted/55",
             FOCUS_RING,
             HOVER_TINT,
           )}
-          aria-label="New workspace"
           onClick={() => startNewWorkspace()}
         >
           <Plus size={14} />
+          <span>New workspace</span>
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-col gap-0.5">
+      <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-1.5">
+        <RepoSwitcherPopover repos={repos} />
+        <div className="flex-1" />
+        <RailSettingsMenu />
+      </div>
+
+      <div className="flex min-h-0 flex-col gap-1">
         {groups.map((group) => (
-          <div key={group.key} className="flex flex-col gap-0.5">
+          <div key={group.key} className="flex flex-col gap-1">
             {group.label && group.repoId ? (
               <GroupHeaderLink
                 label={group.label}
@@ -131,7 +134,7 @@ export function CodeSidebar() {
             ) : (
               group.label && (
                 <div
-                  className="truncate px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground/90"
+                  className="truncate px-2 pt-3 pb-1 text-[11px] font-medium text-muted-foreground/90"
                   title={group.label}
                 >
                   {group.key === "archived"
@@ -299,7 +302,7 @@ function GroupHeaderLink({
       aria-current={active ? "page" : undefined}
       data-active={active || undefined}
       className={cn(
-        "mt-2 cursor-pointer truncate rounded-md px-2 py-1 text-left text-[11px] font-medium text-muted-foreground/90 hover:bg-muted hover:text-foreground data-[active]:text-foreground",
+        "mt-3 cursor-pointer truncate rounded-lg px-2 py-1 text-left text-[11px] font-medium text-muted-foreground/90 hover:bg-background hover:text-foreground data-[active]:text-foreground",
         FOCUS_RING,
         HOVER_TINT,
       )}

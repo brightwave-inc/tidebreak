@@ -36,7 +36,6 @@ function renderCard(overrides?: {
   pr?: PullRequestDigest;
   density?: "compact" | "detailed";
   visibleMeta?: { repoChip: boolean; branch: boolean };
-  detailDefaultOpen?: boolean;
 }) {
   const onOpen = vi.fn();
   const onCommand = vi.fn();
@@ -59,7 +58,6 @@ function renderCard(overrides?: {
         hasPr: Boolean(overrides?.pr),
         archived: merged.status === "archived",
       })}
-      detailDefaultOpen={overrides?.detailDefaultOpen}
       onOpen={onOpen}
       onCommand={onCommand}
     />,
@@ -94,19 +92,17 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("toggle-terminal");
   });
 
-  it("puts the PR and its action in the detail panel, not the row", async () => {
+  it("keeps the PR visible in the row without turning it into workspace navigation", async () => {
     const user = userEvent.setup();
-    const { onOpen, onCommand } = renderCard({ pr, detailDefaultOpen: true });
+    const { onOpen, onCommand } = renderCard({ pr });
 
-    // The panel says what the row cannot: full branch, checks, the PR.
-    expect(screen.getByText("tidebreak/fix-login")).toBeInTheDocument();
-    expect(screen.getByText(/8 passing, 1 pending/)).toBeInTheDocument();
+    expect(screen.getByText("#184")).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Open pull request #184" }),
     );
     expect(onCommand).toHaveBeenCalledWith("open-pr");
-    // Panel actions never double as "open the workspace".
+    // PR actions are siblings of the conversation row, never nested controls.
     expect(onOpen).not.toHaveBeenCalled();
   });
 
@@ -127,7 +123,6 @@ describe("WorkspaceCard", () => {
         density="detailed"
         visibleMeta={{ repoChip: true, branch: false }}
         commands={workspaceCommands({ hasPr: true, archived: false })}
-        detailDefaultOpen
         onOpen={vi.fn()}
         onCommand={vi.fn()}
         onWorkflowAction={onWorkflowAction}
@@ -146,7 +141,6 @@ describe("WorkspaceCard", () => {
     const user = userEvent.setup();
     const { onCommand } = renderCard({
       workspace: { status: "archived", archived_at: "2026-08-18T00:00:00.000Z" },
-      detailDefaultOpen: true,
     });
 
     expect(screen.getByText("Archived")).toBeInTheDocument();
@@ -182,6 +176,40 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 
+  it.each([
+    ["shell", "Shell running - 3 turns"],
+    ["monitor", "Monitoring - 3 turns"],
+  ] as const)("renders %s activity as its own workspace state", (activity, label) => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 3,
+      activity,
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: false, archived: false })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/Agent working/)).not.toBeInTheDocument();
+  });
+
   it("renders a watch task as its own clickable child row", async () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
@@ -214,7 +242,7 @@ describe("WorkspaceCard", () => {
     );
 
     await user.click(
-      screen.getByRole("button", { name: "Watch task for Fix login: Running" }),
+      screen.getByRole("button", { name: "Watch task for Fix login: Watching" }),
     );
     expect(onOpenChildSession).toHaveBeenCalledWith("sess-watch");
     // The child row is a sibling of the row button; opening it must not

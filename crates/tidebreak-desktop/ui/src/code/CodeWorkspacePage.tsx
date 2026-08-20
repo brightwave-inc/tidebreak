@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowDown, CircleDotDashed, PanelRight, SquareTerminal } from "lucide-react";
+import { ArrowDown, CircleDotDashed } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -96,7 +96,6 @@ const CodeBrowserTab = lazy(async () => {
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
-import { PrCardWithResource } from "./PrCard";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { liveCodeSession } from "./parsers";
@@ -110,17 +109,24 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
+import {
+  hasEditorTabDrag,
+  readEditorTabDrag,
+  type EditorTabDrag,
+} from "./editorDrag";
 import { FOCUS_RING } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
+import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
   WorkspaceOverflowMenu,
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
 } from "./workspaceActions";
+import { sessionActivityLabel } from "./workspaceCards";
 import {
   createPermissionModes,
   fenceReasonText,
@@ -447,17 +453,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     );
   }, []);
 
-  function dropDraggedEditor(region: CodeEditorRegion) {
-    if (!draggedEditor || draggedEditor.region === region) return;
-    setWorkspaceLayout(
-      moveEditorTab(
-        layout,
-        draggedEditor.region,
-        draggedEditor.index,
-        region,
-      ),
-    );
+  function dropDraggedEditor(
+    region: CodeEditorRegion,
+    transfer?: Pick<DataTransfer, "getData">,
+  ): boolean {
+    const drag: EditorTabDrag | null = transfer
+      ? readEditorTabDrag(transfer)
+      : draggedEditor;
+    if (!drag) return false;
     setDraggedEditor(null);
+    if (drag.region !== region) {
+      setWorkspaceLayout(
+        moveEditorTab(layout, drag.region, drag.index, region),
+      );
+    }
+    return true;
   }
 
   function copyEditorPath(path: string) {
@@ -532,16 +542,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
             data-testid="source-control-panel"
           >
-            {workspace?.status !== "archived" && (
-              <div className="border-b px-3 py-3">
-                <PrCardWithResource
-                  client={client}
-                  workspaceId={workspaceId}
-                  framed={false}
-                  resource={prResource}
-                />
-              </div>
-            )}
             <DiffOverview
               client={client}
               workspaceId={workspaceId}
@@ -560,11 +560,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               pr={prResource.data?.pr ?? workspace?.pr}
               branch={workspace?.branch_name}
               prResource={prResource}
-              onOpenSourceControl={() =>
-                setWorkspaceLayout(
-                  openCodeEditor(layout, { type: "source_control" }, region),
-                )
-              }
             />
           </div>
         ) : null}
@@ -577,11 +572,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       data-testid="primary-editor-group"
       onDragOver={(event) => {
-        if (draggedEditor?.region === "secondary") event.preventDefault();
+        if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
       }}
       onDrop={(event) => {
-        event.preventDefault();
-        dropDraggedEditor("primary");
+        if (dropDraggedEditor("primary", event.dataTransfer)) {
+          event.preventDefault();
+        }
       }}
     >
       <CodeCenterTabs
@@ -725,11 +723,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       data-testid="secondary-editor-group"
       onDragOver={(event) => {
-        if (draggedEditor?.region === "primary") event.preventDefault();
+        if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
       }}
       onDrop={(event) => {
-        event.preventDefault();
-        dropDraggedEditor("secondary");
+        if (dropDraggedEditor("secondary", event.dataTransfer)) {
+          event.preventDefault();
+        }
       }}
     >
       <CodeCenterTabs
@@ -811,14 +812,28 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         {draggedEditor?.region === "primary" && !hasEditorSplit && (
           <div
             data-testid="split-drop-zone"
-            className="border-primary/50 bg-primary/8 text-primary absolute inset-y-3 right-3 z-10 grid w-[min(34%,18rem)] place-items-center rounded-lg border border-dashed text-xs font-medium shadow-sm backdrop-blur-sm"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => {
+            className="workspace-split-drop-zone absolute inset-y-3 right-3 z-10 flex w-[min(40%,22rem)] flex-col items-center justify-center gap-2 rounded-xl border border-border bg-background/92 px-6 text-center shadow-lg backdrop-blur-md"
+            onDragOver={(event) => {
+              if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
               event.preventDefault();
-              dropDraggedEditor("secondary");
+              event.dataTransfer.dropEffect = "move";
+            }}
+            onDrop={(event) => {
+              if (dropDraggedEditor("secondary", event.dataTransfer)) {
+                event.preventDefault();
+              }
             }}
           >
-            Drop to split right
+            <span className="grid size-9 place-items-center rounded-lg bg-muted text-foreground">
+              <span className="grid grid-cols-2 gap-0.5" aria-hidden>
+                <span className="h-4 w-2 rounded-[2px] bg-foreground/25" />
+                <span className="h-4 w-2 rounded-[2px] bg-foreground" />
+              </span>
+            </span>
+            <span className="text-sm font-semibold">Open beside the agent</span>
+            <span className="max-w-44 text-xs leading-relaxed text-muted-foreground">
+              Drop here to create a working pane on the right.
+            </span>
           </div>
         )}
       </div>
@@ -843,34 +858,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onOpenFile={(path) => openFile(path, undefined, quickOpenTarget)}
         openRequest={quickOpenRequest}
       />
-      <header className="flex h-12 min-w-0 shrink-0 items-center gap-2 border-b border-border-subtle px-4">
-        <div className="min-w-0 flex-1 overflow-hidden">
-          <h1 className="flex min-w-0 items-center text-sm font-medium">
-            {title ? (
-              <span
-                className="min-w-0 flex-1 truncate"
-                title={[title, repoName, workspace?.worktree_path]
-                  .filter(Boolean)
-                  .join(" · ")}
-              >
-                {title}
-              </span>
-            ) : error ? null : (
-              <span
-                data-testid="workspace-header-skeleton"
-                className="flex min-w-0 items-center gap-2"
-              >
-                <Skeleton className="h-4 w-28" />
-                <Skeleton className="h-3 w-16" />
-              </span>
-            )}
-          </h1>
-        </div>
-        <div
-          className="flex shrink-0 items-center gap-2"
-          data-testid="workspace-header-utilities"
-        >
-          {workspace && workspace.status !== "archived" && (
+      <WorkspaceHeader
+        title={title}
+        repoName={repoName}
+        branchName={workspace?.branch_name}
+        worktreePath={workspace?.worktree_path}
+        loading={!title && !error}
+        workflow={
+          workspace && workspace.status !== "archived" ? (
             <WorkspaceWorkflowControl
               client={client}
               workspaceId={workspaceId}
@@ -885,8 +880,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   : undefined
               }
             />
-          )}
-          {session && (
+          ) : undefined
+        }
+        sessionStatus={
+          session ? (
             <>
               <SessionAttentionBadge
                 sessionId={session.id}
@@ -899,46 +896,25 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 harness={session.harness_kind}
                 version={session.harness_version}
                 unrecognizedEventCount={session.unrecognized_event_count}
+                runningLabel={
+                  digest?.lifecycle === "running"
+                    ? sessionActivityLabel(digest)
+                    : undefined
+                }
               />
             </>
-          )}
-          <WithTooltip
-            label={
-              chrome.terminal
-                ? `Hide terminal ${shortcutHints.terminal}`
-                : `Terminal ${shortcutHints.terminal}`
-            }
-          >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-pressed={chrome.terminal !== null}
-              aria-label="Terminal"
-              onClick={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
-            >
-              <SquareTerminal />
-            </Button>
-          </WithTooltip>
-          <WithTooltip
-            label={
-              reviewSidebarOpen
-                ? `Hide review sidebar ${shortcutHints.review}`
-                : `Review sidebar ${shortcutHints.review}`
-            }
-          >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-pressed={reviewSidebarOpen}
-              aria-label="Review sidebar"
-              onClick={() => toggleReviewSidebar()}
-            >
-              <PanelRight />
-            </Button>
-          </WithTooltip>
-          {workspace && (
+          ) : undefined
+        }
+        terminalOpen={chrome.terminal !== null}
+        reviewOpen={reviewSidebarOpen}
+        terminalShortcut={shortcutHints.terminal}
+        reviewShortcut={shortcutHints.review}
+        onToggleTerminal={() =>
+          setWorkspaceLayout(toggleTerminalLayout(layout))
+        }
+        onToggleReview={toggleReviewSidebar}
+        overflowAction={
+          workspace ? (
             <WorkspaceOverflowMenu
               commands={headerCommands}
               context={{
@@ -954,9 +930,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 })
               }
             />
-          )}
-        </div>
-      </header>
+          ) : undefined
+        }
+      />
       {error ? (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4">
           <p className="text-muted-foreground max-w-sm text-center text-sm">
@@ -977,14 +953,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           className="min-h-0 flex-1"
         >
           <ResizablePanel
-            defaultSize={72}
-            minSize={36}
+            defaultSize={68}
+            minSize={42}
             className="h-full min-h-0 min-w-0"
           >
             {workspaceMain}
           </ResizablePanel>
-          <ResizableHandle />
-          <ResizablePanel defaultSize={28} minSize={18} className="min-w-0">
+          <ResizableHandle className="bg-border-subtle transition-colors hover:bg-border" />
+          <ResizablePanel
+            defaultSize={32}
+            minSize={22}
+            className="min-w-0 bg-page-background"
+          >
             <CodeInspector
               key={workspaceId}
               client={client}
@@ -996,6 +976,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               onRequestedTabHandled={handleInspectorTabRequest}
               onOpenFile={openFile}
               onOpenDiff={openFileDiff}
+              onClose={() => setReviewSidebarOpen(false)}
             />
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -1114,18 +1095,25 @@ function SessionLifecycleMark({
   harness,
   version,
   unrecognizedEventCount,
+  runningLabel,
 }: {
   lifecycle: CodeSessionSnapshot["lifecycle"];
   harness: CodeSessionSnapshot["harness_kind"];
   version?: string;
   unrecognizedEventCount: number;
+  runningLabel?: string;
 }) {
   const tooltip = sessionLifecycleTooltip({
     lifecycle,
     harness,
     version,
     unrecognizedEventCount,
+    runningLabel,
   });
+  const label =
+    lifecycle === "running" && runningLabel
+      ? runningLabel
+      : LIFECYCLE_LABELS[lifecycle];
   return (
     <WithTooltip label={tooltip}>
       {/*
@@ -1148,7 +1136,7 @@ function SessionLifecycleMark({
             aria-label={`${unrecognizedEventCount} unrecognized engine ${unrecognizedEventCount === 1 ? "event" : "events"} recorded in this session`}
           />
         )}
-        <span>{LIFECYCLE_LABELS[lifecycle]}</span>
+        <span>{label}</span>
       </span>
     </WithTooltip>
   );

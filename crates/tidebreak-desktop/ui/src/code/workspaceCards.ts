@@ -279,7 +279,7 @@ export function isSessionRowWorthy(
 /** Short lifecycle word for the nested session row. */
 export function sessionRowLabel(digest: CodeSessionDigest): string {
   if (digest.attention.state.type === "needs_you") return "Needs you";
-  if (digest.lifecycle === "running") return "Running";
+  if (digest.lifecycle === "running") return sessionActivityLabel(digest);
   switch (digest.attention.state.type) {
     case "stalled":
       return "Stalled";
@@ -294,12 +294,38 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
   }
 }
 
+/** Precise running-state copy for a workspace row. */
+export function sessionActivityLabel(digest: CodeSessionDigest): string {
+  const runningSubagents =
+    digest.subagents?.filter((entry) => entry.status === "running").length ?? 0;
+  if (runningSubagents > 0 || digest.activity === "subagents") {
+    if (runningSubagents === 1) return "1 subagent working";
+    if (runningSubagents > 1) return `${runningSubagents} subagents working`;
+    return "Subagents working";
+  }
+  switch (digest.activity) {
+    case "shell":
+      return "Shell running";
+    case "monitor":
+      return "Monitoring";
+    case "file":
+      return "Working with files";
+    case "search":
+      return "Searching";
+    case "tool":
+      return "Tool running";
+    case "agent":
+    case undefined:
+      return "Agent working";
+  }
+}
+
 /**
  * The word a watch child row shows. The watch's own state beats lifecycle —
  * a watch is "running" for hours, but "Fixing ×3" is what it is doing —
  * except when it needs you, which outranks everything on a triage rail.
- * Digests from a server without watch enrichment fall back to lifecycle
- * wording.
+ * Digests from a server without watch enrichment still use watch-specific
+ * wording instead of borrowing the interactive session's activity label.
  */
 export function watchRowLabel(digest: CodeSessionDigest): string {
   if (digest.attention.state.type === "needs_you") return "Needs you";
@@ -319,6 +345,7 @@ export function watchRowLabel(digest: CodeSessionDigest): string {
     case "failed":
       return "Failed";
     default:
+      if (digest.lifecycle === "running") return "Watching";
       return sessionRowLabel(digest);
   }
 }
@@ -337,12 +364,16 @@ export function workspaceCardLabel(input: {
   repoName: string;
   branchName: string;
   attention?: Attention;
+  session?: CodeSessionDigest;
   pr?: { number: number; state: string; draft?: boolean };
   terminalOpen?: boolean;
 }): string {
   const parts = [input.title];
   if (input.attention && input.attention.state.type !== "working") {
     parts.push(attentionLabel(input.attention));
+  }
+  if (input.session?.lifecycle === "running") {
+    parts.push(sessionActivityLabel(input.session));
   }
   if (input.pr) {
     parts.push(`Pull request #${input.pr.number} ${prToneLabel(input.pr)}`);

@@ -191,6 +191,7 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
         attention: notice.attention,
         title: notice.title,
         turn_count: notice.turn_count,
+        ...(notice.activity !== undefined ? { activity: notice.activity } : {}),
         ...(notice.pr_state !== undefined ? { pr_state: notice.pr_state } : {}),
         ...(notice.watch_state !== undefined
           ? { watch_state: notice.watch_state }

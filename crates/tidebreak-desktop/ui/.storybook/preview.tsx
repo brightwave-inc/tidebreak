@@ -4,10 +4,17 @@ import "../src/styles.css";
 
 const withTidebreakSurface: Decorator = (Story, context) => {
   const dark = context.globals.theme === "dark";
+  const fullscreen = context.parameters.layout === "fullscreen";
   document.documentElement.classList.toggle("dark", dark);
 
   return (
-    <div className="min-h-screen bg-page-background p-6 text-foreground">
+    <div
+      className={
+        fullscreen
+          ? "h-screen min-h-0 overflow-hidden bg-page-background text-foreground"
+          : "min-h-screen bg-page-background p-6 text-foreground"
+      }
+    >
       <Story />
     </div>
   );

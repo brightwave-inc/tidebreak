@@ -16,6 +16,7 @@ import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({
     inspectorScope: null,
@@ -85,9 +86,12 @@ function makeClient(): Pick<
       number: 41,
       comments: [
         {
+          id: "99",
           kind: "inline",
           author: "reviewer",
-          body: "Rename this.",
+          avatar_url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
+          url: "https://github.com/acme/app/pull/41#discussion_r99",
+          body: "**Rename** this :rocket:",
           path: "src/login.rs",
           line: 12,
           created_at: "2026-08-02T10:00:00Z",
@@ -148,16 +152,18 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
   await screen.findByText("Fix login flow");
 
-  // Draft wins over the open state token, and holds the tab merge buttons.
+  // Draft wins over the open state token and offers no impossible merge action.
   expect(screen.getAllByText("Draft").length).toBeGreaterThan(0);
   expect(screen.getByText("Changes requested")).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Enable auto-merge" }),
-  ).toBeDisabled();
-  const tabMerge = screen
-    .getAllByRole("button", { name: "Merge" })
-    .find((button) => button.hasAttribute("disabled"));
-  expect(tabMerge).toBeDefined();
+    screen.queryByRole("button", { name: "Enable auto-merge" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Squash and merge" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("combobox", { name: "Merge method" }),
+  ).not.toBeInTheDocument();
 
   // Checks render individually with their buckets counted.
   expect(screen.getByText("1 passing")).toBeInTheDocument();
@@ -166,8 +172,9 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
 
   // Comments load on open, with the inline anchor visible.
   await waitFor(() =>
-    expect(screen.getByText("Rename this.")).toBeInTheDocument(),
+    expect(screen.getByText("Rename", { selector: "strong" })).toBeInTheDocument(),
   );
+  expect(screen.getByText(/this 🚀/)).toBeInTheDocument();
   expect(screen.getByText("src/login.rs:12")).toBeInTheDocument();
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
 });
@@ -262,12 +269,14 @@ it.each([
       .setup()
       .click(screen.getByRole("tab", { name: "Pull request" }));
 
-    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
-    const autoMerge = screen.getByRole("button", {
+    expect(
+      screen.queryByRole("button", { name: "Squash and merge" }),
+    ).not.toBeInTheDocument();
+    const autoMerge = screen.queryByRole("button", {
       name: "Enable auto-merge",
     });
     if (autoMergeEnabled) expect(autoMerge).toBeEnabled();
-    else expect(autoMerge).toBeDisabled();
+    else expect(autoMerge).not.toBeInTheDocument();
     expect(screen.getByText(copy)).toBeInTheDocument();
   },
 );
@@ -294,9 +303,11 @@ it("only enables direct merge for an affirmatively ready PR", async () => {
     .setup()
     .click(screen.getByRole("tab", { name: "Pull request" }));
 
-  expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
   expect(
-    screen.getByRole("button", { name: "Enable auto-merge" }),
+    screen.getByRole("button", { name: "Squash and merge" }),
+  ).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: "Enable auto-merge instead" }),
   ).toBeEnabled();
 });
 
@@ -368,7 +379,54 @@ it("shows skipped checks as neutral and hides stale review state after merge", a
   expect(screen.getByText("1 passing")).toBeInTheDocument();
   expect(screen.getByText("1 skipped")).toBeInTheDocument();
   expect(screen.queryByText("Review required")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Merge" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Squash and merge" }),
+  ).not.toBeInTheDocument();
+});
+
+it("attaches, locally resolves, hides, and restores a rich review comment", async () => {
+  const client = makeClient();
+  const user = userEvent.setup();
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, pr: OPEN_PR } as never}
+      contentRevision={0}
+    />,
+  );
+
+  await user.click(screen.getByRole("tab", { name: "Pull request" }));
+  await screen.findByText("Rename", { selector: "strong" });
+  expect(document.querySelector("img[src^='data:image/svg+xml']")).not.toBeNull();
+
+  await user.click(
+    screen.getByRole("button", { name: "Comment actions for reviewer" }),
+  );
+  await user.click(screen.getByRole("menuitem", { name: "Attach to chat" }));
+  expect(useCodeUiStore.getState().pendingComposerPrompt).toMatchObject({
+    scope: "ws-1",
+    submit: false,
+  });
+  expect(useCodeUiStore.getState().pendingComposerPrompt?.text).toContain(
+    "src/login.rs:12",
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "Comment actions for reviewer" }),
+  );
+  await user.click(
+    screen.getByRole("menuitem", { name: "Mark resolved in Tidebreak" }),
+  );
+  expect(screen.getByText("Resolved here")).toBeInTheDocument();
+
+  await user.click(
+    screen.getByRole("button", { name: "Comment actions for reviewer" }),
+  );
+  await user.click(screen.getByRole("menuitem", { name: "Hide in Tidebreak" }));
+  expect(screen.queryByText("Rename", { selector: "strong" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Show 1 hidden" }));
+  expect(await screen.findByText("Rename", { selector: "strong" })).toBeInTheDocument();
 });
 
 it("exposes a tablist and passes the scoped turn into files and source", async () => {
@@ -390,8 +448,7 @@ it("exposes a tablist and passes the scoped turn into files and source", async (
     "aria-selected",
     "true",
   );
-  // Icon-only tabs, so each carries its own name; the panel it opens is
-  // linked back to it.
+  // Visible labels and accessible names stay linked to the panel they open.
   const source = screen.getByRole("tab", { name: "Source control" });
   const panel = screen.getByRole("tabpanel");
   expect(source).toHaveAttribute("aria-controls", panel.id);
@@ -468,24 +525,43 @@ it("gives the active inspector tab a selected fill idle tabs do not share", asyn
   const pr = screen.getByRole("tab", { name: "Pull request" });
 
   expect(files).toHaveAttribute("data-state", "active");
-  expect(files).toHaveClass("bg-foreground/10");
+  expect(files).toHaveClass("bg-background");
   expect(source).toHaveAttribute("data-state", "inactive");
   expect(pr).toHaveAttribute("data-state", "inactive");
-  expect(source).not.toHaveClass("bg-foreground/10");
-  expect(pr).not.toHaveClass("bg-foreground/10");
+  expect(source).not.toHaveClass("bg-background");
+  expect(pr).not.toHaveClass("bg-background");
 
   await userEvent.setup().click(source);
 
   expect(source).toHaveAttribute("data-state", "active");
-  expect(source).toHaveClass("bg-foreground/10");
-  expect(files).not.toHaveClass("bg-foreground/10");
-  expect(pr).not.toHaveClass("bg-foreground/10");
+  expect(source).toHaveClass("bg-background");
+  expect(files).not.toHaveClass("bg-background");
+  expect(pr).not.toHaveClass("bg-background");
 
   // Radix drives the arrows; this pins that the inspector still gets them.
   source.focus();
   await userEvent.setup().keyboard("{ArrowRight}");
   expect(pr).toHaveAttribute("data-state", "active");
   expect(pr).toHaveFocus();
+});
+
+it("closes the review sidebar from its own chrome", async () => {
+  const onClose = vi.fn();
+  render(
+    <CodeInspector
+      client={makeClient() as never}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+      onClose={onClose}
+    />,
+  );
+
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Close review sidebar" }));
+
+  expect(onClose).toHaveBeenCalledOnce();
 });
 
 it("labels a turn by its ordinal among user items", () => {
