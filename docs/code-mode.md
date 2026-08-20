@@ -111,7 +111,7 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
   `archived_at`.
 - **`code_session`** — `id`, `workspace_id`, `kind`
   (`Interactive | Watch`, per
-  [`0049`](decisions/0049-watch-and-fix-is-a-durable-task.md)), `harness_kind`,
+  [`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)), `harness_kind`,
   `harness_version` (observed at launch), `harness_resume_ref` (the
   harness's own session/thread id for resume), `permission_mode`,
   `lifecycle` (`Created | Idle | Running | Fenced | Ended`), `fence_reason`
@@ -136,7 +136,7 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
   `last_fix_head`, `cycles`, `created_at`, `updated_at`. Driven by a
   try-based sweep that reads active rows every tick, so restarts resume
   watches with no extra recovery state
-  ([`0049`](decisions/0049-watch-and-fix-is-a-durable-task.md)).
+  ([`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)).
 
 Boot recovery (`code/recovery.rs`, per
 [`0032`](decisions/0032-code-workspaces-worktrees-checkpoints.md)): sessions
@@ -293,7 +293,7 @@ GET             /code/workspaces/{id}/files          changed files vs base, per-
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
 GET             /code/workspaces/{id}/pr             PR + checks digest (gh; graceful absence)
-POST/DELETE     /code/workspaces/{id}/watch          durable watch-and-fix task (0049)
+POST/DELETE     /code/workspaces/{id}/watch          durable watch-and-fix task (0050)
 POST            /code/workspaces/{id}/actions/{name} quick action; output journaled
 
 POST/GET/DELETE /code/workspaces/{id}/terminals

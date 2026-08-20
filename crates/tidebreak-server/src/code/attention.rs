@@ -15,7 +15,7 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
+    CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -382,7 +382,7 @@ impl Drop for StallSweepGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{should_replace, FenceReason, WorkspaceId};
+    use tidebreak_core::{should_replace, CodeSessionKind, FenceReason, WorkspaceId};
 
     fn auto_working() -> Attention {
         Attention::working(AttentionSource::Lifecycle)

@@ -224,7 +224,7 @@ purpose:
 - **Multiple sessions per workspace.** The data model keeps room for
   follow-up and successor sessions in one worktree; v1 runs one active
   session per workspace. Watch tasks
-  ([record 49](decisions/0049-watch-and-fix-is-a-durable-task.md)) take the
+  ([record 50](decisions/0050-watch-and-fix-is-a-durable-task.md)) take the
   first step: one interactive session plus one watch session may share a
   worktree, serialized so only one turn runs at a time. Free-form
   concurrent sessions stay parked.

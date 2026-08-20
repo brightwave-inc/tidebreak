@@ -13,8 +13,8 @@ use tidebreak_core::db::code::{
     append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_turn,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionKind,
-    CodeSessionLifecycle, CodeTurnStatus, DbStore, FenceReason,
+    Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
+    CodeTurnStatus, DbStore, FenceReason,
 };
 
 use super::attention::{persist_session, replace_attention};
@@ -284,8 +284,8 @@ mod tests {
         get_session, get_turn, insert_repo, insert_session, insert_turn, insert_workspace,
     };
     use tidebreak_core::{
-        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeTurn, CodeTurnId,
-        CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeSessionKind, CodeTurn,
+        CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
