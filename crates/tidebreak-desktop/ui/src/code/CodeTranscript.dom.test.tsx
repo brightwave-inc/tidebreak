@@ -79,6 +79,36 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
 
+  it("shows the command beside the verb, without its worktree cd prefix", () => {
+    const item: CodeTranscriptItem = {
+      kind: "tool",
+      id: "tool-cd",
+      turnId: "t1",
+      callId: "c2",
+      name: "Bash",
+      detail: {
+        kind: "command",
+        cmd: 'cd "/Users/me/Library/Application Support/dev/worktrees/abc" && cargo test -p core',
+        cwd: "/tmp",
+      },
+      status: "succeeded",
+      preview: "",
+      startedAt: "2026-08-15T12:00:00.000Z",
+      durationMs: 900,
+    };
+    render(<CodeTranscript items={[item]} />);
+    // The leading `cd <worktree> &&` repeats the session's own directory on
+    // every row and pushes the real command into the truncated middle.
+    const subject = screen.getByText("cargo test -p core");
+    expect(screen.queryByText(/Application Support/)).toBeNull();
+    // The verb and the command are direct children of the flex title row.
+    // An inline wrapper span here once pushed the command onto its own line
+    // and broke middle truncation (#2282 regression).
+    const verb = screen.getByText("Command run");
+    expect(subject.parentElement).toBe(verb.parentElement);
+    expect(verb.parentElement?.className).toContain("flex");
+  });
+
   it("announces the turn's lifecycle and nothing that streams", () => {
     // A tool line changes on every streamed byte. Wrapping it in a live region
     // reads the whole session out, over and over, and buries the one thing a
