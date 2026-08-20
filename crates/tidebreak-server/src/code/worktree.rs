@@ -494,6 +494,77 @@ pub(crate) async fn create_worktree(
     }
 }
 
+/// True when `refs/heads/<branch>` exists in the repository.
+pub(crate) async fn branch_exists(
+    repo_root: &Path,
+    branch: &str,
+) -> Result<bool, WorktreeError> {
+    match git(
+        Some(repo_root),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        // --quiet: a missing ref exits non-zero with nothing on stderr; any
+        // message is a real failure (not a repository, timeout, …).
+        Err(err) if err.trim().is_empty() => Ok(false),
+        Err(err) => Err(WorktreeError::internal(format!(
+            "could not check branch {branch}: {err}"
+        ))),
+    }
+}
+
+/// Re-create a worktree checking out an existing branch.
+///
+/// The restore counterpart of [`create_worktree`], deliberately a sibling and
+/// not a flag on it: create always mints a branch (`-b`), restore must never
+/// mint one — the branch surviving archive is what makes the workspace worth
+/// restoring. The caller has already verified the branch exists; a race that
+/// deletes it between the check and this call still fails cleanly here.
+pub(crate) async fn restore_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+) -> Result<(), WorktreeError> {
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            WorktreeError::internal(format!(
+                "could not create worktree parent {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    let add = git(
+        Some(repo_root),
+        &[
+            "worktree",
+            "add",
+            &worktree_path.to_string_lossy(),
+            branch,
+        ],
+        GIT_WORKTREE_TIMEOUT,
+    )
+    .await;
+    if let Err(err) = add {
+        cleanup_half_created(repo_root, worktree_path).await;
+        return Err(classify_worktree_add(err, branch));
+    }
+    match verify_inside_worktree(worktree_path).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            cleanup_half_created(repo_root, worktree_path).await;
+            Err(err)
+        }
+    }
+}
+
 /// Run the setup script, if any. Failure preserves the checkout.
 pub(crate) async fn run_setup_script(
     worktree_path: &Path,

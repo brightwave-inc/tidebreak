@@ -10,12 +10,12 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     count_turns, get_session, get_workspace, latest_event_created_at, latest_turn, list_approvals,
-    list_sessions, list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace,
-    save_session,
+    latest_watch_for_session, list_sessions, list_sessions_by_lifecycle_all_owners,
+    list_sessions_for_workspace, save_session,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
+    CodeSessionKind, CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -327,6 +327,14 @@ async fn build_digest(
             ))
         })?;
     let turn_count = count_turns(db, &session.owner, session.id).await?;
+    // A watch session's lifecycle undersells it ("running" for hours), so its
+    // digest carries the watch's own state. The row is small and local — this
+    // never reaches the host the way the PR snapshot does.
+    let watch = if session.kind == CodeSessionKind::Watch {
+        latest_watch_for_session(db, &session.owner, session.id).await?
+    } else {
+        None
+    };
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -336,6 +344,9 @@ async fn build_digest(
         title: workspace.title,
         turn_count,
         pr_state: workspace.pr,
+        watch_state: watch.as_ref().map(|watch| watch.state),
+        watch_detail: watch.as_ref().and_then(|watch| watch.detail.clone()),
+        watch_cycles: watch.as_ref().map(|watch| watch.cycles),
     })
 }
 

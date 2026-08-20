@@ -1166,7 +1166,11 @@ export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: st
 /**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, };
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, 
+/**
+ * Watch progress, present only on `kind: watch` digests.
+ */
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, };
 
 /**
  * Identifies one durable conversation with an external agent engine.
@@ -1263,7 +1267,11 @@ sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: Workspace
  * Boxed to keep the notice enum's variants near one size; the wire
  * shape is unchanged.
  */
-pr_state?: PullRequestDigest, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
+pr_state?: PullRequestDigest, 
+/**
+ * Watch progress, present only on `kind: watch` digests.
+ */
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, };
 
 /**
  * Token accounting as reported by the engine. Missing fields stay zero.

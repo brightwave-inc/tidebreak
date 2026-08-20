@@ -721,6 +721,83 @@ impl CodeRuntime {
         Ok(workspace)
     }
 
+    /// Reactivate an archived workspace at its own path, on its own branch.
+    ///
+    /// Archive keeps the branch, the session rows, and the journal; restore
+    /// puts a checkout back under them. Nothing else changes: sessions stay
+    /// Ended (a new one resumes via the stored harness ref), and the
+    /// checkpoint refs archive deleted stay gone — per-turn diffs from before
+    /// the archive cannot be reopened.
+    ///
+    /// `create_workspace`'s branch-collision check reads archived rows too,
+    /// so this route is the sanctioned way to get an archived branch back
+    /// into a workspace.
+    pub(crate) async fn restore_workspace(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let mut workspace = self.get_workspace(owner, id).await?;
+        if workspace.status == CodeWorkspaceStatus::Active {
+            return Ok(workspace);
+        }
+        if workspace.status != CodeWorkspaceStatus::Archived {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                format!("workspace is {}", workspace.status.as_str()),
+            ));
+        }
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let repo_root = std::path::Path::new(&repo.root_path);
+        if !worktree::branch_exists(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?
+        {
+            return Err(ServerError::conflict_kind(
+                "branch_missing",
+                format!(
+                    "branch {} no longer exists; create a new workspace instead",
+                    workspace.branch_name
+                ),
+            ));
+        }
+        let path = std::path::Path::new(&workspace.worktree_path);
+        if path.exists() {
+            return Err(ServerError::conflict_kind(
+                "worktree_path_occupied",
+                format!(
+                    "something already exists at {}",
+                    workspace.worktree_path
+                ),
+            ));
+        }
+        worktree::restore_worktree(repo_root, path, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?;
+        // Mirror create's tail exactly: setup decides between Active and
+        // SetupFailed, and a failing script preserves the checkout
+        // (Decision 0032's failure-preserves rule). One vocabulary for both
+        // paths — a reader debugging "setup_failed" should not need to know
+        // whether the workspace was created or restored.
+        match run_setup_script(path, repo.setup_script.as_deref()).await {
+            Ok(()) => {
+                workspace.status = CodeWorkspaceStatus::Active;
+                workspace.archived_at = None;
+                save_workspace(&self.db, &workspace).await?;
+                Ok(workspace)
+            }
+            Err(err) => {
+                workspace.status = CodeWorkspaceStatus::SetupFailed;
+                workspace.archived_at = None;
+                save_workspace(&self.db, &workspace).await?;
+                Err(ServerError::unprocessable_kind(
+                    "setup_failed",
+                    err.to_string(),
+                ))
+            }
+        }
+    }
+
     pub(crate) async fn commit_workspace(
         &self,
         owner: &OwnerId,

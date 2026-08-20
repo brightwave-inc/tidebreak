@@ -749,6 +749,16 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pr_state: Option<PullRequestDigest>,
+    /// Watch progress, present only on `kind: watch` digests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch_state: Option<CodeWatchState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch_cycles: Option<i64>,
 }
 
 impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
@@ -762,6 +772,9 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             title: digest.title,
             turn_count: digest.turn_count,
             pr_state: digest.pr_state,
+            watch_state: digest.watch_state,
+            watch_detail: digest.watch_detail,
+            watch_cycles: digest.watch_cycles,
         }
     }
 }
@@ -791,6 +804,16 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         pr_state: Option<Box<PullRequestDigest>>,
+        /// Watch progress, present only on `kind: watch` digests.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        watch_state: Option<CodeWatchState>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        watch_detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        watch_cycles: Option<i64>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -837,6 +860,9 @@ impl CodeUpdateNotice {
             title: wire.title,
             turn_count: wire.turn_count,
             pr_state: wire.pr_state.map(Box::new),
+            watch_state: wire.watch_state,
+            watch_detail: wire.watch_detail,
+            watch_cycles: wire.watch_cycles,
         }
     }
 }

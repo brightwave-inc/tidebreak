@@ -4258,3 +4258,125 @@ fn code_routes_go_through_the_owner_scoped_view() {
         "code routes must query through the owner-scoped view: {findings:?}"
     );
 }
+
+/// Archive keeps the branch; restore puts a checkout back under the same
+/// workspace row. Committed work returns, force-discarded work stays gone,
+/// and restoring an already-active workspace is a no-op.
+#[tokio::test]
+async fn restore_reactivates_an_archived_workspace_on_its_own_branch() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let id = json_id(&workspace);
+    let path = workspace["worktree_path"].as_str().unwrap().to_owned();
+    let branch = workspace["branch_name"].as_str().unwrap().to_owned();
+
+    // One committed file (should survive on the branch) and one uncommitted
+    // (force-archive discards it).
+    std::fs::write(std::path::Path::new(&path).join("kept.txt"), "kept\n").unwrap();
+    for args in [
+        ["add", "kept.txt"].as_slice(),
+        ["commit", "-m", "keep this"].as_slice(),
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&path)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(std::path::Path::new(&path).join("scratch.txt"), "gone\n").unwrap();
+
+    let archived = client
+        .post(format!("http://{addr}/code/workspaces/{id}/archive"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    assert!(!std::path::Path::new(&path).exists());
+
+    let restored = client
+        .post(format!("http://{addr}/code/workspaces/{id}/restore"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = restored.json().await.unwrap();
+    assert_eq!(body["status"], "active");
+    assert_eq!(body["worktree_path"], path.as_str());
+    assert_eq!(body["branch_name"], branch.as_str());
+    assert!(body.get("archived_at").is_none() || body["archived_at"].is_null());
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&path).join("kept.txt")).unwrap(),
+        "kept\n"
+    );
+    assert!(!std::path::Path::new(&path).join("scratch.txt").exists());
+
+    // Idempotent on an active workspace.
+    let again = client
+        .post(format!("http://{addr}/code/workspaces/{id}/restore"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), reqwest::StatusCode::OK);
+}
+
+/// The two ways a restore can be impossible, each with its own kind so the
+/// UI can offer the right fallback: the branch was deleted since archive, or
+/// something has claimed the worktree path.
+#[tokio::test]
+async fn restore_refuses_a_missing_branch_and_an_occupied_path() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let id = json_id(&workspace);
+    let path = workspace["worktree_path"].as_str().unwrap().to_owned();
+    let branch = workspace["branch_name"].as_str().unwrap().to_owned();
+
+    let archived = client
+        .post(format!("http://{addr}/code/workspaces/{id}/archive"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+
+    // Occupy the path first: the branch still exists, so this is the
+    // path-specific refusal.
+    std::fs::create_dir_all(&path).unwrap();
+    let occupied = client
+        .post(format!("http://{addr}/code/workspaces/{id}/restore"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(occupied.status(), reqwest::StatusCode::CONFLICT);
+    let occupied_body: serde_json::Value = occupied.json().await.unwrap();
+    assert_eq!(occupied_body["kind"], "worktree_path_occupied");
+    std::fs::remove_dir_all(&path).unwrap();
+
+    assert!(std::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    let missing = client
+        .post(format!("http://{addr}/code/workspaces/{id}/restore"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::CONFLICT);
+    let missing_body: serde_json::Value = missing.json().await.unwrap();
+    assert_eq!(missing_body["kind"], "branch_missing");
+}

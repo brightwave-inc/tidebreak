@@ -785,10 +785,14 @@ describe("app shell", () => {
       const user = userEvent.setup();
       const { router } = await mountApp({ at: "/code" });
 
-      // The registered repo means the rail and the catalog are both up.
-      expect(
-        await screen.findByRole("button", { name: "app" }),
-      ).toBeInTheDocument();
+      // The registered repo means the rail and the catalog are both up: the
+      // rail's empty state renders its "New workspace" line (beside the
+      // toolbar button of the same name) only once repos have loaded.
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole("button", { name: "New workspace" }),
+        ).toHaveLength(2),
+      );
 
       // jsdom reports a non-mac user agent, so the platform's command modifier
       // here is Ctrl — the same chord the app takes as Cmd on macOS.

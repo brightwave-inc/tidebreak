@@ -25,9 +25,14 @@ import { requestUserAttention } from "../host";
  */
 
 export type CodeUpdatesState = {
+  /** The interactive session's digest, one per workspace. Never a watch. */
   byWorkspace: Record<string, CodeSessionDigest>;
-  /** Live watch-task sessions, one per workspace, beside the conversation. */
-  watchByWorkspace: Record<string, CodeSessionDigest>;
+  /**
+   * Watch digests, keyed workspace → session. Children beside the
+   * conversation, never in its slot — ADR 0050's rule, kept by construction:
+   * the two maps have disjoint sources.
+   */
+  childrenByWorkspace: Record<string, Record<string, CodeSessionDigest>>;
   cloneJobs: Record<string, CodeCloneJobSnapshot>;
   viewedWorkspaceId: string | null;
 };
@@ -41,7 +46,7 @@ export type CodeUpdatesAction =
 
 const EMPTY: CodeUpdatesState = {
   byWorkspace: {},
-  watchByWorkspace: {},
+  childrenByWorkspace: {},
   cloneJobs: {},
   viewedWorkspaceId: null,
 };
@@ -52,33 +57,31 @@ export function reduceCodeUpdates(
 ): CodeUpdatesState {
   switch (action.type) {
     case "snapshot": {
-      // Two digests per workspace at most: the conversation, and its watch
-      // task. A watch session never displaces the conversation the list
-      // surfaces show; it is the workspace's child task.
+      // The snapshot restates every live session, so both maps rebuild from
+      // scratch — a reconnect self-heals a missed end notice.
       const byWorkspace: Record<string, CodeSessionDigest> = {};
-      const watchByWorkspace: Record<string, CodeSessionDigest> = {};
+      const childrenByWorkspace: Record<
+        string,
+        Record<string, CodeSessionDigest>
+      > = {};
       for (const digest of action.sessions) {
         if (digest.kind === "watch") {
-          watchByWorkspace[digest.workspace] = digest;
+          (childrenByWorkspace[digest.workspace] ??= {})[digest.session] =
+            digest;
         } else {
           byWorkspace[digest.workspace] = digest;
         }
       }
-      return { ...state, byWorkspace, watchByWorkspace };
+      return { ...state, byWorkspace, childrenByWorkspace };
     }
-    case "digest":
+    case "digest": {
       if (action.digest.kind === "watch") {
-        if (action.digest.lifecycle === "ended") {
-          const { [action.digest.workspace]: _ended, ...watchByWorkspace } =
-            state.watchByWorkspace;
-          return { ...state, watchByWorkspace };
-        }
         return {
           ...state,
-          watchByWorkspace: {
-            ...state.watchByWorkspace,
-            [action.digest.workspace]: action.digest,
-          },
+          childrenByWorkspace: upsertChild(
+            state.childrenByWorkspace,
+            action.digest,
+          ),
         };
       }
       return {
@@ -88,6 +91,7 @@ export function reduceCodeUpdates(
           [action.digest.workspace]: action.digest,
         },
       };
+    }
     case "clone_progress":
       return {
         ...state,
@@ -101,6 +105,38 @@ export function reduceCodeUpdates(
     case "reset":
       return { ...EMPTY, viewedWorkspaceId: state.viewedWorkspaceId };
   }
+}
+
+function upsertChild(
+  children: CodeUpdatesState["childrenByWorkspace"],
+  digest: CodeSessionDigest,
+): CodeUpdatesState["childrenByWorkspace"] {
+  const forWorkspace = { ...children[digest.workspace] };
+  if (digest.lifecycle === "ended") {
+    // An ended watch leaves the rail; the snapshot on reconnect would drop
+    // it anyway, this just does it without waiting for one.
+    delete forWorkspace[digest.session];
+  } else {
+    forWorkspace[digest.session] = digest;
+  }
+  if (Object.keys(forWorkspace).length === 0) {
+    const next = { ...children };
+    delete next[digest.workspace];
+    return next;
+  }
+  return { ...children, [digest.workspace]: forWorkspace };
+}
+
+/** A workspace's watch digests, in a stable order for rendering. */
+export function watchChildren(
+  state: Pick<CodeUpdatesState, "childrenByWorkspace">,
+  workspaceId: string,
+): CodeSessionDigest[] {
+  const children = state.childrenByWorkspace[workspaceId];
+  if (!children) return [];
+  return Object.values(children).sort((left, right) =>
+    left.session.localeCompare(right.session),
+  );
 }
 
 /** True when a digest transition should poke the OS attention affordance. */
@@ -137,6 +173,15 @@ export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | nu
         title: notice.title,
         turn_count: notice.turn_count,
         ...(notice.pr_state !== undefined ? { pr_state: notice.pr_state } : {}),
+        ...(notice.watch_state !== undefined
+          ? { watch_state: notice.watch_state }
+          : {}),
+        ...(notice.watch_detail !== undefined
+          ? { watch_detail: notice.watch_detail }
+          : {}),
+        ...(notice.watch_cycles !== undefined
+          ? { watch_cycles: notice.watch_cycles }
+          : {}),
       },
     };
   }
@@ -167,7 +212,9 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
   apply: (action) => {
     const previous = get();
     const next = reduceCodeUpdates(previous, action);
-    if (action.type === "digest") {
+    // OS attention stays keyed to the conversation: a watch child's state
+    // change would compare against the interactive digest and misfire.
+    if (action.type === "digest" && action.digest.kind !== "watch") {
       maybeNotify(previous, action.digest);
     }
     set(next);

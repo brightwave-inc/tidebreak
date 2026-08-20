@@ -78,6 +78,21 @@ pub async fn archive_workspace(
     Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 
+/// `POST /code/workspaces/{id}/restore` — reactivate an archived workspace.
+///
+/// The worktree comes back at the same path on the kept branch; session rows
+/// and journal history were never deleted, so the conversation is readable
+/// again the moment this returns. 409 kinds: `branch_missing` (the branch was
+/// deleted since archive — fall back to a new workspace), and
+/// `worktree_path_occupied`.
+pub async fn restore_workspace(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
+    let restored = code.restore_workspace(id).await?;
+    Ok(Json(CodeWorkspaceSnapshot::from(restored)))
+}
+
 pub async fn list_workspace_tree(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,

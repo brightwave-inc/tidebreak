@@ -11395,3 +11395,4 @@ async fn owner_scoped_queries_partition_root_aggregates() {
     );
     assert_eq!(store.get_chat_scoped(&alice, loose.id).await.unwrap(), None);
 }
+

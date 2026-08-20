@@ -161,6 +161,13 @@ impl ScopedCode {
         self.runtime.archive_workspace(&self.owner, id, force).await
     }
 
+    pub(crate) async fn restore_workspace(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        self.runtime.restore_workspace(&self.owner, id).await
+    }
+
     pub(crate) async fn workspace_tree(
         &self,
         id: WorkspaceId,

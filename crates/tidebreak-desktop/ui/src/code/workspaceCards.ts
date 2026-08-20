@@ -68,11 +68,18 @@ export function isWorkspaceSortMode(value: string): value is WorkspaceSortMode {
   return (WORKSPACE_SORT_MODES as readonly string[]).includes(value);
 }
 
-export function nextWorkspaceSortMode(
-  mode: WorkspaceSortMode,
-): WorkspaceSortMode {
-  const index = WORKSPACE_SORT_MODES.indexOf(mode);
-  return WORKSPACE_SORT_MODES[(index + 1) % WORKSPACE_SORT_MODES.length]!;
+/** How much of a card the rail draws; the aria-label never shrinks with it. */
+export type CardDensity = "compact" | "detailed";
+
+export const CARD_DENSITIES: readonly CardDensity[] = ["compact", "detailed"];
+
+export const CARD_DENSITY_LABELS: Record<CardDensity, string> = {
+  compact: "Compact",
+  detailed: "Detailed",
+};
+
+export function isCardDensity(value: string): value is CardDensity {
+  return (CARD_DENSITIES as readonly string[]).includes(value);
 }
 
 export type WorkspaceStatusRank =
@@ -167,6 +174,8 @@ export function listWorkspacesByCreated(
 export type ArrangedWorkspaceGroup = {
   key: string;
   label: string | null;
+  /** Set when the group is one repo, so the rail can link its header. */
+  repoId?: string;
   workspaces: CodeWorkspaceSnapshot[];
 };
 
@@ -174,8 +183,26 @@ export type ArrangedWorkspaceGroup = {
  * The one function the rail reads. Ordering is a pure function of created_at,
  * repo catalog order, and status rank — never catalog array order or digest
  * insertion order.
+ *
+ * Archived workspaces are off the rail unless asked for; when shown, they
+ * are one trailing group in every mode rather than woven back into their
+ * repo, so put-away work never interleaves with live triage.
  */
 export function arrangeWorkspaces(
+  mode: WorkspaceSortMode,
+  repos: readonly CodeRepoSnapshot[],
+  workspaces: readonly CodeWorkspaceSnapshot[],
+  digests: Readonly<Record<string, CodeSessionDigest | undefined>>,
+  options?: { showArchived?: boolean },
+): ArrangedWorkspaceGroup[] {
+  const groups = arrangeLiveWorkspaces(mode, repos, workspaces, digests);
+  if (!options?.showArchived) return groups;
+  const archived = listArchivedWorkspaces(workspaces);
+  if (archived.length === 0) return groups;
+  return [...groups, { key: "archived", label: "Archived", workspaces: archived }];
+}
+
+function arrangeLiveWorkspaces(
   mode: WorkspaceSortMode,
   repos: readonly CodeRepoSnapshot[],
   workspaces: readonly CodeWorkspaceSnapshot[],
@@ -191,17 +218,38 @@ export function arrangeWorkspaces(
     ];
   }
   if (mode === "by-status") {
-    return groupWorkspacesByStatus(workspaces, digests).map((group) => ({
-      key: group.rank,
-      label: WORKSPACE_STATUS_RANK_LABELS[group.rank],
-      workspaces: group.workspaces,
-    }));
+    return groupWorkspacesByStatus(workspaces, digests)
+      .filter((group) => group.rank !== "archived")
+      .map((group) => ({
+        key: group.rank,
+        label: WORKSPACE_STATUS_RANK_LABELS[group.rank],
+        workspaces: group.workspaces,
+      }));
   }
   return groupWorkspacesByRepo(repos, workspaces).map((group) => ({
     key: group.repo?.id ?? "unknown-repo",
     label: group.repo?.display_name ?? "Other repos",
+    repoId: group.repo?.id,
     workspaces: group.workspaces,
   }));
+}
+
+/**
+ * Archived workspaces, most recently put away first. `archived_at` orders the
+ * shelf; rows missing it (older servers) fall back to created_at.
+ */
+export function listArchivedWorkspaces(
+  workspaces: readonly CodeWorkspaceSnapshot[],
+): CodeWorkspaceSnapshot[] {
+  return workspaces
+    .filter((workspace) => workspace.status === "archived")
+    .sort((left, right) => {
+      const byTime = (right.archived_at ?? right.created_at).localeCompare(
+        left.archived_at ?? left.created_at,
+      );
+      if (byTime !== 0) return byTime;
+      return left.id.localeCompare(right.id);
+    });
 }
 
 function sortByCreated(
@@ -243,6 +291,35 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
       return "Pinned";
     default:
       return LIFECYCLE_LABELS[digest.lifecycle];
+  }
+}
+
+/**
+ * The word a watch child row shows. The watch's own state beats lifecycle —
+ * a watch is "running" for hours, but "Fixing ×3" is what it is doing —
+ * except when it needs you, which outranks everything on a triage rail.
+ * Digests from a server without watch enrichment fall back to lifecycle
+ * wording.
+ */
+export function watchRowLabel(digest: CodeSessionDigest): string {
+  if (digest.attention.state.type === "needs_you") return "Needs you";
+  switch (digest.watch_state) {
+    case "watching":
+      return "Watching";
+    case "fixing":
+      return digest.watch_cycles !== undefined && digest.watch_cycles > 1
+        ? `Fixing ×${digest.watch_cycles}`
+        : "Fixing";
+    case "blocked":
+      return "Blocked";
+    case "done":
+      return "Done";
+    case "stopped":
+      return "Stopped";
+    case "failed":
+      return "Failed";
+    default:
+      return sessionRowLabel(digest);
   }
 }
 

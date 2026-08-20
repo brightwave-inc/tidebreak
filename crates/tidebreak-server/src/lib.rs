@@ -736,6 +736,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::archive_workspace),
         )
         .route(
+            "/code/workspaces/{id}/restore",
+            post(routes::code::restore_workspace),
+        )
+        .route(
             "/code/workspaces/{id}/files",
             get(routes::code::list_workspace_files),
         )

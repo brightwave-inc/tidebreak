@@ -226,7 +226,13 @@ function CodeRepoRouteComponent() {
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/w/$workspaceId",
-  validateSearch: (search: Record<string, unknown>): PanelSearch => panelSearchFrom(search),
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): PanelSearch & { task?: string } => ({
+    ...panelSearchFrom(search),
+    // A child task's session attached in place of the conversation.
+    task: typeof search.task === "string" ? search.task : undefined,
+  }),
   component: CodeWorkspaceRouteComponent,
 });
 

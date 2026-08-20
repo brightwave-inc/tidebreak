@@ -1691,3 +1691,40 @@ describe("archive force kinds", () => {
     expect(archiveForceKind(new HttpError(409, "busy", "session_running"))).toBeNull();
   });
 });
+
+describe("restoring a workspace", () => {
+  it("posts to the restore route and surfaces the error kind", async () => {
+    const workspace = {
+      id: "ws-1",
+      repo_id: "repo-1",
+      title: "Fix login",
+      worktree_path: "/tmp/app/.worktrees/fix-login",
+      branch_name: "tidebreak/fix-login",
+      base_ref: "main",
+      status: "active",
+      created_at: "2026-08-15T00:00:00.000Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(workspace), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    const restored = await client.restoreCodeWorkspace("ws-1");
+    expect(restored.status).toBe("active");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/restore");
+    expect(init.method).toBe("POST");
+
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ message: "branch is gone", kind: "branch_missing" }),
+        { status: 409 },
+      ),
+    );
+    // The kind travels: the restore runner branches its fallback on it.
+    await expect(client.restoreCodeWorkspace("ws-1")).rejects.toMatchObject({
+      kind: "branch_missing",
+    });
+  });
+});

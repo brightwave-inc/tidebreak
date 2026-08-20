@@ -1854,13 +1854,20 @@ export function parseCodeSessionDigest(
       "title",
       "turn_count",
       "pr_state",
+      "watch_state",
+      "watch_detail",
+      "watch_cycles",
     ]) ||
     !nonEmpty(value.workspace) ||
     !nonEmpty(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     typeof value.title !== "string" ||
-    !isFiniteNumber(value.turn_count)
+    !isFiniteNumber(value.turn_count) ||
+    (value.watch_state !== undefined &&
+      !isMember(value.watch_state, WATCH_STATES)) ||
+    !optionalString(value.watch_detail) ||
+    (value.watch_cycles !== undefined && !isFiniteNumber(value.watch_cycles))
   ) {
     return null;
   }
@@ -1878,6 +1885,15 @@ export function parseCodeSessionDigest(
     title: value.title,
     turn_count: value.turn_count,
     ...(pr_state ? { pr_state } : {}),
+    ...(value.watch_state !== undefined
+      ? { watch_state: value.watch_state }
+      : {}),
+    ...(value.watch_detail !== undefined
+      ? { watch_detail: value.watch_detail }
+      : {}),
+    ...(value.watch_cycles !== undefined
+      ? { watch_cycles: value.watch_cycles }
+      : {}),
   };
 }
 
@@ -1914,13 +1930,21 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "title",
           "turn_count",
           "pr_state",
+          "watch_state",
+          "watch_detail",
+          "watch_cycles",
         ]) ||
         !nonEmpty(value.workspace) ||
         !nonEmpty(value.session) ||
         !isMember(value.kind, SESSION_KINDS) ||
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
         typeof value.title !== "string" ||
-        !isFiniteNumber(value.turn_count)
+        !isFiniteNumber(value.turn_count) ||
+        (value.watch_state !== undefined &&
+          !isMember(value.watch_state, WATCH_STATES)) ||
+        !optionalString(value.watch_detail) ||
+        (value.watch_cycles !== undefined &&
+          !isFiniteNumber(value.watch_cycles))
       ) {
         return null;
       }
@@ -1939,6 +1963,15 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         title: value.title,
         turn_count: value.turn_count,
         ...(pr_state ? { pr_state } : {}),
+        ...(value.watch_state !== undefined
+          ? { watch_state: value.watch_state }
+          : {}),
+        ...(value.watch_detail !== undefined
+          ? { watch_detail: value.watch_detail }
+          : {}),
+        ...(value.watch_cycles !== undefined
+          ? { watch_cycles: value.watch_cycles }
+          : {}),
       };
     }
     case "clone_progress": {
