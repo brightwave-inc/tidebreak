@@ -34,7 +34,7 @@ afterEach(() => {
 
 describe("reduceCodeUpdates", () => {
   it("replaces the map on snapshot and upserts a digest", () => {
-    const empty = { byWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
+    const empty = { byWorkspace: {}, watchByWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
     const afterSnapshot = reduceCodeUpdates(empty, {
       type: "snapshot",
       sessions: [digest(), digest({ workspace: "ws-2", session: "sess-2", title: "other" })],
@@ -55,7 +55,7 @@ describe("reduceCodeUpdates", () => {
   });
 
   it("never lets a watch session displace the interactive digest", () => {
-    const empty = { byWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
+    const empty = { byWorkspace: {}, watchByWorkspace: {}, cloneJobs: {}, viewedWorkspaceId: null };
     const seeded = reduceCodeUpdates(empty, {
       type: "snapshot",
       sessions: [
@@ -64,12 +64,24 @@ describe("reduceCodeUpdates", () => {
       ],
     });
     expect(seeded.byWorkspace["ws-1"].session).toBe("sess-1");
+    expect(seeded.watchByWorkspace["ws-1"].session).toBe("sess-watch");
     const afterWatchDigest = reduceCodeUpdates(seeded, {
       type: "digest",
       digest: digest({ session: "sess-watch", kind: "watch", turn_count: 5 }),
     });
     expect(afterWatchDigest.byWorkspace["ws-1"].session).toBe("sess-1");
     expect(afterWatchDigest.byWorkspace["ws-1"].turn_count).toBe(0);
+    expect(afterWatchDigest.watchByWorkspace["ws-1"].turn_count).toBe(5);
+    const afterEnd = reduceCodeUpdates(afterWatchDigest, {
+      type: "digest",
+      digest: digest({
+        session: "sess-watch",
+        kind: "watch",
+        lifecycle: "ended",
+      }),
+    });
+    expect(afterEnd.watchByWorkspace["ws-1"]).toBeUndefined();
+    expect(afterEnd.byWorkspace["ws-1"].session).toBe("sess-1");
   });
 
   it("maps notices onto reducer actions", () => {

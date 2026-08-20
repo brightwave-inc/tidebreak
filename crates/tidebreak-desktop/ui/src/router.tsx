@@ -48,6 +48,7 @@ function panelSearchFrom(search: Record<string, unknown>): PanelSearch {
     split: text(search.split),
     splitActive: text(search.splitActive),
     splitFocused: text(search.splitFocused),
+    task: text(search.task),
     left: text(search.left),
     right: text(search.right),
   };

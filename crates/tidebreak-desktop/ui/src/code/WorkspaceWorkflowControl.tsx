@@ -64,6 +64,7 @@ export function WorkspaceWorkflowControl({
   fallbackPr,
   resource,
   onOpenSourceControl,
+  onOpenWatchTask,
 }: {
   client: Pick<
     ApiClient,
@@ -78,6 +79,8 @@ export function WorkspaceWorkflowControl({
   fallbackPr?: PullRequestDigest;
   resource: CodeWorkspacePrResource;
   onOpenSourceControl: () => void;
+  /** Open the watch task's transcript; the segment is a link to the fork. */
+  onOpenWatchTask?: () => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const popoverTitleId = useId();
@@ -409,6 +412,17 @@ export function WorkspaceWorkflowControl({
               <GitBranch aria-hidden />
               Source control
             </Button>
+            {watchActive && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => void stopWatch()}
+              >
+                {busy === "stop_watch" ? "Stopping…" : "Stop watching"}
+              </Button>
+            )}
             {model.pr?.url ? (
               <Button asChild variant="ghost" size="sm" className="ml-auto">
                 <a
@@ -435,13 +449,20 @@ export function WorkspaceWorkflowControl({
           className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-transparent px-2.5 hover:bg-muted/70"
           title={
             watch.detail
-              ? `${watchStateLabel(watch.state)}: ${watch.detail}. Click to stop watching.`
-              : "A watch task is keeping this pull request moving. Click to stop watching."
+              ? `${watchStateLabel(watch.state)}: ${watch.detail}. Click to open the watch task.`
+              : "A watch task is keeping this pull request moving. Click to open it."
           }
           disabled={busy !== null}
           aria-busy={busy === "stop_watch"}
           data-testid="workspace-watch-control"
-          onClick={() => void stopWatch()}
+          onClick={() => {
+            if (onOpenWatchTask) {
+              setDetailsOpen(false);
+              onOpenWatchTask();
+            } else {
+              void stopWatch();
+            }
+          }}
         >
           {busy === "stop_watch" ? (
             <Spinner aria-hidden />
@@ -456,7 +477,11 @@ export function WorkspaceWorkflowControl({
             />
           )}
           <span className="truncate max-[760px]:sr-only">
-            {busy === "stop_watch" ? "Stopping…" : watchStateLabel(watch.state)}
+            {busy === "stop_watch"
+              ? "Stopping…"
+              : onOpenWatchTask
+                ? `Watching in "Fix PR #${watch.pr_number}"`
+                : watchStateLabel(watch.state)}
           </span>
         </Button>
       ) : primary === "open_pr" && primaryLabel && model.pr?.url ? (

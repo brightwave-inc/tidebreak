@@ -31,6 +31,7 @@ export function useLayoutState(): LayoutState {
 export function usePanelNav() {
   const navigate = useNavigate();
   const layout = useLayoutState();
+  const search = useSearch({ strict: false }) as PanelSearch;
   const { chatId, workspaceId } = useParams({ strict: false }) as {
     chatId?: string;
     workspaceId?: string;
@@ -45,7 +46,8 @@ export function usePanelNav() {
       void navigate({
         to: "/code/w/$workspaceId",
         params: { workspaceId },
-        search: searchFromLayout(next),
+        // Layout writes must not evict which task is attached.
+        search: { ...searchFromLayout(next), task: search.task },
       });
     } else if (chatId) {
       void navigate({
