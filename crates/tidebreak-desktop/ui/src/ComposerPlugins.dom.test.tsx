@@ -138,8 +138,8 @@ it("narrows the panel from its own field and picks with the keyboard", async () 
   render(<ComposerHarness slash={slash({ onInvoke })} />);
 
   const user = await openPanel();
-  const search = await screen.findByRole("textbox", {
-    name: "Search the plugin library",
+  const search = await screen.findByRole("combobox", {
+    name: "Plugins, skills, and prompts",
   });
   await user.type(search, "docx");
   expect(screen.getAllByRole("option")).toHaveLength(1);

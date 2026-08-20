@@ -761,7 +761,8 @@ body {
   transition: transform 120ms ease;
 }
 
-.assistant-sources[open] .assistant-sources-chevron {
+.assistant-sources[data-state="open"] .assistant-sources-chevron,
+.assistant-sources-chevron-open {
   transform: rotate(90deg);
 }
 

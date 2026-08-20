@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Copy } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 
 export type ClipboardWriter = {
@@ -66,8 +67,10 @@ export function ClipboardCopyButton({
   return (
     <>
       <WithTooltip label={visibleLabel}>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon-xs"
           className={className}
           aria-label={visibleLabel}
           onClick={() => void onCopy()}
@@ -75,7 +78,7 @@ export function ClipboardCopyButton({
           <span aria-hidden="true" className="clipboard-copy-icon">
             {copyState === "copied" ? <Check size={13} /> : <Copy size={13} />}
           </span>
-        </button>
+        </Button>
       </WithTooltip>
       <span className="sr-only" role="status" aria-live="polite">
         {copyState === "copied"

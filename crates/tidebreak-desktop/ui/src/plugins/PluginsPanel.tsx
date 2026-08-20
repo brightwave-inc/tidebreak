@@ -1,15 +1,23 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { Search, Sparkles, TerminalSquare, Wand2 } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { Sparkles, TerminalSquare, Wand2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import {
   filterSlashOptions,
-  nextOptionHighlight,
   MAX_INVOKED_SKILLS,
   type SlashOption,
 } from "@/ComposerSlash";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { cn } from "@/lib/utils";
 import { categoryIcon } from "./pluginVocabulary";
-import { OptionListbox, optionElementId, type OptionRow } from "@/components/OptionListbox";
+import type { OptionRow } from "@/components/OptionListbox";
 
 /**
  * The library, as one list.
@@ -64,9 +72,7 @@ export function PluginsPanel({
   onClose: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [highlight, setHighlight] = useState(0);
   const matches = filterSlashOptions(options, query);
-  const index = Math.min(highlight, matches.length - 1);
 
   // Opened from a menu the pointer has just left: focus goes to the field so
   // the list can be driven by the keyboard from the moment it appears.
@@ -74,84 +80,88 @@ export function PluginsPanel({
     inputRef.current?.focus();
   }, []);
 
-  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-      return;
-    }
-    const moved = nextOptionHighlight(event.key, index, matches.length);
-    if (moved !== null) {
-      event.preventDefault();
-      setHighlight(moved);
-      return;
-    }
-    if (event.key === "Enter" || event.key === "Tab") {
-      const option = matches[index];
-      if (!option) return;
-      event.preventDefault();
-      // A row that cannot be picked leaves the panel exactly as it is; its hint
-      // already says what is in the way.
-      if (option.unavailable) return;
-      onPick(option);
-    }
-  }
-
   return (
-    <div className="rounded-md border border-border bg-popover text-popover-foreground shadow-md">
-      <div className="flex items-center gap-2 border-b border-border px-2 py-1.5">
-        <Search
-          className="size-4 shrink-0 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <input
-          ref={inputRef}
-          type="text"
-          className="w-full border-none bg-transparent text-sm placeholder:text-muted-foreground focus-visible:outline-none"
-          placeholder="Search plugins, skills, and prompts…"
-          aria-label="Search the plugin library"
-          aria-controls={PLUGINS_PANEL_LIST_ID}
-          aria-activedescendant={
-            matches.length > 0
-              ? optionElementId(PLUGINS_PANEL_LIST_ID, index)
-              : undefined
-          }
-          value={query}
-          onChange={(event) => {
-            onQueryChange(event.target.value);
-            setHighlight(0);
-          }}
-          // A click on a row is taken on mousedown, which never moves focus, so
-          // a blur here is the reader leaving the panel for good.
-          onBlur={onClose}
-          onKeyDown={onKeyDown}
-        />
-      </div>
-      {matches.length === 0 && !capNote ? (
-        <p className="px-3 py-2 text-xs text-muted-foreground">
-          Nothing matches.
-        </p>
-      ) : (
-        <OptionListbox
-          listId={PLUGINS_PANEL_LIST_ID}
-          label={PLUGINS_PANEL_LABEL}
-          rows={pluginOptionRows(matches)}
-          activeIndex={index}
-          note={capNote ? skillCapNote() : null}
-          onPick={(picked) => {
-            const option = matches[picked];
-            if (option) onPick(option);
-          }}
-          onHighlight={setHighlight}
-        />
-      )}
-    </div>
+    <Command
+      shouldFilter={false}
+      label={PLUGINS_PANEL_LABEL}
+      className="rounded-md border border-border bg-popover text-popover-foreground shadow-md"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+      onBlur={(event) => {
+        // A click on a row is taken on mousedown, which never moves focus, so
+        // a blur that leaves the panel is the reader leaving for good.
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        onClose();
+      }}
+    >
+      <CommandInput
+        ref={inputRef}
+        value={query}
+        onValueChange={onQueryChange}
+        placeholder="Search plugins, skills, and prompts…"
+        className="h-9"
+      />
+      <CommandList className="max-h-56">
+        {matches.length === 0 && !capNote ? (
+          <CommandEmpty className="px-3 py-2 text-xs text-muted-foreground">
+            Nothing matches.
+          </CommandEmpty>
+        ) : (
+          <CommandGroup className="p-1">
+            {matches.map((option) => {
+              const Icon = optionIcon(option);
+              const disabled = option.unavailable !== undefined;
+              const hint = option.unavailable ?? optionKindLabel(option);
+              return (
+                <CommandItem
+                  key={`${option.kind}:${option.name}`}
+                  value={`${option.kind}:${option.name}`}
+                  disabled={disabled}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onSelect={() => {
+                    if (disabled) return;
+                    onPick(option);
+                  }}
+                  className={cn(disabled && "opacity-50")}
+                >
+                  <Icon
+                    className="size-4 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{option.label}</span>
+                    {option.description && (
+                      <span className="truncate text-xs text-muted-foreground">
+                        {option.description}
+                      </span>
+                    )}
+                  </span>
+                  {hint && (
+                    <span className="ml-auto shrink-0 pl-2 text-[0.68rem] whitespace-nowrap text-muted-foreground">
+                      {hint}
+                    </span>
+                  )}
+                </CommandItem>
+              );
+            })}
+            {capNote && (
+              <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                {skillCapNote()}
+              </div>
+            )}
+          </CommandGroup>
+        )}
+      </CommandList>
+    </Command>
   );
 }
 
 export const PLUGINS_PANEL_LABEL = "Plugins, skills, and prompts";
-
-const PLUGINS_PANEL_LIST_ID = "composer-plugins-list";
 
 /**
  * A bundle has no icon of its own, so the category stands in for one — for the

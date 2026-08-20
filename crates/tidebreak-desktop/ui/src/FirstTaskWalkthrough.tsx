@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { create } from "zustand";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogPortal,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
 export const FIRST_TASK_WALKTHROUGH_KEY =
   "tidebreak.first-task-walkthrough.v2";
@@ -146,14 +153,6 @@ function focusComposer(): void {
   });
 }
 
-function focusableIn(root: HTMLElement): HTMLElement[] {
-  return [
-    ...root.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ),
-  ];
-}
-
 function clipPathFor(rect: ElementRect, inset: number): string {
   const left = rect.left - inset;
   const top = rect.top - inset;
@@ -180,7 +179,7 @@ export function FirstTaskWalkthrough({
 }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [rect, setRect] = useState<ElementRect | null>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
+  const outcomeRef = useRef<FirstTaskWalkthroughOutcome | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const setSurface = useFirstTaskGuide((state) => state.setSurface);
@@ -191,6 +190,7 @@ export function FirstTaskWalkthrough({
       setStepIndex(0);
       setRect(null);
       setSurface(null);
+      outcomeRef.current = null;
       return;
     }
     setSurface(step.surface);
@@ -269,187 +269,155 @@ export function FirstTaskWalkthrough({
     };
   }, [open, step]);
 
-  useEffect(() => {
-    if (!open) return;
-    cardRef.current?.focus();
-  }, [open, stepIndex]);
-
-  useEffect(() => {
-    if (!open) return;
-    const cycleFocus = (event: KeyboardEvent) => {
-      const card = cardRef.current;
-      if (!card) return;
-      const focusable = focusableIn(card);
-      if (focusable.length === 0) {
-        event.preventDefault();
-        card.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-      if (event.shiftKey) {
-        if (active === first || !card.contains(active)) {
-          event.preventDefault();
-          last.focus();
-        }
-        return;
-      }
-      if (active === last || !card.contains(active)) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        storeOutcome("skipped");
-        setSurface(null);
-        onCloseRef.current("skipped");
-        focusComposer();
-        return;
-      }
-      if (event.key === "Tab") cycleFocus(event);
-    };
-    const onFocusIn = (event: FocusEvent) => {
-      const card = cardRef.current;
-      if (!card) return;
-      const target = event.target;
-      if (target instanceof Node && card.contains(target)) return;
-      const focusable = focusableIn(card);
-      (focusable[0] ?? card).focus();
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    document.addEventListener("focusin", onFocusIn);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, true);
-      document.removeEventListener("focusin", onFocusIn);
-    };
-  }, [open, setSurface]);
-
   function finish(outcome: FirstTaskWalkthroughOutcome) {
+    outcomeRef.current = outcome;
     storeOutcome(outcome);
     setSurface(null);
     onClose(outcome);
     focusComposer();
   }
 
-  if (!open || typeof document === "undefined") return null;
-
-  const dialogWidth = Math.min(320, window.innerWidth - 24);
+  const dialogWidth =
+    typeof window === "undefined"
+      ? 320
+      : Math.min(320, window.innerWidth - 24);
   const above = rect !== null && rect.top >= 220;
-  const dialogLeft = rect
-    ? Math.max(
-        12,
-        Math.min(
-          rect.left + rect.width / 2 - dialogWidth / 2,
-          window.innerWidth - dialogWidth - 12,
-        ),
-      )
-    : Math.max(12, (window.innerWidth - dialogWidth) / 2);
-  const dialogTop = rect
-    ? above
-      ? rect.top - 12
-      : rect.bottom + 12
-    : window.innerHeight / 2;
+  const dialogLeft =
+    typeof window === "undefined"
+      ? 12
+      : rect
+        ? Math.max(
+            12,
+            Math.min(
+              rect.left + rect.width / 2 - dialogWidth / 2,
+              window.innerWidth - dialogWidth - 12,
+            ),
+          )
+        : Math.max(12, (window.innerWidth - dialogWidth) / 2);
+  const dialogTop =
+    typeof window === "undefined"
+      ? 0
+      : rect
+        ? above
+          ? rect.top - 12
+          : rect.bottom + 12
+        : window.innerHeight / 2;
   const inset = 4;
 
-  return createPortal(
-    <>
-      {rect && (
-        <div className="pointer-events-none fixed inset-0 z-[100]" aria-hidden="true">
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) return;
+        // Escape and programmatic close settle as a skip unless a button
+        // already chose completed/skipped through finish().
+        if (outcomeRef.current) return;
+        finish("skipped");
+      }}
+    >
+      <DialogPortal>
+        {rect && (
           <div
-            className="pointer-events-auto absolute inset-0 bg-black/50"
-            style={{ clipPath: clipPathFor(rect, inset) }}
-          />
-          <div
-            data-first-task-ring
-            className="absolute rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
-            style={{
-              top: rect.top - inset,
-              left: rect.left - inset,
-              width: rect.width + inset * 2,
-              height: rect.height + inset * 2,
-            }}
-          />
-        </div>
-      )}
-      <div
-        ref={cardRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="first-task-walkthrough-title"
-        aria-describedby="first-task-walkthrough-body"
-        tabIndex={-1}
-        className="fixed z-[102] max-w-none rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-xl outline-none"
-        style={{
-          top: dialogTop,
-          left: dialogLeft,
-          width: dialogWidth,
-          transform: rect
-            ? above
-              ? "translateY(-100%)"
-              : undefined
-            : "translateY(-50%)",
-        }}
-      >
-        <div aria-live="polite" aria-atomic="true">
-          <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-            <span>Set up your first task</span>
-            <span>
-              {stepIndex + 1} of {STEPS.length}
-            </span>
+            className="pointer-events-none fixed inset-0 z-[100]"
+            aria-hidden="true"
+          >
+            <div
+              className="pointer-events-auto absolute inset-0 bg-black/50"
+              style={{ clipPath: clipPathFor(rect, inset) }}
+            />
+            <div
+              data-first-task-ring
+              className="absolute rounded-[10px] ring-2 ring-[var(--brightwave)] ring-offset-2 ring-offset-transparent"
+              style={{
+                top: rect.top - inset,
+                left: rect.left - inset,
+                width: rect.width + inset * 2,
+                height: rect.height + inset * 2,
+              }}
+            />
           </div>
-          <h2
-            id="first-task-walkthrough-title"
-            className="mt-3 text-base font-semibold tracking-[-0.01em]"
-          >
-            {step.title}
-          </h2>
-          <p
-            id="first-task-walkthrough-body"
-            className="text-muted-foreground mt-1.5 text-sm leading-relaxed"
-          >
-            {step.body}
-          </p>
-        </div>
-        <div className="mt-4 flex items-center gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="mr-auto text-muted-foreground"
-            onClick={() => finish("skipped")}
-          >
-            Skip setup
-          </Button>
-          {stepIndex > 0 && (
+        )}
+        <DialogPrimitive.Content
+          aria-describedby="first-task-walkthrough-body"
+          className={cn(
+            "fixed z-[102] max-w-none rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-xl outline-none",
+            "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          )}
+          style={{
+            top: dialogTop,
+            left: dialogLeft,
+            width: dialogWidth,
+            transform: rect
+              ? above
+                ? "translateY(-100%)"
+                : undefined
+              : "translateY(-50%)",
+          }}
+          // Spotlight hole clicks must not dismiss the card; only Skip, Done,
+          // and Escape close it.
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            focusComposer();
+          }}
+        >
+          <div aria-live="polite" aria-atomic="true">
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span>Set up your first task</span>
+              <span>
+                {stepIndex + 1} of {STEPS.length}
+              </span>
+            </div>
+            <DialogTitle
+              id="first-task-walkthrough-title"
+              className="mt-3 text-base font-semibold tracking-[-0.01em]"
+            >
+              {step.title}
+            </DialogTitle>
+            <DialogDescription
+              id="first-task-walkthrough-body"
+              className="text-muted-foreground mt-1.5 text-sm leading-relaxed"
+            >
+              {step.body}
+            </DialogDescription>
+          </div>
+          <div className="mt-4 flex items-center gap-2">
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
-              onClick={() => setStepIndex((current) => current - 1)}
+              className="mr-auto text-muted-foreground"
+              onClick={() => finish("skipped")}
             >
-              Back
+              Skip setup
             </Button>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => {
-              if (stepIndex === STEPS.length - 1) {
-                finish("completed");
-              } else {
-                setStepIndex((current) => current + 1);
-              }
-            }}
-          >
-            {stepIndex === STEPS.length - 1 ? "Done" : "Next"}
-          </Button>
-        </div>
-      </div>
-    </>,
-    document.body,
+            {stepIndex > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setStepIndex((current) => current - 1)}
+              >
+                Back
+              </Button>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                if (stepIndex === STEPS.length - 1) {
+                  finish("completed");
+                } else {
+                  setStepIndex((current) => current + 1);
+                }
+              }}
+            >
+              {stepIndex === STEPS.length - 1 ? "Done" : "Next"}
+            </Button>
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    </Dialog>
   );
 }

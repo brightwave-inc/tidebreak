@@ -11,6 +11,8 @@ import type {
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import {
   SettingsError,
@@ -699,27 +701,30 @@ export function McpPanel({
 
               {transportOf(server) !== "gateway" && (
               <FieldGroup label="Transport">
-                <div className="flex gap-4" role="radiogroup" aria-label="Transport">
+                <RadioGroup
+                  className="flex flex-row flex-wrap gap-4"
+                  value={transportOf(server)}
+                  aria-label="Transport"
+                  disabled={working}
+                  onValueChange={(transport) =>
+                    update(
+                      index,
+                      transportFields(transport as "stdio" | "http"),
+                    )
+                  }
+                >
                   {(["stdio", "http"] as const).map((transport) => (
-                    <label
+                    <Label
                       key={transport}
-                      className="flex items-center gap-2 text-sm"
+                      className="flex items-center gap-2 text-sm font-normal"
                     >
-                      <input
-                        type="radio"
-                        name={`transport-${index}`}
-                        checked={transportOf(server) === transport}
-                        disabled={working}
-                        onChange={() =>
-                          update(index, transportFields(transport))
-                        }
-                      />
+                      <RadioGroupItem value={transport} />
                       {transport === "stdio"
                         ? "Local process (stdio)"
                         : "Remote endpoint (HTTP)"}
-                    </label>
+                    </Label>
                   ))}
-                </div>
+                </RadioGroup>
               </FieldGroup>
               )}
 

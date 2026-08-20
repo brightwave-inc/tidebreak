@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { create } from "zustand";
 
 import { DocumentIcon } from "./components/document-table/DocumentIcon";
+import { Button } from "@/components/ui/button";
 import type { DeliverableSummary } from "./deliverables";
 import { cn } from "@/lib/utils";
 
@@ -117,13 +118,14 @@ export function PinnedOutputsStrip({
       className="mt-1 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-4 py-1"
       aria-label="Outputs"
     >
-      <button
+      <Button
         type="button"
-        className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground"
+        variant="link"
+        className="h-auto px-0 text-xs text-muted-foreground hover:text-foreground"
         onClick={onOpenOutputs}
       >
         {label}
-      </button>
+      </Button>
       {!collapsed &&
         visible.map((output) => (
           <OutputChip
@@ -133,17 +135,20 @@ export function PinnedOutputsStrip({
           />
         ))}
       {!collapsed && hidden > 0 && (
-        <button
+        <Button
           type="button"
-          className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground"
+          variant="link"
+          className="h-auto px-0 text-xs text-muted-foreground hover:text-foreground"
           onClick={onOpenOutputs}
         >
           {`+${hidden} more`}
-        </button>
+        </Button>
       )}
-      <button
+      <Button
         type="button"
-        className="ml-auto inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        variant="ghost"
+        size="icon-xs"
+        className="ml-auto size-5 shrink-0 text-muted-foreground"
         aria-label={collapsed ? "Show outputs" : "Hide outputs"}
         aria-expanded={!collapsed}
         onClick={() => setCollapsed(chatId, !collapsed)}
@@ -153,7 +158,7 @@ export function PinnedOutputsStrip({
         ) : (
           <ChevronUp className="size-3.5" aria-hidden="true" />
         )}
-      </button>
+      </Button>
     </section>
   );
 }
@@ -166,11 +171,12 @@ function OutputChip({
   onOpen: () => void;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
+      size="xs"
       className={cn(
-        "bg-background inline-flex max-w-56 min-w-0 cursor-pointer items-center gap-1.5",
-        "rounded-md border px-2 py-0.5 text-xs transition-colors hover:bg-accent",
+        "bg-background max-w-56 min-w-0 gap-1.5 px-2 py-0.5 text-xs",
       )}
       onClick={onOpen}
       aria-label={`Open output ${output.filename}`}
@@ -181,6 +187,6 @@ function OutputChip({
         aria-hidden="true"
       />
       <span className="min-w-0 truncate">{output.filename}</span>
-    </button>
+    </Button>
   );
 }

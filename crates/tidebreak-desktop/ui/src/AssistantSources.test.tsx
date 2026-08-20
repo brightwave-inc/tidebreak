@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AssistantSources, type AssistantSource } from "./AssistantSources";
+
+afterEach(cleanup);
 
 function source(
   ordinal: number,
@@ -14,6 +16,10 @@ function source(
     documentId: `document-${ordinal}`,
     locator,
   };
+}
+
+function openSources() {
+  fireEvent.click(screen.getByRole("button", { name: /sources?/i }));
 }
 
 describe("AssistantSources", () => {
@@ -31,6 +37,7 @@ describe("AssistantSources", () => {
       />,
     );
 
+    openSources();
     expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([
       "1Page 4",
       "2Lines 12–18",
@@ -47,6 +54,7 @@ describe("AssistantSources", () => {
         ]}
       />,
     );
+    openSources();
     expect(screen.getByText("Sheet Revenue · B2:D9")).toBeInTheDocument();
   });
 });

@@ -72,7 +72,7 @@ describe("AddRepoPalette", () => {
     fireEvent.change(search, { target: { value: "git" } });
     expect(screen.getByRole("option", { name: /Git URL/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Local folder/ })).not.toBeInTheDocument();
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Enter" });
+    fireEvent.keyDown(search, { key: "Enter" });
     expect(await screen.findByText("Clone from a remote URL into a parent folder.")).toBeInTheDocument();
   });
 

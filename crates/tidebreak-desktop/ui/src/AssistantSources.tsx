@@ -1,6 +1,13 @@
+import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 
 import type { CitationLocator } from "@/api";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { cn } from "@/lib/utils";
 
 export type AssistantSource = Readonly<{
   id: string;
@@ -21,6 +28,7 @@ export function AssistantSources({
   sources,
   onOpenSource,
 }: AssistantSourcesProps) {
+  const [open, setOpen] = useState(false);
   const visibleSources = [...sources]
     .map((source, inputIndex) => ({ source, inputIndex }))
     .sort(
@@ -33,8 +41,13 @@ export function AssistantSources({
   if (visibleSources.length === 0) return null;
 
   return (
-    <details className="assistant-sources">
-      <summary className="assistant-sources-toggle">
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className="assistant-sources"
+      data-state={open ? "open" : "closed"}
+    >
+      <CollapsibleTrigger className="assistant-sources-toggle">
         <span className="assistant-sources-label">
           {visibleSources.length === 1
             ? "1 source"
@@ -50,25 +63,33 @@ export function AssistantSources({
             </span>
           ))}
         </span>
-        <span className="assistant-sources-chevron" aria-hidden="true">
+        <span
+          className={cn(
+            "assistant-sources-chevron",
+            open && "assistant-sources-chevron-open",
+          )}
+          aria-hidden="true"
+        >
           <ChevronRight size={15} />
         </span>
-      </summary>
-      <ol className="assistant-source-list">
-        {visibleSources.map(({ source, inputIndex }) => (
-          <li
-            className="assistant-source"
-            key={`${source.id}:${inputIndex}`}
-            aria-label={`Source ${source.ordinal}`}
-          >
-            <span className="assistant-source-number" aria-hidden="true">
-              {source.ordinal}
-            </span>
-            <SourceCopy source={source} onOpen={onOpenSource} />
-          </li>
-        ))}
-      </ol>
-    </details>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ol className="assistant-source-list">
+          {visibleSources.map(({ source, inputIndex }) => (
+            <li
+              className="assistant-source"
+              key={`${source.id}:${inputIndex}`}
+              aria-label={`Source ${source.ordinal}`}
+            >
+              <span className="assistant-source-number" aria-hidden="true">
+                {source.ordinal}
+              </span>
+              <SourceCopy source={source} onOpen={onOpenSource} />
+            </li>
+          ))}
+        </ol>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

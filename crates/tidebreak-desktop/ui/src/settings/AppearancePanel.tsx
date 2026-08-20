@@ -1,5 +1,8 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import type { ComponentType } from "react";
+
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { cn } from "@/lib/utils";
 import type { ThemeMode } from "../theme";
 import { SettingsField, SettingsPanel, SettingsSection } from "./primitives";
@@ -28,28 +31,30 @@ export function AppearancePanel({
     >
       <SettingsSection>
         <SettingsField label="Theme">
-          <div className="theme-options" role="radiogroup" aria-label="Theme">
+          <RadioGroup
+            value={mode}
+            onValueChange={(value) => onChange(value as ThemeMode)}
+            className="theme-options flex flex-row flex-wrap gap-2"
+            aria-label="Theme"
+          >
             {OPTIONS.map((option) => {
               const Icon = option.icon;
               const active = mode === option.mode;
               return (
-                <button
+                <Label
                   key={option.mode}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
                   className={cn(
-                    "inline-flex items-center gap-2 rounded-lg border border-border px-3.5 py-2 bg-background text-foreground text-[0.85rem] font-medium transition-[border-color,background-color] duration-[120ms] ease-in-out hover:bg-accent [&_svg]:text-muted-foreground",
+                    "inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background px-3.5 py-2 text-[0.85rem] font-medium text-foreground transition-[border-color,background-color] duration-[120ms] ease-in-out hover:bg-accent [&_svg]:text-muted-foreground",
                     active && "border-primary bg-accent [&_svg]:text-foreground",
                   )}
-                  onClick={() => onChange(option.mode)}
                 >
+                  <RadioGroupItem value={option.mode} className="sr-only" />
                   <Icon size={16} />
                   {option.label}
-                </button>
+                </Label>
               );
             })}
-          </div>
+          </RadioGroup>
         </SettingsField>
       </SettingsSection>
     </SettingsPanel>

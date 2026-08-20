@@ -3,9 +3,12 @@ import { ChevronDown, Lightbulb } from "lucide-react";
 
 import { MessageMarkdown } from "./MessageMarkdown";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-
-let accordionSeq = 0;
 
 /**
  * The model's reasoning for one step, behind a disclosure.
@@ -29,7 +32,6 @@ export function ThinkingAccordion({
 }) {
   const [expanded, setExpanded] = useState(streaming);
   const toggledByReader = useRef(false);
-  const contentId = useRef(`thinking-${(accordionSeq += 1)}`).current;
 
   useEffect(() => {
     if (streaming || toggledByReader.current) return;
@@ -39,37 +41,35 @@ export function ThinkingAccordion({
   if (!text.trim()) return null;
 
   return (
-    <div className="w-full self-start">
-      <Button
-        type="button"
-        variant="link"
-        className="text-muted-foreground h-auto px-0 py-1"
-        aria-expanded={expanded}
-        aria-controls={contentId}
-        onClick={() => {
-          toggledByReader.current = true;
-          setExpanded((current) => !current);
-        }}
-      >
-        <Lightbulb className="size-4" />
-        <span className={cn(streaming && "animate-pulse")}>
-          {streaming ? "Thinking" : "Thought"}
-        </span>
-        <ChevronDown
-          className={cn(
-            "size-4 transition-transform",
-            !expanded && "-rotate-90",
-          )}
-        />
-      </Button>
-      {expanded && (
-        <div
-          id={contentId}
-          className="text-muted-foreground border-border ml-1.5 border-l-2 py-1 pl-4 text-sm"
+    <Collapsible
+      open={expanded}
+      onOpenChange={(next) => {
+        toggledByReader.current = true;
+        setExpanded(next);
+      }}
+      className="w-full self-start"
+    >
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant="link"
+          className="text-muted-foreground h-auto px-0 py-1"
         >
-          <MessageMarkdown>{text}</MessageMarkdown>
-        </div>
-      )}
-    </div>
+          <Lightbulb className="size-4" />
+          <span className={cn(streaming && "animate-pulse")}>
+            {streaming ? "Thinking" : "Thought"}
+          </span>
+          <ChevronDown
+            className={cn(
+              "size-4 transition-transform",
+              !expanded && "-rotate-90",
+            )}
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="text-muted-foreground border-border ml-1.5 border-l-2 py-1 pl-4 text-sm">
+        <MessageMarkdown>{text}</MessageMarkdown>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
