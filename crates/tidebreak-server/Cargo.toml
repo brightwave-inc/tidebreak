@@ -33,6 +33,9 @@ tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-router = { path = "../tidebreak-router" }
 tidebreak-sandbox-protocol = { path = "../tidebreak-sandbox-protocol" }
 axum = { workspace = true }
+# Pool sizing for the store this host opens (`host_connect_options`); the
+# driver features come from `tidebreak-core`.
+sea-orm = { workspace = true }
 # `rt-multi-thread` backs the durable operation log's synchronous `OperationStore`
 # bridge (`tokio::task::block_in_place`); the host runs on a multi-thread runtime.
 tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "sync", "macros", "time"] }
@@ -112,7 +115,6 @@ winreg = "=0.56.0"
 # so the sandbox-resident driver tests can drive the actual sandbox side over a
 # loopback socket, with only Docker and the host model mocked.
 tidebreak-sandbox-agent = { path = "../tidebreak-sandbox-agent" }
-sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tokio-tungstenite = { workspace = true }
