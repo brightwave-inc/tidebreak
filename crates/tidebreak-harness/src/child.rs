@@ -9,10 +9,11 @@ use std::io;
 use std::process::{ExitStatus, Output};
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 #[cfg(unix)]
-use tokio::time::timeout;
+use tokio::time::sleep;
 
 use crate::TurnOutcome;
 
@@ -65,26 +66,31 @@ impl ChildPid {
     }
 }
 
-/// One child and the operating-system process tree it owns.
+/// One child and the operating-system containment boundary it owns.
 ///
 /// Windows children are created suspended, assigned to a Job Object configured
 /// with `KILL_ON_JOB_CLOSE`, then resumed. That closes the usual spawn/assign
 /// race where a wrapper such as `npm.cmd` could create a descendant before it
 /// became part of the job. Dropping this value terminates the job tree.
 ///
-/// Unix keeps Tokio's immediate-child kill-on-drop behavior. [`Self::interrupt`]
-/// sends SIGINT first and escalates after the caller's grace period.
+/// Unix children lead a dedicated process group. Ordinary wrappers and their
+/// inherited descendants remain in that group; a descendant that deliberately
+/// calls `setsid` or changes groups is outside this boundary. [`Self::interrupt`]
+/// sends SIGINT to the group first and escalates after the caller's grace
+/// period; dropping an unreaped value kills the group.
 pub struct ProcessTreeChild {
     child: Option<Child>,
+    #[cfg(unix)]
+    process_group: Option<libc::pid_t>,
     #[cfg(windows)]
     job: windows::Job,
 }
 
-/// Spawn `command` with process-tree ownership.
+/// Spawn `command` with platform process containment.
 ///
 /// Callers may await [`ProcessTreeChild::wait_with_output`] inside a timeout:
-/// cancelling that future drops the owned child and terminates its Windows Job
-/// Object tree.
+/// cancelling that future drops the owned child and terminates its containment
+/// boundary.
 pub fn spawn_process_tree(command: &mut Command) -> io::Result<ProcessTreeChild> {
     command.kill_on_drop(true);
     #[cfg(windows)]
@@ -101,7 +107,26 @@ pub fn spawn_process_tree(command: &mut Command) -> io::Result<ProcessTreeChild>
             job,
         });
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        // Tokio delegates this safe setup to `std::process::Command`, which
+        // calls setpgid in the child before exec. There is no post-spawn window
+        // where a wrapper can create descendants outside the owned group.
+        command.process_group(0);
+        let mut child = command.spawn()?;
+        let process_group = match child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            Some(process_group) => process_group,
+            None => {
+                let _ = child.start_kill();
+                return Err(io::Error::other("spawned child has no valid process id"));
+            }
+        };
+        Ok(ProcessTreeChild {
+            child: Some(child),
+            process_group: Some(process_group),
+        })
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         Ok(ProcessTreeChild {
             child: Some(command.spawn()?),
@@ -139,53 +164,109 @@ impl ProcessTreeChild {
         self.child_mut().stderr.take()
     }
 
-    /// Wait for the root child to exit.
+    /// Wait for the root child to exit, ending Unix group ownership.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child_mut().wait().await
+        let status = self.child_mut().wait().await;
+        #[cfg(unix)]
+        if status.is_ok() {
+            // Once the leader is reaped its numeric pid/pgid may be reused.
+            // Never retain that bare id for a later Drop or signal.
+            self.process_group = None;
+        }
+        status
     }
 
-    /// Read a completed root child's exit status without waiting.
+    /// Read a completed root child's exit status, ending Unix group ownership.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child_mut().try_wait()
+        let status = self.child_mut().try_wait();
+        #[cfg(unix)]
+        if matches!(status, Ok(Some(_))) {
+            // See `wait`: a reaped leader no longer pins the numeric pgid.
+            self.process_group = None;
+        }
+        status
     }
 
-    /// Wait for the root child and collect its configured stdout and stderr.
+    /// Drain inherited stdout/stderr, then reap the root child.
     ///
     /// Dropping this future before completion drops `self`, which terminates
-    /// the owned Windows process tree.
+    /// the owned containment boundary.
     pub async fn wait_with_output(mut self) -> io::Result<Output> {
-        self.child
-            .take()
-            .expect("process child is present")
-            .wait_with_output()
-            .await
+        drop(self.take_stdin());
+        let stdout = self.take_stdout();
+        let stderr = self.take_stderr();
+        let read_stdout = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stdout) = stdout {
+                stdout.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, io::Error>(bytes)
+        };
+        let read_stderr = async move {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr {
+                stderr.read_to_end(&mut bytes).await?;
+            }
+            Ok::<_, io::Error>(bytes)
+        };
+        let (stdout, stderr) = tokio::try_join!(read_stdout, read_stderr)?;
+        let status = self.wait().await?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     /// Ask the process to stop, escalating to tree termination after `grace`.
     ///
     /// Windows has no reliable console-control channel for GUI-spawned batch
     /// shims, so interruption terminates the Job Object immediately. Unix
-    /// sends SIGINT to the root child first and preserves the existing grace
-    /// period before escalating.
+    /// sends SIGINT to the owned process group, then sends SIGKILL after the
+    /// grace period before reaping the group leader. Keeping the leader
+    /// unreaped pins the numeric process-group id so escalation cannot target
+    /// an unrelated group after pid reuse. Cancelling this future also sends
+    /// SIGKILL through a drop guard.
     pub async fn interrupt(&mut self, grace: Duration) -> io::Result<ExitStatus> {
         #[cfg(unix)]
-        if let Some(pid) = self.id() {
-            // SAFETY: the pid belongs to the child held by this value.
-            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
-            if let Ok(status) = timeout(grace, self.wait()).await {
-                return status;
+        {
+            let Some(process_group) = self.process_group.take() else {
+                return self.wait().await;
+            };
+            let mut guard = ProcessGroupGuard::new(Some(process_group));
+            guard.signal(libc::SIGINT)?;
+            sleep(grace).await;
+            guard.kill()?;
+            let status = self.child_mut().wait().await;
+            if status.is_ok() {
+                guard.disarm();
             }
+            status
         }
         #[cfg(not(unix))]
-        let _ = grace;
-
-        self.terminate().await
+        {
+            let _ = grace;
+            self.terminate().await
+        }
     }
 
     /// Terminate the entire owned tree and wait for the root child.
     pub async fn terminate(&mut self) -> io::Result<ExitStatus> {
-        self.terminate_tree()?;
-        self.wait().await
+        #[cfg(unix)]
+        {
+            let mut guard = ProcessGroupGuard::new(self.process_group.take());
+            guard.kill()?;
+            let status = self.child_mut().wait().await;
+            if status.is_ok() {
+                guard.disarm();
+            }
+            status
+        }
+        #[cfg(not(unix))]
+        {
+            self.terminate_tree()?;
+            self.wait().await
+        }
     }
 
     fn terminate_tree(&mut self) -> io::Result<()> {
@@ -193,7 +274,16 @@ impl ProcessTreeChild {
         {
             self.job.terminate()
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let Some(process_group) = self.process_group else {
+                return Ok(());
+            };
+            signal_process_group(process_group, libc::SIGKILL)?;
+            self.process_group = None;
+            Ok(())
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             self.child_mut().start_kill()
         }
@@ -202,8 +292,66 @@ impl ProcessTreeChild {
 
 impl Drop for ProcessTreeChild {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.process_group.is_some() {
+            let _ = self.terminate_tree();
+        }
+        #[cfg(not(unix))]
         if self.child.is_some() {
             let _ = self.terminate_tree();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+    debug_assert!(process_group > 0);
+    // SAFETY: a negative pid asks kill(2) to signal the process group whose
+    // positive id was captured from the child created with process_group(0).
+    if unsafe { libc::kill(-process_group, signal) } == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    process_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(process_group: Option<libc::pid_t>) -> Self {
+        Self { process_group }
+    }
+
+    fn signal(&self, signal: libc::c_int) -> io::Result<()> {
+        match self.process_group {
+            Some(process_group) => signal_process_group(process_group, signal),
+            None => Ok(()),
+        }
+    }
+
+    fn kill(&self) -> io::Result<()> {
+        self.signal(libc::SIGKILL)
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.process_group.take() {
+            let _ = signal_process_group(process_group, libc::SIGKILL);
         }
     }
 }
@@ -424,6 +572,175 @@ mod tests {
                 assert!(detail.ends_with("boom"), "{detail}");
             }
             other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_process_tree_tests {
+    use std::io;
+    use std::path::Path;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::process::{ChildStdout, Command};
+    use tokio::time::{sleep, timeout, Instant};
+
+    use super::{spawn_process_tree, ProcessTreeChild};
+
+    const ASSERTION_TIMEOUT: Duration = Duration::from_secs(5);
+    const INTERRUPT_GRACE: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn interrupting_a_process_tree_stops_an_int_ignoring_descendant() {
+        let (mut child, mut stdout) = spawn_shell_tree().await;
+
+        let status = timeout(ASSERTION_TIMEOUT, child.interrupt(INTERRUPT_GRACE))
+            .await
+            .expect("process-tree interrupt completed")
+            .unwrap();
+        assert!(!status.success(), "root unexpectedly exited successfully");
+        assert_pipe_reaches_eof(&mut stdout).await;
+    }
+
+    #[tokio::test]
+    async fn terminating_a_process_tree_stops_its_descendant_and_closes_its_pipe() {
+        let (mut child, mut stdout) = spawn_shell_tree().await;
+
+        timeout(ASSERTION_TIMEOUT, child.terminate())
+            .await
+            .expect("process-tree termination completed")
+            .unwrap();
+        assert_pipe_reaches_eof(&mut stdout).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_process_tree_stops_its_descendant_and_closes_its_pipe() {
+        let (child, mut stdout) = spawn_shell_tree().await;
+
+        drop(child);
+        assert_pipe_reaches_eof(&mut stdout).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_interrupt_still_escalates_and_closes_descendant_pipes() {
+        let (mut child, mut stdout) = spawn_shell_tree().await;
+
+        let cancelled = timeout(
+            Duration::from_millis(10),
+            child.interrupt(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(cancelled.is_err(), "interrupt unexpectedly completed");
+        assert_pipe_reaches_eof(&mut stdout).await;
+        timeout(ASSERTION_TIMEOUT, child.wait())
+            .await
+            .expect("cancelled interrupt left the root running")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_output_collection_kills_a_pipe_owning_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let pid_file_arg = pid_file.to_string_lossy().into_owned();
+        let script = r#"
+/bin/sh -c 'printf "%s\n" "$$" > "$1"; trap "" INT; while :; do sleep 60; done' descendant "$1" &
+exit 0
+"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script, "root", pid_file_arg.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = spawn_process_tree(&mut command).unwrap();
+        let root = libc::pid_t::try_from(child.id().expect("root child has a pid")).unwrap();
+        let descendant = wait_for_pid(&pid_file).await;
+        // SAFETY: the descendant just published its live pid.
+        assert_eq!(unsafe { libc::getpgid(descendant) }, root);
+
+        let cancelled = timeout(Duration::from_millis(25), child.wait_with_output()).await;
+        assert!(
+            cancelled.is_err(),
+            "output collection unexpectedly ignored the inherited pipe"
+        );
+        assert_process_exits(descendant).await;
+    }
+
+    async fn spawn_shell_tree() -> (ProcessTreeChild, BufReader<ChildStdout>) {
+        // The root exits when SIGINT arrives, while its descendant deliberately
+        // ignores SIGINT and retains stdout. Signalling only the root recreates
+        // the Grok failure: the pipe never reaches EOF and the descendant lives.
+        let script = r#"
+trap 'exit 130' INT
+/bin/sh -c 'trap "" INT; printf "%s\n" "$$"; while :; do sleep 60; done' &
+wait
+"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = spawn_process_tree(&mut command).unwrap();
+        let root = libc::pid_t::try_from(child.id().expect("root child has a pid")).unwrap();
+        let mut stdout = BufReader::new(child.take_stdout().expect("stdout is piped"));
+        let mut line = String::new();
+        timeout(ASSERTION_TIMEOUT, stdout.read_line(&mut line))
+            .await
+            .expect("descendant published its pid")
+            .unwrap();
+        let descendant = line.trim().parse::<libc::pid_t>().unwrap();
+        assert_ne!(descendant, root, "test command did not create a descendant");
+        // SAFETY: the descendant just published its live pid.
+        let descendant_group = unsafe { libc::getpgid(descendant) };
+        assert_eq!(
+            descendant_group, root,
+            "descendant was not placed in the root's process group"
+        );
+
+        (child, stdout)
+    }
+
+    async fn assert_pipe_reaches_eof(stdout: &mut BufReader<ChildStdout>) {
+        let mut trailing = Vec::new();
+        timeout(ASSERTION_TIMEOUT, stdout.read_to_end(&mut trailing))
+            .await
+            .expect("descendant released the stdout pipe")
+            .unwrap();
+    }
+
+    async fn wait_for_pid(path: &Path) -> libc::pid_t {
+        let deadline = Instant::now() + ASSERTION_TIMEOUT;
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(path).await {
+                if let Ok(pid) = value.trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant did not publish its pid"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn assert_process_exits(pid: libc::pid_t) {
+        let deadline = Instant::now() + ASSERTION_TIMEOUT;
+        loop {
+            // SAFETY: signal 0 only checks whether the pid still exists.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant {pid} remained alive after output cancellation"
+            );
+            sleep(Duration::from_millis(10)).await;
         }
     }
 }
