@@ -72,6 +72,13 @@ describe("FilesPanel", () => {
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     expect(screen.getByText("src")).toBeInTheDocument();
     expect(screen.getByText("lib.rs")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Files to include" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Files to exclude" })).toBeVisible();
+    expect(
+      screen.getByRole("treeitem", { name: "lib.rs" }).querySelector(
+        '[data-file-icon="code"]',
+      ),
+    ).not.toBeNull();
     expect(screen.queryByText("Changes")).not.toBeInTheDocument();
     expect(screen.queryByText("+3")).not.toBeInTheDocument();
 

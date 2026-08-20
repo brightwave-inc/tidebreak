@@ -1307,6 +1307,31 @@ body {
   border-top: 1px solid var(--line);
 }
 
+/* Review comments use the same safe Markdown renderer as chat, at sidebar
+   scale. The selector stays scoped so transcript typography is unchanged. */
+.review-comment-markdown .message-markdown {
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+}
+
+.review-comment-markdown .message-markdown ul,
+.review-comment-markdown .message-markdown ol,
+.review-comment-markdown .message-markdown pre,
+.review-comment-markdown .message-markdown blockquote {
+  margin: 0.65rem 0;
+}
+
+.review-comment-markdown .message-markdown h1,
+.review-comment-markdown .message-markdown h2,
+.review-comment-markdown .message-markdown h3,
+.review-comment-markdown .message-markdown h4,
+.review-comment-markdown .message-markdown h5,
+.review-comment-markdown .message-markdown h6 {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
 .markdown-image-omitted {
   display: inline-block;
   border: 1px solid var(--line);

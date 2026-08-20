@@ -130,6 +130,7 @@ describe("reduceCodeUpdates", () => {
         attention: working,
         title: "first change",
         turn_count: 1,
+        activity: "monitor",
       }),
     ).toEqual({
       type: "digest",
@@ -141,6 +142,7 @@ describe("reduceCodeUpdates", () => {
         attention: working,
         title: "first change",
         turn_count: 1,
+        activity: "monitor",
       },
     });
     expect(

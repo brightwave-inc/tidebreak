@@ -353,7 +353,22 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
 // ---------------------------------------------------------------------------
 
 /** Digest for a session mid-turn: the card's live state line. */
-export const runningDigest: CodeSessionDigest = codeDigest({ turn_count: 3 });
+export const runningDigest: CodeSessionDigest = codeDigest({
+  turn_count: 3,
+  activity: "agent",
+});
+
+/** The agent is blocked on a foreground command, not generating. */
+export const shellDigest: CodeSessionDigest = codeDigest({
+  turn_count: 3,
+  activity: "shell",
+});
+
+/** The session is only observing a background task. */
+export const monitorDigest: CodeSessionDigest = codeDigest({
+  turn_count: 3,
+  activity: "monitor",
+});
 
 /** Digest for a structured question the harness is waiting on. */
 export const needsYouDigest: CodeSessionDigest = codeDigest({
@@ -381,6 +396,7 @@ export const watchDigest: CodeSessionDigest = codeDigest({
  */
 export const subagentsDigest: CodeSessionDigest = codeDigest({
   turn_count: 3,
+  activity: "subagents",
   subagents: [
     {
       call_id: "toolu_task_running",

@@ -3,6 +3,7 @@
 //! Every attention write goes through [`replace_attention`]. Digests are
 //! cheap: they are assembled from session, workspace, and turn-count rows.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -10,12 +11,13 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     count_turns, get_session, get_workspace, latest_event_created_at, latest_turn,
-    latest_watch_for_session, list_approvals, list_sessions, list_sessions_by_lifecycle_all_owners,
-    list_sessions_for_workspace, save_session,
+    latest_watch_for_session, list_approvals, list_recent_events, list_sessions,
+    list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace, save_session,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeApprovalState, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeTurnStatus, DbStore, OwnerId, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
+    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
+    CodeTurnStatus, DbStore, OwnerId, ToolDetail, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -26,6 +28,7 @@ pub(crate) const STALL_IDLE_SECS: u32 = 90;
 
 /// How often the stall sweep walks running sessions.
 pub(crate) const STALL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+const ACTIVITY_EVENT_WINDOW: u64 = 256;
 
 /// The only function that may write attention onto a session value.
 ///
@@ -335,6 +338,13 @@ async fn build_digest(
     } else {
         None
     };
+    let activity = if session.lifecycle == CodeSessionLifecycle::Running {
+        let events =
+            list_recent_events(db, &session.owner, session.id, ACTIVITY_EVENT_WINDOW).await?;
+        Some(session_activity(session, &events))
+    } else {
+        None
+    };
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -343,6 +353,7 @@ async fn build_digest(
         attention: session.attention.clone(),
         title: workspace.title,
         turn_count,
+        activity,
         pr_state: workspace.pr,
         watch_state: watch.as_ref().map(|watch| watch.state),
         watch_detail: watch.as_ref().and_then(|watch| watch.detail.clone()),
@@ -353,6 +364,65 @@ async fn build_digest(
             Some(session.subagents.clone())
         },
     })
+}
+
+fn session_activity(
+    session: &CodeSession,
+    events: &[tidebreak_core::SequencedCodeEvent],
+) -> CodeSessionActivity {
+    if session
+        .subagents
+        .iter()
+        .any(|entry| entry.status == CodeSubagentStatus::Running)
+    {
+        return CodeSessionActivity::Subagents;
+    }
+
+    let mut completed = HashSet::new();
+    for sequenced in events {
+        match &sequenced.event {
+            CodeEvent::ToolCompleted {
+                call_id,
+                parent_call_id: None,
+                ..
+            } => {
+                completed.insert(call_id.as_str());
+            }
+            CodeEvent::ToolStarted {
+                call_id,
+                name,
+                detail,
+                parent_call_id: None,
+            } if !completed.contains(call_id.as_str()) => {
+                return classify_activity(name, detail);
+            }
+            CodeEvent::TurnStarted { .. }
+            | CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnFailed { .. }
+            | CodeEvent::TurnInterrupted => break,
+            _ => {}
+        }
+    }
+    CodeSessionActivity::Agent
+}
+
+fn classify_activity(name: &str, detail: &ToolDetail) -> CodeSessionActivity {
+    let normalized = name.to_ascii_lowercase().replace(['_', '-'], "");
+    if normalized == "task" {
+        return CodeSessionActivity::Subagents;
+    }
+    if normalized.contains("output")
+        || normalized.contains("monitor")
+        || normalized.starts_with("wait")
+    {
+        return CodeSessionActivity::Monitor;
+    }
+    match detail {
+        ToolDetail::Command { .. } => CodeSessionActivity::Shell,
+        ToolDetail::FileEdit { .. } | ToolDetail::FileRead { .. } => CodeSessionActivity::File,
+        ToolDetail::Search { .. } => CodeSessionActivity::Search,
+        ToolDetail::Other { .. } => CodeSessionActivity::Tool,
+    }
 }
 
 async fn last_activity_at(
@@ -398,7 +468,10 @@ impl Drop for StallSweepGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{should_replace, CodeSessionKind, FenceReason, WorkspaceId};
+    use tidebreak_core::{
+        should_replace, CodeSessionKind, CodeSubagentSummary, FenceReason, SequencedCodeEvent,
+        ToolOutcome, WorkspaceId,
+    };
 
     fn auto_working() -> Attention {
         Attention::working(AttentionSource::Lifecycle)
@@ -434,6 +507,19 @@ mod tests {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
+        }
+    }
+
+    fn sequenced(seq: i64, event: CodeEvent) -> SequencedCodeEvent {
+        SequencedCodeEvent { seq, event }
+    }
+
+    fn started(name: &str, detail: ToolDetail) -> CodeEvent {
+        CodeEvent::ToolStarted {
+            call_id: "tool-1".into(),
+            name: name.into(),
+            detail,
+            parent_call_id: None,
         }
     }
 
@@ -508,5 +594,91 @@ mod tests {
                 assert_eq!(applied, expected, "current={current:?} next={next:?}");
             }
         }
+    }
+
+    #[test]
+    fn running_command_is_shell_activity() {
+        let session = session_with(auto_working());
+        let events = [sequenced(
+            2,
+            started(
+                "Bash",
+                ToolDetail::Command {
+                    cmd: "cargo test".into(),
+                    cwd: "/workspace".into(),
+                },
+            ),
+        )];
+
+        assert_eq!(
+            session_activity(&session, &events),
+            CodeSessionActivity::Shell
+        );
+    }
+
+    #[test]
+    fn output_or_wait_tool_is_monitor_activity() {
+        let session = session_with(auto_working());
+        let events = [sequenced(
+            2,
+            started(
+                "TaskOutput",
+                ToolDetail::Other {
+                    summary: "waiting for a background command".into(),
+                },
+            ),
+        )];
+
+        assert_eq!(
+            session_activity(&session, &events),
+            CodeSessionActivity::Monitor
+        );
+    }
+
+    #[test]
+    fn running_subagent_is_subagent_activity() {
+        let mut session = session_with(auto_working());
+        session.subagents.push(CodeSubagentSummary {
+            call_id: "task-1".into(),
+            name: "Inspect the parser".into(),
+            status: CodeSubagentStatus::Running,
+        });
+
+        assert_eq!(
+            session_activity(&session, &[]),
+            CodeSessionActivity::Subagents
+        );
+    }
+
+    #[test]
+    fn completed_tool_returns_to_agent_activity() {
+        let session = session_with(auto_working());
+        let events = [
+            sequenced(
+                3,
+                CodeEvent::ToolCompleted {
+                    call_id: "tool-1".into(),
+                    outcome: ToolOutcome::Succeeded,
+                    preview: "done".into(),
+                    detail: None,
+                    parent_call_id: None,
+                },
+            ),
+            sequenced(
+                2,
+                started(
+                    "Bash",
+                    ToolDetail::Command {
+                        cmd: "cargo test".into(),
+                        cwd: "/workspace".into(),
+                    },
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            session_activity(&session, &events),
+            CodeSessionActivity::Agent
+        );
     }
 }

@@ -32,6 +32,7 @@ import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
+import { CODE_EDITOR_DRAG_TYPE } from "./editorDrag";
 import {
   readStoredBrowserSession,
   seedBrowserSession,
@@ -541,6 +542,31 @@ describe("CodeWorkspacePage", () => {
       "aria-label",
       "3 unrecognized engine events recorded in this session",
     );
+  });
+
+  it("names monitor activity precisely in the workspace header", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    await mountWorkspace(client);
+    useCodeUpdatesStore.getState().apply({
+      type: "digest",
+      digest: {
+        workspace: WORKSPACE.id,
+        session: SESSION.id,
+        kind: "interactive",
+        lifecycle: "running",
+        attention: { state: { type: "working" }, source: "lifecycle" },
+        title: WORKSPACE.title,
+        turn_count: 2,
+        activity: "monitor",
+      },
+    });
+
+    const utilities = await screen.findByTestId("workspace-header-utilities");
+    await waitFor(() =>
+      expect(within(utilities).getByText("Monitoring")).toBeInTheDocument(),
+    );
+    expect(within(utilities).queryByText("Running")).not.toBeInTheDocument();
   });
 
   it("shows the Codex session model even before its native catalog loads", async () => {
@@ -1225,7 +1251,7 @@ describe("CodeWorkspacePage", () => {
     expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith("browser-1");
   });
 
-  it("moves and drags file tabs into a reloadable split group", async () => {
+  it("moves and drags file tabs into a reloadable split group from the transfer payload", async () => {
     const client = makeClient();
     const user = userEvent.setup();
     const { router } = await mountWorkspace(
@@ -1263,11 +1289,25 @@ describe("CodeWorkspacePage", () => {
     ).not.toBeInTheDocument();
 
     const libTab = screen.getByRole("tab", { name: "lib.rs" });
+    const dragPayload = new Map<string, string>();
     const dataTransfer = {
       effectAllowed: "none",
-      setData: vi.fn(),
+      dropEffect: "none",
+      types: [] as string[],
+      setData: vi.fn((type: string, value: string) => {
+        dragPayload.set(type, value);
+        if (!dataTransfer.types.includes(type)) dataTransfer.types.push(type);
+      }),
+      getData: vi.fn((type: string) => dragPayload.get(type) ?? ""),
     };
     fireEvent.dragStart(libTab, { dataTransfer });
+    // The preview state still says lib.rs. The durable transfer payload now
+    // says main.rs, proving the drop resolves the actual drag data instead of
+    // trusting the source component's transient React state.
+    dataTransfer.setData(
+      CODE_EDITOR_DRAG_TYPE,
+      JSON.stringify({ region: "primary", index: 1 }),
+    );
     const dropZone = await screen.findByTestId("split-drop-zone");
     fireEvent.dragOver(dropZone, { dataTransfer });
     fireEvent.drop(dropZone, { dataTransfer });
@@ -1277,7 +1317,7 @@ describe("CodeWorkspacePage", () => {
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
-        split: "file.src%2Flib.rs",
+        split: "file.src%2Fmain.rs",
       }),
     );
   });

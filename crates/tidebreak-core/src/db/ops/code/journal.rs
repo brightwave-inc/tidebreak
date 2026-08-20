@@ -1,6 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 
 use crate::code::{CodeEvent, CodeSessionId, SequencedCodeEvent};
@@ -98,6 +99,33 @@ pub async fn list_events(
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .filter(entities::code_event::Column::Seq.gt(after))
         .order_by_asc(entities::code_event::Column::Seq)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|model| {
+            Ok(SequencedCodeEvent {
+                seq: model.seq,
+                event: serde_json::from_value(model.event)?,
+            })
+        })
+        .collect()
+}
+
+/// Newest journal events for one session, newest first. Digests use this
+/// bounded tail to identify an unresolved top-level tool without replaying a
+/// long conversation on every updates-socket connection.
+pub async fn list_recent_events(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    limit: u64,
+) -> Result<Vec<SequencedCodeEvent>> {
+    entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::code_event::Column::Seq)
+        .limit(limit)
         .all(&store.conn)
         .await
         .map_err(store_err)?

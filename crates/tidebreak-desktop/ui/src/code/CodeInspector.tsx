@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Check,
+  CircleCheck,
   CircleDashed,
   CircleMinus,
   ExternalLink,
+  EyeOff,
   Files,
   GitBranch,
   GitMerge,
   GitPullRequest,
   MessageSquare,
+  MessageSquareReply,
+  MoreHorizontal,
   RefreshCw,
+  RotateCcw,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -25,6 +30,13 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -33,8 +45,8 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { MessageMarkdown } from "@/MessageMarkdown";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
@@ -44,7 +56,6 @@ import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { prWorkflowStatus, type PrWorkflowState } from "./prActions";
-import { PrCard, PrCardWithResource } from "./PrCard";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
@@ -52,18 +63,18 @@ import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 export type InspectorTab = "files" | "source" | "pr";
 
 const TAB_TRIGGER_CLASS =
-  "text-muted-foreground hover:bg-transparent hover:text-foreground grid size-8 place-items-center rounded-lg px-0 py-0";
+  "text-muted-foreground hover:bg-background/70 hover:text-foreground flex h-8 items-center gap-1.5 rounded-lg px-2.5 py-0 text-xs font-medium";
 
 const TAB_TRIGGER_SELECTED_CLASS =
-  "bg-foreground/10 text-foreground hover:bg-foreground/10 hover:text-foreground data-[state=active]:bg-foreground/10 data-[state=active]:text-foreground shadow-[inset_0_-2px_0_0_currentColor]";
+  "bg-background text-foreground hover:bg-background hover:text-foreground data-[state=active]:bg-background data-[state=active]:text-foreground shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]";
 
 /**
- * Right workspace rail: Files, Source control, and Pull request as icon tabs.
+ * Optional right workspace pane: Files, Source control, and Pull request as
+ * clearly labeled tabs.
  *
- * Files is a nested worktree explorer. Source control is a compact changed-file
- * index plus commit, push, and PR creation; individual patches open in the
- * center pane. Pull request carries the PR's own life: status, checks, and
- * review comments once one exists.
+ * Files is a nested worktree explorer. Changes is a compact PR-oriented
+ * changed-file index; individual patches open in the center pane. Review
+ * carries the PR's own life: status, checks, and conversation.
  */
 export function CodeInspector({
   client,
@@ -75,6 +86,7 @@ export function CodeInspector({
   onRequestedTabHandled,
   onOpenFile,
   onOpenDiff,
+  onClose,
 }: {
   client: ApiClient;
   workspaceId: string;
@@ -85,6 +97,7 @@ export function CodeInspector({
   onRequestedTabHandled?: (revision: number) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onOpenDiff?: (path: string) => void;
+  onClose?: () => void;
 }) {
   const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
   const pr = prResource
@@ -96,7 +109,6 @@ export function CodeInspector({
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
   const [file, setFile] = useState<string | undefined>();
-  const active = workspace?.status !== "archived";
   const turnId = scope?.turnId;
 
   useEffect(() => {
@@ -131,7 +143,7 @@ export function CodeInspector({
 
   return (
     <aside
-      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-page-background/45"
       aria-label="Workspace surfaces"
       data-testid="code-inspector"
     >
@@ -140,11 +152,12 @@ export function CodeInspector({
         onValueChange={(next) => setTab(next as InspectorTab)}
         className="flex min-h-0 flex-1 flex-col overflow-hidden"
       >
-        <header className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
+        <header className="flex h-11 shrink-0 items-center gap-1 border-b border-border-subtle bg-page-background/55 px-2">
           <TabsList className="h-auto justify-start gap-0.5 bg-transparent p-0">
             <InspectorTabTrigger
               value="files"
               label="Files"
+              displayLabel="Files"
               selected={tab === "files"}
             >
               <Files className="size-3.5" />
@@ -152,6 +165,7 @@ export function CodeInspector({
             <InspectorTabTrigger
               value="source"
               label="Source control"
+              displayLabel="Changes"
               selected={tab === "source"}
             >
               <GitBranch className="size-3.5" />
@@ -159,6 +173,7 @@ export function CodeInspector({
             <InspectorTabTrigger
               value="pr"
               label="Pull request"
+              displayLabel="Review"
               selected={tab === "pr"}
             >
               <GitPullRequest
@@ -169,21 +184,35 @@ export function CodeInspector({
               />
             </InspectorTabTrigger>
           </TabsList>
-          {scope && (
-            <button
-              type="button"
-              className={cn(
-                "text-muted-foreground hover:bg-muted hover:text-foreground ml-auto cursor-pointer truncate rounded-full border px-2 py-0.5 font-mono text-[11px]",
-                FOCUS_RING,
-                HOVER_TINT,
-              )}
-              aria-label={`Clear ${scope.label} scope`}
-              title={scope.label}
-              onClick={() => setInspectorScope(null)}
-            >
-              {scope.label} ×
-            </button>
-          )}
+          <div className="ml-auto flex min-w-0 items-center gap-1">
+            {scope && (
+              <button
+                type="button"
+                className={cn(
+                  "text-muted-foreground hover:bg-background hover:text-foreground cursor-pointer truncate rounded-lg border border-border-subtle bg-background/60 px-2 py-1 font-mono text-[11px]",
+                  FOCUS_RING,
+                  HOVER_TINT,
+                )}
+                aria-label={`Clear ${scope.label} scope`}
+                title={scope.label}
+                onClick={() => setInspectorScope(null)}
+              >
+                {scope.label} ×
+              </button>
+            )}
+            {onClose && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="rounded-lg"
+                aria-label="Close review sidebar"
+                onClick={onClose}
+              >
+                <X />
+              </Button>
+            )}
+          </div>
         </header>
         <TabsContent
           value="files"
@@ -202,25 +231,6 @@ export function CodeInspector({
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {active && (
-              <div className="border-b px-3 py-3">
-                {prResource ? (
-                  <PrCardWithResource
-                    client={client}
-                    workspaceId={workspaceId}
-                    framed={false}
-                    resource={prResource}
-                  />
-                ) : (
-                  <PrCard
-                    client={client}
-                    workspaceId={workspaceId}
-                    contentRevision={contentRevision}
-                    framed={false}
-                  />
-                )}
-              </div>
-            )}
             <DiffOverview
               client={client}
               workspaceId={workspaceId}
@@ -242,7 +252,6 @@ export function CodeInspector({
             pr={pr}
             branch={workspace?.branch_name}
             prResource={prResource}
-            onOpenSourceControl={() => setTab("source")}
           />
         </TabsContent>
       </Tabs>
@@ -253,29 +262,28 @@ export function CodeInspector({
 function InspectorTabTrigger({
   value,
   label,
+  displayLabel,
   selected,
   children,
 }: {
   value: InspectorTab;
   label: string;
+  displayLabel: string;
   selected: boolean;
   children: ReactNode;
 }) {
   return (
-    <WithTooltip label={label}>
-      <span className="inline-flex">
-        <TabsTrigger
-          value={value}
-          aria-label={label}
-          className={cn(
-            TAB_TRIGGER_CLASS,
-            selected && TAB_TRIGGER_SELECTED_CLASS,
-          )}
-        >
-          {children}
-        </TabsTrigger>
-      </span>
-    </WithTooltip>
+    <TabsTrigger
+      value={value}
+      aria-label={label}
+      className={cn(
+        TAB_TRIGGER_CLASS,
+        selected && TAB_TRIGGER_SELECTED_CLASS,
+      )}
+    >
+      {children}
+      <span>{displayLabel}</span>
+    </TabsTrigger>
   );
 }
 
@@ -297,11 +305,6 @@ export function inspectorTurnLabel(
 }
 
 /**
- * The pull request's own life: status, checks, review comments, and the two
- * user-initiated ways to land it. The digest arrives over the updates socket,
- * so actions only have to hit the server — the fresh state restates itself.
- */
-/**
  * The pull request's own life: status, checks, and review comments.
  *
  * Exported so the center can host it as a peer tab; the inspector remains
@@ -313,15 +316,12 @@ export function PrTab({
   pr,
   branch,
   prResource,
-  onOpenSourceControl,
 }: {
   client: ApiClient;
   workspaceId: string;
   pr?: PullRequestDigest;
   branch?: string;
   prResource?: CodeWorkspacePrResource;
-  /** Send the reader to the tab that can actually open a pull request. */
-  onOpenSourceControl?: () => void;
 }) {
   const { confirm, dialog } = useConfirm();
   const [localRefreshing, setLocalRefreshing] = useState(false);
@@ -333,6 +333,14 @@ export function PrTab({
   const [comments, setComments] = useState<PullRequestComment[] | null>(null);
   const [commentsError, setCommentsError] = useState<string | null>(null);
   const prNumber = pr?.number;
+  const commentPreferenceKey = `${workspaceId}:${prNumber ?? "none"}`;
+  const [commentPreferences, setCommentPreferences] =
+    useState<ReviewCommentPreferences>(() =>
+      readReviewCommentPreferences(commentPreferenceKey),
+    );
+  const offerComposerPrompt = useCodeUiStore(
+    (state) => state.offerComposerPrompt,
+  );
   const sharedMerging =
     prResource?.busy === "merge" || prResource?.busy === "auto_merge"
       ? prResource.busy
@@ -363,6 +371,25 @@ export function PrTab({
     if (prNumber === undefined) return;
     void loadComments();
   }, [loadComments, prNumber]);
+
+  useEffect(() => {
+    setCommentPreferences(readReviewCommentPreferences(commentPreferenceKey));
+  }, [commentPreferenceKey]);
+
+  function updateCommentPreferences(
+    update: (current: ReviewCommentPreferences) => ReviewCommentPreferences,
+  ) {
+    setCommentPreferences((current) => {
+      const next = update(current);
+      storeReviewCommentPreferences(commentPreferenceKey, next);
+      return next;
+    });
+  }
+
+  function attachComment(comment: PullRequestComment) {
+    offerComposerPrompt(workspaceId, commentChatContext(comment));
+    toast.success("Review comment attached to chat");
+  }
 
   async function refresh() {
     if (!prResource) setLocalRefreshing(true);
@@ -418,28 +445,14 @@ export function PrTab({
 
   if (!pr) {
     return (
-      // Commit, push, and Create PR all live one tab away — including the gh
-      // install and sign-in remediation, which the git card states with the
-      // exact commands. Repeating any of that here would be a second copy to
-      // keep true; a way over to it is not.
       <div className="flex flex-col items-start gap-3 px-4 py-8">
         <div className="flex flex-col gap-1.5">
           <p className="text-sm font-medium">No pull request yet</p>
           <p className="text-muted-foreground text-xs leading-relaxed">
-            Once one exists, its status, checks, and review comments land here.
+            Create one from the workspace header. Its checks and review
+            conversation will appear here.
           </p>
         </div>
-        {onOpenSourceControl && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onOpenSourceControl}
-          >
-            <GitBranch />
-            Open Source control
-          </Button>
-        )}
       </div>
     );
   }
@@ -447,6 +460,9 @@ export function PrTab({
   const tone = prTone(pr);
   const workflow = prWorkflowStatus(pr);
   const mergeControls = prMergeControls(workflow.state);
+  const showMergeMethod =
+    mergeControls.canMerge ||
+    (mergeControls.canEnableAutoMerge && !pr.auto_merge_enabled);
   const counts = checkCounts(pr);
   const open = tone === "open" || tone === "draft";
   const branchLine =
@@ -532,54 +548,80 @@ export function PrTab({
       <CheckList checks={pr.checks ?? []} counts={counts} />
 
       {open && (
-        <div className="flex flex-col gap-2 border-t pt-3">
-          <div className="flex items-center gap-2">
-            <GitMerge className="text-muted-foreground size-3.5 shrink-0" />
-            <Select
-              value={method}
-              onValueChange={(next) => setMethod(next as CodePrMergeMethod)}
-              disabled={mutationBusy}
-            >
-              <SelectTrigger
-                className="h-7 flex-1 text-xs"
-                aria-label="Merge method"
+        <div className="border-border-subtle flex flex-col gap-2.5 rounded-xl border bg-background/45 p-2.5">
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="bg-muted text-muted-foreground mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg">
+              <GitMerge className="size-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium">Merge pull request</p>
+              <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+                {mergeControls.explanation ??
+                  `Ready to land on ${pr.base_branch ?? "the base branch"}.`}
+              </p>
+            </div>
+            {showMergeMethod && (
+              <Select
+                value={method}
+                onValueChange={(next) => setMethod(next as CodePrMergeMethod)}
+                disabled={mutationBusy}
               >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="squash">Squash and merge</SelectItem>
-                <SelectItem value="merge">Merge commit</SelectItem>
-                <SelectItem value="rebase">Rebase and merge</SelectItem>
-              </SelectContent>
-            </Select>
+                <SelectTrigger
+                  className="h-7 w-[116px] shrink-0 text-[11px]"
+                  aria-label="Merge method"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="squash">Squash and merge</SelectItem>
+                  <SelectItem value="merge">Merge commit</SelectItem>
+                  <SelectItem value="rebase">Rebase and merge</SelectItem>
+                </SelectContent>
+              </Select>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          {mergeControls.canMerge ? (
             <Button
               type="button"
               size="sm"
-              disabled={mutationBusy || !mergeControls.canMerge}
+              className="w-full"
+              disabled={mutationBusy}
               onClick={() => void merge(false)}
             >
               {merging === "merge" ? <Spinner aria-hidden /> : null}
-              Merge
+              {mergeMethodLabel(method)}
             </Button>
-            {!pr.auto_merge_enabled && (
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                disabled={mutationBusy || !mergeControls.canEnableAutoMerge}
-                onClick={() => void merge(true)}
-              >
-                {merging === "auto_merge" ? <Spinner aria-hidden /> : null}
-                Enable auto-merge
-              </Button>
-            )}
-          </div>
-          {mergeControls.explanation && (
-            <p className="text-muted-foreground text-xs">
-              {mergeControls.explanation}
-            </p>
+          ) : mergeControls.canEnableAutoMerge && !pr.auto_merge_enabled ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="w-full"
+              disabled={mutationBusy}
+              onClick={() => void merge(true)}
+            >
+              {merging === "auto_merge" ? <Spinner aria-hidden /> : null}
+              Enable auto-merge
+            </Button>
+          ) : pr.auto_merge_enabled ? (
+            <div className="text-success-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
+              <CircleCheck className="size-3.5" />
+              Auto-merge is enabled
+            </div>
+          ) : null}
+          {mergeControls.canMerge && !pr.auto_merge_enabled && (
+            <button
+              type="button"
+              className={cn(
+                "text-muted-foreground hover:text-foreground cursor-pointer self-center rounded-sm text-[11px]",
+                FOCUS_RING,
+                HOVER_TINT,
+              )}
+              disabled={mutationBusy || !mergeControls.canEnableAutoMerge}
+              onClick={() => void merge(true)}
+            >
+              Enable auto-merge instead
+            </button>
           )}
           {mergeError && (
             <p className="text-critical text-xs" role="alert">
@@ -592,10 +634,38 @@ export function PrTab({
       <CommentsSection
         comments={comments}
         error={commentsError}
+        preferences={commentPreferences}
         onRetry={() => void loadComments()}
+        onAttach={attachComment}
+        onHide={(key) =>
+          updateCommentPreferences((current) => ({
+            ...current,
+            hidden: addPreference(current.hidden, key),
+          }))
+        }
+        onToggleResolved={(key) =>
+          updateCommentPreferences((current) => ({
+            ...current,
+            resolved: togglePreference(current.resolved, key),
+          }))
+        }
+        onRestoreHidden={() =>
+          updateCommentPreferences((current) => ({ ...current, hidden: [] }))
+        }
       />
     </div>
   );
+}
+
+function mergeMethodLabel(method: CodePrMergeMethod): string {
+  switch (method) {
+    case "squash":
+      return "Squash and merge";
+    case "merge":
+      return "Create merge commit";
+    case "rebase":
+      return "Rebase and merge";
+  }
 }
 
 function prMergeControls(state: PrWorkflowState): {
@@ -710,18 +780,52 @@ function ReviewDecisionBadge({ decision }: { decision?: string }) {
 function CommentsSection({
   comments,
   error,
+  preferences,
   onRetry,
+  onAttach,
+  onHide,
+  onToggleResolved,
+  onRestoreHidden,
 }: {
   comments: PullRequestComment[] | null;
   error: string | null;
+  preferences: ReviewCommentPreferences;
   onRetry: () => void;
+  onAttach: (comment: PullRequestComment) => void;
+  onHide: (key: string) => void;
+  onToggleResolved: (key: string) => void;
+  onRestoreHidden: () => void;
 }) {
+  const keyed = (comments ?? []).map((comment) => ({
+    comment,
+    key: reviewCommentKey(comment),
+  }));
+  const visible = keyed.filter(
+    ({ key }) => !preferences.hidden.includes(key),
+  );
+  const hiddenCount = keyed.length - visible.length;
+
   return (
-    <div className="flex flex-col gap-2 border-t pt-3">
-      <div className="text-muted-foreground flex items-center gap-1.5 text-xs font-medium">
-        <MessageSquare className="size-3.5" />
-        Comments
-        {comments && comments.length > 0 && <span>({comments.length})</span>}
+    <div className="flex flex-col gap-2.5 border-t border-border-subtle pt-3">
+      <div className="flex items-center gap-1.5">
+        <div className="text-muted-foreground flex min-w-0 flex-1 items-center gap-1.5 text-xs font-medium">
+          <MessageSquare className="size-3.5" />
+          Comments
+          {comments && comments.length > 0 && <span>({comments.length})</span>}
+        </div>
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className={cn(
+              "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
+            onClick={onRestoreHidden}
+          >
+            Show {hiddenCount} hidden
+          </button>
+        )}
       </div>
       {error && (
         <div className="flex flex-col items-start gap-1">
@@ -737,15 +841,40 @@ function CommentsSection({
       {!error && comments && comments.length === 0 && (
         <p className="text-muted-foreground text-xs">No comments yet.</p>
       )}
+      {!error && comments && comments.length > 0 && visible.length === 0 && (
+        <p className="text-muted-foreground text-xs">
+          All comments are hidden in Tidebreak.
+        </p>
+      )}
       {!error &&
-        comments?.map((comment, index) => (
-          <CommentRow key={index} comment={comment} />
+        visible.map(({ comment, key }) => (
+          <CommentRow
+            key={key}
+            comment={comment}
+            resolved={preferences.resolved.includes(key)}
+            onAttach={() => onAttach(comment)}
+            onHide={() => onHide(key)}
+            onToggleResolved={() => onToggleResolved(key)}
+          />
         ))}
     </div>
   );
 }
 
-function CommentRow({ comment }: { comment: PullRequestComment }) {
+function CommentRow({
+  comment,
+  resolved,
+  onAttach,
+  onHide,
+  onToggleResolved,
+}: {
+  comment: PullRequestComment;
+  resolved: boolean;
+  onAttach: () => void;
+  onHide: () => void;
+  onToggleResolved: () => void;
+}) {
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const when = comment.created_at
     ? new Date(comment.created_at).toLocaleString(undefined, {
         month: "short",
@@ -754,30 +883,244 @@ function CommentRow({ comment }: { comment: PullRequestComment }) {
         minute: "2-digit",
       })
     : null;
+  const author = comment.author ?? "Unknown";
+  const avatar = comment.avatar_url ?? githubAvatarUrl(comment.author);
+  const anchor =
+    comment.kind === "inline" && comment.path
+      ? `${comment.path}${comment.line !== undefined ? `:${comment.line}` : ""}`
+      : null;
+
   return (
-    <div className="border-border flex flex-col gap-1 rounded-md border px-2 py-1.5">
-      <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px]">
-        <span className="text-foreground shrink-0 font-medium">
-          {comment.author ?? "Unknown"}
+    <article
+      className={cn(
+        "border-border-subtle group/comment rounded-xl border bg-background/45 px-2.5 py-2.5",
+        resolved && "bg-muted/25 opacity-70",
+      )}
+    >
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="bg-muted text-muted-foreground grid size-7 shrink-0 place-items-center overflow-hidden rounded-full text-[10px] font-semibold uppercase">
+          {avatar && !avatarFailed ? (
+            <img
+              src={avatar}
+              alt=""
+              className="size-full object-cover"
+              onError={() => setAvatarFailed(true)}
+            />
+          ) : (
+            author.slice(0, 2)
+          )}
         </span>
-        {comment.kind === "review" && comment.review_state && (
-          <span className="shrink-0 capitalize">
-            {comment.review_state.replaceAll("_", " ")}
-          </span>
-        )}
-        {comment.kind === "inline" && comment.path && (
-          <span className="truncate font-mono" title={comment.path}>
-            {comment.path}
-            {comment.line !== undefined ? `:${comment.line}` : ""}
-          </span>
-        )}
-        {when && <span className="ml-auto shrink-0 tabular-nums">{when}</span>}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="text-foreground min-w-0 truncate text-xs font-medium">
+              {author}
+            </span>
+            {comment.kind === "review" && comment.review_state && (
+              <span className="text-muted-foreground shrink-0 text-[11px] capitalize">
+                {comment.review_state.replaceAll("_", " ")}
+              </span>
+            )}
+            {resolved && (
+              <span className="text-success-foreground flex shrink-0 items-center gap-1 text-[10px] font-medium">
+                <CircleCheck className="size-3" />
+                Resolved here
+              </span>
+            )}
+            {when && (
+              <span className="text-muted-foreground ml-auto shrink-0 text-[10px] tabular-nums">
+                {when}
+              </span>
+            )}
+          </div>
+          {anchor && (
+            <div
+              className="text-muted-foreground mt-0.5 truncate font-mono text-[10px]"
+              title={anchor}
+            >
+              {anchor}
+            </div>
+          )}
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="-mr-1 -mt-1 rounded-lg opacity-70 group-hover/comment:opacity-100 data-[state=open]:opacity-100"
+              aria-label={`Comment actions for ${author}`}
+            >
+              <MoreHorizontal />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem onSelect={onAttach}>
+              <MessageSquareReply />
+              Attach to chat
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onToggleResolved}>
+              {resolved ? <RotateCcw /> : <CircleCheck />}
+              {resolved
+                ? "Mark unresolved in Tidebreak"
+                : "Mark resolved in Tidebreak"}
+            </DropdownMenuItem>
+            {comment.url && (
+              <DropdownMenuItem
+                onSelect={() =>
+                  void openExternal(comment.url!).catch(() => undefined)
+                }
+              >
+                <ExternalLink />
+                Open on GitHub
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onHide}>
+              <EyeOff />
+              Hide in Tidebreak
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-      <p className="text-xs leading-relaxed whitespace-pre-wrap">
-        {comment.body}
-      </p>
-    </div>
+      <div className="review-comment-markdown mt-2 pl-9 text-[13px] leading-5">
+        <MessageMarkdown>
+          {expandGithubEmojiShortcodes(comment.body)}
+        </MessageMarkdown>
+      </div>
+    </article>
   );
+}
+
+type ReviewCommentPreferences = {
+  hidden: string[];
+  resolved: string[];
+};
+
+const REVIEW_COMMENT_PREFS_KEY = "tidebreak.review-comment-prefs.v1";
+
+function reviewCommentKey(comment: PullRequestComment): string {
+  if (comment.id) return `${comment.kind}:${comment.id}`;
+  const identity = [
+    comment.kind,
+    comment.author ?? "",
+    comment.created_at ?? "",
+    comment.path ?? "",
+    comment.line ?? "",
+    comment.body,
+  ].join("\u0000");
+  let hash = 2166136261;
+  for (let index = 0; index < identity.length; index += 1) {
+    hash ^= identity.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${comment.kind}:local-${(hash >>> 0).toString(36)}`;
+}
+
+function readReviewCommentPreferences(key: string): ReviewCommentPreferences {
+  if (typeof window === "undefined") return { hidden: [], resolved: [] };
+  try {
+    const raw = window.localStorage.getItem(REVIEW_COMMENT_PREFS_KEY);
+    if (!raw) return { hidden: [], resolved: [] };
+    const all = JSON.parse(raw) as Record<string, unknown>;
+    const value = all[key];
+    if (!value || typeof value !== "object") {
+      return { hidden: [], resolved: [] };
+    }
+    const preferences = value as Partial<ReviewCommentPreferences>;
+    return {
+      hidden: Array.isArray(preferences.hidden)
+        ? preferences.hidden.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
+      resolved: Array.isArray(preferences.resolved)
+        ? preferences.resolved.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
+    };
+  } catch {
+    return { hidden: [], resolved: [] };
+  }
+}
+
+function storeReviewCommentPreferences(
+  key: string,
+  preferences: ReviewCommentPreferences,
+) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(REVIEW_COMMENT_PREFS_KEY);
+    const all = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    all[key] = preferences;
+    window.localStorage.setItem(REVIEW_COMMENT_PREFS_KEY, JSON.stringify(all));
+  } catch {
+    // Comment display preferences are best-effort and never block review.
+  }
+}
+
+function addPreference(values: readonly string[], value: string): string[] {
+  return values.includes(value) ? [...values] : [...values, value];
+}
+
+function togglePreference(values: readonly string[], value: string): string[] {
+  return values.includes(value)
+    ? values.filter((item) => item !== value)
+    : [...values, value];
+}
+
+function githubAvatarUrl(author: string | undefined): string | undefined {
+  if (!author || !/^[A-Za-z0-9-]+$/.test(author)) return undefined;
+  return `https://github.com/${encodeURIComponent(author)}.png?size=64`;
+}
+
+function commentChatContext(comment: PullRequestComment): string {
+  const author = comment.author ? `@${comment.author}` : "a reviewer";
+  const anchor = comment.path
+    ? ` on \`${comment.path}${comment.line !== undefined ? `:${comment.line}` : ""}\``
+    : "";
+  const quote = comment.body
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `Review comment from ${author}${anchor}:\n\n${quote}\n\nHelp me address this feedback.`;
+}
+
+const GITHUB_EMOJI: Readonly<Record<string, string>> = {
+  "+1": "👍",
+  "-1": "👎",
+  bug: "🐛",
+  checkered_flag: "🏁",
+  eyes: "👀",
+  fire: "🔥",
+  heart: "❤️",
+  heavy_check_mark: "✔️",
+  laughing: "😆",
+  memo: "📝",
+  party_parrot: "🦜",
+  rocket: "🚀",
+  shipit: "🐿️",
+  smile: "😄",
+  sparkles: "✨",
+  tada: "🎉",
+  thinking: "🤔",
+  warning: "⚠️",
+  wave: "👋",
+  white_check_mark: "✅",
+  x: "❌",
+};
+
+/** Expand common GitHub emoji shortcodes outside inline and fenced code. */
+export function expandGithubEmojiShortcodes(markdown: string): string {
+  return markdown
+    .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g)
+    .map((part) => {
+      if (part.startsWith("`")) return part;
+      return part.replace(/:([+\-a-z0-9_]+):/gi, (token, name: string) => {
+        return GITHUB_EMOJI[name.toLowerCase()] ?? token;
+      });
+    })
+    .join("");
 }
 
 function CheckList({

@@ -444,6 +444,7 @@ describe("pull request state in live updates", () => {
     attention: { state: { type: "working" }, source: "lifecycle" },
     title: "Fix login",
     turn_count: 3,
+    activity: "shell",
     pr_state: richPr,
   };
 
@@ -466,6 +467,16 @@ describe("pull request state in live updates", () => {
         type: "digest",
         ...digest,
         pr_state: { ...richPr, in_merge_queue: "yes" },
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects an unknown running activity instead of relabeling it", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...digest,
+        activity: "agents",
       }),
     ).toBeNull();
   });

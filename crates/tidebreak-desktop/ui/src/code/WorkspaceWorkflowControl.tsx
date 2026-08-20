@@ -223,7 +223,7 @@ export function WorkspaceWorkflowControl({
 
   return (
     <div
-      className="border-border-subtle bg-background/80 flex min-w-0 max-w-[min(34vw,24rem)] shrink items-center overflow-hidden rounded-md border shadow-sm shadow-black/5"
+      className="border-border-subtle bg-page-background/70 flex min-w-0 max-w-[min(40vw,26rem)] shrink items-center overflow-hidden rounded-lg border shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
       data-testid="workspace-workflow-control"
       data-stage={model.stage}
       data-tone={model.tone}
@@ -233,7 +233,7 @@ export function WorkspaceWorkflowControl({
           <button
             type="button"
             className={cn(
-              "hover:bg-muted/70 focus-visible:ring-ring/25 flex h-control-sm min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent px-2 text-xs font-medium transition-colors outline-none focus-visible:ring-3",
+              "hover:bg-background focus-visible:ring-ring/25 flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-3",
             )}
             aria-label={`Workspace status: ${model.summary}`}
           >
@@ -446,7 +446,7 @@ export function WorkspaceWorkflowControl({
           type="button"
           variant="ghost"
           size="sm"
-          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-transparent px-2.5 hover:bg-muted/70"
+          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-background px-2.5 hover:bg-muted/70"
           title={
             watch.detail
               ? `${watchStateLabel(watch.state)}: ${watch.detail}. Click to open the watch task.`
@@ -489,7 +489,7 @@ export function WorkspaceWorkflowControl({
           asChild
           variant="ghost"
           size="sm"
-          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-transparent px-2.5 hover:bg-muted/70"
+          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-foreground px-2.5 text-background hover:bg-foreground/88 hover:text-background"
         >
           <a
             href={model.pr.url}
@@ -507,7 +507,7 @@ export function WorkspaceWorkflowControl({
           type="button"
           variant="ghost"
           size="sm"
-          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-transparent px-2.5 hover:bg-muted/70"
+          className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-foreground px-2.5 text-background hover:bg-foreground/88 hover:text-background disabled:bg-muted disabled:text-muted-foreground"
           title={
             primary === "watch_and_fix"
               ? "Start an agent task that watches this pull request and fixes actionable failures."
@@ -553,7 +553,7 @@ export function WorkspaceWorkflowControl({
               type="button"
               variant="ghost"
               size="sm"
-              className="border-border-subtle rounded-none border-0 border-l bg-transparent px-1.5 hover:bg-muted/70"
+              className="border-border-subtle rounded-none border-0 border-l bg-transparent px-1.5 hover:bg-background"
               aria-label="More workspace actions"
               disabled={busy !== null || agentActionRunning}
             >

@@ -12,6 +12,7 @@ import {
   groupWorkspacesByRepo,
   middleTruncate,
   prChipTone,
+  sessionActivityLabel,
   workspaceCardLabel,
   workspaceStatusRank,
 } from "./workspaceCards";
@@ -299,6 +300,45 @@ describe("formatCompactAge", () => {
     expect(formatCompactAge("2026-08-18T11:48:00.000Z", now)).toBe("12m");
     expect(formatCompactAge("2026-08-18T09:00:00.000Z", now)).toBe("3h");
     expect(formatCompactAge("2026-08-16T12:00:00.000Z", now)).toBe("2d");
+  });
+});
+
+describe("sessionActivityLabel", () => {
+  it.each([
+    ["agent", "Agent working"],
+    ["shell", "Shell running"],
+    ["monitor", "Monitoring"],
+    ["file", "Working with files"],
+    ["search", "Searching"],
+    ["tool", "Tool running"],
+  ] as const)("labels %s activity precisely", (activity, label) => {
+    expect(
+      sessionActivityLabel(
+        digest("ws-a", { lifecycle: "running", activity }),
+      ),
+    ).toBe(label);
+  });
+
+  it("counts running subagents and ignores settled ones", () => {
+    expect(
+      sessionActivityLabel(
+        digest("ws-a", {
+          lifecycle: "running",
+          activity: "subagents",
+          subagents: [
+            { call_id: "task-1", name: "Inspect parser", status: "running" },
+            { call_id: "task-2", name: "Run tests", status: "running" },
+            { call_id: "task-3", name: "Map UI", status: "done" },
+          ],
+        }),
+      ),
+    ).toBe("2 subagents working");
+  });
+
+  it("keeps the generic fallback for older running digests", () => {
+    expect(
+      sessionActivityLabel(digest("ws-a", { lifecycle: "running" })),
+    ).toBe("Agent working");
   });
 });
 

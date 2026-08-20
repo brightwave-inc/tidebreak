@@ -1193,9 +1193,21 @@ export type CodePushSnapshot = { branch: string, remote: string, };
 export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, created_at: string, };
 
 /**
+ * What a running interactive session is actually occupied with. This is
+ * intentionally coarser than a transcript tool name: list surfaces need to
+ * distinguish agent generation, a shell, a passive monitor, and delegated
+ * work without leaking command text into every digest.
+ */
+export type CodeSessionActivity = "agent" | "shell" | "monitor" | "subagents" | "file" | "search" | "tool";
+
+/**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, pr_state?: PullRequestDigest, 
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+/**
+ * What the live turn is occupied with, while running.
+ */
+activity?: CodeSessionActivity, pr_state?: PullRequestDigest, 
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
@@ -1323,6 +1335,10 @@ export type CodeUpdateNotice = { "type": "snapshot",
  * One row per live session.
  */
 sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+/**
+ * What the live turn is occupied with, while running.
+ */
+activity?: CodeSessionActivity, 
 /**
  * Boxed to keep the notice enum's variants near one size; the wire
  * shape is unchanged.
@@ -2880,9 +2896,22 @@ export type PullRequestComment = {
  */
 kind: PullRequestCommentKind, 
 /**
+ * Stable host identifier, normalized to text across GraphQL and REST
+ * comment shapes.
+ */
+id?: string, 
+/**
  * Author login, when the host reported one.
  */
 author?: string, 
+/**
+ * Author avatar URL, when the host reported one.
+ */
+avatar_url?: string, 
+/**
+ * Host page for the comment or review, when available.
+ */
+url?: string, 
 /**
  * Host creation timestamp, verbatim.
  */

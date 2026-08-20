@@ -10,18 +10,20 @@ import {
   codeWorkspace,
   draftPrDigest,
   mergedPrDigest,
+  monitorDigest,
   needsYouDigest,
   openPrDigest,
   runningDigest,
+  shellDigest,
   stalledDigest,
   subagentsDigest,
   watchDigest,
 } from "./fixtures";
 
 /**
- * The rail's workspace card. Hover the card (or tab into it) to swap the
- * state glyphs for the action cluster; right-click for the same commands as
- * a context menu.
+ * The rail's workspace row. Conversation state, pull-request status, and the
+ * next workflow action stay visible without hover; right-click remains the
+ * complete command path.
  */
 
 const meta = {
@@ -54,12 +56,8 @@ type Story = StoryObj<typeof meta>;
 
 export const Idle: Story = {};
 
-/**
- * The detail panel that opens beside a row on hover (or focus): full branch,
- * state, checks, and the pull request with its action. Rendered open here;
- * on any other story, rest the pointer on the row to see it live.
- */
-export const DetailPanel: Story = {
+/** PR state and the next action remain visible directly in the rail. */
+export const PullRequestInRail: Story = {
   args: {
     workspace: { ...codeWorkspace, pr: openPrDigest },
     digest: { ...runningDigest, pr_state: openPrDigest },
@@ -69,13 +67,12 @@ export const DetailPanel: Story = {
       archived: false,
       hasSession: true,
     }),
-    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
 
 /** One click from the rail: an approved, green PR offers Merge. */
-export const DetailPanelReadyToMerge: Story = {
+export const ReadyToMerge: Story = {
   args: {
     workspace: {
       ...codeWorkspace,
@@ -88,26 +85,24 @@ export const DetailPanelReadyToMerge: Story = {
       },
     },
     commands: workspaceCommands({ hasPr: true, archived: false }),
-    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
 
 /** A conflicting PR leads with Resolve conflicts, same as the header. */
-export const DetailPanelConflicts: Story = {
+export const Conflicts: Story = {
   args: {
     workspace: {
       ...codeWorkspace,
       pr: { ...openPrDigest, mergeable: "conflicting" },
     },
     commands: workspaceCommands({ hasPr: true, archived: false }),
-    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
 
-/** The panel when the session is waiting on the reader. */
-export const DetailPanelNeedsYou: Story = {
+/** The row when the session is waiting on the reader. */
+export const NeedsYouInline: Story = {
   args: {
     digest: needsYouDigest,
     session: codeSession,
@@ -116,7 +111,6 @@ export const DetailPanelNeedsYou: Story = {
       archived: false,
       hasSession: true,
     }),
-    detailDefaultOpen: true,
   },
 };
 
@@ -137,6 +131,33 @@ export const Active: Story = {
 export const RunningSession: Story = {
   args: {
     digest: runningDigest,
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+};
+
+/** A live turn waiting on a command says so instead of implying generation. */
+export const ShellRunning: Story = {
+  args: {
+    digest: shellDigest,
+    session: codeSession,
+    terminalOpen: true,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+};
+
+/** A passive output/watch tool remains active without reading as an agent. */
+export const Monitoring: Story = {
+  args: {
+    digest: monitorDigest,
     session: codeSession,
     commands: workspaceCommands({
       hasPr: false,
@@ -214,12 +235,11 @@ export const TerminalOpen: Story = {
   args: { terminalOpen: true },
 };
 
-/** On the shelf: dimmed row; its panel and menu lead with Restore. */
+/** On the shelf: dimmed row with Restore kept in reach. */
 export const Archived: Story = {
   args: {
     workspace: archivedWorkspace,
     commands: workspaceCommands({ hasPr: false, archived: true }),
-    detailDefaultOpen: true,
   },
 };
 

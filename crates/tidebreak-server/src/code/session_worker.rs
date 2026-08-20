@@ -962,6 +962,16 @@ async fn persist_and_publish(
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
+    let activity_boundary = matches!(
+        &event,
+        CodeEvent::ToolStarted {
+            parent_call_id: None,
+            ..
+        } | CodeEvent::ToolCompleted {
+            parent_call_id: None,
+            ..
+        }
+    );
     apply_side_effects(db, owner, session_id, spawn_epoch, &event).await?;
     let seq = append_event(db, owner, session_id, spawn_epoch, &event).await?;
     if is_activity(&event) {
@@ -971,6 +981,11 @@ async fn persist_and_publish(
         session_id,
         tidebreak_core::SequencedCodeEvent { seq, event },
     );
+    if activity_boundary {
+        if let Ok(Some(session)) = get_session(db, owner, session_id).await {
+            super::attention::emit_digest(db, bus, &session).await;
+        }
+    }
     Ok(())
 }
 

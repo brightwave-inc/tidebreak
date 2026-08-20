@@ -8,6 +8,7 @@ import type {
   CodeEvent,
   CodePermissionMode,
   CodeRepoSnapshot,
+  CodeSessionActivity,
   CodeSessionLifecycle,
   CodeSessionKind,
   CodeWatchState,
@@ -132,6 +133,15 @@ const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "ended",
 ]);
 const SESSION_KINDS = new Set<CodeSessionKind>(["interactive", "watch"]);
+const SESSION_ACTIVITIES = new Set<CodeSessionActivity>([
+  "agent",
+  "shell",
+  "monitor",
+  "subagents",
+  "file",
+  "search",
+  "tool",
+]);
 const WATCH_STATES = new Set<CodeWatchState>([
   "watching",
   "fixing",
@@ -726,7 +736,10 @@ function parsePullRequestComment(value: unknown): PullRequestComment | null {
     !isRecord(value) ||
     !onlyKeys<WirePullRequestComment>(value, [
       "kind",
+      "id",
       "author",
+      "avatar_url",
+      "url",
       "created_at",
       "body",
       "review_state",
@@ -735,7 +748,10 @@ function parsePullRequestComment(value: unknown): PullRequestComment | null {
     ]) ||
     !isMember(value.kind, PR_COMMENT_KINDS) ||
     typeof value.body !== "string" ||
+    !optionalStringField(value.id) ||
     !optionalStringField(value.author) ||
+    !optionalStringField(value.avatar_url) ||
+    !optionalStringField(value.url) ||
     !optionalStringField(value.created_at) ||
     !optionalStringField(value.review_state) ||
     !optionalStringField(value.path) ||
@@ -748,7 +764,10 @@ function parsePullRequestComment(value: unknown): PullRequestComment | null {
   return {
     kind: value.kind,
     body: value.body,
+    ...(value.id ? { id: value.id } : {}),
     ...(value.author ? { author: value.author } : {}),
+    ...(value.avatar_url ? { avatar_url: value.avatar_url } : {}),
+    ...(value.url ? { url: value.url } : {}),
     ...(value.created_at ? { created_at: value.created_at } : {}),
     ...(value.review_state ? { review_state: value.review_state } : {}),
     ...(value.path ? { path: value.path } : {}),
@@ -1964,6 +1983,7 @@ export function parseCodeSessionDigest(
       "attention",
       "title",
       "turn_count",
+      "activity",
       "pr_state",
       "watch_state",
       "watch_detail",
@@ -1976,6 +1996,8 @@ export function parseCodeSessionDigest(
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     typeof value.title !== "string" ||
     !isFiniteNumber(value.turn_count) ||
+    (value.activity !== undefined &&
+      !isMember(value.activity, SESSION_ACTIVITIES)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalString(value.watch_detail) ||
@@ -1999,6 +2021,7 @@ export function parseCodeSessionDigest(
     attention,
     title: value.title,
     turn_count: value.turn_count,
+    ...(value.activity !== undefined ? { activity: value.activity } : {}),
     ...(pr_state ? { pr_state } : {}),
     ...(value.watch_state !== undefined
       ? { watch_state: value.watch_state }
@@ -2045,6 +2068,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "attention",
           "title",
           "turn_count",
+          "activity",
           "pr_state",
           "watch_state",
           "watch_detail",
@@ -2057,6 +2081,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
         typeof value.title !== "string" ||
         !isFiniteNumber(value.turn_count) ||
+        (value.activity !== undefined &&
+          !isMember(value.activity, SESSION_ACTIVITIES)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
         !optionalString(value.watch_detail) ||
@@ -2084,6 +2110,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         attention,
         title: value.title,
         turn_count: value.turn_count,
+        ...(value.activity !== undefined ? { activity: value.activity } : {}),
         ...(pr_state ? { pr_state } : {}),
         ...(value.watch_state !== undefined
           ? { watch_state: value.watch_state }

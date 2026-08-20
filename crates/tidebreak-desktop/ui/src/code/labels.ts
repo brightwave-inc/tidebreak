@@ -51,11 +51,17 @@ export function sessionLifecycleTooltip(input: {
   harness: HarnessKind;
   version?: string;
   unrecognizedEventCount: number;
+  /** Precise live work, when a running digest can provide it. */
+  runningLabel?: string;
 }): string {
   const harness = input.version
     ? `${HARNESS_LABELS[input.harness]} ${input.version}`
     : HARNESS_LABELS[input.harness];
-  const parts = [LIFECYCLE_LABELS[input.lifecycle], harness];
+  const lifecycle =
+    input.lifecycle === "running" && input.runningLabel
+      ? input.runningLabel
+      : LIFECYCLE_LABELS[input.lifecycle];
+  const parts = [lifecycle, harness];
   if (input.unrecognizedEventCount > 0) {
     const count = input.unrecognizedEventCount;
     const noun = count === 1 ? "event" : "events";

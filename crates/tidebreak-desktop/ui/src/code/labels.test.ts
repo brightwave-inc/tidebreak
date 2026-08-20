@@ -37,9 +37,10 @@ describe("sessionLifecycleTooltip", () => {
         lifecycle: "running",
         harness: "codex",
         unrecognizedEventCount: 1,
+        runningLabel: "Monitoring",
       }),
     ).toBe(
-      "Running · Codex CLI · 1 unrecognized engine event recorded — transcript may be incomplete",
+      "Monitoring · Codex CLI · 1 unrecognized engine event recorded — transcript may be incomplete",
     );
   });
 });

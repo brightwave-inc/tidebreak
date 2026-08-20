@@ -9,7 +9,7 @@ import {
   type RefObject,
 } from "react";
 
-import { ChevronRight, File, FileText, Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, Folder, FolderOpen } from "lucide-react";
 import type { ApiClient } from "../api/client";
 import type { CodeWorkspaceSearchMatch } from "../api/types";
 import { SearchInput } from "@/components/SearchInput";
@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { CodeFileIcon } from "./CodeFileIcon";
 import {
   ancestorPaths,
   buildFileTree,
@@ -52,7 +53,6 @@ export function FilesPanel({
   const [query, setQuery] = useState("");
   const [include, setInclude] = useState("");
   const [exclude, setExclude] = useState("");
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const [openDirs, setOpenDirs] = useState<Set<string>>(() => new Set());
   const [closedTop, setClosedTop] = useState<Set<string>>(() => new Set());
   const [searchHits, setSearchHits] = useState<CodeWorkspaceSearchMatch[] | null>(
@@ -183,7 +183,6 @@ export function FilesPanel({
       const pane = root.current;
       if (!pane || pane.closest("[data-state='inactive']")) return;
       event.preventDefault();
-      setFiltersOpen(true);
       searchInput.current?.focus();
       searchInput.current?.select();
     }
@@ -268,7 +267,7 @@ export function FilesPanel({
           {busy && <Spinner className="size-3.5" aria-label="Refreshing" />}
         </span>
       </div>
-      <div className="flex flex-col gap-2 px-3 pt-2">
+      <div className="flex flex-col gap-1.5 px-3 pb-2 pt-2.5">
         <SearchInput
           size="sm"
           value={query}
@@ -277,36 +276,20 @@ export function FilesPanel({
           aria-label="Search file contents"
           inputRef={searchInput}
         />
-        {filtersOpen || include || exclude ? (
-          <>
-            <Input
-              value={include}
-              onChange={(event) => setInclude(event.target.value)}
-              placeholder="files to include"
-              aria-label="Files to include"
-              className="h-8 text-xs"
-            />
-            <Input
-              value={exclude}
-              onChange={(event) => setExclude(event.target.value)}
-              placeholder="files to exclude"
-              aria-label="Files to exclude"
-              className="h-8 text-xs"
-            />
-          </>
-        ) : (
-          <button
-            type="button"
-            className={cn(
-              "text-muted-foreground hover:text-foreground cursor-pointer self-start rounded-sm text-[11px]",
-              FOCUS_RING,
-              HOVER_TINT,
-            )}
-            onClick={() => setFiltersOpen(true)}
-          >
-            Include / exclude
-          </button>
-        )}
+        <Input
+          value={include}
+          onChange={(event) => setInclude(event.target.value)}
+          placeholder="Files to include"
+          aria-label="Files to include"
+          className="h-8 text-xs"
+        />
+        <Input
+          value={exclude}
+          onChange={(event) => setExclude(event.target.value)}
+          placeholder="Files to exclude"
+          aria-label="Files to exclude"
+          className="h-8 text-xs"
+        />
       </div>
       {!searchMode && error && (
         <p className="text-critical px-3 py-2 text-sm">{error}</p>
@@ -412,8 +395,8 @@ function SearchResults({
     >
       {groups.map((group) => (
         <section key={group.path} className="mb-2" aria-label={group.path}>
-          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1 text-[11px]">
-            <FileText className="size-3.5 shrink-0" aria-hidden />
+          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1.5 text-[11px]">
+            <CodeFileIcon path={group.path} />
             <span className="min-w-0 flex-1 truncate font-mono" title={group.path}>
               {group.path}
             </span>
@@ -588,8 +571,7 @@ function TreeRow({
 }) {
   const open = node.kind === "dir" && isOpen(node.path);
   const current = node.kind === "file" && selected === node.path;
-  const Icon =
-    node.kind === "dir" ? (open ? FolderOpen : Folder) : File;
+  const DirectoryIcon = open ? FolderOpen : Folder;
 
   return (
     <li
@@ -618,7 +600,7 @@ function TreeRow({
       <div
         style={{ paddingLeft: treeIndentPx(depth) }}
         className={cn(
-          "ring-offset-background flex w-full cursor-pointer items-center gap-1 rounded-sm py-0.5 pr-2 text-left text-xs",
+          "ring-offset-background flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[12.5px]",
           "group-focus-visible/row:ring-ring group-focus-visible/row:ring-2 group-focus-visible/row:ring-offset-0",
           HOVER_TINT,
           current && "bg-muted/60",
@@ -636,14 +618,21 @@ function TreeRow({
         ) : (
           <span className="size-3 shrink-0" aria-hidden />
         )}
-        <Icon className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
-        {/*
-          Mono, like every other path-shaped surface in code mode: the explorer
-          was the one place a file name was set in the UI face, which made the
-          same name look like two different strings in the tree and in the tab
-          it opened.
-        */}
-        <span className="min-w-0 truncate font-mono" title={node.path}>
+        {node.kind === "dir" ? (
+          <DirectoryIcon
+            className="text-muted-foreground size-3.5 shrink-0"
+            aria-hidden
+          />
+        ) : (
+          <CodeFileIcon path={node.path} />
+        )}
+        <span
+          className={cn(
+            "min-w-0 truncate",
+            node.kind === "dir" && "font-medium",
+          )}
+          title={node.path}
+        >
           {node.name}
         </span>
       </div>
