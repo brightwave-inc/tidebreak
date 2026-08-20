@@ -1014,11 +1014,11 @@ describe("CodeWorkspacePage", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Open file…" }),
     );
-    const picker = await screen.findByRole("textbox", {
+    const picker = await screen.findByRole("combobox", {
       name: "Search files by name",
     });
     expect(picker).toHaveFocus();
-    await user.click(await screen.findByRole("button", { name: "src/lib.rs" }));
+    await user.click(await screen.findByRole("option", { name: "src/lib.rs" }));
 
     expect(await screen.findByRole("tab", { name: "lib.rs" })).toHaveAttribute(
       "aria-selected",

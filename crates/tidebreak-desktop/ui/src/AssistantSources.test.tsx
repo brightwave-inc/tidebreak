@@ -19,7 +19,13 @@ function source(
 }
 
 function openSources() {
-  fireEvent.click(screen.getByRole("button", { name: /sources?/i }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: (accessibleName, element) =>
+        element.classList.contains("assistant-sources-toggle") &&
+        /\d+\s+sources?/i.test(accessibleName),
+    }),
+  );
 }
 
 describe("AssistantSources", () => {

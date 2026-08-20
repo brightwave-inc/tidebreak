@@ -73,7 +73,7 @@ export function AssistantSources({
           <ChevronRight size={15} />
         </span>
       </CollapsibleTrigger>
-      <CollapsibleContent>
+      <CollapsibleContent forceMount>
         <ol className="assistant-source-list">
           {visibleSources.map(({ source, inputIndex }) => (
             <li
