@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DndContext } from "@dnd-kit/core";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
@@ -26,32 +27,36 @@ function TabStrip({
 }) {
   const [active, setActive] = useState(editorTabs.length > 0 ? 0 : -1);
   const [chatFocused, setChatFocused] = useState(editorTabs.length === 0);
+  // Tabs drag through dnd-kit, which addresses everything from the context the
+  // page provides. Without one here the strip would render but sit inert.
   return (
-    <CodeCenterTabs
-      editorTabs={editorTabs}
-      editorActiveIndex={active}
-      conversationFocused={chatFocused}
-      onSelectChat={() => setChatFocused(true)}
-      onSelectEditor={(index) => {
-        setChatFocused(false);
-        setActive(index);
-      }}
-      onCloseEditor={fn()}
-      onCloseAllEditors={fn()}
-      onCloseOtherEditors={fn()}
-      onCloseEditorsToRight={fn()}
-      onCopyPath={fn()}
-      onNewTab={fn()}
-      onNewBrowser={withBrowser ? fn() : undefined}
-      onNewDiff={withDiff ? fn() : undefined}
-      onNewSourceControl={withDiff ? fn() : undefined}
-      onNewPr={withDiff ? fn() : undefined}
-      onNewTerminal={withTerminal ? fn() : undefined}
-      onSplitActive={fn()}
-      region={region}
-      showMainAgent={region === "primary"}
-      browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
-    />
+    <DndContext>
+      <CodeCenterTabs
+        editorTabs={editorTabs}
+        editorActiveIndex={active}
+        conversationFocused={chatFocused}
+        onSelectChat={() => setChatFocused(true)}
+        onSelectEditor={(index) => {
+          setChatFocused(false);
+          setActive(index);
+        }}
+        onCloseEditor={fn()}
+        onCloseAllEditors={fn()}
+        onCloseOtherEditors={fn()}
+        onCloseEditorsToRight={fn()}
+        onCopyPath={fn()}
+        onNewTab={fn()}
+        onNewBrowser={withBrowser ? fn() : undefined}
+        onNewDiff={withDiff ? fn() : undefined}
+        onNewSourceControl={withDiff ? fn() : undefined}
+        onNewPr={withDiff ? fn() : undefined}
+        onNewTerminal={withTerminal ? fn() : undefined}
+        onSplitActive={fn()}
+        region={region}
+        showMainAgent={region === "primary"}
+        browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
+      />
+    </DndContext>
   );
 }
 

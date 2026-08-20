@@ -1,91 +1,116 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+
+import type { LayoutState, PanelContent } from "@/panel/panelTypes";
 
 import {
-  CODE_EDITOR_DRAG_TYPE,
-  hasEditorTabDrag,
-  readEditorTabDrag,
-  writeEditorTabDrag,
+  dropEditorTab,
+  editorStripDropId,
+  editorTabDragId,
+  findEditorPanel,
+  offersSplitDrop,
+  EDITOR_SPLIT_DROP_ID,
 } from "./editorDrag";
 
-function transfer() {
-  const data = new Map<string, string>();
-  const value = {
-    effectAllowed: "none",
-    types: [] as string[],
-    setData: vi.fn((type: string, payload: string) => {
-      data.set(type, payload);
-      if (!value.types.includes(type)) value.types.push(type);
-    }),
-    getData: vi.fn((type: string) => data.get(type) ?? ""),
+const lib: PanelContent = { type: "file", path: "src/lib.rs" };
+const main: PanelContent = { type: "file", path: "src/main.rs" };
+const diff: PanelContent = { type: "diff", path: "src/main.rs" };
+
+/** A left group holding three tabs, with the terminal drawer among them. */
+function layout(overrides: Partial<LayoutState> = {}): LayoutState {
+  return {
+    tabs: [lib, { type: "terminal" }, main, diff],
+    activeIndex: 0,
+    fullscreen: false,
+    ...overrides,
   };
-  return value;
 }
 
-describe("editor tab drag payload", () => {
-  it("round-trips the tab through the private transfer type", () => {
-    const data = transfer();
+const tabId = (region: "primary" | "secondary", panel: PanelContent) =>
+  editorTabDragId(region, panel);
 
-    writeEditorTabDrag(data as unknown as DataTransfer, {
-      region: "primary",
-      index: 2,
-    });
-
-    expect(data.effectAllowed).toBe("move");
-    expect(data.setData).toHaveBeenCalledWith(
-      CODE_EDITOR_DRAG_TYPE,
-      JSON.stringify({ region: "primary", index: 2 }),
+describe("editor tab drops", () => {
+  it("reorders within a group without moving the terminal", () => {
+    const next = dropEditorTab(
+      layout(),
+      tabId("primary", lib),
+      tabId("primary", diff),
     );
-    expect(hasEditorTabDrag(data as unknown as DataTransfer)).toBe(true);
-    expect(readEditorTabDrag(data)).toEqual({ region: "primary", index: 2 });
+
+    // The drawer holds its slot while the tabs around it shuffle.
+    expect(next?.tabs).toEqual([main, { type: "terminal" }, diff, lib]);
+    // And the tab that was active still is, wherever it ended up.
+    expect(next?.activeIndex).toBe(3);
   });
 
-  it("accepts the plain-text compatibility payload", () => {
+  it("appends when the drop lands on the strip's open space", () => {
+    const next = dropEditorTab(
+      layout(),
+      tabId("primary", lib),
+      editorStripDropId("primary"),
+    );
+
+    expect(next?.tabs).toEqual([main, { type: "terminal" }, diff, lib]);
+  });
+
+  it("creates the split from the zone, and reads back across it", () => {
+    const split = dropEditorTab(
+      layout(),
+      tabId("primary", diff),
+      EDITOR_SPLIT_DROP_ID,
+    );
+    expect(split?.editorSplit?.tabs).toEqual([diff]);
+    expect(split?.tabs).toEqual([lib, { type: "terminal" }, main]);
+
+    // Dropping it on the left strip sends it home again.
+    const back = dropEditorTab(
+      split!,
+      tabId("secondary", diff),
+      editorStripDropId("primary"),
+    );
+    expect(back?.editorSplit?.tabs ?? []).toEqual([]);
+    expect(back?.tabs).toContainEqual(diff);
+  });
+
+  it("reports every no-op drag as null", () => {
+    const state = layout();
+    // Released over open air, and dropped back onto itself.
+    expect(dropEditorTab(state, tabId("primary", lib), null)).toBeNull();
     expect(
-      readEditorTabDrag({
-        getData: (type) =>
-          type === "text/plain"
-            ? "tidebreak-editor-tab:secondary:4"
-            : "",
-      }),
-    ).toEqual({ region: "secondary", index: 4 });
-  });
-
-  it("keeps the text fallback when a webview rejects custom MIME data", () => {
-    const data = new Map<string, string>();
-    const value = {
-      effectAllowed: "none",
-      types: [] as string[],
-      setData: vi.fn((type: string, payload: string) => {
-        if (type === CODE_EDITOR_DRAG_TYPE) throw new Error("unsupported type");
-        data.set(type, payload);
-        value.types.push(type);
-      }),
-      getData: vi.fn((type: string) => data.get(type) ?? ""),
-    };
-
-    expect(() =>
-      writeEditorTabDrag(value as unknown as DataTransfer, {
-        region: "primary",
-        index: 3,
-      }),
-    ).not.toThrow();
-    expect(hasEditorTabDrag(value as unknown as DataTransfer)).toBe(true);
-    expect(readEditorTabDrag(value)).toEqual({ region: "primary", index: 3 });
-  });
-
-  it("rejects malformed and negative indexes", () => {
-    expect(
-      readEditorTabDrag({
-        getData: (type) =>
-          type === CODE_EDITOR_DRAG_TYPE
-            ? JSON.stringify({ region: "primary", index: -1 })
-            : "not-a-tab",
-      }),
+      dropEditorTab(state, tabId("primary", lib), tabId("primary", lib)),
     ).toBeNull();
+    // Aimed at a tab that closed underneath the drag.
     expect(
-      readEditorTabDrag({
-        getData: (type) => (type === "text/plain" ? "primary:1" : ""),
-      }),
+      dropEditorTab(state, tabId("primary", lib), tabId("primary", {
+        type: "file",
+        path: "src/gone.rs",
+      })),
     ).toBeNull();
+    // Dragging something that is not one of ours, onto something that is not
+    // one of our targets.
+    expect(dropEditorTab(state, "sidebar-item", "trash")).toBeNull();
+    // The split zone only ever takes a left-group tab.
+    expect(
+      dropEditorTab(state, tabId("secondary", lib), EDITOR_SPLIT_DROP_ID),
+    ).toBeNull();
+  });
+
+  it("offers the split zone only while there is a split to create", () => {
+    const state = layout();
+    expect(offersSplitDrop(state, tabId("primary", lib))).toBe(true);
+    expect(offersSplitDrop(state, tabId("secondary", lib))).toBe(false);
+
+    const split = dropEditorTab(
+      state,
+      tabId("primary", diff),
+      EDITOR_SPLIT_DROP_ID,
+    );
+    expect(offersSplitDrop(split!, tabId("primary", lib))).toBe(false);
+  });
+
+  it("finds the panel the overlay draws, and only while it exists", () => {
+    const state = layout();
+    expect(findEditorPanel(state, tabId("primary", main))).toEqual(main);
+    expect(findEditorPanel(state, tabId("secondary", main))).toBeNull();
+    expect(findEditorPanel(state, editorStripDropId("primary"))).toBeNull();
   });
 });

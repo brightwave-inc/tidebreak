@@ -366,6 +366,75 @@ export function openCodeEditor(
   );
 }
 
+/**
+ * Reorder one group's tabs, keeping whatever was active active.
+ *
+ * Positions count editor tabs only, because that is what the strip draws. The
+ * terminal lives in the same array but renders as a drawer, so it holds its
+ * slot while the tabs around it shuffle — otherwise dragging a tab past it
+ * would move the drawer.
+ */
+export function reorderEditorTab(
+  layout: LayoutState,
+  region: CodeEditorRegion,
+  from: number,
+  to: number,
+): LayoutState {
+  if (from === to) return layout;
+
+  if (region === "secondary") {
+    const split = layout.editorSplit;
+    if (!split) return layout;
+    const tabs = moveWithin(split.tabs, from, to);
+    if (!tabs) return layout;
+    const active = split.tabs[split.activeIndex];
+    return {
+      ...layout,
+      editorSplit: { ...split, tabs, activeIndex: keyIndex(tabs, active) },
+    };
+  }
+
+  const moved = moveWithin(layout.tabs.filter(isEditorTab), from, to);
+  if (!moved) return layout;
+  const active = layout.tabs[layout.activeIndex];
+  let next = 0;
+  const tabs = layout.tabs.map((tab) =>
+    isEditorTab(tab) ? (moved[next++] ?? tab) : tab,
+  );
+  return { ...layout, tabs, activeIndex: keyIndex(tabs, active) };
+}
+
+/**
+ * The list with one item lifted out and put back at `to`.
+ *
+ * Null when either position is off the end, which is how a drop onto something
+ * that is no longer there reports itself.
+ */
+function moveWithin<T>(
+  items: readonly T[],
+  from: number,
+  to: number,
+): T[] | null {
+  if (from < 0 || from >= items.length) return null;
+  if (to < 0 || to >= items.length) return null;
+  const next = [...items];
+  const [item] = next.splice(from, 1);
+  if (item === undefined) return null;
+  next.splice(to, 0, item);
+  return next;
+}
+
+/** Where a tab ended up after the shuffle; 0 if there is nothing to follow. */
+function keyIndex(
+  tabs: readonly PanelContent[],
+  tab: PanelContent | undefined,
+): number {
+  if (!tab) return 0;
+  const key = panelKey(tab);
+  const at = tabs.findIndex((candidate) => panelKey(candidate) === key);
+  return at < 0 ? 0 : at;
+}
+
 /** Move an existing file/diff tab between the two visible editor groups. */
 export function moveEditorTab(
   layout: LayoutState,
