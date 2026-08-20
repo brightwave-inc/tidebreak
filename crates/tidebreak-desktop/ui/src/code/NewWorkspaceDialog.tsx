@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -52,9 +53,10 @@ import {
  * Every field arrives answered, so the dialog is one keystroke deep: Cmd+Enter
  * from anywhere in it creates with what is on screen. Repo, harness, and model
  * open on what this reader used last — the catalog knows, and `lastCreate`
- * covers a fresh window. The title is optional: left blank, the server
- * generates a two-word name and later replaces it with one derived from the
- * first turn, the same way chats are named.
+ * covers a fresh window. The starting prompt is optional: filled in, it lands
+ * in the workspace composer after create. The title is optional too: left
+ * blank, the server generates a two-word name and later replaces it with one
+ * derived from the first turn, the same way chats are named.
  *
  * Permission mode defaults to the most autonomous posture the harness honors
  * (decision 0039, amended). Whichever posture that is, the row states it.
@@ -114,6 +116,7 @@ export function NewWorkspaceDialog({
   const lastCreate = useCodeUiStore((state) => state.lastCreate);
   const rememberCreate = useCodeUiStore((state) => state.rememberCreate);
   const [repoId, setRepoId] = useState("");
+  const [startingPrompt, setStartingPrompt] = useState("");
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
   const [pickedHarness, setPickedHarness] = useState<HarnessKind | null>(null);
@@ -147,6 +150,7 @@ export function NewWorkspaceDialog({
     const nextRepo =
       defaultRepoId ?? recentRepoId(repos, known, lastCreate?.repoId);
     setRepoId(nextRepo);
+    setStartingPrompt("");
     setTitle("");
     setBaseRef(
       repos.find((repo) => repo.id === nextRepo)?.default_base_ref ?? "",
@@ -230,6 +234,10 @@ export function NewWorkspaceDialog({
         return;
       }
       upsertWorkspace(workspace);
+      const prompt = startingPrompt.trim();
+      if (prompt) {
+        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+      }
       try {
         const gateway = gatewayCodeModels(models, harness, defaultModelKey);
         const listed =
@@ -314,24 +322,6 @@ export function NewWorkspaceDialog({
               </SelectContent>
             </Select>
           </div>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Title</span>
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={creating}
-              placeholder="Named automatically"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Base ref</span>
-            <Input
-              value={baseRef}
-              onChange={(event) => setBaseRef(event.target.value)}
-              disabled={creating}
-              placeholder={selectedRepo?.default_base_ref}
-            />
-          </label>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Harness</span>
             <HarnessPicker
@@ -358,6 +348,34 @@ export function NewWorkspaceDialog({
               variant="field"
             />
           </div>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Starting prompt</span>
+            <Textarea
+              value={startingPrompt}
+              onChange={(event) => setStartingPrompt(event.target.value)}
+              disabled={creating}
+              placeholder="Optional"
+              rows={3}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Title</span>
+            <Input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              disabled={creating}
+              placeholder="Named automatically"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium">Base ref</span>
+            <Input
+              value={baseRef}
+              onChange={(event) => setBaseRef(event.target.value)}
+              disabled={creating}
+              placeholder={selectedRepo?.default_base_ref}
+            />
+          </label>
           <div className="flex flex-col gap-1 text-sm">
             <span className="font-medium">Permission mode</span>
             <Select
