@@ -45,7 +45,7 @@ semver = "=1.0.28"
 sha2 = { workspace = true }
 symphonia = { workspace = true }
 opus-decoder = { workspace = true }
-tauri = { version = "=2.11.5", features = [] }
+tauri = { version = "=2.11.5", features = ["unstable"] }
 tauri-plugin-deep-link = "=2.4.9"
 tauri-plugin-dialog = "=2.7.2"
 tauri-plugin-shell = "=2.3.5"

@@ -22,6 +22,7 @@ mod broker;
 mod channel;
 mod chat_debug;
 mod client_execution;
+mod code_browser;
 #[cfg(test)]
 mod command_parity;
 mod deep_link;
@@ -651,6 +652,7 @@ pub fn run() {
             disconnect_remote_machine,
             put_native_mcp_servers,
             request_user_attention,
+            code_browser::code_browser_command,
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,

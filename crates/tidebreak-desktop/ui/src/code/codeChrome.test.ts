@@ -8,12 +8,14 @@ import {
   closeEditorTabsToRight,
   closeFocusedCodeTab,
   closeOtherEditorTabs,
+  codeBrowserIds,
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
   mergeEditorSplit,
   moveEditorTab,
   openCodeEditor,
+  removedCodeBrowserIds,
   splitCodeChromeLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
@@ -150,6 +152,74 @@ describe("code chrome layout", () => {
       "diff",
       "terminal",
     ]);
+  });
+
+  it("treats browser sessions as editor tabs without confusing them with the inspector", () => {
+    const layout = {
+      tabs: [
+        { type: "folders" as const },
+        { type: "browser" as const, browserId: "browser-1" },
+      ],
+      activeIndex: 1,
+      fullscreen: false,
+    };
+
+    const chrome = splitCodeChromeLayout(layout);
+    expect(chrome.panels.tabs).toEqual([{ type: "folders" }]);
+    expect(chrome.editors.tabs).toEqual([
+      { type: "browser", browserId: "browser-1" },
+    ]);
+    expect(
+      openCodeEditor(layout, {
+        type: "browser",
+        browserId: "browser-2",
+      }).tabs,
+    ).toContainEqual({ type: "browser", browserId: "browser-2" });
+  });
+
+  it("reports only browser sessions truly removed by close operations", () => {
+    const layout = {
+      tabs: [
+        { type: "browser" as const, browserId: "browser-1" },
+        { type: "file" as const, path: "src/lib.rs" },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+      editorSplit: {
+        tabs: [{ type: "browser" as const, browserId: "browser-2" }],
+        activeIndex: 0,
+      },
+    };
+
+    const moved = moveEditorTab(layout, "primary", 0, "secondary");
+    expect(removedCodeBrowserIds(layout, moved)).toEqual([]);
+    expect(codeBrowserIds(mergeEditorSplit(moved))).toEqual([
+      "browser-2",
+      "browser-1",
+    ]);
+
+    const closed = closeAllEditorTabs(layout, "secondary");
+    expect(removedCodeBrowserIds(layout, closed)).toEqual(["browser-2"]);
+
+    const primaryOnly = closeOtherEditorTabs(layout, 1, "primary");
+    expect(removedCodeBrowserIds(layout, primaryOnly)).toEqual(["browser-1"]);
+
+    const withBrowserOnRight = {
+      ...layout,
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "browser" as const, browserId: "browser-1" },
+      ],
+    };
+    expect(
+      removedCodeBrowserIds(
+        withBrowserOnRight,
+        closeEditorTabsToRight(withBrowserOnRight, 0, "primary"),
+      ),
+    ).toEqual(["browser-1"]);
+    expect(
+      removedCodeBrowserIds(layout, closeAllEditorTabs(layout)),
+    ).toEqual(["browser-1", "browser-2"]);
   });
 
   it("closes editor-tab groups without dropping side panels or the terminal", () => {

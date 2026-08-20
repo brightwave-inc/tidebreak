@@ -32,6 +32,41 @@ import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
+import {
+  readStoredBrowserSession,
+  seedBrowserSession,
+  writeStoredBrowserSession,
+} from "./browser/browserPersistence";
+
+const browserMocks = vi.hoisted(() => ({
+  close: vi.fn(async () => undefined),
+}));
+
+vi.mock("./browser/browserHost", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./browser/browserHost")>();
+  return { ...actual, closeCodeBrowser: browserMocks.close };
+});
+
+vi.mock("./browser/CodeBrowserTab", () => ({
+  CodeBrowserTab: ({
+    browserId,
+    obscured,
+    onTitleChange,
+  }: {
+    browserId: string;
+    obscured?: boolean;
+    onTitleChange?: (title: string) => void;
+  }) => (
+    <button
+      type="button"
+      data-testid={`browser-panel-${browserId}`}
+      data-obscured={String(Boolean(obscured))}
+      onClick={() => onTitleChange?.("Tidebreak docs")}
+    >
+      Browser panel
+    </button>
+  ),
+}));
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
@@ -404,6 +439,9 @@ afterEach(() => {
     pendingComposerPrompt: null,
     composerActionScope: null,
   });
+  browserMocks.close.mockClear();
+  window.localStorage.clear();
+  vi.restoreAllMocks();
 });
 
 describe("CodeWorkspacePage", () => {
@@ -937,6 +975,109 @@ describe("CodeWorkspacePage", () => {
       "true",
     );
     expect(screen.getByTestId("file-viewer")).toHaveTextContent("src/lib.rs");
+  });
+
+  it("opens, restores, and retitles a browser as a center editor tab", async () => {
+    const client = makeClient();
+    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(
+      "browser-1" as `${string}-${string}-${string}-${string}-${string}`,
+    );
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(client);
+
+    await user.click(await screen.findByRole("button", { name: "New browser tab" }));
+
+    expect(await screen.findByRole("tab", { name: "Browser" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      await screen.findByTestId("browser-panel-browser-1"),
+    ).toBeInTheDocument();
+    expect(readStoredBrowserSession("browser-1")?.workspaceId).toBe("ws-1");
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "browser.browser-1",
+      }),
+    );
+
+    await user.click(screen.getByTestId("browser-panel-browser-1"));
+    expect(screen.getByRole("tab", { name: "Tidebreak docs" })).toBeInTheDocument();
+  });
+
+  it("restores a persisted browser title without polling storage", async () => {
+    const client = makeClient();
+    const session = seedBrowserSession({
+      browserId: "browser-restored",
+      workspaceId: "ws-1",
+      initialUrl: "https://docs.tidebreak.dev",
+    });
+    writeStoredBrowserSession({ ...session, title: "Tidebreak handbook" });
+
+    await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=browser.browser-restored",
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: "Tidebreak handbook" }),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("hides the native browser behind dialogs and portaled menus", async () => {
+    const client = makeClient();
+    seedBrowserSession({
+      browserId: "browser-1",
+      workspaceId: "ws-1",
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client, "/code/w/ws-1?tabs=browser.browser-1");
+
+    const panel = await screen.findByTestId("browser-panel-browser-1");
+    expect(panel).toHaveAttribute("data-obscured", "false");
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    await waitFor(() => expect(panel).toHaveAttribute("data-obscured", "true"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(panel).toHaveAttribute("data-obscured", "false"));
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "Browser" }));
+    await screen.findByRole("menu");
+    await waitFor(() => expect(panel).toHaveAttribute("data-obscured", "true"));
+  });
+
+  it("closes a native browser only when its editor tab is removed", async () => {
+    const client = makeClient();
+    seedBrowserSession({ browserId: "browser-1", workspaceId: "ws-1" });
+    const user = userEvent.setup();
+    await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=browser.browser-1&split=file.README.md",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Move split tabs to main group" }),
+    );
+    expect(browserMocks.close).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Close Browser" }));
+    await waitFor(() =>
+      expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith("browser-1"),
+    );
+  });
+
+  it("closes surviving native browser sessions when the workspace tears down", async () => {
+    const client = makeClient();
+    seedBrowserSession({ browserId: "browser-1", workspaceId: "ws-1" });
+    const mounted = await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=browser.browser-1",
+    );
+    await screen.findByTestId("browser-panel-browser-1");
+
+    mounted.unmount();
+
+    expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith("browser-1");
   });
 
   it("moves and drags file tabs into a reloadable split group", async () => {

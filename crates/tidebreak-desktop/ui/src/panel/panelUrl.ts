@@ -54,6 +54,8 @@ export function parsePanelSegment(segment: string): PanelContent | null {
       return parseFileTarget(id);
     case "diff":
       return parseDiffTarget(id);
+    case "browser":
+      return parseBrowserTarget(id);
     default:
       // `apps` and `plugins` were panel segments before the libraries became
       // routes of their own. A bare `files` catalog is still retired.
@@ -98,6 +100,18 @@ function parseDiffTarget(id: string): PanelContent | null {
   return null;
 }
 
+function parseBrowserTarget(id: string): PanelContent | null {
+  if (!id) return null;
+  try {
+    const browserId = decodeURIComponent(id);
+    return /^[A-Za-z0-9_-]{1,80}$/.test(browserId)
+      ? { type: "browser", browserId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseDocumentTarget(id: string): PanelContent | null {
   if (!id) return null;
   const separator = id.indexOf(".");
@@ -139,6 +153,8 @@ export function encodePanelSegment(panel: PanelContent): string {
       if (panel.path) return `diff.f.${encodeURIComponent(panel.path)}`;
       return "diff";
     }
+    case "browser":
+      return `browser.${encodeURIComponent(panel.browserId)}`;
   }
 }
 
@@ -149,7 +165,7 @@ export type PanelSearch = {
   active?: string;
   /** `"1"` when the region has taken the whole window. */
   fullscreen?: string;
-  /** Code workspace: file/diff tabs in the right editor group. */
+  /** Code workspace: editor tabs in the right editor group. */
   split?: string;
   /** Code workspace: the tab showing in the right editor group. */
   splitActive?: string;
@@ -194,7 +210,14 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
   const splitTabs: PanelContent[] = [];
   for (const segment of search.split?.split(TAB_SEPARATOR) ?? []) {
     const panel = parsePanelSegment(segment.trim());
-    if (!panel || (panel.type !== "file" && panel.type !== "diff")) continue;
+    if (
+      !panel ||
+      (panel.type !== "file" &&
+        panel.type !== "diff" &&
+        panel.type !== "browser")
+    ) {
+      continue;
+    }
     const key = panelKey(panel);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -277,7 +300,7 @@ export function searchFromLayout(layout: LayoutState): PanelSearch {
         ? layout.tabs.map(encodePanelSegment).join(TAB_SEPARATOR)
         : undefined,
     // The first tab is the default, so naming it would only lengthen the URL.
-    // `chat` keeps file/diff tabs open while the conversation is showing.
+    // `chat` keeps editor tabs open while the conversation is showing.
     active: layout.conversationFocused
       ? "chat"
       : layout.activeIndex > 0 && active
