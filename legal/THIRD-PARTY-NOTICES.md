@@ -26,8 +26,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 827
-- Desktop UI production packages: 506
-- Distinct license texts: 573
+- Desktop UI production packages: 521
+- Distinct license texts: 574
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -5403,7 +5403,19 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/primitive 1.1.3
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
 ### @radix-ui/primitive 1.1.7
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-accordion 1.2.12
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5427,17 +5439,41 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-collapsible 1.1.12
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
 ### @radix-ui/react-collection 1.1.15
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-collection 1.1.7
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-compose-refs 1.1.2
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: not distributed with this package
+
 ### @radix-ui/react-compose-refs 1.1.5
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-context 1.1.2
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: not distributed with this package
 
 ### @radix-ui/react-context 1.2.2
 
@@ -5456,6 +5492,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-direction 1.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: not distributed with this package
 
 ### @radix-ui/react-direction 1.1.4
 
@@ -5493,6 +5535,12 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-id 1.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: not distributed with this package
+
 ### @radix-ui/react-id 1.1.4
 
 - License: `MIT`
@@ -5529,7 +5577,19 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-presence 1.1.5
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
 ### @radix-ui/react-primitive 2.1.10
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-primitive 2.1.3
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5571,6 +5631,12 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-slot 1.2.3
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
 ### @radix-ui/react-slot 1.3.3
 
 - License: `MIT`
@@ -5607,7 +5673,19 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
+### @radix-ui/react-use-controllable-state 1.2.2
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
 ### @radix-ui/react-use-controllable-state 1.2.6
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-use-effect-event 0.0.2
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5624,6 +5702,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
+
+### @radix-ui/react-use-layout-effect 1.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/radix-ui/primitives.git
+- License text: not distributed with this package
 
 ### @radix-ui/react-use-layout-effect 1.1.4
 
@@ -6618,6 +6702,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: lukeed/clsx
 - License text: `license` ([L-3d5b63706380](#l-3d5b63706380))
+
+### cmdk 1.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/pacocoursey/cmdk.git
+- License text: `LICENSE.md` ([L-99139a74daf9](#l-99139a74daf9))
 
 ### collapse-white-space 2.1.0
 
@@ -27454,6 +27544,32 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
    defend, and hold each Contributor harmless for any liability
    incurred by, or claims asserted against, such Contributor by reason
    of your accepting any such warranty or additional liability.
+```
+
+### L-99139a74daf9
+
+```
+MIT License
+
+Copyright (c) 2022 Paco Coursey
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-997aa5213699
