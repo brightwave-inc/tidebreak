@@ -1422,6 +1422,16 @@ export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "arch
 export type CodeWorkspaceTree = { paths: Array<string>, truncated: boolean, };
 
 /**
+ * Where new worktrees land: `GET`/`PUT /code/worktree-root`.
+ *
+ * `root` is the stored setting and is absent while the deployment runs on its
+ * default. `effective_root` is what the next workspace uses, and
+ * `default_root` is what clearing the setting returns to — so a reader can
+ * tell a chosen path from an inherited one without repeating the rule.
+ */
+export type CodeWorktreeRoot = { root?: string, effective_root: string, default_root: string, };
+
+/**
  * What one on-demand compaction did.
  */
 export type CompactionRun = { 
@@ -3330,6 +3340,11 @@ export type RootAttachmentOrigin = "project_default" | "conversation";
  * One journaled event on the per-session WebSocket.
  */
 export type SequencedCodeEventFrame = { seq: number, event: CodeEvent, replayed?: boolean, };
+
+/**
+ * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.
+ */
+export type SetCodeWorktreeRootBody = { root: string | null, };
 
 /**
  * Runtime settings a client can read. The API key itself is never returned —

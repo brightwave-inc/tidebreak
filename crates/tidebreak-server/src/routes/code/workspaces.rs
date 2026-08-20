@@ -10,10 +10,28 @@ use crate::state::AppState;
 use super::types::{
     ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
-    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, WorkspaceBlobQuery,
-    WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery, WorkspaceTreeQuery,
+    CodeWorktreeRoot, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
+    SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
+    WorkspaceSearchQuery, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
+
+/// `GET /code/worktree-root`: where the next workspace's worktree lands.
+pub async fn get_worktree_root(code: ScopedCode) -> Result<Json<CodeWorktreeRoot>, ServerError> {
+    Ok(Json(code.worktree_root().await?))
+}
+
+/// `PUT /code/worktree-root`.
+///
+/// New workspaces only. Worktrees already on disk keep the absolute path
+/// stored on their row, because a git worktree records absolute paths in two
+/// places that a move would have to repair.
+pub async fn set_worktree_root(
+    code: ScopedCode,
+    Json(body): Json<SetCodeWorktreeRootBody>,
+) -> Result<Json<CodeWorktreeRoot>, ServerError> {
+    Ok(Json(code.set_worktree_root(body.root.as_deref()).await?))
+}
 
 pub async fn create_workspace(
     code: ScopedCode,

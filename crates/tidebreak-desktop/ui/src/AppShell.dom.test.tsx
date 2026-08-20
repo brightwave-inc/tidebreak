@@ -78,6 +78,10 @@ const listCodeRepos = vi.fn(async () => [
 ]);
 const listCodeWorkspaces = vi.fn(async () => [] as unknown[]);
 const getHarnessDoctor = vi.fn(async () => ({ harnesses: [] }));
+const getCodeWorktreeRoot = vi.fn(async () => ({
+  effective_root: "/Users/sam/Tidebreak/workspaces",
+  default_root: "/Users/sam/Tidebreak/workspaces",
+}));
 const listCodeHarnessModels = vi.fn(async () => ({
   kind: "claude_code" as const,
   models: [],
@@ -141,6 +145,7 @@ vi.mock("./api", () => ({
     listCodeRepos = listCodeRepos;
     listCodeWorkspaces = listCodeWorkspaces;
     getHarnessDoctor = getHarnessDoctor;
+    getCodeWorktreeRoot = getCodeWorktreeRoot;
     listCodeHarnessModels = listCodeHarnessModels;
     openCodeUpdates = vi.fn(() => ({
       close() {},

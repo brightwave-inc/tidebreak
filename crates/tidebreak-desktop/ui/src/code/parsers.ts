@@ -49,6 +49,7 @@ import type {
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot,
+  CodeWorktreeRoot,
   CodeSubscriptionUsage,
   PullRequestDigest,
   PullRequestComment,
@@ -93,6 +94,7 @@ import type {
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
+  CodeWorktreeRoot as WireCodeWorktreeRoot,
 } from "../generated/wire";
 
 /**
@@ -348,6 +350,29 @@ export function parseCodeCloneDefaults(
     ...(value.gh_authenticated !== undefined
       ? { gh_authenticated: value.gh_authenticated }
       : {}),
+  };
+}
+
+export function parseCodeWorktreeRoot(
+  value: unknown,
+): CodeWorktreeRoot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorktreeRoot>(value, [
+      "root",
+      "effective_root",
+      "default_root",
+    ]) ||
+    !optionalString(value.root) ||
+    typeof value.effective_root !== "string" ||
+    typeof value.default_root !== "string"
+  ) {
+    return null;
+  }
+  return {
+    effective_root: value.effective_root,
+    default_root: value.default_root,
+    ...(value.root !== undefined ? { root: value.root } : {}),
   };
 }
 

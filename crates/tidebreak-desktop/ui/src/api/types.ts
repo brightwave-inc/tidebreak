@@ -138,6 +138,7 @@ import {
   type CodeCloneDefaults as WireCodeCloneDefaults,
   type CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
+  type CodeWorktreeRoot as WireCodeWorktreeRoot,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type PullRequestDigest as WirePullRequestDigest,
   type PullRequestCheck as WirePullRequestCheck,
@@ -1104,6 +1105,8 @@ export type CodeCloneDefaults = WireCodeCloneDefaults;
 export type CodeCloneJobSnapshot = WireCodeCloneJobSnapshot;
 /** Where the warm install of one pinned engine stands. */
 export type CodeHarnessInstallSnapshot = WireCodeHarnessInstallSnapshot;
+/** Where new code worktrees land, and what clearing the setting returns to. */
+export type CodeWorktreeRoot = WireCodeWorktreeRoot;
 
 /** Subscription quota windows exposed by Model Gateway or a direct harness. */
 export type CodeSubscriptionUsage = {

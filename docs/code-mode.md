@@ -271,6 +271,7 @@ carries the whole `rawInput`, so it has nothing to correct.
 ```
 POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
 GET             /code/harnesses            doctor    POST /code/harnesses/refresh
+GET/PUT         /code/worktree-root        {root}    where new worktrees land (admin)
 
 POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
 GET/PATCH       /code/workspaces/{id}
@@ -304,6 +305,23 @@ POST            /code/workspaces/{id}/terminals/{tid}/write | /resize
 The session worker is the only journal writer for its session, under a
 lease and the spawn epoch; routes submit work and read state, they never
 write the journal directly.
+
+### Where worktrees live
+
+A workspace's worktree is created at
+`<root>/<repo-slug>/<workspace-slug>-<short-id>/`, where `<root>` is the
+`code_worktree_root` setting, or — with none stored — the visible default the
+embedding named (`~/Tidebreak/workspaces` on the desktop) or
+`<data_dir>/code/worktrees` for a headless deployment. The readable name leads
+because people read these paths; the id trails to keep two same-named
+workspaces apart. A multi-user deployment inserts the same per-owner segment
+clones use.
+
+The root decides where the *next* worktree is created. Every existing workspace
+keeps the absolute `worktree_path` on its row: git records absolute paths in
+both the worktree's `.git` file and the repository's `.git/worktrees/*` entry,
+so moving one is a `git worktree repair` pass rather than a rename. Moving the
+root therefore never touches a checkout already on disk.
 
 Pull-request operations shell out to the user's `gh` (auth observed, never
 brokered — the [`0034`](decisions/0034-harness-discovery-credentials.md)

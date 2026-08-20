@@ -98,6 +98,7 @@ import {
   type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
+  type CodeWorktreeRoot,
   type CodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot,
   type CodeSubscriptionUsage,
@@ -123,6 +124,7 @@ import {
 import {
   parseCodeApproval,
   parseCodeCloneDefaults,
+  parseCodeWorktreeRoot,
   parseCodeCloneJob,
   parseCodeHarnessInstall,
   parseCodeRepo,
@@ -1759,6 +1761,32 @@ export class ApiClient {
         }),
       ),
       "clone job",
+    );
+  }
+
+  async getCodeWorktreeRoot(): Promise<CodeWorktreeRoot> {
+    return requireParsed(
+      parseCodeWorktreeRoot(
+        await this.json("/code/worktree-root", { headers: this.headers() }),
+      ),
+      "worktree root",
+    );
+  }
+
+  /**
+   * Move the root new worktrees are created under. A null root restores the
+   * default. Worktrees already on disk keep the path they were created at.
+   */
+  async setCodeWorktreeRoot(root: string | null): Promise<CodeWorktreeRoot> {
+    return requireParsed(
+      parseCodeWorktreeRoot(
+        await this.json("/code/worktree-root", {
+          method: "PUT",
+          headers: this.headers(true),
+          body: JSON.stringify({ root }),
+        }),
+      ),
+      "worktree root",
     );
   }
 

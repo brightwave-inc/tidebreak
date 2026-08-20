@@ -119,6 +119,19 @@ impl ScopedCode {
         self.runtime.get_clone_job(id)
     }
 
+    pub(crate) async fn worktree_root(
+        &self,
+    ) -> Result<crate::routes::code::CodeWorktreeRoot, ServerError> {
+        self.runtime.worktree_root_snapshot().await
+    }
+
+    pub(crate) async fn set_worktree_root(
+        &self,
+        root: Option<&str>,
+    ) -> Result<crate::routes::code::CodeWorktreeRoot, ServerError> {
+        self.runtime.set_worktree_root(root).await
+    }
+
     // ------------------------------------------------------------------
     // Workspaces.
     // ------------------------------------------------------------------
