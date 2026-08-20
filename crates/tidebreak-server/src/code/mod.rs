@@ -20,6 +20,7 @@ pub(crate) mod terminal;
 pub(crate) mod titling;
 pub(crate) mod watch;
 pub(crate) mod worktree;
+pub(crate) mod worktree_root;
 
 pub(crate) use runtime::CodeRuntime;
 pub(crate) use scoped::ScopedCode;

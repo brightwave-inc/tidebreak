@@ -696,30 +696,48 @@ pub(crate) fn branch_name(prefix: &str, title: &str, seed: u128) -> String {
     format!("{prefix}{slug}")
 }
 
-/// Path `<data_dir>/code/worktrees/<repo-slug>/<workspace-slug>/`.
-/// `<data_dir>/code/worktrees/<repo-id>-<slug>/<workspace-id>-<slug>/`.
+/// Path `<root>/<repo-slug>/<workspace-slug>-<short-id>/`.
 ///
-/// Ids are the uniqueness key so two clones of the same project cannot share
-/// a directory. Slugs stay only as a human-readable suffix.
+/// The readable name leads and the id trails, because these paths are read by
+/// people: they appear in terminal prompts, editor titles, and every `cd` an
+/// agent narrates. The workspace id still carries uniqueness — two workspaces
+/// on one repo may share a title, and a title may be empty — so it stays as a
+/// short suffix rather than the leading segment it used to be.
+///
+/// The repo segment is the slug alone. Workspace ids are unique across every
+/// repo, so two repos that share a name share a folder without ever sharing a
+/// worktree.
 pub(crate) fn worktree_dir(
-    data_dir: &Path,
-    repo_id: tidebreak_core::RepoId,
+    root: &Path,
     workspace_id: tidebreak_core::WorkspaceId,
     repo_slug: &str,
     workspace_slug: &str,
 ) -> PathBuf {
-    data_dir
-        .join("code")
-        .join("worktrees")
-        .join(dir_name(repo_id, repo_slug))
-        .join(dir_name(workspace_id, workspace_slug))
+    root.join(dir_segment(repo_slug, "repo")).join(format!(
+        "{}-{}",
+        dir_segment(workspace_slug, "workspace"),
+        short_id(workspace_id.as_uuid())
+    ))
 }
 
-fn dir_name(id: impl std::fmt::Display, slug: &str) -> String {
+/// The default worktree root for an embedding that names no visible one:
+/// `<data_dir>/code/worktrees`, where every worktree lived before the root
+/// became configurable.
+pub(crate) fn data_dir_worktree_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("code").join("worktrees")
+}
+
+/// First eight hex digits of a UUID — enough to separate the workspaces one
+/// person runs, short enough to keep the path readable.
+pub(crate) fn short_id(id: &uuid::Uuid) -> String {
+    id.simple().to_string()[..8].to_owned()
+}
+
+fn dir_segment<'a>(slug: &'a str, fallback: &'a str) -> &'a str {
     if slug.is_empty() {
-        id.to_string()
+        fallback
     } else {
-        format!("{id}-{slug}")
+        slug
     }
 }
 
@@ -1002,8 +1020,7 @@ mod tests {
 
     fn scratch_worktree(data: &Path, label: &str) -> PathBuf {
         worktree_dir(
-            data,
-            tidebreak_core::RepoId::new(),
+            &data_dir_worktree_root(data),
             tidebreak_core::WorkspaceId::new(),
             "demo",
             label,
@@ -1212,17 +1229,38 @@ mod tests {
         assert!(bounded_truncated);
     }
 
+    /// The path a person reads: the repo folder and the workspace name lead,
+    /// and the id is the short suffix that keeps two same-named workspaces
+    /// apart. Two workspaces never share a directory even on one repo, and the
+    /// root is whatever the deployment configured.
     #[test]
-    fn worktree_paths_are_keyed_on_ids() {
-        let data = std::path::Path::new("/tmp/data");
-        let repo_a = tidebreak_core::RepoId::new();
-        let repo_b = tidebreak_core::RepoId::new();
-        let ws = tidebreak_core::WorkspaceId::new();
-        let left = worktree_dir(data, repo_a, ws, "origin", "first");
-        let right = worktree_dir(data, repo_b, ws, "origin", "first");
+    fn worktree_paths_read_name_first_and_stay_unique() {
+        let root = std::path::Path::new("/Users/sam/Tidebreak/workspaces");
+        let first = tidebreak_core::WorkspaceId::new();
+        let second = tidebreak_core::WorkspaceId::new();
+        let left = worktree_dir(root, first, "tidebreak", "fix-login");
+        let right = worktree_dir(root, second, "tidebreak", "fix-login");
         assert_ne!(left, right);
-        assert!(left.to_string_lossy().contains(&repo_a.to_string()));
-        assert!(right.to_string_lossy().contains(&repo_b.to_string()));
+        assert_eq!(left.parent(), Some(root.join("tidebreak").as_path()));
+        let leaf = left.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(leaf, format!("fix-login-{}", short_id(first.as_uuid())));
+        // An untitled workspace on a nameless repo still resolves to two
+        // segments rather than collapsing into the root.
+        let bare = worktree_dir(root, first, "", "");
+        assert_eq!(
+            bare,
+            root.join("repo")
+                .join(format!("workspace-{}", short_id(first.as_uuid())))
+        );
+    }
+
+    /// The headless default keeps every worktree where it has always lived.
+    #[test]
+    fn the_data_dir_root_is_unchanged() {
+        assert_eq!(
+            data_dir_worktree_root(std::path::Path::new("/srv/tidebreak")),
+            std::path::Path::new("/srv/tidebreak/code/worktrees")
+        );
     }
 
     #[test]

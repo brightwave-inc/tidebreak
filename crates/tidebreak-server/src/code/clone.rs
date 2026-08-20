@@ -76,19 +76,20 @@ impl CloneJob {
     }
 }
 
-/// Directory a given owner's clones land in, under the deployment's shared
-/// clone parent.
+/// Directory a given owner's checkouts land in, under a deployment-wide
+/// parent: the clone parent here, and the worktree root in
+/// [`super::worktree_root`].
 ///
-/// The parent directory is one deployment-wide setting, so without a per-owner
-/// segment two users cloning the same remote would both target
+/// Each of those parents is one setting shared by every principal, so without
+/// a per-owner segment two users cloning the same remote would both target
 /// `<parent>/<name>` and the second would be refused — or worse, adopt the
-/// first user's checkout. The local profile keeps cloning straight into the
+/// first user's checkout. The local profile keeps writing straight into the
 /// parent, because there is exactly one owner and its paths are the ones users
 /// already have.
 ///
 /// Owner keys are visible ASCII and may contain characters that are not safe
 /// in a path segment, so everything outside a conservative set is replaced.
-pub(crate) fn owner_clone_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
+pub(crate) fn owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
     if owner.is_local() {
         return parent.to_path_buf();
     }
@@ -166,7 +167,7 @@ impl CodeRuntime {
                 "name must be a single path segment",
             ));
         }
-        let target = owner_clone_dir(&parent, owner).join(&name);
+        let target = owner_dir(&parent, owner).join(&name);
         if target.exists() {
             return Err(ServerError::conflict_kind(
                 "clone_target_exists",

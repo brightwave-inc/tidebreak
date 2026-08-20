@@ -294,6 +294,29 @@ pub struct CodeCloneDefaults {
     pub gh_remediation: String,
 }
 
+/// Where new worktrees land: `GET`/`PUT /code/worktree-root`.
+///
+/// `root` is the stored setting and is absent while the deployment runs on its
+/// default. `effective_root` is what the next workspace uses, and
+/// `default_root` is what clearing the setting returns to — so a reader can
+/// tell a chosen path from an inherited one without repeating the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorktreeRoot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub root: Option<String>,
+    pub effective_root: String,
+    pub default_root: String,
+}
+
+/// Body of `PUT /code/worktree-root`. A null or blank root clears the setting.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetCodeWorktreeRootBody {
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
 /// Body of `POST /code/repos`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

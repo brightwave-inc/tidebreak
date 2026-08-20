@@ -13,6 +13,7 @@ import {
   parseCodeSessionList,
   parseCodeSubscriptionUsage,
   parseCodeUpdateNotice,
+  parseCodeWorktreeRoot,
   parseCodeTerminal,
   parseCodeTerminalList,
   parseCodeTerminalRead,
@@ -599,6 +600,41 @@ describe("liveCodeSession", () => {
     expect(watch && live).toBeTruthy();
     expect(liveCodeSession([watch!, live!])?.id).toBe("sess-1");
     expect(liveCodeSession([watch!])).toBeNull();
+  });
+});
+
+describe("worktree root parser", () => {
+  it("keeps an absent root absent and refuses a wrong shape", () => {
+    expect(
+      parseCodeWorktreeRoot({
+        effective_root: "/Users/sam/Tidebreak/workspaces",
+        default_root: "/Users/sam/Tidebreak/workspaces",
+      }),
+    ).toEqual({
+      effective_root: "/Users/sam/Tidebreak/workspaces",
+      default_root: "/Users/sam/Tidebreak/workspaces",
+    });
+    expect(
+      parseCodeWorktreeRoot({
+        root: "/Volumes/work/trees",
+        effective_root: "/Volumes/work/trees",
+        default_root: "/Users/sam/Tidebreak/workspaces",
+      }),
+    ).toEqual({
+      root: "/Volumes/work/trees",
+      effective_root: "/Volumes/work/trees",
+      default_root: "/Users/sam/Tidebreak/workspaces",
+    });
+    expect(
+      parseCodeWorktreeRoot({ effective_root: "/tmp/trees" }),
+    ).toBeNull();
+    expect(
+      parseCodeWorktreeRoot({
+        root: 7,
+        effective_root: "/tmp/trees",
+        default_root: "/tmp/trees",
+      }),
+    ).toBeNull();
   });
 });
 

@@ -126,6 +126,9 @@ pub(crate) struct CodeRuntime {
     pub bus: Arc<CodeEventBus>,
     pub adapters: AdapterRegistry,
     pub data_dir: PathBuf,
+    /// Visible worktree root this embedding names, if any. The stored
+    /// `code_worktree_root` setting overrides it; see [`super::worktree_root`].
+    pub(crate) worktree_root_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     host: HostEnv,
@@ -158,6 +161,7 @@ impl CodeRuntime {
     pub(crate) fn new(
         db: Arc<DbStore>,
         data_dir: PathBuf,
+        worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     ) -> Self {
         Self {
@@ -166,6 +170,7 @@ impl CodeRuntime {
             adapters: builtin_registry(),
             blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir: data_dir.clone(),
+            worktree_root_default,
             approvals: ApprovalBridge::new(),
             host: HostEnv {
                 data_dir: Some(data_dir),
@@ -235,6 +240,7 @@ impl CodeRuntime {
             adapters,
             blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir,
+            worktree_root_default: None,
             approvals: ApprovalBridge::new(),
             host: HostEnv::from_process(),
             host_tool_broker: None,
@@ -597,7 +603,12 @@ impl CodeRuntime {
                 from_title
             }
         };
-        let path = worktree_dir(&self.data_dir, repo_id, id, &repo_slug, &workspace_slug);
+        // Resolved per creation, not cached: the root is a setting an operator
+        // can change while the process runs, and it decides only where the
+        // *next* worktree lands. Existing workspaces keep the absolute path on
+        // their row (`super::worktree_root`).
+        let root = self.owner_worktree_root(owner).await?;
+        let path = worktree_dir(&root, id, &repo_slug, &workspace_slug);
         let display_title = if title.is_empty() {
             workspace_slug.clone()
         } else {
@@ -2306,7 +2317,7 @@ mod managed_node_wait_tests {
         ))
         .await
         .expect("db");
-        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None);
+        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None, None);
 
         assert_eq!(
             runtime.managed_node_root(false).await.expect("node root"),

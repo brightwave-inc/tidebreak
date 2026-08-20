@@ -127,6 +127,19 @@ pub struct Config {
     /// [`Config::bind_addr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_addr: Option<SocketAddr>,
+    /// Where new code-mode worktrees land when no `code_worktree_root` setting
+    /// is stored.
+    ///
+    /// Worktrees hold uncommitted work on real branches, so a windowed
+    /// embedding points this at a visible place in the user's home directory —
+    /// the desktop app uses `~/Tidebreak/workspaces` — rather than letting user
+    /// work sit in disposable app data. Embeddings that leave it absent (the
+    /// CLI, self-host, tests) keep worktrees under
+    /// `{data_dir}/code/worktrees`, which is the right answer for a headless
+    /// deployment whose data directory *is* its user-visible location. Either
+    /// way the stored setting wins once an operator sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_worktree_root_default: Option<PathBuf>,
 }
 
 /// The bind every profile uses when no address is configured: loopback, and
@@ -191,6 +204,7 @@ impl Config {
             auth_gateway_verifier_url: None,
             public_url: None,
             listen_addr: None,
+            code_worktree_root_default: None,
         }
     }
 
@@ -292,6 +306,7 @@ impl Config {
             auth_gateway_verifier_url,
             public_url,
             listen_addr,
+            code_worktree_root_default: None,
         })
     }
 

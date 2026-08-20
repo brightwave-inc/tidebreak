@@ -2,8 +2,9 @@
 //!
 //! Every route here is owner-scoped through `ScopedCode`. The routes that
 //! change what the machine *is* — installing pinned harness binaries, and the
-//! clone-parent-directory setting every principal shares — are registered on
-//! the deployment-plane router in `crate::lib` instead, behind `require_admin`.
+//! clone-parent and worktree-root directories every principal shares — are
+//! registered on the deployment-plane router in `crate::lib` instead, behind
+//! `require_admin`.
 
 mod approvals;
 mod git;
@@ -49,15 +50,16 @@ pub(crate) use types::{
     CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
     CodeTerminalSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
     CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, HarnessDoctorReport, HarnessModelList,
-    MergeCodePrBody, QueuedCodeTurn, SequencedCodeEventFrame,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, HarnessDoctorReport,
+    HarnessModelList, MergeCodePrBody, QueuedCodeTurn, SequencedCodeEventFrame,
+    SetCodeWorktreeRootBody,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_blob, get_workspace_diff,
-    list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace, restore_workspace,
-    search_workspace,
+    get_worktree_root, list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace,
+    restore_workspace, search_workspace, set_worktree_root,
 };
 
 // Nothing here reaches `AppState.code` directly. Every handler in this module

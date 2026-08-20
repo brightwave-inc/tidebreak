@@ -535,6 +535,17 @@ fn home_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("resolve home dir: {e}"))
 }
 
+/// Default root for code worktrees: `~/Tidebreak/workspaces`.
+///
+/// Not created here. The server creates each worktree's parents when it adds
+/// one, so an install that never opens code mode leaves no empty folder in the
+/// user's home directory.
+fn worktree_root_default(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(home_dir(app)?
+        .join(channel::PRODUCTION_PRODUCT_NAME)
+        .join("workspaces"))
+}
+
 /// Resolve the directory Tauri stages bundle resources into.
 ///
 /// Packaged builds use Tauri's normal resource path (`Contents/Resources` on
@@ -845,6 +856,14 @@ async fn boot_server(
         .clone()
         .expect("skills dir was just set");
     config.exec_plugins_dir = Some(exec_plugins_dir(&app, &skills_dir)?);
+    // Code worktrees hold uncommitted work on real branches, so they land in a
+    // visible folder in the user's home directory rather than in app data,
+    // which uninstall and "reset app data" flows treat as disposable. Every
+    // channel shares the one root on purpose: the app identifier keys app data
+    // precisely so three builds cannot corrupt each other's *state*, and a dev
+    // build growing its own second copy of the user's work is the problem, not
+    // the protection. The stored `code_worktree_root` setting overrides this.
+    config.code_worktree_root_default = Some(worktree_root_default(&app)?);
     // The effective identifier — including the debug and staging overrides —
     // keys the macOS managed-preferences (MDM) domain the server reads policy from.
     config.bundle_id = Some(app.config().identifier.clone());

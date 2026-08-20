@@ -2102,11 +2102,139 @@ async fn two_repos_with_the_same_name_get_distinct_worktrees() {
     assert_eq!(repo_b["display_name"], "origin");
     let path_a = ws_a["worktree_path"].as_str().unwrap();
     let path_b = ws_b["worktree_path"].as_str().unwrap();
+    // Same repo name, so the same repo folder — the workspace id suffix is
+    // what keeps the two checkouts apart.
     assert_ne!(path_a, path_b);
-    assert!(path_a.contains(json_id(&repo_a)));
-    assert!(path_b.contains(json_id(&repo_b)));
+    assert!(path_a.contains(&json_id(&ws_a)[..8]));
+    assert!(path_b.contains(&json_id(&ws_b)[..8]));
     assert!(std::path::Path::new(path_a).join("README.md").is_file());
     assert!(std::path::Path::new(path_b).join("README.md").is_file());
+}
+
+/// The worktree root is a setting, and moving it moves only what comes next.
+///
+/// The two halves are one test because the second is meaningless without the
+/// first: a root that new workspaces honour but old ones silently follow would
+/// leave every existing checkout pointing at nothing.
+#[tokio::test]
+async fn the_worktree_root_moves_new_workspaces_and_leaves_existing_ones() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (repo_body, before) = register_and_workspace(&client, addr, &token, &repo).await;
+    let before_path = before["worktree_path"].as_str().unwrap().to_owned();
+    // The default is the data directory until a root is set.
+    let defaults = client
+        .get(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(defaults["root"].is_null());
+    assert_eq!(defaults["effective_root"], defaults["default_root"]);
+    assert!(before_path.starts_with(defaults["default_root"].as_str().unwrap()));
+
+    // A root that does not exist yet is created rather than refused.
+    let chosen = dir.path().join("visible").join("workspaces");
+    let moved = client
+        .put(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "root": chosen }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(moved.status(), reqwest::StatusCode::OK);
+    let moved: serde_json::Value = moved.json().await.unwrap();
+    assert_eq!(moved["root"], moved["effective_root"]);
+    assert!(chosen.is_dir());
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "second change",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let after: serde_json::Value = created.json().await.unwrap();
+    let after_path = after["worktree_path"].as_str().unwrap();
+    assert!(
+        after_path.starts_with(chosen.to_str().unwrap()),
+        "{after_path}"
+    );
+    // Readable name first, id last.
+    assert!(after_path.ends_with(&format!("second-change-{}", &json_id(&after)[..8])));
+    assert!(std::path::Path::new(after_path).join("README.md").is_file());
+
+    // The workspace created before the move keeps the path on its row, and the
+    // checkout is still there.
+    let reread = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}",
+            json_id(&before)
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(reread["worktree_path"], before_path);
+    assert!(std::path::Path::new(&before_path)
+        .join("README.md")
+        .is_file());
+
+    // Clearing the setting returns the deployment to its default and, again,
+    // touches nothing on disk.
+    let cleared = client
+        .put(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "root": null }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(cleared["root"].is_null());
+    assert_eq!(cleared["effective_root"], cleared["default_root"]);
+}
+
+/// A root the deployment cannot write worktrees under is refused when it is
+/// set, not at the first workspace that fails.
+#[tokio::test]
+async fn the_worktree_root_refuses_a_relative_path_and_a_file() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let relative = client
+        .put(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "root": "workspaces" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(relative.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"x").unwrap();
+    let refused = client
+        .put(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "root": file }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4238,6 +4366,21 @@ async fn code_deployment_plane_routes_refuse_a_member() {
         .unwrap();
     assert_eq!(admin.status(), reqwest::StatusCode::OK);
 
+    let member_root = client
+        .get(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(BOB_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(member_root.status(), reqwest::StatusCode::FORBIDDEN);
+    let admin_root = client
+        .get(format!("http://{addr}/code/worktree-root"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_root.status(), reqwest::StatusCode::OK);
+
     let member_refresh = client
         .post(format!("http://{addr}/code/harnesses/refresh"))
         .bearer_auth(BOB_TOKEN)
@@ -4261,26 +4404,26 @@ async fn code_deployment_plane_routes_refuse_a_member() {
 /// the second clone from landing on the first one's checkout.
 #[test]
 fn clone_targets_are_keyed_by_owner() {
-    use crate::code::clone::owner_clone_dir;
+    use crate::code::clone::owner_dir;
     let parent = std::path::Path::new("/srv/checkouts");
     // The local profile is single-user and keeps the paths people already have.
     assert_eq!(
-        owner_clone_dir(parent, &tidebreak_core::OwnerId::local()),
+        owner_dir(parent, &tidebreak_core::OwnerId::local()),
         parent.to_path_buf()
     );
-    let alice = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("alice").unwrap());
-    let bob = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("bob").unwrap());
+    let alice = owner_dir(parent, &tidebreak_core::OwnerId::new("alice").unwrap());
+    let bob = owner_dir(parent, &tidebreak_core::OwnerId::new("bob").unwrap());
     assert_ne!(alice, bob);
     assert_eq!(alice, parent.join("alice"));
     // An owner key is visible ASCII, so it may carry separators and dots that
     // must not escape the parent or resolve to it.
-    let hostile = owner_clone_dir(
+    let hostile = owner_dir(
         parent,
         &tidebreak_core::OwnerId::new("../../etc/passwd").unwrap(),
     );
     assert_eq!(hostile.parent(), Some(parent));
     assert!(hostile.starts_with(parent));
-    let dots = owner_clone_dir(parent, &tidebreak_core::OwnerId::new("..").unwrap());
+    let dots = owner_dir(parent, &tidebreak_core::OwnerId::new("..").unwrap());
     assert_eq!(dots, parent.join("owner"));
 }
 

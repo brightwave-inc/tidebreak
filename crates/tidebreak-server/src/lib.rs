@@ -450,13 +450,14 @@ pub fn app(state: AppState) -> Router {
             "/voice-transcription/install",
             post(routes::post_voice_transcription_install),
         )
-        // Code mode's two deployment-plane routes. Installing a pinned harness
-        // writes a binary to this machine, and the clone parent directory is
-        // one shared setting that decides where every principal's checkouts
-        // land on its disk — both change what the deployment *is*, so neither
-        // belongs to a member (decisions 6 and 48 step 1). Reading and
-        // cloning into that directory stay on the member plane: those produce
-        // owner-scoped rows and owner-keyed checkouts.
+        // Code mode's deployment-plane routes. Installing a pinned harness
+        // writes a binary to this machine, and the clone parent and worktree
+        // root are shared settings that decide where every principal's
+        // checkouts and worktrees land on its disk — all of them change what
+        // the deployment *is*, so none belongs to a member (decisions 6 and 48
+        // step 1). Creating workspaces under those directories stays on the
+        // member plane: that produces owner-scoped rows and owner-keyed
+        // checkouts.
         .route(
             "/code/harnesses/refresh",
             post(routes::code::refresh_harnesses),
@@ -468,6 +469,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/repos/clone-defaults",
             get(routes::code::clone_defaults),
+        )
+        .route(
+            "/code/worktree-root",
+            get(routes::code::get_worktree_root).put(routes::code::set_worktree_root),
         )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
@@ -1458,6 +1463,7 @@ async fn bind_inner(
     let code = Arc::new(code::CodeRuntime::new(
         db,
         state.config.data_dir.clone(),
+        state.config.code_worktree_root_default.clone(),
         code_host_tool_broker,
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
