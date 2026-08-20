@@ -33,8 +33,9 @@ is React/TypeScript under `crates/tidebreak-desktop/ui`.
 - Show the states that matter for evaluation, including loading, empty, success,
   failure, and compact variants when they apply. Reuse the typed Storybook
   fixtures instead of duplicating ad hoc sample data.
-- Run `pnpm storybook` from `crates/tidebreak-desktop/ui` while developing UI,
-  and run `pnpm storybook:build` before publishing relevant UI changes.
+- Run `scripts/storybook.sh` while developing UI, and run
+  `pnpm --dir crates/tidebreak-desktop/ui storybook:build` before publishing
+  relevant UI changes.
 
 ## Pointers
 
