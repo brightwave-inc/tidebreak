@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { CodeFileIcon } from "./CodeFileIcon";
+import { useCodeUiStore } from "./CodeUiStore";
 import {
   ancestorPaths,
   buildFileTree,
@@ -64,6 +65,9 @@ export function FilesPanel({
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  const filesSearchPending = useCodeUiStore(
+    (state) => state.filesSearchPending,
+  );
   const rowRefs = useRef(new Map<string, HTMLLIElement>());
 
   const loadTree = useCallback(
@@ -176,19 +180,16 @@ export function FilesPanel({
     });
   }
 
+  // The find chord is raised as a flag by the shell keymap, above the route
+  // that owns this panel. Taking it here rather than watching for the key
+  // means search still answers Cmd+F when the review rail was closed: the
+  // store opens the rail, this panel mounts, and the ask is still waiting.
   useEffect(() => {
-    function onFind(event: KeyboardEvent) {
-      if (event.key !== "f" && event.key !== "F") return;
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      const pane = root.current;
-      if (!pane || pane.closest("[data-state='inactive']")) return;
-      event.preventDefault();
-      searchInput.current?.focus();
-      searchInput.current?.select();
-    }
-    window.addEventListener("keydown", onFind);
-    return () => window.removeEventListener("keydown", onFind);
-  }, []);
+    if (!filesSearchPending) return;
+    if (!useCodeUiStore.getState().takeFilesSearch()) return;
+    searchInput.current?.focus();
+    searchInput.current?.select();
+  }, [filesSearchPending]);
 
   const searchMode = Boolean(query.trim());
   const ready = tree !== null;
