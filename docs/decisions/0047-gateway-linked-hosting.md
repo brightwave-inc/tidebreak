@@ -9,20 +9,19 @@
   [`docs/gateway-boundary.md`](../gateway-boundary.md),
   [`docs/self-hosting.md`](../self-hosting.md),
   [`docs/deferred.md`](../deferred.md),
-  [`0048-one-interaction-model.md`](0048-one-interaction-model.md)
+  [`0048-one-interaction-model.md`](0048-one-interaction-model.md),
+  [`0049-gateway-authenticated-hosted-machines.md`](0049-gateway-authenticated-hosted-machines.md)
 - Supersedes: none
 
 ## Context
 
 The self-host profile exists so a team can run one shared Tidebreak server:
-PostgreSQL store, an operator token file resolving each request to a named
-principal with a role, fail-closed boot, plain HTTP behind the operator's
-fronting infrastructure (decision 6). What does not exist is any way to *use*
-that deployment from the product's own clients, or any identity source beyond
-the hand-edited token file. `docs/deferred.md` parks all of it: a member
-client (a desktop connection mode or a hosted web UI), a supervision-first
-mobile client, remote session execution, and "auth beyond the static token
-file waits on gateway-derived identity."
+PostgreSQL store, a principal-naming authenticator, fail-closed boot, and plain
+HTTP behind the operator's fronting infrastructure (decision 6). At the time
+of this decision, the only implemented authenticator was an operator token
+file and the product had no way to attach its own client to that deployment.
+Decision 49 completes the Gateway-authenticator and desktop-attachment parts
+of this plan; this record remains the machine/client and owner-scoping record.
 
 Meanwhile the desktop app is deliberately local. The server refuses
 non-loopback hosts in the desktop profile, the client has no product path for
@@ -31,15 +30,13 @@ client executor, native export, computer use — rides credentials the renderer
 never holds, which `docs/host-access.md` already names as "the intended
 consequence for host authority and a defect for anything else."
 
-What is changing: model gateway deployments (the product
+What was proposed here: model gateway deployments (the product
 [`docs/gateway-boundary.md`](../gateway-boundary.md) already integrates with
 as an OAuth client) are growing the ability to deploy `tidebreak-server` as
-an optional component of the gateway installation — colocated database,
-fronting and TLS from the operator's infrastructure, and the token file
-generated from the gateway's user roster rather than edited by hand. That
-gives a team one self-hosted installation instead of two, and it makes the
-deferred member-client work worth unblocking: agents keep running when a
-laptop closes, and any device the user holds can supervise them.
+an optional component of the gateway installation — colocated database, with
+fronting and TLS from the operator's infrastructure and identity derived from
+Gateway users. Decision 49 deliberately skips the provisional generated roster
+and verifies Gateway-issued user credentials directly.
 
 Two facts bound the design:
 
@@ -60,15 +57,11 @@ the single interaction model those clients speak.
 ## Decision
 
 1. **A gateway-linked deployment is a self-host deployment whose identity
-   derives from a gateway roster.** In its first form, the gateway's
-   deployment tooling generates the token file from its roster and
-   `tidebreak-server` is unchanged: the token file remains the
-   credential-to-principal seam exactly as decision 6 left it. The end state
-   is a gateway authenticator behind that same seam — the server verifies
-   gateway-issued credentials directly, answering the same *which user,
-   which role* question, and the token file retires. Decision 6 anticipated
-   this authenticator; this record commits to building it, in a follow-up
-   record that specifies the verification mechanism.
+   derives from Gateway accounts.** Decision 49 specifies the implemented
+   mechanism: Tidebreak verifies a dedicated resource token through Gateway,
+   receives the stable user UUID and live administrator bit, and keeps static
+   token files only for standalone compatibility. The generated-roster bridge
+   described during this record's design is not the hosted default.
 2. **Machine and client become the product vocabulary.** A running
    `tidebreak-server` instance is a machine. Renderer-shaped clients — the
    desktop webview, and later web and mobile surfaces — attach to a machine
@@ -77,9 +70,11 @@ the single interaction model those clients speak.
    governs the gateway boundary: probe, don't pin.
 3. **The desktop app gains a remote connection mode** — the deferred member
    client, chosen over a hosted web UI as the first client because its
-   approval and consent surfaces already exist. Connecting takes a base URL
-   and a token; TLS is required unless the host is loopback, mirroring the
-   pairing rule in [`docs/gateway-boundary.md`](../gateway-boundary.md).
+   approval and consent surfaces already exist. Gateway-backed connection
+   takes a base URL and reuses the desktop's existing Gateway OAuth session;
+   standalone compatibility takes a base URL and static token. TLS is required
+   unless the host is loopback, mirroring the pairing rule in
+   [`docs/gateway-boundary.md`](../gateway-boundary.md).
    While attached to a remote machine, host-authority features degrade
    legibly: routes and tools that require the client executor or the host
    broker are absent or refused with stable reasons, on the pattern headless
@@ -137,17 +132,16 @@ record does not claim one.
 - The desktop profile's loopback lockdown is untouched; a new connection
   mode must not weaken the origin and loopback refusals for the local
   server.
-- Until the gateway authenticator lands, revocation is as fast as the next
-  roster provisioning run. Teams needing instant revocation are the trigger
-  for building the authenticator.
+- Decision 49's Gateway authenticator makes deactivation, session revocation,
+  and role changes effective on the next live principal validation. The
+  next-provision window applies only to standalone static-token operation.
 - The disposable regime means a team's hosted history can vanish on upgrade.
   That is accepted on purpose, stated in operator documentation, and revisited
   at 1.0, when the compatibility commitment inverts the pre-1.0 rules.
 - Owner scoping for code mode is now on the critical path of two records
   (this one and decision 48), which is the point: it is paid once.
-- Revisit when the remote wire is proven and a web or mobile client starts
-  (the client surface may deserve its own record), when the gateway
-  authenticator is designed, or at 1.0.
+- Revisit when a web or mobile client starts (the client surface may deserve
+  its own record), or at 1.0.
 
 ## Validation
 
@@ -162,5 +156,6 @@ record does not claim one.
 - The plausible wrong implementation of decision point 4 scopes reads but
   not events: a second user on a shared machine must see neither another
   owner's `code_*` rows nor their session events on the updates channel.
-- Provisioned-identity drill: a token absent from the regenerated file is
-  refused; the server still fails closed when the file is missing entirely.
+- Gateway-identity drill: inactive, revoked, and wrong-resource credentials
+  are refused; the server still fails closed when neither Gateway identity nor
+  a standalone token file is configured.

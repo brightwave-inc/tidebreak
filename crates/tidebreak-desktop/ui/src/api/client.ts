@@ -231,10 +231,23 @@ async function throwIfNotOk(response: Response): Promise<void> {
 }
 
 export class ApiClient {
+  private accessToken: string;
+
   constructor(
     readonly baseUrl: string,
-    readonly token: string,
-  ) {}
+    token: string,
+  ) {
+    this.accessToken = token;
+  }
+
+  get token(): string {
+    return this.accessToken;
+  }
+
+  /** Replace the short-lived bearer used by subsequent HTTP and WebSocket connections. */
+  setAccessToken(token: string): void {
+    this.accessToken = token;
+  }
 
   private headers(json = false): HeadersInit {
     const headers: Record<string, string> = {

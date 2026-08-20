@@ -11,15 +11,17 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use axum::Extension;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::OwnerId;
 
-use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::attention::list_digests;
 use crate::code::bus::CodeLiveUpdate;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
+use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;
 
 use super::types::{CodeSessionDigest, CodeUpdateNotice};
@@ -28,18 +30,26 @@ pub async fn code_updates(
     State(state): State<AppState>,
     code: ScopedCode,
     headers: axum::http::HeaderMap,
+    auth_lease: Option<Extension<GatewayAuthLease>>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
     let owner = code.owner().clone();
+    let auth_lease = auth_lease.map(|Extension(lease)| lease);
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_updates(socket, state, owner)))
+    Ok(upgrade.on_upgrade(move |socket| stream_updates(socket, state, owner, auth_lease)))
 }
 
-async fn stream_updates(mut socket: WebSocket, state: AppState, owner: OwnerId) {
+async fn stream_updates(
+    mut socket: WebSocket,
+    state: AppState,
+    owner: OwnerId,
+    auth_lease: Option<GatewayAuthLease>,
+) {
+    let mut auth_revalidation = gateway_auth_revalidation_timer(auth_lease.as_ref());
     let Some(runtime) = state.code.clone() else {
         return;
     };
@@ -61,6 +71,16 @@ async fn stream_updates(mut socket: WebSocket, state: AppState, owner: OwnerId) 
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
+                let invalid = match auth_lease.as_ref() {
+                    Some(lease) => !lease.revalidate(&state).await,
+                    None => false,
+                };
+                if invalid {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
             },
             update = live.recv() => match update {
                 Ok(CodeLiveUpdate::Digest(digest)) => {

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ConfirmDialog";
 import {
   HOST_AUTHORITIES,
+  connectGatewayRemoteMachine,
   connectFailureMessage,
   connectRemoteMachine,
   disconnectRemoteMachine,
@@ -86,6 +87,23 @@ export function MachinePanel() {
     }
   }
 
+  async function connectWithGateway() {
+    setBusy(true);
+    setError(null);
+    try {
+      await connectGatewayRemoteMachine(baseUrl);
+      reattach();
+    } catch (failure) {
+      const refused = remoteConnectError(failure);
+      setError(
+        refused
+          ? connectFailureMessage(refused)
+          : friendlyErrorMessage(failure, "Could not connect through Model Gateway."),
+      );
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     const accepted = await confirm({
       title: "Work on this computer again?",
@@ -153,7 +171,7 @@ export function MachinePanel() {
       ) : (
         <SettingsSection
           title="Connect to a machine"
-          description="Enter the address of a Tidebreak server and a token for your account on it. The address must use https unless the machine is on this computer, because the token would otherwise travel in the clear."
+          description="Enter the hosted Tidebreak address. If it uses the same Model Gateway as this app, your existing sign-in supplies access automatically."
         >
           <SettingsField label="Address" hint="For example, https://tidebreak.example.com.">
             <Input
@@ -165,9 +183,18 @@ export function MachinePanel() {
               disabled={busy}
             />
           </SettingsField>
+          <div>
+            <Button
+              onClick={() => void connectWithGateway()}
+              disabled={busy || !baseUrl.trim()}
+            >
+              <Server size={16} aria-hidden />
+              Connect with Model Gateway
+            </Button>
+          </div>
           <SettingsField
-            label="Token"
-            hint="Whoever runs the machine issues this. It is stored in this computer's credential store, not in a file."
+            label="Standalone token"
+            hint="Only for a Tidebreak machine that is not connected to Model Gateway."
           >
             <Input
               type="password"
@@ -184,7 +211,7 @@ export function MachinePanel() {
               disabled={busy || !baseUrl.trim() || !token.trim()}
             >
               <Server size={16} aria-hidden />
-              Connect
+              Connect with token
             </Button>
           </div>
           {error && <SettingsError>{error}</SettingsError>}

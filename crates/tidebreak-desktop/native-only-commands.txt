@@ -30,6 +30,8 @@ code_browser_command: creates and controls sandboxed native child webviews whose
 # Attaching this client to a machine it does not host (ADR 0047)
 remote_machine_state: reports which machine this client is attached to, from shell-held state that exists before any machine is reachable.
 connect_remote_machine: stores the machine token in the OS credential store, which only the native shell can reach.
+connect_gateway_remote_machine: mints a machine-bound token from the shell's keychain-held Gateway OAuth session (ADR 0049); the rotating refresh credential never leaves the native shell.
+remote_machine_access_token: refreshes that machine-bound token from the same keychain-held session so HTTP calls and new sockets use the latest value.
 disconnect_remote_machine: removes that stored token from the OS credential store.
 
 # OS pickers, drops, and save dialogs

@@ -3,15 +3,17 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use axum::Extension;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::db::code::list_events;
 use tidebreak_core::{CodeSessionId, OwnerId};
 
-use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Path, Query};
+use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;
 
 use super::types::{SequencedCodeEventFrame, SessionEventsQuery};
@@ -22,6 +24,7 @@ pub async fn session_events(
     Path(id): Path<CodeSessionId>,
     Query(query): Query<SessionEventsQuery>,
     headers: axum::http::HeaderMap,
+    auth_lease: Option<Extension<GatewayAuthLease>>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
     // Authorize before upgrading: the per-session channel is keyed by id, so
@@ -29,12 +32,14 @@ pub async fn session_events(
     // journal's pattern, rather than by filtering frames afterwards.
     let _ = code.get_session(id).await?;
     let owner = code.owner().clone();
+    let auth_lease = auth_lease.map(|Extension(lease)| lease);
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, owner, id, query.after)))
+    Ok(upgrade
+        .on_upgrade(move |socket| stream_events(socket, state, owner, id, query.after, auth_lease)))
 }
 
 async fn stream_events(
@@ -43,7 +48,9 @@ async fn stream_events(
     owner: OwnerId,
     session: CodeSessionId,
     after: i64,
+    auth_lease: Option<GatewayAuthLease>,
 ) {
+    let mut auth_revalidation = gateway_auth_revalidation_timer(auth_lease.as_ref());
     let Some(runtime) = state.code.clone() else {
         return;
     };
@@ -61,6 +68,16 @@ async fn stream_events(
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
+                let invalid = match auth_lease.as_ref() {
+                    Some(lease) => !lease.revalidate(&state).await,
+                    None => false,
+                };
+                if invalid {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
             },
             live_event = live.recv() => match live_event {
                 Ok(event) => {

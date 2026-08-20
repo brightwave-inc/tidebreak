@@ -75,6 +75,43 @@ impl PairingHandle {
     pub fn store(&self) -> Arc<dyn Store> {
         self.store.clone()
     }
+
+    /// Mint a fresh user credential for a hosted Tidebreak machine that names
+    /// the same Gateway managing this desktop profile.
+    pub async fn hosted_tidebreak_access_token(
+        &self,
+        gateway_url: &str,
+        resource: &str,
+    ) -> Result<String> {
+        let expected = GatewayAuthConfig::new(gateway_url)?.base_url().to_string();
+        let policy = self.gateway.policy()?;
+        let Some(actual) = policy.gateway_url else {
+            return Err(AgentError::SignInRequired(
+                "this Tidebreak profile is not managed by a Model Gateway".into(),
+            ));
+        };
+        if actual != expected {
+            return Err(AgentError::SignInRequired(format!(
+                "the hosted Tidebreak machine uses {expected}, but this profile is managed by {actual}"
+            )));
+        }
+        let connection = self.gateway.connection().await?.ok_or_else(|| {
+            AgentError::SignInRequired("no managed Model Gateway connection is available".into())
+        })?;
+        let machine = resource.strip_prefix("tidebreak:").ok_or_else(|| {
+            AgentError::config("hosted Tidebreak credentials require a machine-bound resource")
+        })?;
+        if machine.len() != 64
+            || !machine
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(AgentError::config(
+                "hosted Tidebreak credentials require a lowercase SHA-256 machine resource",
+            ));
+        }
+        connection.access_token(resource).await
+    }
 }
 
 /// Why a pairing did not provision this profile.

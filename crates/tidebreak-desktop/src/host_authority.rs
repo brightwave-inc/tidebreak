@@ -77,11 +77,12 @@ pub(crate) fn require_local_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::AttachedAuth;
 
     fn attached() -> Attached {
         Attached {
             base_url: "https://machine.example.com".to_owned(),
-            token: "token-value".to_owned(),
+            auth: AttachedAuth::StaticToken("token-value".to_owned()),
         }
     }
 

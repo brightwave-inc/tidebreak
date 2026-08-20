@@ -27,14 +27,26 @@ use tokio::sync::{mpsc, Mutex};
 pub const RESOURCE_CONTROL: &str = "control";
 /// The audience for inference calls on the gateway's compatible routes.
 pub const RESOURCE_LLM: &str = "llm";
+/// The audience accepted by a Gateway-backed Tidebreak server.
+pub const RESOURCE_TIDEBREAK: &str = "tidebreak";
 
-const SCOPE: &str = "openid profile offline_access models:read inference:invoke";
+const SCOPE: &str = "openid profile offline_access models:read inference:invoke tidebreak:access";
 /// The secret-store key the gateway session lives under. Public so the secret
 /// cache can treat it as a miss-passthrough key, and so [`crate::secret_rehome`]
 /// can name every stored credential.
 pub const SECRET_KEY: &str = "gateway.credentials_v1";
 /// Refresh an access token this close to expiry instead of using it.
 const EXPIRY_LEEWAY_SECONDS: u64 = 60;
+
+/// Whether a resource carries a bearer for a Tidebreak machine.
+///
+/// The bare resource is retained while hosted deployments move to the
+/// machine-bound `tidebreak:<sha256>` audience. Neither form belongs in the
+/// durable per-resource cache: a desktop can mint it again from the rotating
+/// refresh session when it needs to attach or reconnect.
+fn is_tidebreak_resource(resource: &str) -> bool {
+    resource == RESOURCE_TIDEBREAK || resource.starts_with("tidebreak:")
+}
 
 /// True when an operation failed because there is no usable gateway session —
 /// never signed in, session revoked, or refresh-token reuse detected. Callers
@@ -514,7 +526,11 @@ impl CredentialVault {
     }
 
     pub async fn save(&self, credentials: &GatewayCredentials) -> Result<()> {
-        let raw = serde_json::to_string(credentials)?;
+        let mut durable = credentials.clone();
+        durable
+            .access_tokens
+            .retain(|resource, _| !is_tidebreak_resource(resource));
+        let raw = serde_json::to_string(&durable)?;
         self.secrets.set_secret(SECRET_KEY, &raw).await
     }
 
@@ -1108,6 +1124,9 @@ pub struct GatewayConnection {
     auth: GatewayAuth,
     vault: CredentialVault,
     token_motion: Mutex<()>,
+    /// Short-lived machine bearers keyed by resource. They are deliberately
+    /// process-only: the rotating refresh token is the durable credential.
+    volatile_tokens: Mutex<HashMap<String, CachedAccessToken>>,
     /// Attestation contexts and the access tokens minted inside them.
     /// Memory-only by design: context ids are pinned server-side to the
     /// session they were first used with, so persisting them would carry
@@ -1140,6 +1159,7 @@ impl GatewayConnection {
             auth,
             vault,
             token_motion: Mutex::new(()),
+            volatile_tokens: Mutex::new(HashMap::new()),
             attested: Mutex::new(AttestedTokens::default()),
         }
     }
@@ -1159,6 +1179,7 @@ impl GatewayConnection {
     /// state left to ever revoke it.
     pub async fn store_session(&self, session: &AuthorizedSession) -> Result<()> {
         let _guard = self.token_motion.lock().await;
+        self.volatile_tokens.lock().await.clear();
         // Attestation contexts are pinned to the session being replaced.
         *self.attested.lock().await = AttestedTokens::default();
         // An unreadable stored blob is skipped, as in sign-out: it carries no
@@ -1236,6 +1257,9 @@ impl GatewayConnection {
     /// A fresh access token for `resource`, from cache when possible and via
     /// rotating refresh otherwise.
     pub async fn access_token(&self, resource: &str) -> Result<String> {
+        if is_tidebreak_resource(resource) {
+            return self.volatile_access_token_bound(resource, None).await;
+        }
         self.access_token_bound(resource, None).await
     }
 
@@ -1246,8 +1270,78 @@ impl GatewayConnection {
         resource: &str,
         expected_installation: &str,
     ) -> Result<String> {
+        if is_tidebreak_resource(resource) {
+            return self
+                .volatile_access_token_bound(resource, Some(expected_installation))
+                .await;
+        }
         self.access_token_bound(resource, Some(expected_installation))
             .await
+    }
+
+    /// A fresh access token held only in this process.
+    ///
+    /// Refresh rotation remains serialized with every other token mint, and
+    /// the rotated refresh token is saved before the access token becomes
+    /// usable. Tidebreak resources route here automatically through
+    /// [`Self::access_token`].
+    pub async fn volatile_access_token(&self, resource: &str) -> Result<String> {
+        self.volatile_access_token_bound(resource, None).await
+    }
+
+    async fn volatile_access_token_bound(
+        &self,
+        resource: &str,
+        expected_installation: Option<&str>,
+    ) -> Result<String> {
+        let _guard = self.token_motion.lock().await;
+        let Some(mut credentials) = self.vault.load().await? else {
+            return Err(sign_in_required("no gateway session is stored"));
+        };
+        if !self.matches_deployment(&credentials) {
+            return Err(sign_in_required(
+                "the stored gateway session belongs to a different gateway deployment",
+            ));
+        }
+        if expected_installation.is_some_and(|expected| credentials.installation_id != expected) {
+            return Err(sign_in_required(
+                "the model gateway session changed after this route was selected",
+            ));
+        }
+        {
+            let mut volatile = self.volatile_tokens.lock().await;
+            volatile.retain(|_, cached| cached.is_fresh());
+            if let Some(cached) = volatile.get(resource) {
+                return Ok(cached.token.clone());
+            }
+        }
+        let token = match self
+            .auth
+            .refresh(
+                &credentials.refresh_token,
+                resource,
+                &credentials.installation_id,
+                None,
+            )
+            .await
+        {
+            Ok(token) => token,
+            Err(error) => {
+                self.retire_refused_session(&error).await;
+                return Err(error);
+            }
+        };
+        credentials.refresh_token = token.refresh_token.clone();
+        self.vault.save(&credentials).await?;
+        self.volatile_tokens.lock().await.insert(
+            resource.to_string(),
+            CachedAccessToken {
+                token: token.access_token.clone(),
+                expires_at_unix: token.expires_at_unix,
+                scope: token.scope.clone(),
+            },
+        );
+        Ok(token.access_token)
     }
 
     async fn access_token_bound(
@@ -1561,6 +1655,7 @@ impl GatewayConnection {
     /// refresh-token expiry.
     pub async fn sign_out(&self) -> Result<()> {
         let _guard = self.token_motion.lock().await;
+        self.volatile_tokens.lock().await.clear();
         *self.attested.lock().await = AttestedTokens::default();
         if let Some(credentials) = self.vault.load().await? {
             self.revoke_stored(&credentials).await;

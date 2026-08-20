@@ -859,6 +859,9 @@ pub fn app(state: AppState) -> Router {
         ))
         .with_state(state.clone());
     let frame_state = state.clone();
+    let auth_discovery = Router::new()
+        .route("/auth/discovery", get(auth::discovery))
+        .with_state(state.clone());
 
     // Loopback-only + bearer token is the real gate. CORS names the origins
     // this app actually loads its frontend from rather than mirroring whatever
@@ -904,6 +907,7 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .merge(view_frames)
+        .merge(auth_discovery)
         .merge(api)
         // Inside CORS, so a foreign preflight is answered by the CORS layer's
         // own rejection rather than by a bare 403.
@@ -1943,17 +1947,10 @@ async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
             Ok(Arc::new(store))
         }
         Profile::SelfHost => {
-            let tokens = config.auth_tokens_file.as_deref().ok_or_else(|| {
-                AgentError::config(
-                    "refusing to open a shared store without a principal-naming \
-                     authenticator: self-host requires TIDEBREAK_AUTH_TOKENS_FILE \
-                     (format in the auth module docs)",
-                )
-            })?;
-            // Load and discard: boot proves the authenticator names someone
-            // before the shared store exists. State assembly re-loads the
-            // same file as the request path's credential map.
-            auth::TokenMap::load(tokens)?;
+            // Validate and discard: boot proves a principal-naming
+            // authenticator is configured before the shared store exists.
+            // State assembly constructs the live verifier used by requests.
+            auth::PrincipalAuthenticator::from_config(config)?;
             let store = tidebreak_core::DbStore::connect(&config.database_url()?).await?;
             Ok(Arc::new(store))
         }

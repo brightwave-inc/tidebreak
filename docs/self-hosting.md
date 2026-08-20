@@ -19,14 +19,15 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes three things about the server:
   binary must be built with tidebreak-server's `postgres` feature for the
   driver to exist at all.
 - **Every request must name a user.** The desktop profile's per-launch bearer
-  token authenticates nobody here; credentials come from an operator-managed
-  token file and resolve to a named principal carrying a role. Chats, projects,
-  documents, transcripts, and the event stream are owner-scoped to that
-  principal.
+  token authenticates nobody here. A hosted deployment validates short-lived
+  Model Gateway `tidebreak` resource tokens; a standalone deployment can use
+  the operator-managed token file. Both resolve to a named principal carrying
+  a role. Chats, projects, documents, transcripts, code workspaces, and event
+  streams are owner-scoped to that principal.
 - **Boot fails closed.** The server refuses to open the shared store unless
-  `TIDEBREAK_AUTH_TOKENS_FILE` is set and loads cleanly — a shared database
-  never comes up behind an API that cannot tell its callers apart, or that
-  nobody is empowered to configure.
+  exactly one of `TIDEBREAK_AUTH_GATEWAY_URL` or
+  `TIDEBREAK_AUTH_TOKENS_FILE` is valid — a shared database never comes up
+  behind an API that cannot tell its callers apart.
 
 The deployment posture is stated in
 [decision record 6](decisions/0006-self-host-deployment-plane-authorization.md):
@@ -46,9 +47,33 @@ and for what is still integration work.
 
 - Docker with Compose v2.
 - A machine that can reach your model provider's API.
-- Somewhere private to keep the tokens file and the database password.
+- Somewhere private to keep the database password, plus either a Model Gateway
+  installation or a standalone tokens file.
 
-## Generating tokens
+## Model Gateway identity (hosted default)
+
+Set `TIDEBREAK_AUTH_GATEWAY_URL` to the Model Gateway base URL. Tidebreak
+desktop's “Connect with Model Gateway” flow discovers this URL from the hosted
+machine, mints a short-lived `tidebreak` resource token from the OAuth session
+the app already holds, and refreshes it automatically.
+
+The hosted server asks the Gateway to resolve that token on every request.
+Active Gateway users become Tidebreak members, Gateway administrators become
+Tidebreak administrators, and the stable Gateway user UUID becomes the owner
+key. Deactivation, session revocation, and role changes require no Tidebreak
+roster update or token redistribution. If the Gateway cannot validate a token,
+the request is refused.
+
+Do not set `TIDEBREAK_AUTH_TOKENS_FILE` in this mode. Selecting both mechanisms
+is an ambiguous configuration and the server refuses to start.
+
+`TIDEBREAK_AUTH_GATEWAY_URL` must remain the public Gateway identity URL that
+the desktop is signed into. If the hosted server cannot reach that URL from its
+cluster, set `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` to a cluster-routable HTTPS
+URL. Only the server's principal checks use the override; `/auth/discovery`
+continues to publish the public URL.
+
+## Generating tokens for standalone compatibility
 
 The token file is the credential-to-principal map, and it is also where roles
 are managed — there is deliberately no UI for that. One line per token,
@@ -98,8 +123,9 @@ rejected alternatives, and what would make us revisit it are in
 
 ### What a member runs
 
-The member surface is the HTTP API and the `tidebreak` CLI pointed at the
-deployment. Give each teammate a token from the file above and a base URL:
+For the standalone token-file mode, the member surface is the HTTP API and the
+`tidebreak` CLI pointed at the deployment. Give each teammate a token from the
+file above and a base URL:
 
 ```sh
 export TIDEBREAK_SERVER_URL=https://tidebreak.example
@@ -112,11 +138,11 @@ cargo run -p tidebreak-cli -- --server "$TIDEBREAK_SERVER_URL" -p "summarize yes
 docs describe. A member token receives `403` on deployment-plane routes, which
 is the intended degradation — not a desktop Settings panel.
 
-The packaged desktop app is the local Desktop profile. It embeds its own
-server, uses a per-launch loopback token, and does not connect to a remote
-self-host deployment. A remote-server connection mode, or a hosted web UI
-served by the deployment, is parked — see
-[What comes after v1](deferred.md#a-client-for-self-host-teammates).
+The packaged desktop app still embeds its local Desktop-profile server, but it
+can attach its renderer to a remote self-host machine. For a Gateway-backed
+machine, Settings → Machine → “Connect with Model Gateway” reuses the app's
+managed Gateway session and stores no Tidebreak user token. “Connect with
+token” remains available for this standalone compatibility mode.
 
 Give `admin` only to the people who actually administer the deployment: MCP
 server definitions spawn processes on the host, and the provider credentials
@@ -138,7 +164,9 @@ aspirational.
 | --- | --- | --- | --- |
 | `TIDEBREAK_PROFILE` | yes | `desktop` | `self_host` (or `selfhost`) selects this profile. Anything else is desktop or a config error. |
 | `TIDEBREAK_DATABASE_URL` | yes (self-host) | — | PostgreSQL connection string for the shared store. |
-| `TIDEBREAK_AUTH_TOKENS_FILE` | yes (self-host) | — | Path to the token file above. Absent, boot fails before the store opens. |
+| `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | — | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
+| `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
+| `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
 | `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
 | `TIDEBREAK_MODEL` | no | built-in default | Default model name; also settable at runtime through settings or per chat. |
@@ -230,8 +258,9 @@ docker compose exec -T postgres pg_dump -U tidebreak tidebreak | gzip > tidebrea
 
 Restore into a fresh, empty database before starting the server against it.
 
-The tokens file and `.env` are not in either volume. Back them up separately,
-as secrets.
+The `.env` file is not in either volume. Back it up separately as a secret. In
+standalone compatibility mode, back up the tokens file too; Gateway-backed
+mode has no Tidebreak token file.
 
 ## Upgrading
 

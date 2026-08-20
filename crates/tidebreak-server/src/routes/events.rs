@@ -1,19 +1,48 @@
 //! Route handlers extracted from the parent `routes` module.
 
+use std::future::pending;
+use std::time::Duration;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use axum::Extension;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use tidebreak_core::{AgentEvent, ChatId, SequencedEvent, Store};
 
-use crate::auth::{offered_handshake_subprotocol, WS_HANDSHAKE_SUBPROTOCOL};
+use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
 use crate::event_projection::{RendererChatFrame, RendererChatMetadata, RendererSequencedEvent};
 use crate::extract::{Path, Query};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
+
+const GATEWAY_AUTH_REVALIDATION_INTERVAL: Duration = Duration::from_secs(60);
+
+pub(in crate::routes) fn gateway_auth_revalidation_timer(
+    lease: Option<&GatewayAuthLease>,
+) -> Option<Interval> {
+    lease.map(|_| {
+        let mut interval = tokio::time::interval_at(
+            Instant::now() + GATEWAY_AUTH_REVALIDATION_INTERVAL,
+            GATEWAY_AUTH_REVALIDATION_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval
+    })
+}
+
+pub(in crate::routes) async fn wait_for_gateway_auth_revalidation(timer: &mut Option<Interval>) {
+    match timer {
+        Some(timer) => {
+            timer.tick().await;
+        }
+        None => pending::<()>().await,
+    }
+}
 
 /// Query for `GET /chats/{id}/events`.
 #[derive(Debug, Deserialize)]
@@ -43,19 +72,28 @@ pub async fn chat_events(
     Path(id): Path<ChatId>,
     Query(query): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
+    auth_lease: Option<Extension<GatewayAuthLease>>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
     store.require_chat(id).await?;
+    let auth_lease = auth_lease.map(|Extension(lease)| lease);
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
     } else {
         upgrade
     };
-    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after)))
+    Ok(upgrade.on_upgrade(move |socket| stream_events(socket, state, id, query.after, auth_lease)))
 }
 
 /// Serve one client's event stream for `chat`: replay from the journal, then live.
-async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, after: i64) {
+async fn stream_events(
+    mut socket: WebSocket,
+    state: AppState,
+    chat: ChatId,
+    after: i64,
+    auth_lease: Option<GatewayAuthLease>,
+) {
+    let mut auth_revalidation = gateway_auth_revalidation_timer(auth_lease.as_ref());
     // Subscribe before replaying, so an event emitted during replay is buffered on
     // the live channel rather than lost in the gap between the two.
     let mut live = state.events.subscribe(chat);
@@ -104,6 +142,16 @@ async fn stream_events(mut socket: WebSocket, state: AppState, chat: ChatId, aft
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
+                let invalid = match auth_lease.as_ref() {
+                    Some(lease) => !lease.revalidate(&state).await,
+                    None => false,
+                };
+                if invalid {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
             },
             notice = metadata.recv() => match notice {
                 Ok(notice) => {

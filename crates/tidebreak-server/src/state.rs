@@ -193,10 +193,10 @@ pub struct AppState {
     /// Authenticates the local owner on the desktop profile; on self-host it
     /// names nobody and admits nobody.
     pub token: Arc<str>,
-    /// The self-host profile's named bearer tokens (credential → user).
-    /// Loaded from `Config::auth_tokens_file` at assembly; empty on desktop,
-    /// where `require_token` never consults it.
-    pub(crate) principal_tokens: Arc<crate::auth::TokenMap>,
+    /// The self-host profile's credential-to-principal verifier. Gateway mode
+    /// checks live account state; static-token mode remains for standalone
+    /// deployments. Desktop never consults it.
+    pub(crate) principal_authenticator: Arc<crate::auth::PrincipalAuthenticator>,
     /// A second per-launch secret required for native-only operations.
     pub(crate) client_executor_token: Arc<str>,
     /// A per-launch capability limited to publishing caller-supplied bytes.
@@ -361,19 +361,13 @@ impl AppState {
         // Resolve the profile's principal-naming credentials up front, so a
         // self-host server that could authenticate nobody fails assembly
         // instead of starting and rejecting every request.
-        let principal_tokens = match config.profile {
+        let principal_authenticator = match config.profile {
             Profile::SelfHost => {
-                let path = config.auth_tokens_file.as_deref().ok_or_else(|| {
-                    AgentError::config(
-                        "self-host requires TIDEBREAK_AUTH_TOKENS_FILE (named bearer tokens \
-                         mapping token to user; see the auth module docs)",
-                    )
-                })?;
-                Arc::new(crate::auth::TokenMap::load(path)?)
+                Arc::new(crate::auth::PrincipalAuthenticator::from_config(&config)?)
             }
             // Desktop (and any future single-user embedding) authenticates
             // with the per-launch bearer only.
-            _ => Arc::default(),
+            _ => Arc::new(crate::auth::PrincipalAuthenticator::None),
         };
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
         let blob_writes = Arc::new(BlobWriteGuard::new(config.data_dir.join("blob-locks")));
@@ -423,7 +417,7 @@ impl AppState {
             file_preview_permits: Arc::new(Semaphore::new(2)),
             agent_config,
             token: Uuid::new_v4().to_string().into(),
-            principal_tokens,
+            principal_authenticator,
             client_executor_token: mint_client_executor_token(),
             local_import_token: mint_local_import_token(),
             client_executor_id,

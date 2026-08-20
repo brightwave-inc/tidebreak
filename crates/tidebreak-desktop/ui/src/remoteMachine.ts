@@ -36,6 +36,18 @@ export async function connectRemoteMachine(
   return await invoke<RemoteMachineState>("connect_remote_machine", { baseUrl, token });
 }
 
+/** Attach using the Model Gateway session this desktop already holds. */
+export async function connectGatewayRemoteMachine(
+  baseUrl: string,
+): Promise<RemoteMachineState> {
+  return await invoke<RemoteMachineState>("connect_gateway_remote_machine", { baseUrl });
+}
+
+/** Mint or retrieve a fresh bearer for the currently attached machine. */
+export async function remoteMachineAccessToken(): Promise<string> {
+  return await invoke<string>("remote_machine_access_token");
+}
+
 /** Detach and forget the machine's token. */
 export async function disconnectRemoteMachine(): Promise<RemoteMachineState> {
   return await invoke<RemoteMachineState>("disconnect_remote_machine");
@@ -73,6 +85,8 @@ const CONNECT_COPY: Record<RemoteConnectReason, string> = {
     "Something answered at that address, but not a Tidebreak machine. Check the address.",
   remote_machine_token_storage_failed:
     "The token could not be saved to this computer's credential store. Nothing was changed.",
+  remote_machine_gateway_auth_unavailable:
+    "This machine is not connected to the same Model Gateway as this app. Sign in through that Gateway, or use a static token for a standalone machine.",
 };
 
 export function connectFailureMessage(error: RemoteConnectError): string {

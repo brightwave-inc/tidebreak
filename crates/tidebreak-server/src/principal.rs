@@ -58,12 +58,12 @@ pub enum Role {
 pub enum Principal {
     /// The one person at the machine, authenticated by the per-launch bearer.
     LocalOwner,
-    /// A named user on a shared deployment, resolved from a configured
-    /// credential (today the self-host token file — see [`crate::auth`]).
+    /// A named user on a shared deployment, resolved from live Model Gateway
+    /// identity or a standalone static token (see [`crate::auth`]).
     User {
         /// Who the credential names.
         id: UserId,
-        /// What the token file says they may reconfigure.
+        /// What the selected authenticator says they may reconfigure.
         role: Role,
     },
 }
