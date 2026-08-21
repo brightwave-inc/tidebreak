@@ -611,8 +611,12 @@ fn desktop_sibling_exe_from(exe: &Path, name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "current exe has no parent directory".to_string())?;
     let extension = cfg!(target_os = "windows").then_some(".exe").unwrap_or("");
     let path = exe_dir.join(format!("{name}{extension}"));
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("sibling exe {name} not found at {} ({error})", path.display()))?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        format!(
+            "sibling exe {name} not found at {} ({error})",
+            path.display()
+        )
+    })?;
     if !metadata.file_type().is_file() {
         return Err(format!("sibling exe {name} is not a regular file"));
     }
@@ -1061,9 +1065,11 @@ mod resource_dir_tests {
     fn desktop_sibling_exe_rejects_missing_file() {
         let dir = temp_dir("sibling-missing");
         let err = desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak")
-            .err()
-            .expect("should fail");
-        assert!(err.contains("not found"), "error should mention not found: {err}");
+            .expect_err("should fail");
+        assert!(
+            err.contains("not found"),
+            "error should mention not found: {err}"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1071,8 +1077,7 @@ mod resource_dir_tests {
     fn desktop_sibling_exe_rejects_path_traversal() {
         let dir = temp_dir("sibling-traversal");
         let err = desktop_sibling_exe_from(&desktop_path(&dir), "../tidebreak")
-            .err()
-            .expect("should fail");
+            .expect_err("should fail");
         assert!(err.contains("single file name"), "error: {err}");
         let _ = fs::remove_dir_all(dir);
     }
@@ -1084,8 +1089,7 @@ mod resource_dir_tests {
         let exe_path = sibling_path(&dir);
         fs::write(&exe_path, []).expect("write");
         let err = desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak")
-            .err()
-            .expect("should fail");
+            .expect_err("should fail");
         assert!(err.contains("not executable"), "error: {err}");
         let _ = fs::remove_dir_all(dir);
     }

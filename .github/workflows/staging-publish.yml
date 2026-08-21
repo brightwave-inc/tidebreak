@@ -505,14 +505,14 @@ jobs:
             exit 1
           }
 
-          broker_sidecar="$app_path/Contents/MacOS/tidebreak-host-broker"
-          [[ -x "$broker_sidecar" ]] || {
-            echo "Universal staging app is missing its executable host broker sidecar: $broker_sidecar" >&2
+          sidecar="$app_path/Contents/MacOS/tidebreak-host-broker"
+          [[ -x "$sidecar" ]] || {
+            echo "Universal staging app is missing its executable host broker sidecar: $sidecar" >&2
             exit 1
           }
-          broker_arches="$(lipo -archs "$broker_sidecar")"
-          [[ "$broker_arches" = *arm64* && "$broker_arches" = *x86_64* ]] || {
-            echo "Expected universal staging host broker, found Mach-O architectures: $broker_arches" >&2
+          sidecar_arches="$(lipo -archs "$sidecar")"
+          [[ "$sidecar_arches" = *arm64* && "$sidecar_arches" = *x86_64* ]] || {
+            echo "Expected universal staging host broker, found Mach-O architectures: $sidecar_arches" >&2
             exit 1
           }
 

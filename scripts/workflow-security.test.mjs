@@ -2115,8 +2115,8 @@ test("universal macOS release and staging packages contain both slices", () => {
     assert.match(job, /lipo -archs "\$app_path\/Contents\/MacOS\/\$executable"/);
     assert.match(job, /\$binary_arches" = \*arm64\*/);
     assert.match(job, /\$binary_arches" = \*x86_64\*/);
-    assert.match(job, /broker_sidecar="\$app_path\/Contents\/MacOS\/tidebreak-host-broker"/);
-    assert.match(job, /broker_arches="\$\(lipo -archs "\$broker_sidecar"\)"/);
+    assert.match(job, /sidecar="\$app_path\/Contents\/MacOS\/tidebreak-host-broker"/);
+    assert.match(job, /sidecar_arches="\$\(lipo -archs "\$sidecar"\)"/);
     assert.match(job, /cli_sidecar="\$app_path\/Contents\/MacOS\/tidebreak"/);
     assert.match(job, /cli_arches="\$\(lipo -archs "\$cli_sidecar"\)"/);
   }
