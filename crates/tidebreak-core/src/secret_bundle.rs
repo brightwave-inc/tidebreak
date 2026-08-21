@@ -35,10 +35,10 @@
 //! underneath is merged again rather than overwritten.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex as AsyncMutex;
+use futures::lock::Mutex as AsyncMutex;
 
 use crate::error::{AgentError, Result};
 use crate::storage::SecretProvider;
@@ -75,8 +75,10 @@ const WRITE_ATTEMPTS: usize = 3;
 /// attachment both wrap the same keychain service. Per-instance locking would
 /// let those two interleave a read-modify-write and lose a key.
 fn write_lock() -> &'static AsyncMutex<()> {
-    static LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
-    &LOCK
+    // `futures`, not `tokio`: this module is available in every feature
+    // configuration of the crate, and `tokio` is optional here.
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 /// What happened to one per-key item during
