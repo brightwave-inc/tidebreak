@@ -76,6 +76,18 @@ pub enum FenceReason {
         /// Bounded human-readable detail, as the engine reported it.
         detail: String,
     },
+    /// Consecutive turns failed without one succeeding between them.
+    ///
+    /// Whatever broke is not specific to a prompt — an expired credential,
+    /// a revoked key, an engine that cannot reach its provider — so the next
+    /// turn would fail the same way. Fencing offers a reap instead of a
+    /// session that reads idle and is not.
+    RepeatedTurnFailures {
+        /// How many turns failed in a row.
+        count: u32,
+        /// Bounded detail from the last failure, as the engine reported it.
+        detail: String,
+    },
 }
 
 /// Server-computed attention for one unit of supervised work.

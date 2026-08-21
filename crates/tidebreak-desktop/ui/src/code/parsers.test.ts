@@ -7,32 +7,33 @@ import {
   parseCodeCloneDefaults,
   parseCodeCloneJob,
   parseCodeCommit,
-  parseCodeEvent,
-  parseCodePush,
-  parseCodeSession,
-  parseCodeSessionList,
-  parseCodeSubscriptionUsage,
   parseCodeDeliveryActionResult,
   parseCodeDeliveryPullRequestDetail,
   parseCodeDeliveryPullRequestsPage,
   parseCodeDeliveryRepositories,
   parseCodeDeliveryRunDetail,
   parseCodeDeliveryRunsPage,
-  parseCodeUpdateNotice,
-  parseCodeWorktreeRoot,
+  parseCodeEvent,
+  parseCodePrComments,
+  parseCodePush,
+  parseCodeSession,
+  parseCodeSessionList,
+  parseCodeSubscriptionUsage,
   parseCodeTerminal,
   parseCodeTerminalList,
   parseCodeTerminalRead,
   parseCodeTurn,
   parseCodeTurnList,
   parseCodeTurnSubmission,
+  parseCodeUpdateNotice,
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspacePr,
   parseCodeWorkspaceSearch,
   parseCodeWorkspaceTree,
-  parseCodeWorkspacePr,
-  parseCodePrComments,
+  parseCodeWorktreeRoot,
+  parseFenceReason,
 } from "./parsers";
 
 const DELIVERY_CAPABILITY = {
@@ -1017,5 +1018,34 @@ describe("code delivery wire parsers", () => {
     expect(
       parseCodeDeliveryActionResult({ success: "yes", message: "done" }),
     ).toBeNull();
+  });
+});
+
+describe("parseFenceReason", () => {
+  it("accepts every reason the server can send", () => {
+    expect(parseFenceReason({ type: "orphan_alive" })).toEqual({
+      type: "orphan_alive",
+    });
+    expect(
+      parseFenceReason({ type: "resume_lost", detail: "gone" }),
+    ).toEqual({ type: "resume_lost", detail: "gone" });
+    // A session fenced for repeated failures used to fail this parse, and
+    // a null here drops the whole session from the list rather than just
+    // its badge.
+    expect(
+      parseFenceReason({
+        type: "repeated_turn_failures",
+        count: 3,
+        detail: "401",
+      }),
+    ).toEqual({ type: "repeated_turn_failures", count: 3, detail: "401" });
+  });
+
+  it("rejects a malformed reason", () => {
+    expect(parseFenceReason({ type: "repeated_turn_failures" })).toBeNull();
+    expect(
+      parseFenceReason({ type: "repeated_turn_failures", count: "3", detail: "x" }),
+    ).toBeNull();
+    expect(parseFenceReason({ type: "who_knows" })).toBeNull();
   });
 });
