@@ -567,8 +567,14 @@ pub(crate) async fn browser_wait(
             BrowserDispatchEffect::Observe,
             None,
             move || async move {
-                poll_wait_condition(app, dispatch_registry, capability_id, workspace_id, arguments)
-                    .await
+                poll_wait_condition(
+                    app,
+                    dispatch_registry,
+                    capability_id,
+                    workspace_id,
+                    arguments,
+                )
+                .await
             },
         )
         .await
@@ -613,7 +619,10 @@ async fn poll_wait_condition(
         };
 
         if *halt.borrow_and_update()
-            || snapshot.agent_access.as_ref().is_some_and(|access| access.halted)
+            || snapshot
+                .agent_access
+                .as_ref()
+                .is_some_and(|access| access.halted)
         {
             return Ok(wait_result(
                 &arguments.browser_id,
@@ -646,7 +655,10 @@ async fn poll_wait_condition(
             // authorized this wait are all still live.
             let final_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
             if *halt.borrow_and_update()
-                || final_snapshot.agent_access.as_ref().is_some_and(|access| access.halted)
+                || final_snapshot
+                    .agent_access
+                    .as_ref()
+                    .is_some_and(|access| access.halted)
             {
                 return Ok(wait_result(
                     &arguments.browser_id,
@@ -786,8 +798,14 @@ pub(crate) async fn browser_screenshot(
             BrowserDispatchEffect::Observe,
             None,
             move || async move {
-                capture_screenshot(app, dispatch_registry, capability_id, workspace_id, arguments)
-                    .await
+                capture_screenshot(
+                    app,
+                    dispatch_registry,
+                    capability_id,
+                    workspace_id,
+                    arguments,
+                )
+                .await
             },
         )
         .await
