@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   ArrowUpRight,
+  FileText,
   FolderOpen,
   Image as ImageIcon,
   Mic,
@@ -196,6 +197,25 @@ export type ComposerFiles = {
   onRemove: (documentId: string) => void;
 };
 
+/**
+ * A file that already sits in the agent's working directory.
+ *
+ * Nothing is uploaded and no document is created: the chip carries a path,
+ * and the surface names that path in the message it sends. Chat has no such
+ * files, so only code mode passes these.
+ */
+export type ComposerWorkspaceFile = {
+  /** Workspace-relative, which is what the engine is told to read. */
+  path: string;
+  /** One short line under the path — what the file holds, or how big it is. */
+  detail?: string;
+};
+
+export type ComposerWorkspaceFiles = {
+  items: readonly ComposerWorkspaceFile[];
+  onRemove: (path: string) => void;
+};
+
 export type ComposerFolders = {
   items: ChatFolderAccess[];
   /**
@@ -306,6 +326,8 @@ export type ComposerProps = {
   slash?: ComposerSlash;
   images?: ComposerImages;
   files?: ComposerFiles;
+  /** Paths the agent can already read, shown as chips and named on send. */
+  workspaceFiles?: ComposerWorkspaceFiles;
   folders?: ComposerFolders;
   /**
    * Workspace-relative paths `@` can insert as plain text. The parent fetches
@@ -352,6 +374,7 @@ export function Composer({
   slash,
   images,
   files,
+  workspaceFiles,
   folders,
   pathMentions,
   voice,
@@ -918,6 +941,20 @@ export function Composer({
           ))}
         </ul>
       )}
+      {workspaceFiles && workspaceFiles.items.length > 0 && (
+        <ul
+          className="m-0 flex list-none flex-wrap gap-2 p-0"
+          aria-label="Attached workspace files"
+        >
+          {workspaceFiles.items.map((file) => (
+            <WorkspaceFileChip
+              key={file.path}
+              file={file}
+              onRemove={() => workspaceFiles.onRemove(file.path)}
+            />
+          ))}
+        </ul>
+      )}
       {folderChips.length > 0 && folders && (
         <ul
           className="m-0 flex list-none flex-wrap gap-2 p-0"
@@ -1386,6 +1423,50 @@ function FileAttachmentChip({
         type="button"
         className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${file.displayName}`}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
+  );
+}
+
+/**
+ * One file the agent can already open, named by path.
+ *
+ * A path, not a thumbnail: the bytes are in the worktree before the turn
+ * starts, so the chip's job is to show the reader which file the message is
+ * about to point at, and to let them take it back off.
+ */
+function WorkspaceFileChip({
+  file,
+  onRemove,
+}: {
+  file: ComposerWorkspaceFile;
+  onRemove: () => void;
+}) {
+  const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+  const folder = file.path.slice(0, file.path.length - name.length - 1);
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <FileText className="size-4" aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong
+          className="max-w-[14rem] truncate text-xs font-semibold text-foreground"
+          title={file.path}
+        >
+          {name}
+        </strong>
+        <small className="max-w-[14rem] truncate text-[0.68rem]">
+          {file.detail ?? folder}
+        </small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        aria-label={`Remove ${name}`}
         onClick={onRemove}
       >
         <X size={14} aria-hidden="true" />

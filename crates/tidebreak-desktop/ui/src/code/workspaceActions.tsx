@@ -54,6 +54,8 @@ export type WorkspaceCommandId =
   | "toggle-terminal"
   | "pin-attention"
   | "clear-attention"
+  /** Handled by the workspace page, which owns the tab the fork opens into. */
+  | "fork-agent"
   | "run-quick-action"
   | "archive"
   | "force-archive"
@@ -136,6 +138,8 @@ export function workspaceHeaderCommands(input: {
   hasSession: boolean;
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
+  /** The shown agent has a transcript worth handing to a sibling. */
+  canFork?: boolean;
 }): WorkspaceCommand[] {
   const items: WorkspaceCommand[] = [{ id: "rename", label: "Rename…" }];
   if (input.hasSession) {
@@ -144,6 +148,9 @@ export function workspaceHeaderCommands(input: {
         ? { id: "clear-attention", label: "Clear attention" }
         : { id: "pin-attention", label: "Pin attention" },
     );
+    if (input.canFork) {
+      items.push({ id: "fork-agent", label: "Fork this agent" });
+    }
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
   }
   if (!input.archived) {

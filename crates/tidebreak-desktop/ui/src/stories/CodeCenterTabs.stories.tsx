@@ -61,6 +61,7 @@ function TabStrip({
         }}
         onNewConversation={region === "primary" ? fn() : undefined}
         onCloseConversation={fn()}
+        onForkConversation={fn()}
         onSelectEditor={(index) => {
           setChatFocused(false);
           setActive(index);
@@ -80,8 +81,7 @@ function TabStrip({
         region={region}
         browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
       />
-    </DndContext>
-  );
+    </DndContext>  );
 }
 
 const meta = {
@@ -134,6 +134,14 @@ export const ManyConversations: Story = {
       },
     ],
   },
+};
+
+/**
+ * Right-click an agent's tab to fork it: the transcript goes into the
+ * worktree and a new agent opens on it. A draft has nothing to fork yet.
+ */
+export const ForkFromTabMenu: Story = {
+  args: { conversations: MAIN_AGENT },
 };
 
 /** A new agent the reader has opened but not started: the one closable tab. */

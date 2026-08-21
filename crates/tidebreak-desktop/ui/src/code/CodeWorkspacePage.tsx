@@ -29,6 +29,7 @@ import type { ApiClient } from "../api/client";
 import type {
   Attention,
   CodeApprovalSnapshot,
+  CodeForkTranscript,
   CodePermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
@@ -118,6 +119,7 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
+import { FORK_FRAMING, forkTranscriptFile } from "./fork";
 import {
   useCodeUpdatesStore,
   useConversationDigests,
@@ -243,6 +245,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
    * has not heard of yet, and clearing it would drop a good link on reload.
    */
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  /**
+   * The transcript a fork wrote, waiting for the draft agent to send it.
+   *
+   * It survives an engine change and a rewritten framing line, and clears
+   * once a session starts or the reader closes the draft.
+   */
+  const [forkSource, setForkSource] = useState<CodeForkTranscript | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [quickOpenRequest, setQuickOpenRequest] = useState(0);
@@ -448,6 +457,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       setSessions((current) => [...current, created]);
       setActiveSessionId(created.id);
       setDraftAgent(false);
+      setForkSource(null);
       // The first agent stays at a clean URL; a sibling names itself so a
       // reload comes back to the tab the reader was on.
       if (conversations.length > 0) openWorkspaceTask(created.id);
@@ -484,6 +494,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         hasSession: Boolean(session),
         attentionPinned:
           (digest?.attention ?? session?.attention)?.state.type === "manual",
+        // A watch child is the harness's own run, not a conversation to
+        // continue, so only an interactive agent offers a fork.
+        canFork: session?.kind === "interactive",
         quickActions: repo?.quick_actions ?? [],
       })
     : [];
@@ -590,7 +603,27 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   /** Add a tab for an agent the reader has not filled in yet. */
   function newConversation() {
+    setForkSource(null);
     selectConversation(null);
+  }
+
+  /**
+   * Hand one agent's transcript to a fresh one.
+   *
+   * The server writes the file into the worktree, so the child reads it from
+   * its own working directory whatever engine it turns out to be. Nothing is
+   * sent here: the draft tab opens with the transcript attached and a framing
+   * line the reader edits first.
+   */
+  async function forkConversation(sessionId: string) {
+    try {
+      const written = await client.forkCodeSession(sessionId);
+      setForkSource(written);
+      selectConversation(null);
+      useCodeUiStore.getState().offerComposerPrompt(workspaceId, FORK_FRAMING);
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not fork this agent"));
+    }
   }
 
   /**
@@ -602,6 +635,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   function closeConversation(sessionId: string | null) {
     if (sessionId !== null) return;
     setDraftAgent(false);
+    setForkSource(null);
     const first = conversations[0];
     if (first) selectConversation(first.id);
     else setActiveSessionId(null);
@@ -791,6 +825,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onSelectConversation={selectConversation}
         onNewConversation={newConversation}
         onCloseConversation={closeConversation}
+        onForkConversation={(sessionId) => void forkConversation(sessionId)}
         onSelectEditor={(index) =>
           setWorkspaceLayout(focusEditorTab(layout, index, "primary"))
         }
@@ -880,6 +915,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   defaultModelKey={defaultModelKey}
                   onStart={(harness, mode, message, model) =>
                     startSession(harness, mode, message, model)
+                  }
+                  workspaceFiles={
+                    forkSource
+                      ? {
+                          items: [forkTranscriptFile(forkSource)],
+                          onRemove: () => setForkSource(null),
+                        }
+                      : undefined
                   }
                 />
               )}
@@ -1113,14 +1156,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 repoName: repoName ?? undefined,
                 worktreePath: workspace.worktree_path,
               }}
-              onCommand={(command) =>
+              onCommand={(command) => {
+                if (command.id === "fork-agent") {
+                  if (session) void forkConversation(session.id);
+                  return;
+                }
                 run(command.id, {
                   workspace,
                   title: title ?? workspace.title,
                   session: session ?? undefined,
                   actionName: command.actionName,
-                })
-              }
+                });
+              }}
             />
           ) : undefined
         }

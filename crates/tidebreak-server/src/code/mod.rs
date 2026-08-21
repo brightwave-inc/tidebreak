@@ -10,6 +10,7 @@ pub(crate) mod bus;
 pub(crate) mod checkpoint;
 pub(crate) mod clone;
 pub(crate) mod delivery;
+pub(crate) mod fork;
 pub(crate) mod gh;
 pub(crate) mod harness_install;
 pub(crate) mod recovery;
