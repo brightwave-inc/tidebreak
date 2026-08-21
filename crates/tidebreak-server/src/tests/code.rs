@@ -1955,6 +1955,55 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
 }
 
 #[tokio::test]
+async fn a_sibling_fenced_for_repeated_failures_does_not_close_the_workspace() {
+    // Repeated turn failures fence the session that hit them, but its engine
+    // answered every time — an expired credential, a refused prompt, a
+    // provider outage. No process is unaccounted for and the worktree is not
+    // at risk, so a healthy sibling keeps working. Only a fence that implies
+    // an engine outside our locks closes the workspace.
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+
+    let owner = tidebreak_core::OwnerId::local();
+    let fenced_id: CodeSessionId = ids[0].parse().unwrap();
+    let reason = FenceReason::RepeatedTurnFailures {
+        count: 3,
+        detail: "the provider refused three turns in a row".into(),
+    };
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, fenced_id)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Fenced;
+    row.fence_reason = Some(reason.clone());
+    row.attention = Attention::new(
+        AttentionState::Fenced { reason },
+        AttentionSource::Lifecycle,
+    );
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let accepted = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "while a sibling is fenced" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "a sibling fenced for repeated failures must not close the workspace: {}",
+        accepted.text().await.unwrap()
+    );
+}
+
+#[tokio::test]
 async fn a_workspace_still_holds_only_one_watch_session() {
     // Watch keeps its cap: the fix loop belongs to the workspace, not to one
     // agent, so a second one would double every push. Record 54 lifted the cap

@@ -90,6 +90,28 @@ pub enum FenceReason {
     },
 }
 
+impl FenceReason {
+    /// Whether this fence must also stop every other session in the workspace.
+    ///
+    /// True when an engine process may be writing to the shared worktree
+    /// outside every lock this process holds — an orphan from a previous
+    /// boot, a pid the probe could not identify, or a session the engine no
+    /// longer recognizes. Nothing in the workspace may write until a reap
+    /// settles it (decision 0055).
+    ///
+    /// False for [`Self::RepeatedTurnFailures`]. That fence says the engine
+    /// answered and the turns failed — an expired credential, a refused
+    /// prompt, a provider outage. The process is accounted for and the
+    /// worktree is not at risk, so a healthy sibling session keeps working.
+    #[must_use]
+    pub const fn blocks_workspace(&self) -> bool {
+        match self {
+            Self::OrphanAlive | Self::ProbeAmbiguous { .. } | Self::ResumeLost { .. } => true,
+            Self::RepeatedTurnFailures { .. } => false,
+        }
+    }
+}
+
 /// Server-computed attention for one unit of supervised work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
