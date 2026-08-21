@@ -540,6 +540,18 @@ pub(in crate::db) async fn claim_turn_run(
         ));
     }
 
+    // Idle fast path. A turn worker draws a fresh token for each poll, and an
+    // empty scan has no receipt to persist. Check exact-retry evidence and
+    // claimable work without taking SQLite's single writer; the locked scan
+    // below remains authoritative when any of them exists. A turn admitted
+    // after this hint is picked up by the worker wake or the next bounded poll.
+    if !any_turn_claim_work_on(&store.conn, lease_token, now).await? {
+        return Ok(ClaimTurnRunOutcome {
+            turn: None,
+            terminal_event: None,
+        });
+    }
+
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_turn_claim_write_lock(&transaction).await?;
@@ -583,27 +595,7 @@ pub(in crate::db) async fn claim_turn_run(
             });
         }
         let due = entities::turn_run::Entity::find()
-            .filter(
-                sea_orm::Condition::any()
-                    .add(entities::turn_run::Column::Status.eq(TurnRunStatus::Resuming.as_str()))
-                    .add(
-                        sea_orm::Condition::all()
-                            .add(entities::turn_run::Column::Status.is_in([
-                                TurnRunStatus::Queued.as_str(),
-                                TurnRunStatus::RetryWait.as_str(),
-                            ]))
-                            .add(
-                                sea_orm::sea_query::Expr::col(
-                                    entities::turn_run::Column::AttemptCount,
-                                )
-                                .lt(sea_orm::sea_query::Expr::col(
-                                    entities::turn_run::Column::MaxAttempts,
-                                )),
-                            ),
-                    ),
-            )
-            .filter(entities::turn_run::Column::AvailableAt.lte(now))
-            .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+            .filter(due_turn_candidate_condition(now))
             .order_by_asc(entities::turn_run::Column::AvailableAt)
             .order_by_asc(entities::turn_run::Column::CreatedAt)
             .order_by_asc(entities::turn_run::Column::Id)
@@ -611,12 +603,7 @@ pub(in crate::db) async fn claim_turn_run(
             .await
             .map_err(store_err)?;
         let expired = entities::turn_run::Entity::find()
-            .filter(entities::turn_run::Column::Status.is_in([
-                TurnRunStatus::Running.as_str(),
-                TurnRunStatus::Cancelling.as_str(),
-            ]))
-            .filter(entities::turn_run::Column::LeaseExpiresAt.lte(now))
-            .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+            .filter(expired_turn_candidate_condition(now))
             .order_by_asc(entities::turn_run::Column::LeaseExpiresAt)
             .order_by_asc(entities::turn_run::Column::CreatedAt)
             .order_by_asc(entities::turn_run::Column::Id)
@@ -990,6 +977,74 @@ pub(in crate::db) async fn claim_turn_run(
             terminal_event: None,
         });
     }
+}
+
+fn due_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(
+            sea_orm::Condition::any()
+                .add(entities::turn_run::Column::Status.eq(TurnRunStatus::Resuming.as_str()))
+                .add(
+                    sea_orm::Condition::all()
+                        .add(entities::turn_run::Column::Status.is_in([
+                            TurnRunStatus::Queued.as_str(),
+                            TurnRunStatus::RetryWait.as_str(),
+                        ]))
+                        .add(
+                            sea_orm::sea_query::Expr::col(entities::turn_run::Column::AttemptCount)
+                                .lt(sea_orm::sea_query::Expr::col(
+                                    entities::turn_run::Column::MaxAttempts,
+                                )),
+                        ),
+                ),
+        )
+        .add(entities::turn_run::Column::AvailableAt.lte(now))
+        .add(entities::turn_run::Column::UpdatedAt.lte(now))
+}
+
+fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(entities::turn_run::Column::Status.is_in([
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+        ]))
+        .add(entities::turn_run::Column::LeaseExpiresAt.lte(now))
+        .add(entities::turn_run::Column::UpdatedAt.lte(now))
+}
+
+async fn any_turn_claim_work_on<C>(
+    conn: &C,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    if entities::event::Entity::find()
+        .filter(entities::event::Column::ScanToken.eq(lease_token))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+        || entities::turn_claim::Entity::find_by_id(lease_token)
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .is_some()
+    {
+        return Ok(true);
+    }
+
+    Ok(entities::turn_run::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(due_turn_candidate_condition(now))
+                .add(expired_turn_candidate_condition(now)),
+        )
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some())
 }
 
 pub(in crate::db) async fn heartbeat_turn_run(
