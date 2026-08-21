@@ -21,11 +21,13 @@ use tidebreak_core::{
 /// Directory holding fork transcripts, relative to the worktree root.
 pub(crate) const FORKS_DIR: &str = ".tidebreak/forks";
 
-/// Largest transcript written, in bytes.
+/// Largest transcript written, in bytes. Bounds the whole file, header
+/// included.
 ///
 /// A long session can hold megabytes of assistant text. The child needs
 /// recent context far more than it needs the first turn, so the oldest turns
-/// are dropped to fit and the header says so.
+/// are dropped to fit and the header says so. One turn can be over the cap by
+/// itself, so that one is cut rather than written past it.
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 
 /// A written fork transcript, as the route reports it.
@@ -37,11 +39,18 @@ pub(crate) struct WrittenTranscript {
     pub(crate) byte_len: u64,
     /// Turns the file actually contains.
     pub(crate) turns: u32,
-    /// True when older turns were dropped to fit [`MAX_TRANSCRIPT_BYTES`].
+    /// True when anything was left out to fit [`MAX_TRANSCRIPT_BYTES`]:
+    /// older turns, or the end of a turn too large on its own.
     pub(crate) truncated: bool,
 }
 
 /// Render one session's transcript and write it under the worktree.
+///
+/// A session can be forked again over a file the last child is already
+/// reading, so the write is published by rename: a reader sees one whole
+/// version or another and never the middle of one. Each write stages its own
+/// sibling file, so two forks racing on one session cannot mix their bytes —
+/// the later rename simply wins.
 pub(crate) async fn write_transcript(
     worktree: &Path,
     session: &CodeSession,
@@ -53,13 +62,38 @@ pub(crate) async fn write_transcript(
     tokio::fs::create_dir_all(&dir).await?;
     ignore_scratch_dir(worktree).await?;
     let path = dir.join(format!("{}.md", session.id));
-    tokio::fs::write(&path, rendered.markdown.as_bytes()).await?;
+    publish(&path, rendered.markdown.as_bytes()).await?;
     Ok(WrittenTranscript {
         path: format!("{FORKS_DIR}/{}.md", session.id),
         byte_len: rendered.markdown.len() as u64,
         turns: rendered.turns,
         truncated: rendered.truncated,
     })
+}
+
+/// Put bytes at `path` in one step, leaving nothing behind if it fails.
+///
+/// The staged name carries a fresh id rather than a fixed `.part` suffix, so
+/// concurrent writers stage separately and neither can be caught writing over
+/// the other's half-written file.
+async fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("the transcript path names no file"))?;
+    let staged = path.with_file_name(format!(
+        "{}.{}.part",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let written = tokio::fs::write(&staged, bytes).await;
+    let published = match written {
+        Ok(()) => tokio::fs::rename(&staged, path).await,
+        Err(err) => Err(err),
+    };
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&staged).await;
+    }
+    published
 }
 
 /// Make `.tidebreak/` ignore itself.
@@ -85,6 +119,10 @@ struct RenderedTranscript {
 }
 
 /// Serialize a session as markdown, newest turns kept when it will not fit.
+///
+/// The result is never larger than [`MAX_TRANSCRIPT_BYTES`]. Turns are kept
+/// from the newest back; the header counts against the same budget, and a
+/// turn that is over the budget by itself is cut instead of overrunning it.
 fn render_transcript(
     session: &CodeSession,
     turns: &[CodeTurn],
@@ -96,27 +134,57 @@ fn render_transcript(
         sections.push(render_turn(turn, events, engine));
     }
 
+    // The header is part of the file, so it is part of the budget. Its length
+    // depends on how many turns are dropped, which is what the budget decides
+    // — so reserve the longest it can be, the one that drops every turn.
+    let reserved = header(session, turns.len(), turns.len(), engine).len();
+    let budget = MAX_TRANSCRIPT_BYTES.saturating_sub(reserved);
+
     // Budget from the end: the last turn is the one the child most needs.
+    // Each section costs the blank line that separates it, too.
     let mut kept = 0usize;
     let mut used = 0usize;
-    for section in sections.iter().rev() {
-        if used + section.len() > MAX_TRANSCRIPT_BYTES && kept > 0 {
-            break;
+    let mut clipped = false;
+    for section in sections.iter_mut().rev() {
+        if used + section.len() + 1 > budget {
+            if kept > 0 {
+                break;
+            }
+            // One turn is over the cap on its own. The child gets the start
+            // of it rather than a file that ignores the bound.
+            clip(section, budget.saturating_sub(1));
+            clipped = true;
         }
-        used += section.len();
+        used += section.len() + 1;
         kept += 1;
     }
     let dropped = sections.len() - kept;
 
-    let mut out = String::with_capacity(used + 512);
+    let mut out = String::with_capacity(reserved + used);
+    out.push_str(&header(session, turns.len(), dropped, engine));
+    for section in &sections[dropped..] {
+        out.push('\n');
+        out.push_str(section);
+    }
+
+    RenderedTranscript {
+        markdown: out,
+        turns: kept as u32,
+        truncated: dropped > 0 || clipped,
+    }
+}
+
+/// The file's opening: where the transcript came from, and what is missing.
+fn header(session: &CodeSession, total: usize, dropped: usize, engine: &str) -> String {
+    let mut out = String::new();
     let _ = writeln!(out, "# Transcript of a {engine} session");
     out.push('\n');
     let _ = writeln!(
         out,
         "Recorded from the session started {}. {} turn{}{}.",
         session.created_at.to_rfc3339(),
-        turns.len(),
-        if turns.len() == 1 { "" } else { "s" },
+        total,
+        if total == 1 { "" } else { "s" },
         if dropped > 0 {
             format!(", of which the {dropped} oldest are not included here")
         } else {
@@ -129,16 +197,26 @@ fn render_transcript(
          subagent did inside a `Task` call is summarized by that call rather \
          than transcribed.\n",
     );
+    out
+}
 
-    for section in &sections[dropped..] {
-        out.push('\n');
-        out.push_str(section);
+/// Cut a section to `budget` bytes, on a character boundary, and say so.
+///
+/// The head is what survives: it holds the heading and the ask, without which
+/// the section stops being readable markdown at all. Cutting from the front
+/// would save the engine's last words and lose the question they answer.
+fn clip(section: &mut String, budget: usize) {
+    const CUT: &str = "\n_(the rest of this turn was too large to include)_\n";
+    if section.len() <= budget {
+        return;
     }
-
-    RenderedTranscript {
-        markdown: out,
-        turns: kept as u32,
-        truncated: dropped > 0,
+    let mut end = budget.saturating_sub(CUT.len()).min(section.len());
+    while end > 0 && !section.is_char_boundary(end) {
+        end -= 1;
+    }
+    section.truncate(end);
+    if budget > CUT.len() {
+        section.push_str(CUT);
     }
 }
 
@@ -468,6 +546,126 @@ mod tests {
         assert!(rendered.markdown.contains("the 3 oldest are not included"));
         assert!(rendered.markdown.contains("## Turn 5 — you"));
         assert!(!rendered.markdown.contains("## Turn 1 — you"));
+    }
+
+    /// The cap bounds the file, not the turns inside it, so the header has to
+    /// come out of the same budget. Two turns that together sit just under it
+    /// leave no room for the paragraph saying where the transcript came from.
+    #[test]
+    fn counts_the_header_against_the_cap() {
+        let session = session();
+        let bulk = "x".repeat(MAX_TRANSCRIPT_BYTES / 2 - 40);
+        let turns: Vec<CodeTurn> = (1..=2)
+            .map(|ordinal| turn(session.id, ordinal, &bulk))
+            .collect();
+
+        let rendered = render_transcript(&session, &turns, &[]);
+        assert!(
+            rendered.markdown.len() <= MAX_TRANSCRIPT_BYTES,
+            "{} bytes is over the cap",
+            rendered.markdown.len()
+        );
+        assert_eq!(rendered.turns, 1);
+        assert!(rendered.truncated);
+    }
+
+    /// One turn can be larger than the whole budget on its own — a single ask
+    /// with a pasted log in it. Dropping turns cannot help there, so the turn
+    /// itself is cut, and the file says where.
+    #[test]
+    fn cuts_a_turn_that_is_over_the_cap_by_itself() {
+        let session = session();
+        let bulk = "x".repeat(MAX_TRANSCRIPT_BYTES * 2);
+        let only = turn(session.id, 1, &bulk);
+
+        let rendered = render_transcript(&session, &[only], &[]);
+        assert!(
+            rendered.markdown.len() <= MAX_TRANSCRIPT_BYTES,
+            "{} bytes is over the cap",
+            rendered.markdown.len()
+        );
+        assert_eq!(rendered.turns, 1);
+        assert!(rendered.truncated);
+        assert!(rendered.markdown.contains("## Turn 1 — you"));
+        assert!(rendered
+            .markdown
+            .contains("the rest of this turn was too large to include"));
+    }
+
+    /// Multi-byte text must not be cut through a character. A file the child
+    /// engine cannot decode is worse than one that stops early.
+    #[test]
+    fn cuts_on_a_character_boundary() {
+        let session = session();
+        let only = turn(session.id, 1, &"日".repeat(MAX_TRANSCRIPT_BYTES));
+
+        let rendered = render_transcript(&session, &[only], &[]);
+        assert!(rendered.markdown.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(rendered.truncated);
+        // Round-tripping through bytes proves nothing was cut mid-character:
+        // `String` would not hold it otherwise.
+        assert_eq!(
+            String::from_utf8(rendered.markdown.clone().into_bytes()).expect("valid utf-8"),
+            rendered.markdown
+        );
+    }
+
+    /// A session can be forked again while the last child still has the file
+    /// open. Every read has to land on a whole document, which is what the
+    /// stage-then-rename is for — a plain write truncates in place first.
+    #[tokio::test]
+    async fn a_reader_never_catches_a_re_fork_mid_write() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let worktree = tempfile::tempdir().expect("tempdir");
+        let session = session();
+        let short = vec![turn(session.id, 1, "hello")];
+        let long: Vec<CodeTurn> = (1..=20)
+            .map(|ordinal| turn(session.id, ordinal, &"x".repeat(8 * 1024)))
+            .collect();
+        write_transcript(worktree.path(), &session, &short, &[])
+            .await
+            .expect("first write");
+        let path = worktree
+            .path()
+            .join(format!("{FORKS_DIR}/{}.md", session.id));
+
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let path = path.clone();
+            let done = Arc::clone(&done);
+            tokio::task::spawn_blocking(move || {
+                let mut reads = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    let seen = std::fs::read_to_string(&path).expect("the file is always there");
+                    assert!(
+                        seen.starts_with("# Transcript of a Claude Code session"),
+                        "a reader caught {} bytes mid-write",
+                        seen.len()
+                    );
+                    reads += 1;
+                }
+                reads
+            })
+        };
+
+        for _ in 0..20 {
+            for turns in [&long, &short] {
+                write_transcript(worktree.path(), &session, turns, &[])
+                    .await
+                    .expect("re-fork");
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+        assert!(reader.await.expect("reader") > 0, "the reader never ran");
+
+        // Nothing staged is left behind for the child engine to trip over.
+        let left: Vec<String> = std::fs::read_dir(worktree.path().join(FORKS_DIR))
+            .expect("forks dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
+            .collect();
+        assert_eq!(left, vec![format!("{}.md", session.id)]);
     }
 
     /// The file has to be readable by the child engine and invisible to

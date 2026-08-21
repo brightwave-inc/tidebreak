@@ -304,7 +304,8 @@ pub struct CodeForkTranscript {
     pub path: String,
     pub byte_len: u64,
     pub turns: u32,
-    /// True when the oldest turns were dropped to fit the size cap.
+    /// True when anything was left out to fit the size cap: the oldest
+    /// turns, or the end of a turn too large on its own.
     pub truncated: bool,
 }
 

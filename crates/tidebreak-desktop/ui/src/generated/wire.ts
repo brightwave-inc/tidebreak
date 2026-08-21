@@ -1241,7 +1241,8 @@ export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: n
  */
 export type CodeForkTranscript = { path: string, byte_len: number, turns: number, 
 /**
- * True when the oldest turns were dropped to fit the size cap.
+ * True when anything was left out to fit the size cap: the oldest
+ * turns, or the end of a turn too large on its own.
  */
 truncated: boolean, };
 
