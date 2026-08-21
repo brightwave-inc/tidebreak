@@ -23,8 +23,8 @@ use axum::http::request::Parts;
 
 use tidebreak_core::{
     CodeApproval, CodeApprovalId, CodeApprovalState, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionId, CodeTurn, CodeTurnId, CodeWorkspace, Diffstat, HarnessKind, OwnerId, RepoId,
-    SequencedCodeEvent, WorkspaceId,
+    CodeSessionId, CodeTurn, CodeTurnId, CodeWorkspace, Diffstat, HarnessKind, OwnerId,
+    ReasoningEffort, RepoId, SequencedCodeEvent, WorkspaceId,
 };
 use tidebreak_harness::ApprovalDecision;
 
@@ -32,7 +32,7 @@ use super::checkpoint::ChangedFile;
 use super::clone::CloneRequest;
 use super::delivery;
 use super::gh::{self, ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
-use super::runtime::{CodeRuntime, RepoRegistration, SubmitTurnOutcome};
+use super::runtime::{CodeRuntime, NewSessionSettings, RepoRegistration, SubmitTurnOutcome};
 use super::worktree;
 use crate::error::ServerError;
 use crate::principal::AuthContext;
@@ -420,11 +420,10 @@ impl ScopedCode {
         &self,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
+        settings: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         self.runtime
-            .create_session(&self.owner, workspace_id, harness, permission_mode, model)
+            .create_session(&self.owner, workspace_id, harness, settings)
             .await
     }
 
@@ -474,10 +473,28 @@ impl ScopedCode {
         id: CodeSessionId,
         message: String,
         model: Option<String>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         self.runtime
-            .submit_turn(&self.owner, id, message, model, attachments)
+            .submit_turn(
+                &self.owner,
+                id,
+                message,
+                model,
+                reasoning_effort,
+                attachments,
+            )
+            .await
+    }
+
+    pub(crate) async fn set_reasoning_effort(
+        &self,
+        id: CodeSessionId,
+        effort: Option<ReasoningEffort>,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime
+            .set_reasoning_effort(&self.owner, id, effort)
             .await
     }
 

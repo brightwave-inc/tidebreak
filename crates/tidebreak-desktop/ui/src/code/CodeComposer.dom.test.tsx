@@ -242,7 +242,7 @@ describe("CodeComposer", () => {
     ).toBeInTheDocument();
   });
 
-  it("explains why the session permission mode cannot change", async () => {
+  it("explains why the permission mode cannot change without a handler", async () => {
     const user = userEvent.setup();
     renderComposer(
       <CodeComposer
@@ -259,6 +259,32 @@ describe("CodeComposer", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Set when the session started — start a new session to change it",
     );
+  });
+
+  /**
+   * A live session can re-posture: the engine takes the new mode on its own
+   * channel where it has one, and is relaunched where it does not.
+   */
+  it("changes the permission mode of a live session", async () => {
+    const user = userEvent.setup();
+    const onModeChange = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        availableModes={["plan", "ask", "auto"]}
+        sessionId="sess-1"
+        onModeChange={onModeChange}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Permissions: Ask" });
+    expect(trigger).toBeEnabled();
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitem", { name: /Auto/ }));
+    expect(onModeChange).toHaveBeenCalledWith("auto");
   });
 
   it("queues a follow-up written while a turn is running", async () => {
@@ -514,6 +540,7 @@ describe("CodeComposer", () => {
             reasoning_efforts: ["low", "medium", "high"],
           },
         ]}
+        onEffortChange={vi.fn()}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
@@ -524,6 +551,101 @@ describe("CodeComposer", () => {
     expect(
       model.compareDocumentPosition(effort) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  /**
+   * The session's own level labels the button, and picking one reports it. A
+   * control that only moved locally would claim a level the next turn does
+   * not run at.
+   */
+  it("labels reasoning effort from the session and reports a change", async () => {
+    const user = userEvent.setup();
+    const onEffortChange = vi.fn();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="codex"
+        model="gpt-5.4"
+        reasoningEffort="high"
+        modelOptions={[
+          {
+            id: "gpt-5.4",
+            label: "GPT-5.4",
+            source: "Codex CLI",
+            reasoning_efforts: ["low", "medium", "high", "xhigh", "ultra"],
+          },
+        ]}
+        onEffortChange={onEffortChange}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reasoning: High" }));
+    await user.click(screen.getByRole("menuitem", { name: /Ultra/ }));
+    expect(onEffortChange).toHaveBeenCalledWith("ultra");
+    expect(
+      screen.getByRole("button", { name: "Reasoning: Ultra" }),
+    ).toHaveAttribute("data-ultra", "on");
+  });
+
+  /**
+   * The treatment marks the top of whatever ladder is on offer, so an engine
+   * that stops at `xhigh` gets it there and nothing hard-codes `ultra`.
+   */
+  it("marks the top rung of a shorter ladder", () => {
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="grok"
+        model="grok-4.6"
+        reasoningEffort="xhigh"
+        modelOptions={[
+          {
+            id: "grok-4.6",
+            label: "Grok 4.6",
+            source: "Grok CLI",
+            reasoning_efforts: ["low", "medium", "high", "xhigh"],
+          },
+        ]}
+        onEffortChange={vi.fn()}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Reasoning: X-high" }),
+    ).toHaveAttribute("data-ultra", "on");
+  });
+
+  /**
+   * No handler means nothing would persist the choice, so the control stays
+   * hidden rather than offering a level the next turn would not run at.
+   */
+  it("hides reasoning effort when the caller cannot persist it", () => {
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="codex"
+        model="gpt-5.4"
+        modelOptions={[
+          {
+            id: "gpt-5.4",
+            label: "GPT-5.4",
+            source: "Codex CLI",
+            reasoning_efforts: ["low", "medium", "high"],
+          },
+        ]}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /Reasoning:/ })).toBeNull();
   });
 
   it("hides reasoning effort when the model accepts none", () => {
@@ -541,6 +663,7 @@ describe("CodeComposer", () => {
             reasoning_efforts: [],
           },
         ]}
+        onEffortChange={vi.fn()}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,

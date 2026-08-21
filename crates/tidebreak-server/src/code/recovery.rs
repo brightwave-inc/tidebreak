@@ -443,6 +443,7 @@ mod tests {
                 harness_resume_ref: None,
                 permission_mode: CodePermissionMode::Plan,
                 model: None,
+                reasoning_effort: None,
                 lifecycle,
                 fence_reason: None,
                 child_pid: pid,
@@ -626,6 +627,7 @@ mod tests {
             worktree: _dir.path().join("wt"),
             permission_mode: CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -650,6 +652,7 @@ mod tests {
             .send(crate::code::session_worker::WorkerCommand::RunTurn {
                 message: "hello".into(),
                 model: None,
+                reasoning_effort: None,
                 attachments: Vec::new(),
                 reply,
             })

@@ -27,7 +27,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::CodePermissionMode;
+use tidebreak_core::{CodePermissionMode, ReasoningEffort};
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -53,6 +53,70 @@ pub(crate) fn permission_mode_flags(mode: CodePermissionMode) -> Vec<String> {
             "--dangerously-skip-permissions".into(),
             "--allow-dangerously-skip-permissions".into(),
         ],
+    }
+}
+
+/// The keyword that turns ultracode on.
+///
+/// 2.1.234 exposes no flag for it: the engine scans a human-typed prompt for
+/// the word and, when dynamic workflows are available, spends the turn on
+/// multi-agent orchestration. A build where they are not just reads a stray
+/// word, so this degrades to plain `xhigh` on its own.
+pub(crate) const ULTRACODE_KEYWORD: &str = "ultracode";
+
+/// The level a turn actually runs at, already degraded to the engine's ladder.
+#[must_use]
+pub(crate) fn resolve_effort(effort: Option<ReasoningEffort>) -> Option<ReasoningEffort> {
+    effort.and_then(|level| level.clamp_to(crate::claude::EFFORT_LADDER))
+}
+
+/// `--effort` for a level. `Ultra` is ultracode, which the engine spells as
+/// `xhigh` plus [`ULTRACODE_KEYWORD`] in the prompt — see [`turn_text`].
+#[must_use]
+pub(crate) fn effort_flags(effort: Option<ReasoningEffort>) -> Vec<String> {
+    let Some(level) = resolve_effort(effort) else {
+        return Vec::new();
+    };
+    let token = match level {
+        ReasoningEffort::Ultra => ReasoningEffort::XHigh.as_str(),
+        other => other.as_str(),
+    };
+    vec!["--effort".into(), token.to_owned()]
+}
+
+/// The prompt as the engine receives it: the user's text, plus the ultracode
+/// keyword on its own line when the turn asked for that level.
+///
+/// Appending is the whole mechanism. A prompt that already says the word is
+/// left alone, so a user who typed it does not get it twice.
+#[must_use]
+pub(crate) fn turn_text(input: &TurnInput) -> String {
+    if resolve_effort(input.reasoning_effort) != Some(ReasoningEffort::Ultra)
+        || crate::text::contains_word(&input.text, ULTRACODE_KEYWORD)
+    {
+        return input.text.clone();
+    }
+    if input.text.trim().is_empty() {
+        return ULTRACODE_KEYWORD.to_owned();
+    }
+    format!("{}\n\n{ULTRACODE_KEYWORD}", input.text)
+}
+
+/// Claude Code's own token for a mode on the `set_permission_mode` control
+/// request, when the mode can be reached without relaunching.
+///
+/// `Allow` is absent on purpose. Its posture is
+/// `--dangerously-skip-permissions`, which the engine only accepts when the
+/// child was launched with `--allow-dangerously-skip-permissions` — and
+/// composing that flag on a session that did not choose Allow is exactly what
+/// decision 0033 forbids. Moving to or from Allow relaunches instead.
+#[must_use]
+pub(crate) fn live_mode_token(mode: CodePermissionMode) -> Option<&'static str> {
+    match mode {
+        CodePermissionMode::Plan => Some("plan"),
+        CodePermissionMode::Ask => Some("manual"),
+        CodePermissionMode::Auto => Some("acceptEdits"),
+        CodePermissionMode::Allow => None,
     }
 }
 
@@ -96,6 +160,17 @@ struct EngineChannel {
     /// Resolved model this child was launched with. `--model` is a launch
     /// flag, so a turn that asks for a different one needs a fresh child.
     model: Option<String>,
+    /// Resolved effort this child was launched with. `--effort` is a launch
+    /// flag too, and 2.1.234 has no control request that moves it.
+    effort: Option<ReasoningEffort>,
+    /// The mode this child is running under.
+    ///
+    /// Starts as what argv composed and moves with an accepted
+    /// `set_permission_mode`, which is what keeps [`ClaudeSession::ensure_channel`]
+    /// from retiring a child that already took the new mode. Only the launch
+    /// flags decide the bypass posture, and a live switch never crosses it —
+    /// see [`live_mode_token`] — so this can move without argv being wrong.
+    mode: Mutex<CodePermissionMode>,
 }
 
 impl EngineChannel {
@@ -162,6 +237,9 @@ struct TurnRead {
 /// Live Claude Code session: one child for the session lifetime.
 pub struct ClaudeSession {
     spec: SessionSpec,
+    /// The session's current permission mode, which a live switch moves.
+    /// `spec.permission_mode` is only what it started on.
+    permission_mode: Mutex<CodePermissionMode>,
     resume_ref: Mutex<Option<String>>,
     channel: AsyncMutex<Option<Arc<EngineChannel>>>,
     pid: ChildPid,
@@ -191,8 +269,10 @@ impl Drop for TurnGuard<'_> {
 impl ClaudeSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
+        let permission_mode = spec.permission_mode;
         Self {
             spec,
+            permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
             channel: AsyncMutex::new(None),
             pid: ChildPid::new(),
@@ -208,7 +288,21 @@ impl ClaudeSession {
         turn_model.or(self.spec.model.as_deref()).map(str::to_owned)
     }
 
-    fn compose_plan_for(&self, turn_model: Option<&str>) -> Result<LaunchPlan, HarnessError> {
+    /// The effort a turn actually runs at, already degraded to the ladder.
+    fn resolved_effort(&self, turn_effort: Option<ReasoningEffort>) -> Option<ReasoningEffort> {
+        resolve_effort(turn_effort.or(self.spec.reasoning_effort))
+    }
+
+    /// The mode in force right now.
+    fn permission_mode(&self) -> CodePermissionMode {
+        *self.permission_mode.lock().expect("claude permission mode")
+    }
+
+    fn compose_plan_for(
+        &self,
+        turn_model: Option<&str>,
+        turn_effort: Option<ReasoningEffort>,
+    ) -> Result<LaunchPlan, HarnessError> {
         // Prompt travels on stdin (`claude -p` with no prompt argument) so a
         // user message cannot trip the bypass-flag denylist. Every turn is a
         // stream-json user line on a stdin that stays open, which is what
@@ -224,11 +318,12 @@ impl ClaudeSession {
             "--input-format".into(),
             "stream-json".into(),
         ];
-        argv.extend(permission_mode_flags(self.spec.permission_mode));
+        argv.extend(permission_mode_flags(self.permission_mode()));
         if let Some(model) = self.resolved_model(turn_model) {
             argv.push("--model".into());
             argv.push(model);
         }
+        argv.extend(effort_flags(self.resolved_effort(turn_effort)));
         if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
@@ -247,13 +342,17 @@ impl ClaudeSession {
             cwd: self.spec.worktree.clone(),
             env,
         };
-        validate_launch_plan_with(&plan, bypass_policy(self.spec.permission_mode))?;
+        validate_launch_plan_with(&plan, bypass_policy(self.permission_mode()))?;
         Ok(plan)
     }
 
     /// Start a child for this session, resuming whatever ref the session holds.
-    fn spawn_child(&self, turn_model: Option<&str>) -> Result<Arc<EngineChannel>, HarnessError> {
-        let plan = self.compose_plan_for(turn_model)?;
+    fn spawn_child(
+        &self,
+        turn_model: Option<&str>,
+        turn_effort: Option<ReasoningEffort>,
+    ) -> Result<Arc<EngineChannel>, HarnessError> {
+        let plan = self.compose_plan_for(turn_model, turn_effort)?;
         let mut command = Command::new(&plan.argv[0]);
         command
             .args(&plan.argv[1..])
@@ -302,25 +401,34 @@ impl ClaudeSession {
             stderr: captured,
             stderr_task: Mutex::new(Some(stderr_task)),
             model: self.resolved_model(turn_model),
+            effort: self.resolved_effort(turn_effort),
+            mode: Mutex::new(self.permission_mode()),
         }))
     }
 
     /// The channel this turn runs on, and whether it was just spawned.
     ///
-    /// A child that has exited, or that was launched on a different model, is
-    /// retired here: the replacement resumes the session, so the turn the user
-    /// asked for still lands on their transcript.
+    /// A child that has exited, or that was launched on flags this turn no
+    /// longer matches, is retired here: the replacement resumes the session, so
+    /// the turn the user asked for still lands on their transcript.
+    ///
+    /// Model, effort, and the bypass posture are all launch flags. A mode
+    /// switch the control request already handled leaves the child's own mode
+    /// agreeing with the session, so only a move to or from `Allow` respawns.
     async fn ensure_channel(
         &self,
         turn_model: Option<&str>,
+        turn_effort: Option<ReasoningEffort>,
     ) -> Result<(Arc<EngineChannel>, bool), HarnessError> {
         let mut slot = self.channel.lock().await;
         if let Some(channel) = slot.as_ref() {
-            let same_model = channel.model == self.resolved_model(turn_model);
+            let same_flags = channel.model == self.resolved_model(turn_model)
+                && channel.effort == self.resolved_effort(turn_effort)
+                && *channel.mode.lock().expect("claude child mode") == self.permission_mode();
             // Probing reaps a child that has already exited, so never wait on
             // it again afterwards.
             let exited = channel.has_exited().await;
-            if same_model && !exited {
+            if same_flags && !exited {
                 return Ok((channel.clone(), false));
             }
             if let Some(channel) = slot.take() {
@@ -330,7 +438,7 @@ impl ClaudeSession {
             }
             self.pid.clear();
         }
-        let channel = self.spawn_child(turn_model)?;
+        let channel = self.spawn_child(turn_model, turn_effort)?;
         *slot = Some(channel.clone());
         Ok((channel, true))
     }
@@ -435,7 +543,9 @@ impl HarnessSession for ClaudeSession {
         let prompt = encode_turn_stdin(&input);
         let mut retried = false;
         let channel = loop {
-            let (channel, fresh) = self.ensure_channel(input.model.as_deref()).await?;
+            let (channel, fresh) = self
+                .ensure_channel(input.model.as_deref(), input.reasoning_effort)
+                .await?;
             match self.write_line(&channel, &prompt).await {
                 Ok(()) => break channel,
                 // A child that died between turns leaves a pipe that only
@@ -547,6 +657,51 @@ impl HarnessSession for ClaudeSession {
         Ok(())
     }
 
+    /// Re-posture a live child with the `set_permission_mode` control request.
+    ///
+    /// Cheap where it works: the child keeps its context, so the next turn
+    /// starts as fast as any other. It does not work for `Allow` — see
+    /// [`live_mode_token`] — and with no child up there is nothing to tell, so
+    /// both cases record the mode and let the next launch compose it.
+    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+        let current = self.permission_mode();
+        if current == mode {
+            return Ok(());
+        }
+        let (Some(token), Some(_)) = (live_mode_token(mode), live_mode_token(current)) else {
+            return Err(HarnessError::PermissionModeSwitchUnsupported);
+        };
+        // No child means no argv to disagree with: recording the mode is the
+        // whole switch, and the next spawn composes it.
+        let Some(channel) = self.channel.lock().await.clone() else {
+            *self.permission_mode.lock().expect("claude permission mode") = mode;
+            return Ok(());
+        };
+        let request_id = format!(
+            "tb-set-mode-{}",
+            self.next_control_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "set_permission_mode", "mode": token },
+        }))
+        .map_err(|err| HarnessError::Other(format!("encode set_permission_mode: {err}")))?;
+        line.push(b'\n');
+        // A child that will not take the request is a child the caller should
+        // replace, so report the refusal rather than record a mode the engine
+        // is not running under.
+        self.write_line(&channel, &line)
+            .await
+            .map_err(|_| HarnessError::PermissionModeSwitchUnsupported)?;
+        *self.permission_mode.lock().expect("claude permission mode") = mode;
+        // The child took the request, so it is no longer running the mode its
+        // argv named. Without this the next turn would read the disagreement
+        // as a stale child and respawn the one thing the switch just avoided.
+        *channel.mode.lock().expect("claude child mode") = mode;
+        Ok(())
+    }
+
     fn resume_ref(&self) -> Option<String> {
         self.resume_ref.lock().expect("claude resume").clone()
     }
@@ -620,11 +775,12 @@ where
 
 /// One stream-json user line per turn, on a stdin that stays open.
 pub(crate) fn encode_turn_stdin(input: &TurnInput) -> Vec<u8> {
+    let text = turn_text(input);
     let mut content = Vec::new();
-    if !input.text.is_empty() || input.images.is_empty() {
+    if !text.is_empty() || input.images.is_empty() {
         content.push(serde_json::json!({
             "type": "text",
-            "text": input.text,
+            "text": text,
         }));
     }
     for image in &input.images {
@@ -662,6 +818,7 @@ mod encode_tests {
         let encoded = encode_turn_stdin(&TurnInput {
             text: "hello".into(),
             model: None,
+            reasoning_effort: None,
             images: Vec::new(),
         });
         let line = String::from_utf8(encoded).unwrap();
@@ -679,6 +836,7 @@ mod encode_tests {
         let encoded = encode_turn_stdin(&TurnInput {
             text: "look".into(),
             model: None,
+            reasoning_effort: None,
             images: vec![TurnImage {
                 media_type: "image/png".into(),
                 bytes: b"pixels".to_vec(),
@@ -757,6 +915,7 @@ mod tests {
             worktree: worktree.to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -779,6 +938,7 @@ mod tests {
         TurnInput {
             text: text.into(),
             model: None,
+            reasoning_effort: None,
             images: Vec::new(),
         }
     }
@@ -789,6 +949,122 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// The engine takes `low..max` on `--effort`. `Ultra` is ultracode, which
+    /// it spells as `xhigh` plus the keyword — there is no flag.
+    #[test]
+    fn effort_flags_map_the_ladder_and_spell_ultra_as_xhigh() {
+        let flag = |level: Option<ReasoningEffort>| effort_flags(level).join(" ");
+        assert_eq!(flag(None), "");
+        assert_eq!(flag(Some(ReasoningEffort::Low)), "--effort low");
+        assert_eq!(flag(Some(ReasoningEffort::XHigh)), "--effort xhigh");
+        assert_eq!(flag(Some(ReasoningEffort::Max)), "--effort max");
+        assert_eq!(flag(Some(ReasoningEffort::Ultra)), "--effort xhigh");
+        // `none` is an OpenAI rung the engine has no equivalent for, so it
+        // degrades to the lowest level `--effort` does take.
+        assert_eq!(flag(Some(ReasoningEffort::None)), "--effort low");
+    }
+
+    #[test]
+    fn ultra_appends_the_ultracode_keyword_and_nothing_else_does() {
+        let with = |text: &str, level: Option<ReasoningEffort>| {
+            turn_text(&TurnInput {
+                text: text.into(),
+                model: None,
+                reasoning_effort: level,
+                images: Vec::new(),
+            })
+        };
+        assert_eq!(with("fix the bug", None), "fix the bug");
+        assert_eq!(
+            with("fix the bug", Some(ReasoningEffort::Max)),
+            "fix the bug"
+        );
+        assert_eq!(
+            with("fix the bug", Some(ReasoningEffort::Ultra)),
+            "fix the bug\n\nultracode"
+        );
+        // Already asked for by name: do not say it twice.
+        assert_eq!(
+            with("ultracode this", Some(ReasoningEffort::Ultra)),
+            "ultracode this"
+        );
+        // An image-only turn still carries the keyword.
+        assert_eq!(with("", Some(ReasoningEffort::Ultra)), "ultracode");
+    }
+
+    #[test]
+    fn effort_rides_argv_and_ultra_composes_xhigh() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = ClaudeSession::new(SessionSpec {
+            worktree: dir.path().to_path_buf(),
+            permission_mode: CodePermissionMode::Ask,
+            model: None,
+            reasoning_effort: Some(ReasoningEffort::Ultra),
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: None,
+            binary: PathBuf::from("/usr/bin/claude"),
+            sink: Arc::new(Discard),
+            browser: None,
+        });
+        let plan = session.compose_plan_for(None, None).unwrap();
+        let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
+        assert_eq!(plan.argv[index + 1], "xhigh");
+        // A turn-level level wins over the session's.
+        let plan = session
+            .compose_plan_for(None, Some(ReasoningEffort::Low))
+            .unwrap();
+        let index = plan.argv.iter().position(|arg| arg == "--effort").unwrap();
+        assert_eq!(plan.argv[index + 1], "low");
+    }
+
+    /// The control request reaches `plan`, `manual`, and `acceptEdits`.
+    /// `Allow` is the bypass flag, which only a fresh child can carry.
+    #[test]
+    fn a_live_switch_covers_every_mode_except_the_bypass() {
+        assert_eq!(live_mode_token(CodePermissionMode::Plan), Some("plan"));
+        assert_eq!(live_mode_token(CodePermissionMode::Ask), Some("manual"));
+        assert_eq!(
+            live_mode_token(CodePermissionMode::Auto),
+            Some("acceptEdits")
+        );
+        assert_eq!(live_mode_token(CodePermissionMode::Allow), None);
+    }
+
+    /// With no child up there is nothing to tell, so the mode is recorded and
+    /// the next launch composes it. Moving to `Allow` is refused whatever the
+    /// child's state, because its flags are decided at launch.
+    #[tokio::test]
+    async fn a_switch_without_a_child_is_recorded_for_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = session_with(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+        );
+        session
+            .set_permission_mode(CodePermissionMode::Auto)
+            .await
+            .unwrap();
+        let plan = session.compose_plan_for(None, None).unwrap();
+        let index = plan
+            .argv
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .unwrap();
+        assert_eq!(plan.argv[index + 1], "acceptEdits");
+
+        assert!(matches!(
+            session.set_permission_mode(CodePermissionMode::Allow).await,
+            Err(HarnessError::PermissionModeSwitchUnsupported)
+        ));
+        // Refused means unchanged: the session must not be left claiming a
+        // posture its argv would not compose.
+        assert_eq!(session.permission_mode(), CodePermissionMode::Auto);
     }
 
     #[test]
@@ -807,6 +1083,7 @@ mod tests {
             worktree: dir.path().to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -816,7 +1093,7 @@ mod tests {
             sink: Arc::new(Discard),
             browser: Some(browser),
         });
-        let plan = session.compose_plan_for(None).unwrap();
+        let plan = session.compose_plan_for(None, None).unwrap();
         assert_eq!(
             plan.argv
                 .iter()
@@ -858,6 +1135,7 @@ mod tests {
             worktree: dir.path().to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -867,13 +1145,62 @@ mod tests {
             sink: Arc::new(Discard),
             browser: None,
         });
-        let plan = session.compose_plan_for(None).unwrap();
+        let plan = session.compose_plan_for(None, None).unwrap();
         let index = plan
             .argv
             .iter()
             .position(|arg| arg == "--input-format")
             .expect("a session-long child reads stream-json input on every turn");
         assert_eq!(plan.argv[index + 1], "stream-json");
+    }
+
+    /// The point of the control request: a mode switch between turns keeps the
+    /// child, so the next turn does not pay for a respawn and a resume.
+    #[tokio::test]
+    async fn a_live_mode_switch_keeps_the_child_and_the_next_turn_lands_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("inbox.ndjson");
+        let binary = write_engine(
+            dir.path(),
+            &format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> {inbox}
+  case "$line" in
+    *control_request*) continue ;;
+  esac
+  printf '{{"type":"system","subtype":"init","session_id":"sess-1","claude_code_version":"2.1.238"}}\n'
+  printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-1","usage":{{"input_tokens":1,"output_tokens":1}}}}\n'
+done
+"#,
+                inbox = inbox.display()
+            ),
+        );
+        let session = session_with(binary, dir.path(), Arc::new(Discard));
+
+        session.run_turn(turn("first")).await.unwrap();
+        let pid = session.child_pid().expect("the child outlives its turn");
+
+        session
+            .set_permission_mode(CodePermissionMode::Auto)
+            .await
+            .unwrap();
+        session.run_turn(turn("second")).await.unwrap();
+
+        assert_eq!(
+            session.child_pid(),
+            Some(pid),
+            "the switch must not respawn the child"
+        );
+        let sent = read_lines(&inbox);
+        let modes: Vec<serde_json::Value> = sent
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value["type"] == "control_request")
+            .collect();
+        assert_eq!(modes.len(), 1, "one switch, one control request: {sent:?}");
+        assert_eq!(modes[0]["request"]["subtype"], "set_permission_mode");
+        assert_eq!(modes[0]["request"]["mode"], "acceptEdits");
     }
 
     /// A failing engine is indistinguishable from a finished one on stdout

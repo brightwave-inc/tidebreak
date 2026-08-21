@@ -708,6 +708,10 @@ export function ModelMenu({
  * "Off" rather than "None" for the lowest level, because the menu already has
  * a default: one means "do not reason", the other means "leave the provider's
  * own default alone".
+ *
+ * "Ultra" sits above "Max". No chat model accepts it — it exists for the code
+ * engines, which spell their own top rung differently (Codex `ultra`, Claude
+ * Code ultracode) and are given one name here.
  */
 const REASONING_EFFORT_SCALE: { value: ReasoningEffort; label: string }[] = [
   { value: "none", label: "Off" },
@@ -716,6 +720,7 @@ const REASONING_EFFORT_SCALE: { value: ReasoningEffort; label: string }[] = [
   { value: "high", label: "High" },
   { value: "xhigh", label: "X-high" },
   { value: "max", label: "Max" },
+  { value: "ultra", label: "Ultra" },
 ];
 
 const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =

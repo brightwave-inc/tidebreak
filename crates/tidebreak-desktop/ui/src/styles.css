@@ -145,6 +145,13 @@
   --code-block-ink: oklch(0.94 0.008 95);
   --code-block-border: oklch(0.19 0.01 285);
 
+  /* The top reasoning rung. Violet so it does not read as another selected
+     control next to the model and mode buttons. */
+  --ultra-ink: oklch(0.48 0.19 295);
+  --ultra-wash: oklch(0.96 0.03 295);
+  --ultra-wash-strong: oklch(0.93 0.05 295);
+  --ultra-edge: oklch(0.84 0.08 295);
+
   color-scheme: light;
   font-family: var(--sans);
   font-size: 14px;
@@ -258,6 +265,11 @@
   --code-block-bg: oklch(0.14 0.005 285);
   --code-block-ink: oklch(0.92 0.008 95);
   --code-block-border: oklch(0.28 0.008 285);
+
+  --ultra-ink: oklch(0.82 0.14 295);
+  --ultra-wash: oklch(0.32 0.06 295);
+  --ultra-wash-strong: oklch(0.38 0.08 295);
+  --ultra-edge: oklch(0.46 0.1 295);
 }
 
 @theme inline {

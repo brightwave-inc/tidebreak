@@ -951,6 +951,10 @@ pub fn app(state: AppState) -> Router {
             "/code/sessions/{id}/mode",
             post(routes::code::set_session_permission_mode),
         )
+        .route(
+            "/code/sessions/{id}/effort",
+            post(routes::code::set_session_reasoning_effort),
+        )
         .route("/code/sessions/{id}/fork", post(routes::code::fork_session))
         .route(
             "/code/sessions/{id}/debug",

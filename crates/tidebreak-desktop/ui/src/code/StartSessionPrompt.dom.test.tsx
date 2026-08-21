@@ -10,6 +10,8 @@ import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
+import type { ReasoningEffort } from "../api/types";
+import type { ParsedHarnessModel } from "./parsers";
 
 function app(): AppContextValue {
   return {
@@ -210,8 +212,14 @@ describe("StartSessionPrompt", () => {
       listCodeHarnessModels: vi.fn(async () => ({
         kind: "claude_code" as const,
         models: [
-          { id: "claude-opus-5", label: "Claude Opus 5", default: true },
+          {
+            id: "claude-opus-5",
+            label: "Claude Opus 5",
+            default: true,
+            reasoning_efforts: [],
+          },
         ],
+        reasoning_efforts: [],
       })),
     };
     await renderWithRouter(
@@ -247,7 +255,8 @@ describe("StartSessionPrompt", () => {
     const user = userEvent.setup();
     const codex = deferred<{
       kind: "codex";
-      models: { id: string; label: string; default: boolean }[];
+      models: ParsedHarnessModel[];
+      reasoning_efforts: ReasoningEffort[];
     }>();
     const client = {
       listCodeHarnessModels: vi.fn((kind: HarnessDoctorEntry["kind"]) =>
@@ -255,7 +264,15 @@ describe("StartSessionPrompt", () => {
           ? codex.promise
           : Promise.resolve({
               kind: "claude_code" as const,
-              models: [{ id: "sonnet", label: "Sonnet", default: true }],
+              models: [
+                {
+                  id: "sonnet",
+                  label: "Sonnet",
+                  default: true,
+                  reasoning_efforts: [],
+                },
+              ],
+              reasoning_efforts: [],
             }),
       ),
     };
@@ -289,7 +306,15 @@ describe("StartSessionPrompt", () => {
     await act(async () => {
       codex.resolve({
         kind: "codex",
-        models: [{ id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true }],
+        models: [
+          {
+            id: "gpt-5.6-luna",
+            label: "GPT 5.6 Luna",
+            default: true,
+            reasoning_efforts: [],
+          },
+        ],
+        reasoning_efforts: [],
       });
     });
     expect(

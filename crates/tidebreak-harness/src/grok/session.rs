@@ -22,7 +22,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::CodePermissionMode;
+use tidebreak_core::{CodePermissionMode, ReasoningEffort};
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -30,6 +30,9 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// Live Grok CLI session: one child per [`HarnessSession::run_turn`].
 pub struct GrokSession {
     spec: SessionSpec,
+    /// The session's current permission mode. Each turn is a fresh child, so
+    /// a switch is composed into the next launch and needs nothing else.
+    permission_mode: Mutex<CodePermissionMode>,
     resume_ref: Mutex<Option<String>>,
     version: String,
     child: AsyncMutex<Option<ProcessTreeChild>>,
@@ -44,8 +47,10 @@ pub struct GrokSession {
 impl GrokSession {
     pub(super) fn new(spec: SessionSpec, version: String) -> Self {
         let resume_ref = spec.resume_ref.clone();
+        let permission_mode = spec.permission_mode;
         Self {
             spec,
+            permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
             version,
             child: AsyncMutex::new(None),
@@ -59,6 +64,7 @@ impl GrokSession {
         &self,
         prompt_file: &Path,
         turn_model: Option<&str>,
+        turn_effort: Option<ReasoningEffort>,
     ) -> Result<LaunchPlan, HarnessError> {
         compose_print_plan(PrintLaunch {
             binary: &self.spec.binary,
@@ -67,9 +73,15 @@ impl GrokSession {
             extra_env: &self.spec.extra_env,
             resume_ref: self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
-            mode: self.spec.permission_mode,
+            mode: self.permission_mode(),
             model: turn_model.or(self.spec.model.as_deref()),
+            effort: turn_effort.or(self.spec.reasoning_effort),
         })
+    }
+
+    /// The mode in force right now.
+    fn permission_mode(&self) -> CodePermissionMode {
+        *self.permission_mode.lock().expect("grok permission mode")
     }
 }
 
@@ -83,6 +95,7 @@ pub(crate) struct PrintLaunch<'a> {
     pub prompt_file: &'a Path,
     pub mode: CodePermissionMode,
     pub model: Option<&'a str>,
+    pub effort: Option<ReasoningEffort>,
 }
 
 /// 1.0.4 honors Auto and Allow.
@@ -126,6 +139,15 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     if let Some(model) = launch.model {
         argv.push("--model".into());
         argv.push(model.to_owned());
+    }
+    // 1.0.4 refuses a level outside its own ladder by name, so degrade to the
+    // closest rung it takes rather than fail the turn on a hint.
+    if let Some(effort) = launch
+        .effort
+        .and_then(|level| level.clamp_to(crate::grok::EFFORT_LADDER))
+    {
+        argv.push("--reasoning-effort".into());
+        argv.push(effort.as_str().to_owned());
     }
     if let Some(resume) = launch.resume_ref {
         argv.push("--resume".into());
@@ -228,20 +250,21 @@ timed out, or stopped):\n\
 #[async_trait]
 impl HarnessSession for GrokSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        refuse_unhonored_mode(self.spec.permission_mode)?;
+        refuse_unhonored_mode(self.permission_mode())?;
         let prompt_text = if let Some(browser) = self.spec.browser.as_ref() {
             format!("{}{}", input.text, browser_instructions(browser)?)
         } else {
             input.text
         };
         let prompt_file = write_prompt_file(&prompt_text)?;
-        let plan = match self.compose_plan(&prompt_file, input.model.as_deref()) {
-            Ok(plan) => plan,
-            Err(err) => {
-                let _ = std::fs::remove_file(&prompt_file);
-                return Err(err);
-            }
-        };
+        let plan =
+            match self.compose_plan(&prompt_file, input.model.as_deref(), input.reasoning_effort) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    let _ = std::fs::remove_file(&prompt_file);
+                    return Err(err);
+                }
+            };
         let result = self.spawn_and_read(&plan).await;
         let _ = std::fs::remove_file(&prompt_file);
         result
@@ -264,6 +287,18 @@ impl HarnessSession for GrokSession {
         };
         let status = child.interrupt(INTERRUPT_GRACE).await?;
         self.finish_child(slot, Some(status));
+        Ok(())
+    }
+
+    /// Compose the new mode into the next child.
+    ///
+    /// Nothing to tell a live process: this adapter runs one child per turn,
+    /// so the switch is entirely a matter of what the next launch says. Modes
+    /// the engine cannot honor are refused here for the same reason launch
+    /// refuses them, rather than silently running the old posture.
+    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+        refuse_unhonored_mode(mode)?;
+        *self.permission_mode.lock().expect("grok permission mode") = mode;
         Ok(())
     }
 

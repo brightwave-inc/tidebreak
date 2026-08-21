@@ -22,7 +22,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::{CodePermissionMode, MAX_NOTICE_CHARS};
+use tidebreak_core::{CodePermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,6 +31,14 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// Live Codex session: one app-server child for the session lifetime.
 pub struct CodexSession {
     spec: SessionSpec,
+    /// The session's current permission mode. `turn/start` re-postures a
+    /// thread for "this turn and subsequent turns", so a switch lands here and
+    /// rides out on the next turn rather than relaunching the child.
+    permission_mode: Mutex<CodePermissionMode>,
+    /// Whether the mode has moved since the last turn told the engine about
+    /// it. The first turn on a fresh thread does not need to: `thread/start`
+    /// already carried the posture.
+    posture_unsent: AtomicBool,
     resume_ref: Mutex<Option<String>>,
     /// Whether a turn has actually run on this thread. Codex only writes the
     /// thread's rollout once a turn starts, so a thread id from
@@ -131,8 +139,13 @@ impl Drop for ControlRegistration<'_> {
 impl CodexSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
+        let permission_mode = spec.permission_mode;
         Self {
             spec,
+            permission_mode: Mutex::new(permission_mode),
+            // A resumed thread carries whatever posture it was last told, so
+            // state the mode on the first turn rather than assume it holds.
+            posture_unsent: AtomicBool::new(resume_ref.is_some()),
             resume_ref: Mutex::new(resume_ref),
             thread_ran_a_turn: AtomicBool::new(false),
             resume_lost: Mutex::new(None),
@@ -149,6 +162,22 @@ impl CodexSession {
             control_state_changed: Arc::new(Notify::new()),
             pending_approvals: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The mode in force right now.
+    fn permission_mode(&self) -> CodePermissionMode {
+        *self.permission_mode.lock().expect("codex permission mode")
+    }
+
+    /// The effort a turn runs at: the turn's own, else the session's.
+    ///
+    /// Not clamped here, unlike the adapters with a fixed ladder. Codex states
+    /// its ladder per model on `model/list` and validates the string against
+    /// that row, so the ladder this session's model takes is not something the
+    /// session knows — the picker offers only advertised rungs, and the engine
+    /// itself refuses one it does not.
+    fn resolved_effort(&self, turn_effort: Option<ReasoningEffort>) -> Option<ReasoningEffort> {
+        turn_effort.or(self.spec.reasoning_effort)
     }
 
     /// The detail of a lost resume observed on the stream, when any.
@@ -490,6 +519,21 @@ pub(crate) fn thread_start_policy(mode: CodePermissionMode) -> (&'static str, &'
     }
 }
 
+/// The same posture as [`thread_start_policy`], in the shape `turn/start`
+/// takes: `sandboxPolicy` is a tagged object there, not the plain mode string
+/// `thread/start` accepts. Both fields apply to this turn and every later one,
+/// which is what lets a mode switch land without a new child.
+#[must_use]
+pub(crate) fn turn_start_policy(mode: CodePermissionMode) -> (Value, &'static str) {
+    let (sandbox, approval) = thread_start_policy(mode);
+    let sandbox = match sandbox {
+        "read-only" => json!({ "type": "readOnly" }),
+        "danger-full-access" => json!({ "type": "dangerFullAccess" }),
+        _ => json!({ "type": "workspaceWrite" }),
+    };
+    (sandbox, approval)
+}
+
 /// Spawn the app-server child and complete initialize + thread/start|resume.
 pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessError> {
     let mut session = CodexSession::new(spec);
@@ -552,7 +596,7 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
         if let Some(resume) = session.resume_ref.lock().expect("codex resume").clone() {
             ("thread/resume", json!({ "threadId": resume }))
         } else {
-            let (sandbox, approval) = thread_start_policy(session.spec.permission_mode);
+            let (sandbox, approval) = thread_start_policy(session.permission_mode());
             let mut params = json!({
                 "cwd": session.spec.worktree,
                 "approvalPolicy": approval,
@@ -779,22 +823,39 @@ impl HarnessSession for CodexSession {
             return Err(HarnessError::Other("thread has no resume ref".into()));
         };
         self.begin_control_turn();
-        let id = match self
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{ "type": "text", "text": input.text }],
-                }),
-            )
-            .await
-        {
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": [{ "type": "text", "text": input.text }],
+        });
+        // Every override below applies to this turn and the ones after it, so
+        // a switch between turns needs no new child. State them only when they
+        // moved: an unchanged field re-sent each turn is noise the engine has
+        // to reconcile against the thread it already holds.
+        if let Some(model) = &input.model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = self.resolved_effort(input.reasoning_effort) {
+            params["effort"] = json!(effort.as_str());
+        }
+        let posture_unsent = self.posture_unsent.load(Ordering::SeqCst);
+        if posture_unsent {
+            let (sandbox, approval) = turn_start_policy(self.permission_mode());
+            params["sandboxPolicy"] = sandbox;
+            params["approvalPolicy"] = json!(approval);
+        }
+        let id = match self.request("turn/start", params).await {
             Ok(id) => id,
             Err(err) => {
+                // The posture rode on the request that failed, so it is still
+                // unsent. Clearing it here would leave the thread on its old
+                // one with nothing left to correct it.
                 self.abort_control_turn("the turn did not start");
                 return Err(err);
             }
         };
+        if posture_unsent {
+            self.posture_unsent.store(false, Ordering::SeqCst);
+        }
         let _ = id;
         // Long-lived child: its exit is a session-level failure, not a turn
         // outcome, and `read_until_terminal_turn` already errors on a stream
@@ -816,6 +877,20 @@ impl HarnessSession for CodexSession {
                 Err(err)
             }
         }
+    }
+
+    /// Record the new posture; the next `turn/start` carries it.
+    ///
+    /// `turn/start`'s `approvalPolicy` and `sandboxPolicy` are documented as
+    /// applying to this turn and subsequent turns, so this is the engine's own
+    /// channel for re-posturing a thread — the child and its context stay.
+    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+        if self.permission_mode() == mode {
+            return Ok(());
+        }
+        *self.permission_mode.lock().expect("codex permission mode") = mode;
+        self.posture_unsent.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
@@ -1314,6 +1389,7 @@ done
             worktree: PathBuf::from("."),
             permission_mode: CodePermissionMode::Auto,
             model: None,
+            reasoning_effort: None,
             resume_ref: Some("THREAD-1".into()),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -1363,6 +1439,7 @@ done
             worktree: dir.to_path_buf(),
             permission_mode: CodePermissionMode::Auto,
             model: None,
+            reasoning_effort: None,
             resume_ref,
             extra_argv: Vec::new(),
             extra_env: vec![(
@@ -1408,6 +1485,7 @@ done
             .run_turn(TurnInput {
                 text: "first turn".into(),
                 model: None,
+                reasoning_effort: None,
                 images: Vec::new(),
             })
             .await
@@ -1751,6 +1829,7 @@ done
                     .run_turn(TurnInput {
                         text: "first turn".into(),
                         model: None,
+                        reasoning_effort: None,
                         images: Vec::new(),
                     })
                     .await

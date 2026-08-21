@@ -1505,6 +1505,7 @@ mod tests {
             harness_resume_ref: None,
             permission_mode: CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Running,
             fence_reason: None,
             child_pid: None,

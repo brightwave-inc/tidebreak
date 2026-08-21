@@ -174,6 +174,9 @@ pub(super) fn code_session_table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(ColumnDef::new(CodeSession::Model).text())
+        // NULL means "leave the engine's own default alone", which is not
+        // the same as any level on the ladder.
+        .col(ColumnDef::new(CodeSession::ReasoningEffort).text())
         .col(ColumnDef::new(CodeSession::Lifecycle).text().not_null())
         .col(ColumnDef::new(CodeSession::FenceReason).json_binary())
         .col(ColumnDef::new(CodeSession::ChildPid).big_integer())
@@ -219,6 +222,12 @@ pub(super) fn code_session_table() -> TableCreateStatement {
         )
         .check(Expr::col(CodeSession::Kind).is_in(["interactive", "watch"]))
         .check(Expr::col(CodeSession::PermissionMode).is_in(["plan", "ask", "auto", "allow"]))
+        .check(
+            Expr::col(CodeSession::ReasoningEffort)
+                .is_null()
+                .or(Expr::col(CodeSession::ReasoningEffort)
+                    .is_in(["none", "low", "medium", "high", "xhigh", "max", "ultra"])),
+        )
         .check(Expr::col(CodeSession::SpawnEpoch).gte(0))
         .check(Expr::col(CodeSession::UnrecognizedEventCount).gte(0))
         .to_owned()

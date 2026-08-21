@@ -54,15 +54,32 @@ pub async fn list_harness_models(
         ));
     }
     let listed = adapter.list_models(&probe).await;
+    // An engine that states one ladder for every model says so directly. One
+    // that states a ladder per row — Codex — has no single answer, so the
+    // outer bound is the union of what its rows advertise.
+    let mut reasoning_efforts = adapter.reasoning_efforts(&probe);
+    if reasoning_efforts.is_empty() {
+        reasoning_efforts = listed
+            .iter()
+            .flat_map(|model| model.reasoning_efforts.iter().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
     let models = listed
         .into_iter()
         .map(|model| HarnessModel {
             id: model.id,
             label: model.label,
             default: model.default,
+            reasoning_efforts: model.reasoning_efforts,
         })
         .collect();
-    Ok(Json(HarnessModelList { kind, models }))
+    Ok(Json(HarnessModelList {
+        kind,
+        models,
+        reasoning_efforts,
+    }))
 }
 
 async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {

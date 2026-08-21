@@ -40,6 +40,7 @@ import type {
   HarnessKind,
   HarnessNoticeLevel,
   HarnessTier,
+  ReasoningEffort,
   SequencedCodeEventFrame,
   ToolDetail,
   ToolOutcome,
@@ -163,6 +164,15 @@ const PERMISSION_MODES = new Set<CodePermissionMode>([
   "ask",
   "auto",
   "allow",
+]);
+const REASONING_EFFORTS = new Set<ReasoningEffort>([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
 ]);
 const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "created",
@@ -1669,6 +1679,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "harness_resume_ref",
       "permission_mode",
       "model",
+      "reasoning_effort",
       "lifecycle",
       "fence_reason",
       "attention",
@@ -1682,6 +1693,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !optionalString(value.harness_version) ||
     !optionalString(value.harness_resume_ref) ||
     !optionalString(value.model) ||
+    (value.reasoning_effort !== undefined &&
+      !isMember(value.reasoning_effort, REASONING_EFFORTS)) ||
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
@@ -1713,6 +1726,9 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       ? { harness_resume_ref: value.harness_resume_ref }
       : {}),
     ...(value.model !== undefined ? { model: value.model } : {}),
+    ...(value.reasoning_effort !== undefined
+      ? { reasoning_effort: value.reasoning_effort as ReasoningEffort }
+      : {}),
     ...(fence_reason ? { fence_reason } : {}),
   };
 }
@@ -2166,9 +2182,27 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
   };
 }
 
+export type ParsedHarnessModel = {
+  id: string;
+  label: string;
+  default: boolean;
+  reasoning_efforts: ReasoningEffort[];
+};
+
+function parseEfforts(value: unknown): ReasoningEffort[] {
+  // A server that predates the field, or a level this build cannot label,
+  // narrows the offer rather than failing the whole list.
+  return Array.isArray(value)
+    ? value.filter((level): level is ReasoningEffort =>
+        isMember(level, REASONING_EFFORTS),
+      )
+    : [];
+}
+
 export function parseHarnessModelList(value: unknown): {
   kind: HarnessKind;
-  models: { id: string; label: string; default: boolean }[];
+  models: ParsedHarnessModel[];
+  reasoning_efforts: ReasoningEffort[];
 } | null {
   if (
     !isRecord(value) ||
@@ -2177,7 +2211,7 @@ export function parseHarnessModelList(value: unknown): {
   ) {
     return null;
   }
-  const models: { id: string; label: string; default: boolean }[] = [];
+  const models: ParsedHarnessModel[] = [];
   for (const item of value.models) {
     if (
       !isRecord(item) ||
@@ -2187,9 +2221,18 @@ export function parseHarnessModelList(value: unknown): {
     ) {
       return null;
     }
-    models.push({ id: item.id, label: item.label, default: item.default });
+    models.push({
+      id: item.id,
+      label: item.label,
+      default: item.default,
+      reasoning_efforts: parseEfforts(item.reasoning_efforts),
+    });
   }
-  return { kind: value.kind, models };
+  return {
+    kind: value.kind,
+    models,
+    reasoning_efforts: parseEfforts(value.reasoning_efforts),
+  };
 }
 
 export function parseHarnessDoctorReport(

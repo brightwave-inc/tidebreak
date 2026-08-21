@@ -20,7 +20,8 @@ use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace,
-    CodeWorkspaceStatus, DbStore, Diffstat, FenceReason, HarnessKind, OwnerId, RepoId, WorkspaceId,
+    CodeWorkspaceStatus, DbStore, Diffstat, FenceReason, HarnessKind, OwnerId, ReasoningEffort,
+    RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -181,6 +182,19 @@ pub(crate) struct CodeRuntime {
     /// than queued, because the next turn on a still-unnamed workspace retries
     /// anyway (`super::titling`).
     pub(super) titling_in_flight: Mutex<std::collections::HashSet<tidebreak_core::WorkspaceId>>,
+}
+
+/// What a new session starts on, beyond the engine it is bound to.
+///
+/// One value rather than three parameters: a caller sets all of them together,
+/// and the routes that move them mid-conversation move them one at a time
+/// against the same session row.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NewSessionSettings {
+    pub permission_mode: CodePermissionMode,
+    pub model: Option<String>,
+    /// `None` leaves the engine's own default in force.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl CodeRuntime {
@@ -1372,16 +1386,14 @@ impl CodeRuntime {
         owner: &OwnerId,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
+        settings: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         self.create_session_of_kind(
             owner,
             workspace_id,
             CodeSessionKind::Interactive,
             harness,
-            permission_mode,
-            model,
+            settings,
         )
         .await
     }
@@ -1398,8 +1410,11 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         kind: CodeSessionKind,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort,
+        }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
@@ -1473,6 +1488,7 @@ impl CodeRuntime {
             harness_resume_ref: None,
             permission_mode,
             model: normalize_model(model),
+            reasoning_effort,
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -1567,6 +1583,7 @@ impl CodeRuntime {
         id: CodeSessionId,
         message: String,
         model: Option<String>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let mut session = self.get_session(owner, id).await?;
@@ -1597,8 +1614,22 @@ impl CodeRuntime {
             }
         }
         let handle = self.require_worker(id)?;
+        // Both stick: a composer choice is the session's from here on, exactly
+        // as the engines' own pickers behave. The outer `Option` on effort is
+        // what lets a turn say "back to the engine default" rather than "no
+        // opinion" — the inner `None` is a real choice.
+        let mut changed = false;
         if let Some(model) = normalize_model(model) {
             session.model = Some(model);
+            changed = true;
+        }
+        if let Some(effort) = reasoning_effort {
+            if session.reasoning_effort != effort {
+                session.reasoning_effort = effort;
+                changed = true;
+            }
+        }
+        if changed {
             let _ = save_session(&self.db, &session).await?;
         }
         // A sibling fenced for an unaccounted engine — an orphan from a
@@ -1624,6 +1655,7 @@ impl CodeRuntime {
             .send(WorkerCommand::RunTurn {
                 message: message.clone(),
                 model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
                 attachments: attachments.clone(),
                 reply,
             })
@@ -1656,7 +1688,13 @@ impl CodeRuntime {
         message: String,
         attachments: Vec<tidebreak_core::CodeTurnAttachment>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        if !queue_follow_up(handle, message, session.model.clone(), attachments) {
+        if !queue_follow_up(
+            handle,
+            message,
+            session.model.clone(),
+            session.reasoning_effort,
+            attachments,
+        ) {
             return Err(ServerError::conflict_kind(
                 "queue_full",
                 "a follow-up is already queued on this session",
@@ -1853,6 +1891,21 @@ impl CodeRuntime {
         let caps = adapter.capabilities(&probe);
         refuse_unhonored_mode(session.harness_kind, mode, &caps)?;
 
+        // Ask the live engine first. Where it has a channel for this — Claude
+        // Code's `set_permission_mode` control request, Codex's per-turn
+        // policy fields — the child keeps its context and the switch costs
+        // nothing. An engine that fixes its posture at launch says so, and
+        // falls through to the relaunch below.
+        if self.repostured_in_place(id, mode).await? {
+            let mut session = self.get_session(owner, id).await?;
+            let previous = session.permission_mode;
+            session.permission_mode = mode;
+            save_session(&self.db, &session).await?;
+            self.note_permission_mode(owner, &session, previous, mode)
+                .await;
+            return Ok(session);
+        }
+
         let handle = self.workers.lock().expect("code workers").remove(&id);
         if let Some(handle) = handle {
             Self::shut_down_worker(id, handle).await;
@@ -1863,11 +1916,56 @@ impl CodeRuntime {
         let previous = session.permission_mode;
         session.permission_mode = mode;
         save_session(&self.db, &session).await?;
+        self.note_permission_mode(owner, &session, previous, mode)
+            .await;
+
+        self.attach_and_spawn_worker(session).await
+    }
+
+    /// Whether the live engine took the new mode on its own channel.
+    ///
+    /// `Ok(false)` means it cannot, and the caller relaunches. A session with
+    /// no worker is also `false`: there is nothing to re-posture, and the
+    /// relaunch path is what brings one up.
+    async fn repostured_in_place(
+        &self,
+        id: CodeSessionId,
+        mode: CodePermissionMode,
+    ) -> Result<bool, ServerError> {
+        let Ok(handle) = self.require_worker(id) else {
+            return Ok(false);
+        };
+        let (reply, rx) = oneshot::channel();
+        if handle
+            .commands
+            .send(WorkerCommand::SetPermissionMode { mode, reply })
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+        match rx.await {
+            Ok(Ok(())) => Ok(true),
+            Ok(Err(WorkerError::RelaunchRequired(_))) => Ok(false),
+            Ok(Err(err)) => Err(map_worker(err)),
+            // The worker went away mid-request. Relaunching is the repair.
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Journal a mode change so the transcript says when the posture moved.
+    async fn note_permission_mode(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
+        previous: CodePermissionMode,
+        mode: CodePermissionMode,
+    ) {
         let _ = super::session_worker::journal_event(
             &self.db,
             &self.bus,
             owner,
-            id,
+            session.id,
             session.spawn_epoch,
             CodeEvent::HarnessNotice {
                 level: tidebreak_core::HarnessNoticeLevel::Info,
@@ -1875,8 +1973,54 @@ impl CodeRuntime {
             },
         )
         .await;
+    }
 
-        self.attach_and_spawn_worker(session).await
+    /// Change a session's reasoning effort. `None` hands the level back to the
+    /// engine's own default.
+    ///
+    /// No relaunch and no engine call: every adapter reads the effort off the
+    /// turn, so persisting it is the whole switch. Refused mid-turn all the
+    /// same — a level that changed under a running turn would report a session
+    /// setting the turn did not run at.
+    pub(crate) async fn set_reasoning_effort(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        effort: Option<ReasoningEffort>,
+    ) -> Result<CodeSession, ServerError> {
+        let mut session = self.get_session(owner, id).await?;
+        if session.reasoning_effort == effort {
+            return Ok(session);
+        }
+        match session.lifecycle {
+            CodeSessionLifecycle::Running => {
+                return Err(ServerError::conflict_kind(
+                    "turn_running",
+                    "finish or interrupt the running turn before changing the reasoning effort",
+                ));
+            }
+            CodeSessionLifecycle::Ended => {
+                return Err(ServerError::conflict_kind(
+                    "session_ended",
+                    "this session has ended; start a new one to pick a different effort",
+                ));
+            }
+            _ => {}
+        }
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        if adapter.capabilities(&probe).reasoning_levels == CapLevel::Unsupported {
+            return Err(ServerError::unprocessable_kind(
+                "reasoning_effort_unsupported",
+                format!(
+                    "{harness} takes no reasoning effort",
+                    harness = session.harness_kind
+                ),
+            ));
+        }
+        session.reasoning_effort = effort;
+        save_session(&self.db, &session).await?;
+        Ok(session)
     }
 
     pub(crate) async fn set_attention(
@@ -2336,6 +2480,7 @@ impl CodeRuntime {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
             model: session.model.clone(),
+            reasoning_effort: session.reasoning_effort,
             resume_ref: session.harness_resume_ref.clone(),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -2719,6 +2864,12 @@ fn map_worker(err: WorkerError) -> ServerError {
         }
         WorkerError::SteeringRejected(message) => {
             ServerError::conflict_kind("steering_rejected", message)
+        }
+        // `set_permission_mode` intercepts this and relaunches, so reaching
+        // here means a caller asked the engine to re-posture without a
+        // fallback. Say what the caller has to do rather than 500.
+        WorkerError::RelaunchRequired(message) => {
+            ServerError::conflict_kind("relaunch_required", message)
         }
         WorkerError::Failed(message) => ServerError::internal(message),
         // `submit_turn` intercepts this and parks the message instead, so

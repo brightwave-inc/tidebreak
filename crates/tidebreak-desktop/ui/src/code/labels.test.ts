@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import type { ReasoningEffort } from "../api/types";
 import type { ModeCaps } from "./labels";
 import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
+  effortLadder,
   gatewayCodeModels,
   groupCodeModelOptions,
   harnessUnusableReason,
@@ -184,9 +186,30 @@ describe("gatewayCodeModels", () => {
         source: "Claude Code · model-gateway",
         vendor: "anthropic",
         default: true,
-        reasoning_efforts: [],
+        // No `reasoning_efforts`: the row's chat-catalog ladder is not the
+        // engine's, and a code session runs on the engine's.
       },
     ]);
+  });
+
+  it("falls back to the engine's ladder for a row that states none", () => {
+    const engine: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+    const row = (efforts?: ReasoningEffort[]) => ({
+      id: "m",
+      label: "M",
+      source: "s",
+      ...(efforts ? { reasoning_efforts: efforts } : {}),
+    });
+
+    // A gateway row carries no ladder of its own, so the engine's applies.
+    expect(effortLadder(row(), engine)).toEqual(engine);
+    expect(effortLadder(row([]), engine)).toEqual(engine);
+    // A row the engine listed itself narrows the offer: Codex advertises a
+    // different ladder per model, and only some rows reach the top rung.
+    expect(effortLadder(row(["low", "high"]), engine)).toEqual(["low", "high"]);
+    // An engine with no effort control at all offers nothing.
+    expect(effortLadder(row(), [])).toEqual([]);
+    expect(effortLadder(undefined, engine)).toEqual(engine);
   });
 
   it("confines a mixed gateway catalog to the harness's vendor", () => {

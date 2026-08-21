@@ -88,6 +88,7 @@ async fn seed_owner(
             harness_resume_ref: None,
             permission_mode: CodePermissionMode::Ask,
             model: None,
+            reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

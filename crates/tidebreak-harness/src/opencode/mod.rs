@@ -85,7 +85,9 @@ impl HarnessAdapter for OpencodeAdapter {
             auto_mode: CapLevel::Supported,
             // build agent with every permission rule allow; not `--auto`.
             allow_mode: CapLevel::Supported,
-            reasoning_levels: CapLevel::Unknown,
+            // 1.18.18 `--help` lists no effort or reasoning flag, and the
+            // server's session and prompt bodies carry no field for one.
+            reasoning_levels: CapLevel::Unsupported,
             // session.diff was empty arrays; file.edited was not seen.
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
@@ -332,7 +334,7 @@ mod tests {
         assert_eq!(caps.auto_mode, CapLevel::Supported);
         assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
-        assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
+        assert_eq!(caps.reasoning_levels, CapLevel::Unsupported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Unknown);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);

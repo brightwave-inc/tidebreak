@@ -29,9 +29,10 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
-    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
-    CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, ToolOutcome,
+    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodePermissionMode,
+    CodeSession, CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary,
+    CodeTurn, CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId,
+    ReasoningEffort, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -44,8 +45,13 @@ pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
         model: Option<String>,
+        reasoning_effort: Option<ReasoningEffort>,
         attachments: Vec<tidebreak_core::CodeTurnAttachment>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
+    },
+    SetPermissionMode {
+        mode: CodePermissionMode,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Decide {
         approval: HarnessApprovalRef,
@@ -75,6 +81,9 @@ pub(crate) enum WorkerError {
     SteeringUnavailable(String),
     #[error("{0}")]
     SteeringRejected(String),
+    /// The engine fixes its posture at launch, so the caller relaunches.
+    #[error("{0}")]
+    RelaunchRequired(String),
     #[error("{0}")]
     Failed(String),
     /// A sibling session holds the workspace's turn lock.
@@ -141,6 +150,7 @@ struct WorktreeTurn<'a> {
 pub(crate) struct QueuedFollowUp {
     pub message: String,
     pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 }
 
@@ -439,6 +449,7 @@ pub(crate) fn queue_follow_up(
     handle: &WorkerHandle,
     message: String,
     model: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
     attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 ) -> bool {
     let mut pending = handle.queue.pending.lock().expect("code turn queue");
@@ -448,6 +459,7 @@ pub(crate) fn queue_follow_up(
     *pending = Some(QueuedFollowUp {
         message,
         model,
+        reasoning_effort,
         attachments,
     });
     handle.queue.wake.notify_one();
@@ -486,6 +498,7 @@ async fn run_worker(
                 Some(WorkerCommand::RunTurn {
                     message,
                     model,
+                    reasoning_effort,
                     attachments,
                     reply,
                 }) => {
@@ -502,10 +515,21 @@ async fn run_worker(
                         QueuedFollowUp {
                             message,
                             model,
+                            reasoning_effort,
                             attachments,
                         },
                     )
                     .await;
+                    let _ = reply.send(result);
+                }
+                Some(WorkerCommand::SetPermissionMode { mode, reply }) => {
+                    let result = set_permission_mode(engine.as_ref(), mode).await;
+                    // The worker's own copy is what every later `persist_session`
+                    // writes, so a switch the engine accepted has to land here
+                    // too — otherwise the next turn writes the old mode back.
+                    if result.is_ok() {
+                        session.permission_mode = mode;
+                    }
                     let _ = reply.send(result);
                 }
                 Some(command) => {
@@ -576,9 +600,10 @@ async fn await_worktree_turn<'a>(
                     return None;
                 }
                 Some(WorkerCommand::Shutdown) | None => return None,
-                // There is no turn yet, so steering has nothing to steer and
-                // a second RunTurn is a conflict. `apply_control` answers both
-                // that way already.
+                // There is no turn yet, so steering has nothing to steer, a
+                // second RunTurn is a conflict, and a mode switch belongs to
+                // whichever loop owns the session row. `apply_control` answers
+                // all three that way already.
                 Some(command) => {
                     if apply_control(engine, command, None).await == ControlFlow::Shutdown {
                         return None;
@@ -660,7 +685,35 @@ async fn apply_control(
             )));
             ControlFlow::Continue
         }
+        // Only reachable mid-turn: the two idle loops answer this themselves,
+        // because accepting it means recording the new mode on the session
+        // copy they own. The route refuses a switch while a turn runs, so this
+        // says the same thing rather than re-posturing under a running turn.
+        WorkerCommand::SetPermissionMode { reply, .. } => {
+            let _ = reply.send(Err(WorkerError::Conflict(
+                "finish or interrupt the running turn before changing the permission mode".into(),
+            )));
+            ControlFlow::Continue
+        }
         WorkerCommand::Shutdown => ControlFlow::Shutdown,
+    }
+}
+
+/// Ask the engine to re-posture itself, translating a refusal into the one
+/// thing the caller can do about it.
+async fn set_permission_mode(
+    engine: &dyn HarnessSession,
+    mode: CodePermissionMode,
+) -> Result<(), WorkerError> {
+    match engine.set_permission_mode(mode).await {
+        Ok(()) => Ok(()),
+        Err(HarnessError::PermissionModeSwitchUnsupported) => Err(WorkerError::RelaunchRequired(
+            "this engine sets its permission mode at launch".into(),
+        )),
+        Err(HarnessError::PermissionModeUnsupported(mode)) => Err(WorkerError::Conflict(format!(
+            "this engine cannot honor {mode}"
+        ))),
+        Err(other) => Err(WorkerError::Failed(other.to_string())),
     }
 }
 
@@ -756,6 +809,7 @@ async fn drive_turn_inner(
     QueuedFollowUp {
         message,
         model,
+        reasoning_effort,
         attachments,
     }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
@@ -852,9 +906,18 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
+    // Adopt what the turn was sent with before anything persists this row.
+    // The route already wrote the session's choice; the worker's copy predates
+    // it, and every `persist_session` below writes the whole row — so without
+    // this the turn after a mid-conversation change reverts to the old one.
+    if let Some(model) = model {
+        session.model = Some(model);
+    }
+    session.reasoning_effort = reasoning_effort;
     let run = engine.run_turn(TurnInput {
         text: message,
-        model: model.or_else(|| session.model.clone()),
+        model: session.model.clone(),
+        reasoning_effort: session.reasoning_effort,
         images,
     });
     tokio::pin!(run);
@@ -1101,6 +1164,7 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::StaleTurn(_)) => "stale_turn",
         Err(WorkerError::SteeringUnavailable(_)) => "steering_unavailable",
         Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
+        Err(WorkerError::RelaunchRequired(_)) => "relaunch_required",
         Err(WorkerError::Failed(_)) => "error",
         Err(WorkerError::WorktreeBusy) => "worktree_busy",
     }
@@ -1756,6 +1820,7 @@ mod tests {
                 harness_resume_ref: None,
                 permission_mode: CodePermissionMode::Plan,
                 model: None,
+                reasoning_effort: None,
                 lifecycle: CodeSessionLifecycle::Running,
                 fence_reason: None,
                 child_pid: None,

@@ -763,7 +763,10 @@ fn gemini_thinking_level(effort: ReasoningEffort) -> &'static str {
         ReasoningEffort::None => "minimal",
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High | ReasoningEffort::XHigh | ReasoningEffort::Max => "high",
+        ReasoningEffort::High
+        | ReasoningEffort::XHigh
+        | ReasoningEffort::Max
+        | ReasoningEffort::Ultra => "high",
     }
 }
 

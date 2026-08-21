@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -23,6 +23,15 @@ use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The ladder `grok --reasoning-effort` takes on the pinned 1.0.4. The CLI
+/// names them itself when it refuses one, and it tops out below `max`.
+pub(crate) const EFFORT_LADDER: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
 
 /// Grok CLI adapter. Capabilities below are for the captured version
 /// 1.0.4: verified flags are `Supported`/`Unsupported`; anything not
@@ -97,6 +106,22 @@ impl HarnessAdapter for GrokAdapter {
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
         }
+    }
+
+    fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        EFFORT_LADDER.to_vec()
+    }
+
+    async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
+        let Some(binary) = probe.binary_path.as_deref() else {
+            return Vec::new();
+        };
+        crate::with_reasoning_efforts(
+            crate::prefer_gateway_models(
+                crate::list_cli_models(binary, &["models"], &probe.env).await,
+            ),
+            EFFORT_LADDER,
+        )
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
@@ -451,6 +476,7 @@ mod tests {
             prompt_file: Path::new("/tmp/prompt.txt"),
             mode: CodePermissionMode::Auto,
             model: None,
+            effort: None,
         })
         .unwrap();
         assert!(!plan.argv.iter().any(|arg| {
@@ -482,6 +508,7 @@ mod tests {
             prompt_file: Path::new("/tmp/prompt.txt"),
             mode: CodePermissionMode::Allow,
             model: None,
+            effort: None,
         })
         .unwrap();
         assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));

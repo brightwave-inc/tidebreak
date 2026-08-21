@@ -527,6 +527,7 @@ mod tests {
             harness_resume_ref: None,
             permission_mode: tidebreak_core::CodePermissionMode::Plan,
             model: None,
+            reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from "react";
-import { Check, ChevronDown, Gauge, Search } from "lucide-react";
+import { Check, ChevronDown, Gauge, Search, Sparkles } from "lucide-react";
 
 import type {
   CodePermissionMode,
@@ -38,6 +38,7 @@ import type { CodeTurnSubmission } from "./parsers";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
   codeModelVendor,
+  effortLadder,
   groupCodeModelOptions,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
@@ -45,6 +46,17 @@ import {
 } from "./labels";
 
 const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
+
+/**
+ * The look the top effort rung wears wherever it appears.
+ *
+ * Violet rather than the accent colour, so it reads as its own thing next to
+ * the model and mode buttons instead of as another selected control. The token
+ * itself lives in the theme; this is only where it is applied.
+ */
+const ULTRA_TRIGGER_CLASS =
+  "border border-[var(--ultra-edge)] bg-[var(--ultra-wash)] text-[var(--ultra-ink)] " +
+  "hover:bg-[var(--ultra-wash-strong)] hover:text-[var(--ultra-ink)]";
 const STEERING_UNAVAILABLE =
   "Redirect isn’t available for this harness. Choose Queue to send this after the response.";
 
@@ -368,12 +380,30 @@ export function HarnessModelMenu({
   );
 }
 
-/** Session-local effort, keyed like `session.model` when no PATCH route exists. */
-const sessionReasoningEffort = new Map<string, ReasoningEffort | null>();
+/**
+ * Whether a level is the top rung this engine and model offer.
+ *
+ * The top rung is not the same level everywhere — Codex reaches `ultra`,
+ * Claude Code's own picker calls its top ultracode, grok stops at `xhigh` —
+ * so the treatment below keys on position in the offered ladder rather than
+ * on one hard-coded name.
+ */
+function isTopEffort(
+  levels: readonly ReasoningEffort[],
+  value: ReasoningEffort | null,
+): boolean {
+  const options = reasoningEffortOptions(levels);
+  const top = options[options.length - 1]?.value;
+  return value !== null && top !== undefined && value === top;
+}
 
 /**
  * Composer-chrome effort picker. Chat's `ReasoningEffortSubMenu` is a tools
  * submenu; code wants the same levels sitting next to the model button.
+ *
+ * The top rung is styled apart from the rest. It is the one level that changes
+ * what a turn costs and how long it runs by more than a step, so the control
+ * says so while it is selected rather than reading like any other choice.
  */
 export function ReasoningEffortMenu({
   levels,
@@ -392,18 +422,28 @@ export function ReasoningEffortMenu({
   const label = isDefault
     ? "Default"
     : (reasoningEffortOptions([value])[0]?.label ?? "Default");
+  const topSelected = isTopEffort(levels, value);
+  const topValue = options[options.length - 1]?.value;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
           variant="ghost"
-          className="h-8 max-w-40 gap-2"
+          className={cn(
+            "h-8 max-w-40 gap-2",
+            topSelected && ULTRA_TRIGGER_CLASS,
+          )}
           disabled={disabled}
           aria-label={`Reasoning: ${label}`}
           title={`Reasoning: ${label}`}
+          data-ultra={topSelected ? "on" : undefined}
         >
-          <Gauge className="size-4" />
+          {topSelected ? (
+            <Sparkles className="size-4" />
+          ) : (
+            <Gauge className="size-4" />
+          )}
           <span className="truncate">{label}</span>
           <ChevronDown className="size-4 opacity-50" />
         </Button>
@@ -422,6 +462,7 @@ export function ReasoningEffortMenu({
         <DropdownMenuSeparator />
         {options.map((option) => {
           const selected = !isDefault && value === option.value;
+          const top = option.value === topValue;
           return (
             <DropdownMenuItem
               key={option.value}
@@ -429,8 +470,12 @@ export function ReasoningEffortMenu({
               onSelect={() => {
                 if (!selected) onChange(option.value);
               }}
-              className="flex items-center gap-2"
+              className={cn(
+                "flex items-center gap-2",
+                top && "text-[var(--ultra-ink)]",
+              )}
             >
+              {top && <Sparkles className="size-3.5" />}
               <span className="text-sm">{option.label}</span>
               {selected && <Check className="ml-auto size-4" />}
             </DropdownMenuItem>
@@ -455,8 +500,11 @@ export function CodeComposer({
   history,
   queued = false,
   lastTurnBeganId,
+  reasoningEffort = null,
+  engineEfforts = [],
   onModelChange,
   onModeChange,
+  onEffortChange,
   contextUsage,
   slashCommands,
   searchPaths,
@@ -487,8 +535,17 @@ export function CodeComposer({
    * the parked follow-up starts.
    */
   lastTurnBeganId?: string | null;
+  /** The session's stored level. `null` is the engine's own default. */
+  reasoningEffort?: ReasoningEffort | null;
+  /**
+   * The engine's own ladder, used for a model row that states none of its
+   * own — a gateway catalog row, or a model the engine no longer lists.
+   */
+  engineEfforts?: readonly ReasoningEffort[];
   onModelChange?: (model: string) => void;
   onModeChange?: (mode: CodePermissionMode) => void;
+  /** Absent hides the effort control, as an empty ladder does. */
+  onEffortChange?: (effort: ReasoningEffort | null) => void;
   /** Same meter as chat: the last turn's reading in the send cluster. */
   contextUsage?: ContextUsageReading | null;
   /**
@@ -521,8 +578,11 @@ export function CodeComposer({
   const composerPromptScope = promptScope ?? sessionId ?? "code";
   const [draft, setDraft] = useState("");
   const [selectedModel, setSelectedModel] = useState(model ?? "");
+  // Optimistic: the picker moves on click and the session row catches up when
+  // the route answers. A refusal is surfaced by the caller, which owns the
+  // request and re-renders this from the session it holds.
   const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(
-    () => (sessionId ? (sessionReasoningEffort.get(sessionId) ?? null) : null),
+    reasoningEffort,
   );
   const [notice, setNotice] = useState<{ text: string } | null>(null);
   const [followUpQueued, setFollowUpQueued] = useState(false);
@@ -546,7 +606,7 @@ export function CodeComposer({
     modelOptions?.find((option) => option.id === selectedModel) ??
     modelOptions?.find((option) => option.default) ??
     modelOptions?.[0];
-  const effortLevels = selectedOption?.reasoning_efforts ?? [];
+  const effortLevels = effortLadder(selectedOption, engineEfforts);
 
   const onPathQueryChange = useCallback((query: string | null) => {
     if (query === null || !searchPathsRef.current) {
@@ -614,10 +674,8 @@ export function CodeComposer({
   }, [model]);
 
   useEffect(() => {
-    setSelectedEffort(
-      sessionId ? (sessionReasoningEffort.get(sessionId) ?? null) : null,
-    );
-  }, [sessionId]);
+    setSelectedEffort(reasoningEffort);
+  }, [reasoningEffort, sessionId]);
 
   useEffect(() => {
     setFollowUpQueued(false);
@@ -790,13 +848,13 @@ export function CodeComposer({
           ) : undefined
         }
         effortMenu={
-          effortLevels.length > 0 ? (
+          effortLevels.length > 0 && onEffortChange ? (
             <ReasoningEffortMenu
               levels={effortLevels}
               value={selectedEffort}
               onChange={(next) => {
                 setSelectedEffort(next);
-                if (sessionId) sessionReasoningEffort.set(sessionId, next);
+                onEffortChange(next);
               }}
             />
           ) : undefined

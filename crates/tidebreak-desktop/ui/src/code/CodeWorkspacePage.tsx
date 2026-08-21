@@ -39,6 +39,7 @@ import type {
   CodeWorkspaceSnapshot,
   HarnessKind,
   ModelInfo,
+  ReasoningEffort,
 } from "../api/types";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
@@ -190,6 +191,12 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
     </RouteFrame>
   );
 }
+
+/**
+ * Stable empty ladder. A fresh `[]` per render is a new snapshot every time,
+ * and zustand v5 loops on referentially unstable selector results.
+ */
+const EMPTY_EFFORTS: readonly ReasoningEffort[] = [];
 
 function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client, models, defaultModelKey } = useApp();
@@ -1579,6 +1586,12 @@ function CodeSessionPane({
   const rememberHarnessModels = useCodeCatalogStore(
     (state) => state.rememberHarnessModels,
   );
+  // The ladder a code session runs on belongs to the engine, not to whichever
+  // catalog the model row came from.
+  const engineEfforts =
+    useCodeCatalogStore(
+      (state) => state.effortsByHarness[session.harness_kind],
+    ) ?? EMPTY_EFFORTS;
   const modelOptions = useMemo(() => {
     const gateway = gatewayCodeModels(
       catalogModels,
@@ -1611,20 +1624,31 @@ function CodeSessionPane({
   ]);
   const inferred = modelOptions.find((option) => option.default)?.id;
   const [model, setModel] = useState(session.model ?? inferred);
+  // The row the server last answered with, so the pickers follow a switch the
+  // route made rather than the list this page loaded the workspace with.
+  const [settings, setSettings] = useState({
+    permissionMode: session.permission_mode,
+    reasoningEffort: session.reasoning_effort ?? null,
+  });
 
   useEffect(() => {
     setModel(session.model ?? inferred);
   }, [inferred, session.model]);
 
   useEffect(() => {
-    if (
-      gatewayCodeModels(catalogModels, session.harness_kind, defaultModelKey)
-        .length > 0
-    ) {
-      return;
-    }
+    setSettings({
+      permissionMode: session.permission_mode,
+      reasoningEffort: session.reasoning_effort ?? null,
+    });
+  }, [session.id, session.permission_mode, session.reasoning_effort]);
+
+  useEffect(() => {
     // An empty list is a finished fetch: this engine advertised no models.
     // Treating [] as "not yet loaded" remembers a new [] forever.
+    //
+    // The fetch runs even when a gateway catalog already supplies the rows,
+    // because this route is also where the engine's effort ladder comes from
+    // and a gateway row carries the chat catalog's instead.
     if (cachedModels !== undefined) return;
     let cancelled = false;
     void client.listCodeHarnessModels(session.harness_kind).then(
@@ -1633,6 +1657,7 @@ function CodeSessionPane({
         rememberHarnessModels(
           session.harness_kind,
           harnessCodeModels(listed.models, session.harness_kind),
+          listed.reasoning_efforts,
         );
       },
       () => undefined,
@@ -1640,14 +1665,7 @@ function CodeSessionPane({
     return () => {
       cancelled = true;
     };
-  }, [
-    cachedModels,
-    catalogModels,
-    client,
-    defaultModelKey,
-    rememberHarnessModels,
-    session.harness_kind,
-  ]);
+  }, [cachedModels, client, rememberHarnessModels, session.harness_kind]);
   const doctorEntry = useCodeCatalogStore(
     (state) =>
       state.doctor?.harnesses.find(
@@ -1755,6 +1773,42 @@ function CodeSessionPane({
     });
   }
 
+  async function changePermissionMode(mode: CodePermissionMode) {
+    const previous = settings.permissionMode;
+    setSettings((current) => ({ ...current, permissionMode: mode }));
+    try {
+      const updated = await client.setCodeSessionPermissionMode(
+        session.id,
+        mode,
+      );
+      setSettings({
+        permissionMode: updated.permission_mode,
+        reasoningEffort: updated.reasoning_effort ?? null,
+      });
+    } catch (err) {
+      setSettings((current) => ({ ...current, permissionMode: previous }));
+      toast.error(friendlyErrorMessage(err, "Could not change the mode"));
+    }
+  }
+
+  async function changeReasoningEffort(effort: ReasoningEffort | null) {
+    const previous = settings.reasoningEffort;
+    setSettings((current) => ({ ...current, reasoningEffort: effort }));
+    try {
+      const updated = await client.setCodeSessionReasoningEffort(
+        session.id,
+        effort,
+      );
+      setSettings({
+        permissionMode: updated.permission_mode,
+        reasoningEffort: updated.reasoning_effort ?? null,
+      });
+    } catch (err) {
+      setSettings((current) => ({ ...current, reasoningEffort: previous }));
+      toast.error(friendlyErrorMessage(err, "Could not change the reasoning"));
+    }
+  }
+
   async function steer(message: string) {
     const expectedTurnId = store.getState().activeTurnId;
     if (!expectedTurnId) {
@@ -1831,8 +1885,10 @@ function CodeSessionPane({
         <CodeComposer
           running={busy || lifecycle === "running"}
           disabled={disabled}
-          permissionMode={session.permission_mode}
+          permissionMode={settings.permissionMode}
           availableModes={availableModes}
+          reasoningEffort={settings.reasoningEffort}
+          engineEfforts={engineEfforts}
           harness={session.harness_kind}
           model={model ?? undefined}
           modelOptions={modelOptions}
@@ -1850,6 +1906,12 @@ function CodeSessionPane({
           }
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
+          }
+          onModeChange={changePermissionMode}
+          onEffortChange={
+            doctorEntry?.caps.reasoning_levels === "unsupported"
+              ? undefined
+              : changeReasoningEffort
           }
           contextUsage={
             lastUsage

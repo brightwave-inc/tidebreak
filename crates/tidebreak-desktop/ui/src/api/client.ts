@@ -163,6 +163,7 @@ import {
   parseCodeWatch,
   parseCodePrComments,
   parseHarnessModelList,
+  type ParsedHarnessModel,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
   parseCodeUpdateNotice,
@@ -1987,7 +1988,8 @@ export class ApiClient {
 
   async listCodeHarnessModels(kind: HarnessKind): Promise<{
     kind: HarnessKind;
-    models: { id: string; label: string; default: boolean }[];
+    models: ParsedHarnessModel[];
+    reasoning_efforts: ReasoningEffort[];
   }> {
     return requireParsed(
       parseHarnessModelList(
@@ -2141,6 +2143,7 @@ export class ApiClient {
       harness: HarnessKind;
       permission_mode: CodePermissionMode;
       model?: string;
+      reasoning_effort?: ReasoningEffort;
     },
   ): Promise<CodeSessionSnapshot> {
     return requireParsed(
@@ -2185,6 +2188,12 @@ export class ApiClient {
     message: string,
     model?: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
+    /**
+     * Omit to leave the session's stored level alone. Pass `null` to hand the
+     * level back to the engine's own default — that is a choice, not an
+     * omission, so it cannot ride on `undefined`.
+     */
+    reasoningEffort?: ReasoningEffort | null,
   ): Promise<CodeTurnSubmission> {
     return requireParsed(
       parseCodeTurnSubmission(
@@ -2196,12 +2205,61 @@ export class ApiClient {
             body: JSON.stringify({
               message,
               ...(model ? { model } : {}),
+              ...(reasoningEffort !== undefined
+                ? { reasoning_effort: reasoningEffort }
+                : {}),
               ...(attachments && attachments.length > 0 ? { attachments } : {}),
             }),
           },
         ),
       ),
       "code turn",
+    );
+  }
+
+  /**
+   * Move a live session onto a different permission mode.
+   *
+   * The engine re-postures in place where it can and is relaunched where it
+   * cannot; either way the new mode governs from the next turn. Refused (409
+   * `turn_running`) while a turn is in flight.
+   */
+  async setCodeSessionPermissionMode(
+    sessionId: string,
+    permissionMode: CodePermissionMode,
+  ): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/mode`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ permission_mode: permissionMode }),
+          },
+        ),
+      ),
+      "code session",
+    );
+  }
+
+  /** Change a session's reasoning effort. `null` is the engine's own default. */
+  async setCodeSessionReasoningEffort(
+    sessionId: string,
+    reasoningEffort: ReasoningEffort | null,
+  ): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/effort`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ reasoning_effort: reasoningEffort }),
+          },
+        ),
+      ),
+      "code session",
     );
   }
 

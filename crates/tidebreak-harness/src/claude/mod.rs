@@ -6,7 +6,7 @@ pub mod parse;
 pub mod session;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
 
 use crate::claude::session::ClaudeSession;
 use crate::probe::{observe_version, probe_shell, HostEnv};
@@ -25,6 +25,23 @@ impl ClaudeCodeAdapter {
         Self
     }
 }
+
+/// The ladder `claude --effort` takes on the pinned 2.1.234, plus the rung the
+/// engine's own picker appends above it.
+///
+/// `--effort` itself accepts `low, medium, high, xhigh, max`. `Ultra` is
+/// ultracode, which Claude Code presents as the top of the same slider even
+/// though its effort is `xhigh`: the extra spend goes into multi-agent
+/// orchestration rather than a longer single thread. See
+/// [`session::effort_flags`] for how the two halves are composed.
+pub(crate) const EFFORT_LADDER: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+    ReasoningEffort::Ultra,
+];
 
 fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
@@ -56,6 +73,7 @@ fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
                 label: crate::display_model_label(id),
                 default: current == Some(id),
                 id: id.to_owned(),
+                reasoning_efforts: EFFORT_LADDER.to_vec(),
             });
         }
     }
@@ -67,6 +85,7 @@ fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
                     label: crate::display_model_label(current),
                     id: current.to_owned(),
                     default: true,
+                    reasoning_efforts: EFFORT_LADDER.to_vec(),
                 },
             );
         }
@@ -119,12 +138,17 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             plan_mode: CapLevel::Supported,
             auto_mode: CapLevel::Supported,
             allow_mode: CapLevel::Supported,
-            reasoning_levels: CapLevel::Unknown,
+            // `--effort` is documented on the pinned 2.1.234 `--help`.
+            reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unknown,
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Supported,
             slash_commands: CapLevel::Unknown,
         }
+    }
+
+    fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        EFFORT_LADDER.to_vec()
     }
 
     async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
@@ -457,7 +481,7 @@ mod tests {
         assert_eq!(caps.allow_mode, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unknown);
-        assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
+        assert_eq!(caps.reasoning_levels, CapLevel::Supported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Supported);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
