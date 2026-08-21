@@ -27,7 +27,7 @@
   {
     "type": "turn_completed",
     "usage": {
-      "input_tokens": 13959,
+      "input_tokens": 4999,
       "output_tokens": 7,
       "cache_read_input_tokens": 8960,
       "cache_creation_input_tokens": 0

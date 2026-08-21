@@ -55,13 +55,13 @@
 //! process owns that broker state — `serve`, or the engine `-p` embeds. See
 //! [`folder_executor`].
 //!
-//! `tidebreak browser list|navigate|snapshot --json` drive a running Tidebreak
-//! browser server through the session-private capability file named by
-//! `TIDEBREAK_BROWSER_CAPFILE`. These commands write JSON to stdout and errors
-//! to stderr, and they refuse `--server`/`--attach` since the browser server
-//! is reached exclusively through the capfile.
+//! `tidebreak browser list|navigate|snapshot|wait|screenshot --json` drive a
+//! running Tidebreak browser server through the session-private capability
+//! file named by `TIDEBREAK_BROWSER_CAPFILE`. These commands write JSON to
+//! stdout and errors to stderr, and they refuse `--server`/`--attach` since the
+//! browser server is reached exclusively through the capfile.
 //!
-//! `tidebreak browser-mcp` serves the same three browser operations over MCP
+//! `tidebreak browser-mcp` serves the same five browser operations over MCP
 //! stdio so any MCP-speaking host can observe and navigate browser sessions.
 //! See [`browser`].
 //!
@@ -152,6 +152,12 @@ usage: tidebreak serve
        tidebreak browser list --json
        tidebreak browser navigate --browser-id <id> --url <url> --json
        tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
+       tidebreak browser wait --browser-id <id> --snapshot-id <id> --document-epoch <n> \
+              (--url-changed | --load-state <idle|loading|ready> | \
+               --text-present <text> | --text-absent <text>) \
+              [--timeout-ms <ms>] --json
+       tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
+              --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
        tidebreak browser-mcp
 
        tidebreak folder connect <path> --chat <id> [--output-format text|json]

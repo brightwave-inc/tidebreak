@@ -40,9 +40,9 @@
   {
     "type": "turn_completed",
     "usage": {
-      "input_tokens": 14109,
-      "output_tokens": 5,
-      "cache_read_input_tokens": 13056,
+      "input_tokens": 6068,
+      "output_tokens": 114,
+      "cache_read_input_tokens": 22016,
       "cache_creation_input_tokens": 0
     }
   }
