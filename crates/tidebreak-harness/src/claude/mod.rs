@@ -1,6 +1,7 @@
 //! Claude Code adapter. Reference tier.
 
 pub mod approvals;
+pub mod browser;
 pub mod parse;
 pub mod session;
 
