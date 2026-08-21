@@ -825,6 +825,32 @@ async fn enqueue_retirement_despite_reference(store: &DbStore, blob_id: uuid::Uu
 }
 
 #[tokio::test]
+async fn empty_blob_retirement_poll_does_not_wait_for_sqlite_writer() {
+    let (_dir, store) = temp_store_with_max_connections(2).await;
+
+    // Hold SQLite's single writer with an unrelated transaction. An empty
+    // retirement scan is only a hint that no work exists, so it must remain a
+    // read and return without joining the writer queue.
+    let writer = store.conn.begin().await.unwrap();
+    writer
+        .execute_unprepared("UPDATE advisory_lock SET name = name WHERE name = 'turn_claim'")
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.claim_blob_retirement(now, now + chrono::Duration::minutes(5)),
+    )
+    .await
+    .expect("an empty retirement scan waited for SQLite's writer")
+    .unwrap();
+    assert!(claimed.is_none());
+
+    writer.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn every_reference_class_blocks_every_retirement_decision() {
     for class in ReferenceClass::ALL {
         let blob = DocumentBlob::from_bytes(b"bytes shared across reference classes");

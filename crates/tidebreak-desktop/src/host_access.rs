@@ -26,6 +26,8 @@ pub(crate) struct HostAccess {
     pub(super) output_writebacks: Mutex<()>,
     pub(super) root_changes: Mutex<()>,
     pub(super) computer_use: crate::client_execution::computer_use::ComputerUseState,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) foreground_browser: crate::client_execution::browser::ForegroundBrowserExecutorState,
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,
@@ -52,6 +54,8 @@ impl HostAccess {
             output_writebacks: Mutex::const_new(()),
             root_changes: Mutex::const_new(()),
             computer_use: crate::client_execution::computer_use::ComputerUseState::default(),
+            foreground_browser:
+                crate::client_execution::browser::ForegroundBrowserExecutorState::default(),
             store: OnceCell::new(),
             control_plane: OnceCell::new(),
             receipts,
@@ -497,6 +501,16 @@ pub(super) struct AuthoritativeContext {
     pub(super) chat_id: Uuid,
     pub(super) execution: ExecutionContext,
     pub(super) subject: GrantSubject,
+}
+
+impl AuthoritativeContext {
+    /// Browser workspace identity derived only after the persisted chat has
+    /// been loaded. This namespace cannot collide with code `WorkspaceId`
+    /// values, and no renderer or model field participates in its value.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) fn foreground_browser_scope(&self) -> String {
+        format!("foreground-chat:{}", self.chat_id)
+    }
 }
 
 fn authoritative_context(
@@ -1271,6 +1285,14 @@ mod tests {
         assert_eq!(standalone.execution.conversation_id(), chat_id);
         assert_eq!(standalone.execution.project_id(), None);
         assert_eq!(standalone.subject.id(), chat_id);
+        assert_eq!(
+            standalone.foreground_browser_scope(),
+            format!("foreground-chat:{chat_id}")
+        );
+        assert_ne!(
+            standalone.foreground_browser_scope(),
+            tidebreak_core::WorkspaceId::new().to_string()
+        );
 
         let project_id = Uuid::new_v4();
         let project = authoritative_context(chat_id, Some(project_id)).unwrap();

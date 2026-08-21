@@ -73,6 +73,18 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
     (dir, store)
 }
 
+async fn temp_store_with_max_connections(max_connections: u32) -> (tempfile::TempDir, DbStore) {
+    let template = migrated_sqlite_template().await;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("test.db");
+    std::fs::copy(&template.database, &database).unwrap();
+    let url = format!("sqlite://{}?mode=rw", database.display());
+    let mut options = sea_orm::ConnectOptions::new(url);
+    options.max_connections(max_connections);
+    let store = DbStore::connect_with_options(options).await.unwrap();
+    (dir, store)
+}
+
 /// A checkpoint the host expects an executor lane to run.
 fn dispatchable(call: &crate::model::SandboxToolCallRequest) -> SandboxToolCallParkEntry {
     SandboxToolCallParkEntry {
@@ -3504,6 +3516,37 @@ async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
             + store.list_messages(second_chat.id).await.unwrap().len(),
         1
     );
+}
+
+#[tokio::test]
+async fn empty_turn_claim_does_not_wait_for_sqlite_writer() {
+    let (_dir, store) = temp_store_with_max_connections(2).await;
+
+    // Hold SQLite's single writer with an unrelated transaction. A fresh scan
+    // with no turn to claim must remain read-only and leave the writer queue
+    // available for real work.
+    let writer = store.conn.begin().await.unwrap();
+    writer
+        .execute_unprepared("UPDATE advisory_lock SET name = name WHERE name = 'agent_run_claim'")
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        store.claim_turn_run(
+            uuid::Uuid::new_v4(),
+            now,
+            now + chrono::Duration::minutes(1),
+        ),
+    )
+    .await
+    .expect("an empty turn scan waited for SQLite's writer")
+    .unwrap();
+    assert!(outcome.turn.is_none());
+    assert!(outcome.terminal_event.is_none());
+
+    writer.rollback().await.unwrap();
 }
 
 #[tokio::test]

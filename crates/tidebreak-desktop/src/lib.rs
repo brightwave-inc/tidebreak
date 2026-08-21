@@ -973,7 +973,7 @@ async fn boot_server(
         browser_runtime,
         desktop_sibling_exe("tidebreak")?,
     );
-    let server = tidebreak_server::bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
+    let server = tidebreak_server::bind_configured_with_desktop_foreground_browser_executor(
         config,
         client_executor_id,
         folder_grants,
@@ -1034,6 +1034,16 @@ async fn boot_server(
     tauri::async_runtime::spawn(async move {
         client_execution::computer_use::recover_computer_use_operations(computer_use_app).await;
     });
+    #[cfg(target_os = "macos")]
+    {
+        let foreground_browser_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            client_execution::browser::recover_foreground_browser_operations(
+                foreground_browser_app,
+            )
+            .await;
+        });
+    }
     let output_writeback_app = app.clone();
     tauri::async_runtime::spawn(async move {
         client_execution::output_writeback::recover_output_writebacks(output_writeback_app).await;
