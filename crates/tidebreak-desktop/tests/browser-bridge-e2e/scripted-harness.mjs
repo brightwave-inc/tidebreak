@@ -12,8 +12,10 @@
 // untrusted. No assertion treats page content as instruction.
 
 import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -283,9 +285,9 @@ export function assertStatus(body, status, expectedStatus) {
 // ── fake launch: absolute command, no PATH ──────────────────────────────────
 
 /**
- * Simulate a provider adapter launching the browser bridge with an absolute
- * command and PATH stripped. Returns the capfile content that the bridge
- * would read from TIDEBREAK_BROWSER_CAPFILE.
+ * Launch a real child process through an absolute executable with PATH absent.
+ * The probe reads the capfile only through TIDEBREAK_BROWSER_CAPFILE and emits
+ * the same non-secret tool roster a browser MCP bridge exposes.
  *
  * This is the pure-Node equivalent of what Claude/Codex/OpenCode do:
  *   <absolute-tidebreak> browser-mcp
@@ -300,38 +302,74 @@ export function assertStatus(body, status, expectedStatus) {
  */
 export async function simulateAbsoluteLaunch({
   capfilePath,
-  command = "/opt/tidebreak/bin/tidebreak",
-  args = ["browser-mcp"],
+  command = process.execPath,
+  args = [fileURLToPath(import.meta.url), "browser-mcp-probe"],
 } = {}) {
-  if (!command.startsWith("/")) {
+  if (!isAbsolute(command)) {
     throw new Error(`command must be absolute, got: ${command}`);
   }
 
-  // Simulate stripped PATH
+  // Preserve the normal process environment except for every spelling of
+  // PATH. Windows treats environment keys case-insensitively.
   const env = { ...process.env };
-  delete env.PATH;
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path") delete env[key];
+  }
   env.TIDEBREAK_BROWSER_CAPFILE = capfilePath;
 
-  // Read the capfile (what the bridge would do)
+  // Read once in the parent only to verify that no secret escaped through the
+  // child process boundary.
   const { endpoint, token } = await readCapfile(capfilePath);
-
-  // Verify: token never in argv
+  const result = await runChild(command, args, env);
   const allArgv = [command, ...args].join(" ");
-  if (allArgv.includes(token)) {
-    throw new Error("token appears in simulated argv");
+  if (allArgv.includes(token) || result.stdout.includes(token) || result.stderr.includes(token)) {
+    throw new Error("token escaped through child process argv or output");
+  }
+  if (allArgv.includes(capfilePath)) {
+    throw new Error("capfile path escaped into child process argv");
+  }
+  if (result.code !== 0) {
+    throw new Error(`absolute launch failed (${result.code}): ${result.stderr}`);
   }
 
-  // Simulate what the bridge would print — the token must never appear
-  // in stdout or stderr content
-  const fakeStdout = JSON.stringify({
-    tools: BROWSER_TOOLS.map((name) => ({ name })),
+  const output = JSON.parse(result.stdout);
+  assertToolRegistry(output.tools);
+  if (output.endpoint !== endpoint) {
+    throw new Error("child read a different capfile endpoint");
+  }
+
+  return {
+    endpoint,
+    token,
+    command,
+    argv: [command, ...args],
+    stdout: result.stdout,
+    stderr: result.stderr,
+    envHasPath: Object.keys(env).some((key) => key.toLowerCase() === "path"),
+  };
+}
+
+function runChild(command, args, env) {
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(command, args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolveResult({ code, stdout, stderr });
+    });
   });
-
-  if (fakeStdout.includes(token)) {
-    throw new Error("token appears in simulated stdout");
-  }
-
-  return { endpoint, token, env };
 }
 
 // ── capfile on-disk protocol ────────────────────────────────────────────────
@@ -356,4 +394,25 @@ export async function writeCapfile(dir, endpointBase) {
   await writeFile(capfilePath, JSON.stringify(body), { mode: 0o600 });
 
   return { capfilePath, token };
+}
+
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
+if (
+  invokedPath === resolve(fileURLToPath(import.meta.url)) &&
+  process.argv[2] === "browser-mcp-probe"
+) {
+  try {
+    const capfilePath = process.env.TIDEBREAK_BROWSER_CAPFILE;
+    if (!capfilePath) throw new Error("TIDEBREAK_BROWSER_CAPFILE is required");
+    const { endpoint } = await readCapfile(capfilePath);
+    process.stdout.write(
+      JSON.stringify({
+        endpoint,
+        tools: BROWSER_TOOLS.map((name) => ({ name })),
+      })
+    );
+  } catch (error) {
+    process.stderr.write(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

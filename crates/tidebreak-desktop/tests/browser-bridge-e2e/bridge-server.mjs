@@ -155,18 +155,6 @@ export async function startBridgeServer({
         return;
       }
 
-      // 501 when runtime is missing (checked before auth, matching the
-      // real route layer: attached_runtime error is 501)
-      if (missingRuntime) {
-        errJson(
-          response,
-          501,
-          "not_implemented",
-          "this server has no in-app browser runtime"
-        );
-        return;
-      }
-
       const token = bearerToken(request.headers);
 
       // Missing token → 401
@@ -185,6 +173,18 @@ export async function startBridgeServer({
       // Ended session → 403
       if (tokenRegistry.isEnded(token)) {
         errJson(response, 403, "forbidden", "the browser session has ended");
+        return;
+      }
+
+      // Match the real route refusal ladder: authorize the capability first,
+      // then reveal whether a native runtime is attached.
+      if (missingRuntime) {
+        errJson(
+          response,
+          501,
+          "not_implemented",
+          "this server has no in-app browser runtime"
+        );
         return;
       }
 

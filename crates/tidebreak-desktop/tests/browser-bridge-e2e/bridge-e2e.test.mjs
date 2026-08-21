@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 
 import { startBrowserFixture } from "../browser-fixture/server.mjs";
 import { startBridgeServer, close } from "./bridge-server.mjs";
@@ -189,22 +189,23 @@ test("navigate and snapshot return camelCase shapes", async () => {
 
 // ── absolute command, no PATH ───────────────────────────────────────────────
 
-test("simulated launch uses absolute bridge command with PATH unavailable", async () => {
+test("absolute harness launch succeeds with PATH unavailable", async () => {
   const { capfilePath, token } = await writeCapfile(tmpDir, bridgeEndpoint);
 
   const result = await simulateAbsoluteLaunch({ capfilePath });
 
-  // PATH is stripped
-  assert.equal(result.env.PATH, undefined, "PATH must be stripped");
+  assert.equal(result.envHasPath, false, "PATH must be absent from the child environment");
+  assert.ok(isAbsolute(result.command), "the launched executable must be absolute");
+  assert.ok(!result.argv.includes(capfilePath), "capfile path must stay out of argv");
+  assert.ok(!result.stdout.includes(token), "token must stay out of stdout");
+  assert.ok(!result.stderr.includes(token), "token must stay out of stderr");
 
   // Capfile is readable via TIDEBREAK_BROWSER_CAPFILE
   const capfile = await readCapfile(capfilePath);
   assert.equal(capfile.token, token);
   assert.equal(capfile.endpoint, bridgeEndpoint);
 
-  // Token never appears in the simulated process args
-  const allArgs = ["/opt/tidebreak/bin/tidebreak", "browser-mcp"].join(" ");
-  assert.ok(!allArgs.includes(token), "token must not appear in argv");
+  assert.ok(!result.argv.join(" ").includes(token), "token must not appear in argv");
 });
 
 test("token never appears in capfile path", async () => {
@@ -281,6 +282,29 @@ test("missing runtime returns 501", async () => {
       JSON.stringify(result.body),
       /no in-app browser runtime/i
     );
+  } finally {
+    await close(noRuntime.server);
+  }
+});
+
+test("browser capability auth runs before missing-runtime disclosure", async () => {
+  const noRuntime = await startBridgeServer({
+    port: 0,
+    fixtureOrigin: fixture.origin,
+    missingRuntime: true,
+  });
+
+  try {
+    const missing = await fetch(`${noRuntime.endpoint}/list`);
+    assert.equal(missing.status, 401);
+
+    const unknown = await callBrowserRoute(
+      noRuntime.endpoint,
+      "list",
+      null,
+      "tbreak_bt_unknown"
+    );
+    assert.equal(unknown.status, 401);
   } finally {
     await close(noRuntime.server);
   }
