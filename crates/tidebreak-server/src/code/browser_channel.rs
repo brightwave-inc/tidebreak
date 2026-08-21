@@ -214,7 +214,10 @@ impl BrowserTokenRegistry {
             let _ = std::fs::remove_file(&old.capfile_path);
         }
 
-        Ok(BrowserChannelSpec::new(capfile_path, bridge_command.to_path_buf()))
+        Ok(BrowserChannelSpec::new(
+            capfile_path,
+            bridge_command.to_path_buf(),
+        ))
     }
 
     /// Return the subject for an inbound browser bearer token, or `None`.
@@ -702,7 +705,10 @@ mod tests {
             .issue(sub.clone(), Path::new("tidebreak"))
             .expect_err("relative bridge command must fail closed");
         assert!(error.contains("absolute path"));
-        assert!(std::fs::read_dir(reg.capfile_dir()).unwrap().next().is_none());
+        assert!(std::fs::read_dir(reg.capfile_dir())
+            .unwrap()
+            .next()
+            .is_none());
 
         let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
         assert!(spec.capability_file.exists());
@@ -852,7 +858,9 @@ mod tests {
 
         // Warm up: issue once so the capfile directory exists.
         let warm_subject = subject("warm");
-        let warm = reg.issue(warm_subject.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let warm = reg
+            .issue(warm_subject.clone(), Path::new(TEST_BRIDGE))
+            .unwrap();
         let warm_token = read_token_from_capfile(&warm.capability_file);
         assert!(warm.capability_file.exists());
 
