@@ -292,7 +292,7 @@ impl BrowserClient {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("no detail");
-            ClientFailure::from_http_status(status.as_u16(), kind, message)
+            Err(ClientFailure::from_http_status(status.as_u16(), kind, message))
         }
     }
 }
@@ -312,15 +312,15 @@ async fn read_response_body_bounded(
             detail: format!("body chunk error ({error})"),
         })?;
         let room = max_bytes.saturating_sub(buf.len());
-        if room == 0 {
-            // Drain the rest without allocating.
+        if chunk.len() > room {
+            // The chunk alone exceeds the remaining budget — drain the
+            // rest without allocating and return a size-limit error.
             while stream.next().await.is_some() {}
             return Err(ClientFailure::ToolFailed {
                 detail: "response body exceeded the size limit".to_string(),
             });
         }
-        let take = chunk.len().min(room);
-        buf.extend_from_slice(&chunk[..take]);
+        buf.extend_from_slice(&chunk);
     }
     Ok(buf)
 }
@@ -331,7 +331,7 @@ async fn read_response_body_bounded(
 /// the MCP tools and to [`AgentError`] for the direct CLI.
 ///
 /// The bearer token and capfile path are never included in these errors.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ClientFailure {
     InvalidArguments {
         detail: String,
@@ -357,16 +357,16 @@ impl ClientFailure {
         status: u16,
         kind: &str,
         message: &str,
-    ) -> std::result::Result<!, ClientFailure> {
+    ) -> ClientFailure {
         // Scrub the message: if it contains the token prefix or any plausible
         // bearer pattern, redact it.
         let scrubbed = scrub_server_message(message);
         let detail = format!("({kind}) {scrubbed}");
         match status {
-            400 => Err(ClientFailure::InvalidArguments { detail }),
-            401 | 403 | 501 => Err(ClientFailure::ConfigurationRequired { detail }),
-            404 => Err(ClientFailure::NotFound { detail }),
-            _ => Err(ClientFailure::ToolFailed { detail }),
+            400 => ClientFailure::InvalidArguments { detail },
+            401 | 403 | 501 => ClientFailure::ConfigurationRequired { detail },
+            404 => ClientFailure::NotFound { detail },
+            _ => ClientFailure::ToolFailed { detail },
         }
     }
 
@@ -805,12 +805,15 @@ impl Tool for BrowserNavigateTool {
                 detail: "invalid browser_navigate arguments".to_string(),
             }));
         }
-        let parsed: BrowserNavigateArgs =
-            serde_json::from_value(args)
-                .map_err(|_| ClientFailure::InvalidArguments {
+        let parsed: BrowserNavigateArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
                     detail: "browser_navigate arguments do not match the schema"
                         .to_string(),
-                })?;
+                }))
+            }
+        };
         match browser_navigate(&self.client, &parsed).await {
             Ok(result) => {
                 let data = serde_json::to_value(&result).ok();
@@ -849,12 +852,15 @@ impl Tool for BrowserSnapshotTool {
                 detail: "invalid browser_snapshot arguments".to_string(),
             }));
         }
-        let parsed: BrowserSnapshotArgs =
-            serde_json::from_value(args)
-                .map_err(|_| ClientFailure::InvalidArguments {
+        let parsed: BrowserSnapshotArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
                     detail: "browser_snapshot arguments do not match the schema"
                         .to_string(),
-                })?;
+                }))
+            }
+        };
         match browser_snapshot(&self.client, &parsed).await {
             Ok(snapshot) => {
                 let data = serde_json::to_value(&snapshot).ok();
@@ -1589,9 +1595,7 @@ mod tests {
             (502, ToolErrorCategory::ToolFailed),
         ];
         for (status, expected) in cases {
-            let result = ClientFailure::from_http_status(*status, "test_kind", "test message");
-            assert!(result.is_err());
-            let failure = result.unwrap_err();
+            let failure = ClientFailure::from_http_status(*status, "test_kind", "test message");
             assert_eq!(
                 failure.to_tool_error_category(),
                 *expected,
@@ -1602,12 +1606,11 @@ mod tests {
 
     #[test]
     fn client_failure_scrubs_token_from_server_messages() {
-        let result = ClientFailure::from_http_status(
+        let failure = ClientFailure::from_http_status(
             500,
             "internal",
             "server echoed token tbreak_bt_550e8400-e29b-41d4-a716-446655440000 in error",
         );
-        let failure = result.unwrap_err();
         let text = failure.redacted_text();
         assert!(!text.contains("tbreak_bt_550e8400"));
         assert!(text.contains("[redacted]"));
@@ -1615,12 +1618,11 @@ mod tests {
 
     #[test]
     fn client_failure_scrubs_bearer_keyword() {
-        let result = ClientFailure::from_http_status(
+        let failure = ClientFailure::from_http_status(
             500,
             "internal",
             "Authorization: Bearer secret-token",
         );
-        let failure = result.unwrap_err();
         let text = failure.redacted_text();
         assert!(text.contains("[redacted]"));
         assert!(!text.contains("Bearer"));
