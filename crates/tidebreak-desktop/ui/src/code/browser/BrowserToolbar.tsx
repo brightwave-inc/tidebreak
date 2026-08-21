@@ -366,13 +366,13 @@ function BrowserAgentAccessControl({
   onAgentAccessOpenChange?: (open: boolean) => void;
   agentAccessOpen?: boolean;
 }) {
-  // Close the compact Agent access menu when the toolbar grows past the
-  // compact breakpoint. Radix does not call onOpenChange(false) when its
+ // Close the compact Agent access menu when the toolbar grows past the
+ // compact breakpoint. Radix does not call onOpenChange(false) when its
   // root is conditionally unmounted, so without this the parent visibility
   // source would stay latched true and the native view would stay hidden.
-  useEffect(() => {
-    if (!compact && agentAccessOpen) {
-      onAgentAccessOpenChange?.(false);
+ useEffect(() => {
+   if (!compact && agentAccessOpen) {
+     onAgentAccessOpenChange?.(false);
     }
   }, [compact, agentAccessOpen, onAgentAccessOpenChange]);
 

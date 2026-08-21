@@ -1398,4 +1398,111 @@ describe("BrowserToolbar compact", () => {
     vi.unstubAllGlobals();
   });
 
+  it("closes the compact Agent access menu and restores the native view when agent access is revoked while the menu is open", async () => {
+    // Regression: a host event revokes agent access while the compact
+    // Agent access DropdownMenu is open. BrowserAgentAccessControl returns
+    // null, Radix unmounts without onOpenChange(false), and agentAccessOpen
+    // would stay latched true, keeping the native WKWebView hidden.
+
+    const observerCallbacks: Array<ResizeObserverCallback> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) {
+        observerCallbacks.push(callback);
+      }
+      observe(target: Element) {
+        const entry = {
+          target,
+          contentRect: { width: 390, height: 768, top: 0, left: 0, right: 390, bottom: 768, x: 0, y: 0 },
+          borderBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+          contentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+          devicePixelContentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+        } as unknown as ResizeObserverEntry;
+        const cb = observerCallbacks.at(-1)!;
+        cb([entry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    });
+
+    mockedClientWidth = 390;
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess({
+          shared: true,
+          scope: "origin",
+          canObserve: true,
+          canControl: true,
+        }),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    // Wait for create and initial reveal
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+
+    // Open the compact Agent access menu
+    const access = screen.getByRole("button", {
+      name: "Shared with agent: https://example.com",
+    });
+    await user.click(access);
+    expect(screen.getByRole("menuitem", { name: "Stop sharing" })).toBeVisible();
+
+    // Native view should be hidden while the menu is open
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      }),
+    );
+
+    // Emit a host event that revokes agent access — origin becomes undefined.
+    // The event handler merges agentAccess into runtime state, and
+    // BrowserAgentAccessControl returns null when origin is falsy.
+    runtime.calls.splice(0);
+    await act(async () => {
+      runtime.emit({
+        type: "navigation_finished",
+        url: "https://example.com",
+        browserId: "browser-1",
+        workspaceId: "workspace-1",
+        agentAccess: { ...agentAccess(), shared: false, origin: undefined },
+      });
+    });
+
+    // The effect should close agentAccessOpen, restoring native visibility.
+    await act(async () => {
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() => resolve()),
+      );
+    });
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+
+    vi.unstubAllGlobals();
+  });
+
 });
