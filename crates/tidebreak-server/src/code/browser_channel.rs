@@ -810,7 +810,8 @@ mod tests {
         let sub = subject("writefail");
 
         // Warm up: issue once so the capfile directory exists.
-        let warm = reg.issue(subject("warm")).unwrap();
+        let warm_subject = subject("warm");
+        let warm = reg.issue(warm_subject.clone()).unwrap();
         let warm_token = read_token_from_capfile(&warm.capability_file);
         assert!(warm.capability_file.exists());
 
@@ -831,7 +832,7 @@ mod tests {
         );
         assert_eq!(
             reg.subject_for_token(&warm_token).as_ref(),
-            Some(&subject("warm")),
+            Some(&warm_subject),
             "the prior mapping must survive the failed issuance"
         );
 
