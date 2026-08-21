@@ -50,6 +50,7 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code ws archive <id> [--force]
        tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
        tidebreak code session show <id>
+       tidebreak code session mode <id> plan|ask|auto|allow
        tidebreak code session reap <id>
        tidebreak code run (--session <id> | --ws <id>) [<message>]
                   [--on-approval wait|fail] [--timeout <secs>]
@@ -142,6 +143,11 @@ pub enum Command {
     },
     SessionShow {
         id: CodeSessionId,
+        format: OutputFormat,
+    },
+    SessionMode {
+        id: CodeSessionId,
+        mode: CodePermissionMode,
         format: OutputFormat,
     },
     SessionReap {
@@ -462,6 +468,17 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                     print_turn_line(&turn);
                 }
             }
+            Ok(0)
+        }
+        Command::SessionMode { id, mode, format } => {
+            let session = client.set_session_permission_mode(id, mode).await?;
+            if format == OutputFormat::Json {
+                return emit_ok(&session);
+            }
+            println!(
+                "tidebreak: session {} is now in {} mode",
+                session.id, session.permission_mode
+            );
             Ok(0)
         }
         Command::SessionReap { id, format } => {
@@ -892,6 +909,11 @@ impl TurnGate {
         self.ours
     }
 
+    /// The turn this submit owns, once bound.
+    fn bound_turn(&self) -> Option<CodeTurnId> {
+        self.ours.then_some(self.expected).flatten()
+    }
+
     fn on_ran(&mut self, id: CodeTurnId) {
         if self.ours && self.expected == Some(id) {
             return;
@@ -944,6 +966,53 @@ impl TurnGate {
             return FrameAction::Terminal(turn_exit_code(event).unwrap_or(1));
         }
         FrameAction::Render
+    }
+}
+
+/// How long to wait past a completed turn for its checkpoint.
+///
+/// The server records the checkpoint after publishing the turn's terminal
+/// event, so it lands tens of milliseconds later. This is a bound on that
+/// gap, not a poll interval — the wait ends the moment the frame arrives.
+const CHECKPOINT_TAIL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read the trailing `checkpoint_recorded` for a turn that just completed.
+///
+/// Returns the updated `dangling` state. A turn whose checkpoint failed
+/// journals a `harness_notice` instead, so that is accepted as an ending
+/// too; anything else is passed through untouched. Times out quietly — a
+/// missing checkpoint must never fail a turn that already succeeded.
+async fn drain_checkpoint(
+    client: &Client,
+    session: CodeSessionId,
+    stream: &mut CodeStream,
+    turn_id: CodeTurnId,
+    format: OutputFormat,
+    mut dangling: bool,
+    streamed_text: &mut bool,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + CHECKPOINT_TAIL_WAIT;
+    loop {
+        let frame = tokio::select! {
+            frame = stream.next_session(client, session) => frame,
+            () = tokio::time::sleep_until(deadline) => return dangling,
+        };
+        let Ok(Some((raw, decoded))) = frame else {
+            return dangling;
+        };
+        let done = match &decoded.event {
+            CodeEvent::CheckpointRecorded { turn_id: id, .. } => *id == turn_id,
+            CodeEvent::HarnessNotice { .. } => true,
+            _ => continue,
+        };
+        if format == OutputFormat::Json {
+            emit_line(&raw);
+        } else {
+            dangling = render_event(&decoded.event, dangling, streamed_text);
+        }
+        if done {
+            return dangling;
+        }
     }
 }
 
@@ -1049,6 +1118,25 @@ async fn run_turn(
                     emit_line(&raw);
                 } else {
                     dangling = render_event(&decoded.event, dangling, &mut streamed_text);
+                }
+                // The checkpoint is journaled just after the turn's terminal
+                // event, so breaking here dropped it every time: the turn's
+                // diffstat never reached a caller reading this stream, and a
+                // script that acted on our exit raced a checkpoint that was
+                // not durable yet.
+                if let CodeEvent::TurnCompleted { .. } = &decoded.event {
+                    if let Some(turn_id) = gate.bound_turn() {
+                        dangling = drain_checkpoint(
+                            client,
+                            session,
+                            &mut stream,
+                            turn_id,
+                            format,
+                            dangling,
+                            &mut streamed_text,
+                        )
+                        .await;
+                    }
                 }
                 break Ok(code);
             }
@@ -1302,7 +1390,23 @@ fn print_turn_line(turn: &CodeTurnSnapshot) {
     let usage = turn
         .usage
         .as_ref()
-        .map(|usage| format!("  in={} out={}", usage.input_tokens, usage.output_tokens))
+        .map(|usage| {
+            // Cache reads and writes are most of the prompt on every
+            // Anthropic-routed harness, and a cache write bills above base
+            // input. Printing only `in=` made the most expensive turn in a
+            // session read as the cheapest.
+            let mut line = format!("  in={} out={}", usage.input_tokens, usage.output_tokens);
+            if usage.cache_read_input_tokens > 0 {
+                line.push_str(&format!("  cache-read={}", usage.cache_read_input_tokens));
+            }
+            if usage.cache_creation_input_tokens > 0 {
+                line.push_str(&format!(
+                    "  cache-write={}",
+                    usage.cache_creation_input_tokens
+                ));
+            }
+            line
+        })
         .unwrap_or_default();
     println!(
         "{}\t{}\t{}{stat}{usage}",
@@ -1835,6 +1939,32 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
         "reap" => {
             let (id, format) = take_id_and_format(cursor, "a session id", parse_session_id)?;
             Ok(Command::SessionReap { id, format })
+        }
+        "mode" => {
+            let id = cursor
+                .next()
+                .ok_or_else(|| "expected a session id".to_owned())
+                .and_then(|raw| parse_session_id(&raw))?;
+            let raw = cursor
+                .next()
+                .ok_or_else(|| "expected plan|ask|auto|allow".to_owned())?;
+            let mode = CodePermissionMode::from_str(&raw)
+                .ok_or_else(|| format!("unknown permission mode {raw:?}"))?;
+            let mut flags = SharedFlags {
+                format: OutputFormat::Text,
+            };
+            while let Some(arg) = cursor.next() {
+                if arg.starts_with("--") {
+                    take_format(&mut flags, cursor, &arg)?;
+                } else {
+                    return Err(format!("unexpected code session mode argument {arg:?}"));
+                }
+            }
+            Ok(Command::SessionMode {
+                id,
+                mode,
+                format: flags.format,
+            })
         }
         other => Err(format!("unknown session subcommand {other:?}")),
     }
@@ -2567,6 +2697,39 @@ mod tests {
             FrameAction::Render
         );
         assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
+    }
+
+    /// The tail drain needs the turn it just finished, and must not claim one
+    /// on a stream this submit does not own — otherwise it would wait out the
+    /// checkpoint window on somebody else's turn.
+    #[test]
+    fn bound_turn_is_only_reported_for_a_turn_we_own() {
+        let ours = turn(1);
+        let mut gate = TurnGate::submit();
+        assert_eq!(gate.bound_turn(), None, "nothing bound yet");
+
+        // `on_ran` names the turn, but ownership binds on its live start.
+        gate.on_ran(ours);
+        assert_eq!(
+            gate.bound_turn(),
+            None,
+            "named but not started: no tail to wait for yet"
+        );
+        assert_eq!(
+            gate.on_frame(false, &CodeEvent::TurnStarted { turn_id: ours }),
+            FrameAction::Render
+        );
+        assert_eq!(gate.bound_turn(), Some(ours));
+        assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
+        assert_eq!(
+            gate.bound_turn(),
+            Some(ours),
+            "still ours after the terminal frame, so the checkpoint can be drained"
+        );
+
+        // An attach-owned turn is ours immediately.
+        let attached = turn(2);
+        assert_eq!(TurnGate::attach(attached).bound_turn(), Some(attached));
     }
 
     #[test]

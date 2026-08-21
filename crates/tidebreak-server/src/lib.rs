@@ -541,6 +541,11 @@ pub fn app(state: AppState) -> Router {
             "/code/browser/snapshot",
             post(routes::code::browser_snapshot),
         )
+        .route("/code/browser/wait", post(routes::code::browser_wait))
+        .route(
+            "/code/browser/screenshot",
+            post(routes::code::browser_screenshot),
+        )
         .with_state(state.clone());
 
     let api = Router::new()
@@ -924,6 +929,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::interrupt_session),
         )
         .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
+        .route(
+            "/code/sessions/{id}/mode",
+            post(routes::code::set_session_permission_mode),
+        )
         .route("/code/sessions/{id}/fork", post(routes::code::fork_session))
         .route(
             "/code/sessions/{id}/debug",

@@ -1,15 +1,15 @@
 //! Tidebreak browser CLI commands and the `browser-mcp` stdio server.
 //!
-//! `tidebreak browser list|navigate|snapshot --json` drive a running Tidebreak
-//! browser server through the session-private capability file named by
-//! `TIDEBREAK_BROWSER_CAPFILE`. Every operation runs through a single
-//! [`BrowserClient`] that is shared between the direct CLI and the MCP tool
-//! implementations.
+//! `tidebreak browser list|navigate|snapshot|wait|screenshot --json` drive a
+//! running Tidebreak browser server through the session-private capability
+//! file named by `TIDEBREAK_BROWSER_CAPFILE`. Every operation runs through a
+//! single [`BrowserClient`] that is shared between the direct CLI and the MCP
+//! tool implementations.
 //!
-//! `tidebreak browser-mcp` serves exactly three tools — browser_list,
-//! browser_navigate, browser_snapshot — over MCP stdio, using the canonical
-//! core tool specs and validating typed arguments before sending them to the
-//! browser server.
+//! `tidebreak browser-mcp` serves exactly five tools — browser_list,
+//! browser_navigate, browser_snapshot, browser_wait, and browser_screenshot —
+//! over MCP stdio, using the canonical core tool specs and validating typed
+//! arguments before sending them to the browser server.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,12 +18,15 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 use tidebreak_core::{
-    browser_list_tool_spec, browser_navigate_tool_spec, browser_snapshot_tool_spec,
-    validate_browser_list_arguments, validate_browser_navigate_arguments,
-    validate_browser_snapshot_arguments, AgentError, ApprovalClass, AutoApproveGate,
-    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSnapshotArgs, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
-    ToolSpec,
+    browser_list_tool_spec, browser_navigate_tool_spec, browser_screenshot_tool_spec,
+    browser_snapshot_tool_spec, browser_wait_tool_spec, validate_browser_list_arguments,
+    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    validate_browser_snapshot_arguments, validate_browser_wait_arguments, AgentError,
+    ApprovalClass, AutoApproveGate, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult,
+    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
+    BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData,
+    ImageMediaType, ImageRef, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
+    ToolSpec, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,6 +48,17 @@ const NAVIGATE_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
 
 /// Ceiling on an error body we attempt to parse for `{kind, message}`.
 const ERROR_BODY_MAX_BYTES: usize = 8 * 1024; // 8 KiB
+
+/// Ceiling on a wait response body (small, bounded).
+const WAIT_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
+
+/// Ceiling on a screenshot response body. The base-64 payload within can be up
+/// to `ceil(MAX_BROWSER_SCREENSHOT_PNG_BYTES * 4/3)` = ~10.7 MiB, so the JSON
+/// envelope needs generous headroom.
+const SCREENSHOT_BODY_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Encoded form of the largest image the shared image pipeline will accept.
+const MAX_SCREENSHOT_BASE64_CHARS: usize = (MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
 
 const BODY_TOO_LARGE_DETAIL: &str = "response body exceeded the size limit";
 
@@ -248,7 +262,9 @@ impl BrowserClient {
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
+            // Headroom over the core 30 s native-operation ceiling. A valid
+            // 30 000 ms wait must not be cut off at the client boundary.
+            .timeout(Duration::from_secs(40))
             .build()
             .map_err(|error| {
                 AgentError::config(format!("could not build browser HTTP client ({error})"))
@@ -480,6 +496,40 @@ async fn browser_snapshot(
     BrowserClient::read_bounded_json(response, SNAPSHOT_BODY_MAX_BYTES).await
 }
 
+async fn browser_wait(
+    client: &BrowserClient,
+    args: &BrowserWaitArgs,
+) -> std::result::Result<BrowserWaitResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/wait", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser wait request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, WAIT_BODY_MAX_BYTES).await
+}
+
+async fn browser_screenshot(
+    client: &BrowserClient,
+    args: &BrowserScreenshotArgs,
+) -> std::result::Result<BrowserScreenshotResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/screenshot", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser screenshot request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, SCREENSHOT_BODY_MAX_BYTES).await
+}
+
 // ---------------------------------------------------------------------------
 // CLI parsing
 // ---------------------------------------------------------------------------
@@ -495,6 +545,20 @@ pub(crate) enum BrowserCommand {
     Snapshot {
         browser_id: String,
         max_nodes: Option<usize>,
+    },
+    Wait {
+        browser_id: String,
+        snapshot_id: String,
+        document_epoch: u64,
+        condition: BrowserWaitCondition,
+        timeout_ms: Option<u64>,
+    },
+    Screenshot {
+        browser_id: String,
+        snapshot_id: String,
+        document_epoch: u64,
+        max_width: Option<u64>,
+        max_height: Option<u64>,
     },
 }
 
@@ -599,6 +663,270 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                 max_nodes,
             })
         }
+        "wait" => {
+            let mut browser_id = None;
+            let mut snapshot_id = None;
+            let mut document_epoch = None;
+            let mut condition = None;
+            let mut timeout_ms = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--browser-id" => {
+                        if browser_id.is_some() {
+                            return Err("duplicate --browser-id".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--browser-id requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--browser-id requires a value".to_string());
+                        }
+                        browser_id = Some(value);
+                    }
+                    "--snapshot-id" => {
+                        if snapshot_id.is_some() {
+                            return Err("duplicate --snapshot-id".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--snapshot-id requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--snapshot-id requires a value".to_string());
+                        }
+                        snapshot_id = Some(value);
+                    }
+                    "--document-epoch" => {
+                        if document_epoch.is_some() {
+                            return Err("duplicate --document-epoch".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--document-epoch requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--document-epoch requires a value".to_string());
+                        }
+                        let e: u64 = value.parse().map_err(|_| {
+                            format!(
+                                "--document-epoch expects a non-negative integer, got {value:?}"
+                            )
+                        })?;
+                        document_epoch = Some(e);
+                    }
+                    "--timeout-ms" => {
+                        if timeout_ms.is_some() {
+                            return Err("duplicate --timeout-ms".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--timeout-ms requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--timeout-ms requires a value".to_string());
+                        }
+                        let ms: u64 = value.parse().map_err(|_| {
+                            format!("--timeout-ms expects a non-negative integer, got {value:?}")
+                        })?;
+                        if !(100..=30_000).contains(&ms) {
+                            return Err("--timeout-ms must be between 100 and 30000".to_string());
+                        }
+                        timeout_ms = Some(ms);
+                    }
+                    "--url-changed" => {
+                        if condition.is_some() {
+                            return Err("only one wait condition is allowed".to_string());
+                        }
+                        condition = Some(BrowserWaitCondition::UrlChanged);
+                    }
+                    "--load-state" => {
+                        if condition.is_some() {
+                            return Err("only one wait condition is allowed".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--load-state requires idle, loading, or ready".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--load-state requires idle, loading, or ready".to_string());
+                        }
+                        let state = match value.as_str() {
+                            "idle" => tidebreak_core::BrowserLoadState::Idle,
+                            "loading" => tidebreak_core::BrowserLoadState::Loading,
+                            "ready" => tidebreak_core::BrowserLoadState::Ready,
+                            other => {
+                                return Err(format!(
+                                    "unknown load state {other:?}: expected idle, loading, or ready"
+                                ));
+                            }
+                        };
+                        condition = Some(BrowserWaitCondition::LoadState { state });
+                    }
+                    "--text-present" => {
+                        if condition.is_some() {
+                            return Err("only one wait condition is allowed".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--text-present requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--text-present requires a value".to_string());
+                        }
+                        if value.chars().count() > 512 {
+                            return Err(
+                                "--text-present value must be at most 512 characters".to_string()
+                            );
+                        }
+                        condition = Some(BrowserWaitCondition::TextPresent { text: value });
+                    }
+                    "--text-absent" => {
+                        if condition.is_some() {
+                            return Err("only one wait condition is allowed".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--text-absent requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--text-absent requires a value".to_string());
+                        }
+                        if value.chars().count() > 512 {
+                            return Err(
+                                "--text-absent value must be at most 512 characters".to_string()
+                            );
+                        }
+                        condition = Some(BrowserWaitCondition::TextAbsent { text: value });
+                    }
+                    other => {
+                        return Err(format!("unknown browser wait argument {other:?}"));
+                    }
+                }
+            }
+            let Some(browser_id) = browser_id else {
+                return Err("browser wait requires --browser-id".to_string());
+            };
+            let Some(snapshot_id) = snapshot_id else {
+                return Err("browser wait requires --snapshot-id".to_string());
+            };
+            let Some(document_epoch) = document_epoch else {
+                return Err("browser wait requires --document-epoch".to_string());
+            };
+            let Some(condition) = condition else {
+                return Err(
+                    "a wait condition is required: one of --url-changed, --load-state <idle|loading|ready>, --text-present <text>, or --text-absent <text>"
+                        .to_string(),
+                );
+            };
+            Ok(BrowserCommand::Wait {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                condition,
+                timeout_ms,
+            })
+        }
+        "screenshot" => {
+            let mut browser_id = None;
+            let mut snapshot_id = None;
+            let mut document_epoch = None;
+            let mut max_width = None;
+            let mut max_height = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--browser-id" => {
+                        if browser_id.is_some() {
+                            return Err("duplicate --browser-id".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--browser-id requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--browser-id requires a value".to_string());
+                        }
+                        browser_id = Some(value);
+                    }
+                    "--snapshot-id" => {
+                        if snapshot_id.is_some() {
+                            return Err("duplicate --snapshot-id".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--snapshot-id requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--snapshot-id requires a value".to_string());
+                        }
+                        snapshot_id = Some(value);
+                    }
+                    "--document-epoch" => {
+                        if document_epoch.is_some() {
+                            return Err("duplicate --document-epoch".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--document-epoch requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--document-epoch requires a value".to_string());
+                        }
+                        let e: u64 = value.parse().map_err(|_| {
+                            format!(
+                                "--document-epoch expects a non-negative integer, got {value:?}"
+                            )
+                        })?;
+                        document_epoch = Some(e);
+                    }
+                    "--max-width" => {
+                        if max_width.is_some() {
+                            return Err("duplicate --max-width".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--max-width requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--max-width requires a value".to_string());
+                        }
+                        let w: u64 = value.parse().map_err(|_| {
+                            format!("--max-width expects a non-negative integer, got {value:?}")
+                        })?;
+                        if !(1..=4_096).contains(&w) {
+                            return Err("--max-width must be between 1 and 4096".to_string());
+                        }
+                        max_width = Some(w);
+                    }
+                    "--max-height" => {
+                        if max_height.is_some() {
+                            return Err("duplicate --max-height".to_string());
+                        }
+                        let Some(value) = args.next() else {
+                            return Err("--max-height requires a value".to_string());
+                        };
+                        if value.starts_with("--") {
+                            return Err("--max-height requires a value".to_string());
+                        }
+                        let h: u64 = value.parse().map_err(|_| {
+                            format!("--max-height expects a non-negative integer, got {value:?}")
+                        })?;
+                        if h > 4_096 {
+                            return Err("--max-height must be between 0 and 4096".to_string());
+                        }
+                        max_height = Some(h);
+                    }
+                    other => {
+                        return Err(format!("unknown browser screenshot argument {other:?}"));
+                    }
+                }
+            }
+            let Some(browser_id) = browser_id else {
+                return Err("browser screenshot requires --browser-id".to_string());
+            };
+            let Some(snapshot_id) = snapshot_id else {
+                return Err("browser screenshot requires --snapshot-id".to_string());
+            };
+            let Some(document_epoch) = document_epoch else {
+                return Err("browser screenshot requires --document-epoch".to_string());
+            };
+            Ok(BrowserCommand::Screenshot {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                max_width,
+                max_height,
+            })
+        }
         other => Err(format!("unknown browser command {other:?}")),
     }
 }
@@ -608,6 +936,12 @@ pub(crate) const BROWSER_USAGE: &str = "\
 usage: tidebreak browser list --json
        tidebreak browser navigate --browser-id <id> --url <url> --json
        tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
+       tidebreak browser wait --browser-id <id> --snapshot-id <id> --document-epoch <n> \
+              (--url-changed | --load-state <idle|loading|ready> | \
+               --text-present <text> | --text-absent <text>) \
+              [--timeout-ms <ms>] --json
+       tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
+              --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
 
 Browser commands use the session-private capfile named by
 TIDEBREAK_BROWSER_CAPFILE. They do not take --server/--attach.";
@@ -672,34 +1006,93 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             );
             Ok(())
         }
+        BrowserCommand::Wait {
+            browser_id,
+            snapshot_id,
+            document_epoch,
+            condition,
+            timeout_ms,
+        } => {
+            let args = BrowserWaitArgs {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                condition,
+                timeout_ms,
+            };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg("wait arguments are not well-formed"));
+            }
+            let result = browser_wait(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
+        BrowserCommand::Screenshot {
+            browser_id,
+            snapshot_id,
+            document_epoch,
+            max_width,
+            max_height,
+        } => {
+            let args = BrowserScreenshotArgs {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                max_width,
+                max_height,
+            };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg("screenshot arguments are not well-formed"));
+            }
+            let result = browser_screenshot(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// browser-mcp: stdio MCP server with exactly three tools
+// browser-mcp: stdio MCP server with exactly five tools
 // ---------------------------------------------------------------------------
 
 /// Serve `tidebreak browser-mcp`: load the capfile, construct the client,
-/// build a registry of three tools backed by that client, and run MCP over
-/// stdio.
+/// build a registry of exactly five tools backed by that client, and run MCP
+/// over stdio.
 ///
 /// ## Tool classification
 ///
-/// | Tool            | Class     | Rationale                                                   |
-/// |-----------------|-----------|-------------------------------------------------------------|
-/// | browser_list    | ReadOnly  | Observes session state; no mutation.                        |
-/// | browser_navigate| Sensitive | Mutates the shared visible browser; the user sees the change.|
-/// | browser_snapshot | ReadOnly | Reads untrusted page data; no side effects.                 |
+/// | Tool               | Class     | Rationale                                                   |
+/// |--------------------|-----------|-------------------------------------------------------------|
+/// | browser_list       | ReadOnly  | Observes session state; no mutation.                        |
+/// | browser_navigate   | Sensitive | Mutates the shared visible browser; the user sees the change.|
+/// | browser_snapshot    | ReadOnly | Reads untrusted page data; no side effects.                 |
+/// | browser_wait       | ReadOnly  | Polls a deterministic predicate; no mutation.               |
+/// | browser_screenshot | ReadOnly  | Captures epoch-bound pixels; no mutation.                   |
 ///
 /// ## Authorization
 ///
-/// The registry contains only these three tools. We wire
+/// The registry contains exactly these five tools. We wire
 /// [`AutoApproveGate`] because possession of the session-private capfile
 /// *is* the actual scoped authorization boundary for this process: without
 /// the capfile the server cannot be reached, and with it every operation is
 /// exactly the one the capfile's issuer intended. The browser server
 /// authorizes each operation independently against its own origin-scoped
 /// grants.
+///
+/// `browser_act` is intentionally excluded. It is registered only when the
+/// engine adapter synthesises native input, which this bridge does not.
 pub(crate) async fn run_browser_mcp() -> Result<()> {
     let cap = BrowserCapfile::from_env()?;
     let client = BrowserClient::new(&cap)?;
@@ -713,6 +1106,12 @@ pub(crate) async fn run_browser_mcp() -> Result<()> {
                 client: client.clone(),
             }))
             .with(Box::new(BrowserSnapshotTool {
+                client: client.clone(),
+            }))
+            .with(Box::new(BrowserWaitTool {
+                client: client.clone(),
+            }))
+            .with(Box::new(BrowserScreenshotTool {
                 client: client.clone(),
             })),
     );
@@ -853,6 +1252,86 @@ impl Tool for BrowserSnapshotTool {
     }
 }
 
+/// [`BROWSER_WAIT_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserWaitTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserWaitTool {
+    fn spec(&self) -> ToolSpec {
+        browser_wait_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_wait_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_wait arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserWaitArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_wait arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_wait(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).ok();
+                let text = format_browser_wait_summary(&result);
+                Ok(ToolOutput::text(text).with_data(data.unwrap_or(Value::Null)))
+            }
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
+/// [`BROWSER_SCREENSHOT_TOOL`] as an MCP-registrable [`Tool`].
+///
+/// The base-64 payload is decoded, validated, and published as a
+/// content-addressed [`ImageRef`] + [`ImageData`] pair. The pixel bytes
+/// never enter model-facing text, logs, or data fields.
+struct BrowserScreenshotTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserScreenshotTool {
+    fn spec(&self) -> ToolSpec {
+        browser_screenshot_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::ReadOnly
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_screenshot_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_screenshot arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserScreenshotArgs = match serde_json::from_value(args) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_screenshot arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_screenshot(&self.client, &parsed).await {
+            Ok(result) => Ok(screenshot_tool_output(&result).unwrap_or_else(mcp_failure)),
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
 // -- helper functions --
 
 /// Build a concise model-readable summary of a page snapshot.
@@ -892,6 +1371,135 @@ fn format_browser_list_summary(result: &BrowserListResult) -> String {
         })
         .collect();
     format!("{} browser session(s):\n{}", lines.len(), lines.join("\n"))
+}
+
+/// Build a concise model-readable summary of a wait result.
+fn format_browser_wait_summary(result: &BrowserWaitResult) -> String {
+    format!(
+        "Wait {:?} on browser {} (epoch {}): {}.",
+        result.status, result.browser_id, result.document_epoch, result.message
+    )
+}
+
+/// Build a concise model-readable summary of a screenshot capture.
+/// The text mentions dimensions and epoch; pixel bytes are in the
+/// accompanying [`ImageRef`] / [`ImageData`] pair only.
+fn format_screenshot_summary(result: &BrowserScreenshotResult, image: &ImageRef) -> String {
+    format!(
+        "Screenshot of browser {} captured at epoch {} (snapshot {}): {}×{}, {:.1} kiB.",
+        result.browser_id,
+        result.document_epoch,
+        result.snapshot_id,
+        image.width,
+        image.height,
+        image.byte_len as f64 / 1024.0,
+    )
+}
+
+/// Convert one server screenshot response into model text plus an out-of-band
+/// image attachment. No structured payload is added because it would carry the
+/// server's base-64 field into journals and model-facing tool data.
+fn screenshot_tool_output(
+    result: &BrowserScreenshotResult,
+) -> std::result::Result<ToolOutput, ClientFailure> {
+    let (image_ref, image_data) = decode_screenshot_image(result)?;
+    let text = format_screenshot_summary(result, &image_ref);
+    Ok(ToolOutput::text(text).with_images([(image_ref, image_data)]))
+}
+
+/// Decode and validate the base-64 screenshot payload, returning a
+/// content-addressed [`ImageRef`] + [`ImageData`] pair.
+///
+/// The base-64 bytes never appear in text, logs, errors, or structured
+/// data. Only identity, dimensions, and the opaque [`ImageData`] pixels
+/// escape this function.
+fn decode_screenshot_image(
+    result: &BrowserScreenshotResult,
+) -> std::result::Result<(ImageRef, ImageData), ClientFailure> {
+    use base64::Engine as _;
+
+    if result.mime_type != "image/png" {
+        return Err(ClientFailure::ToolFailed {
+            detail: format!(
+                "screenshot mime type must be image/png, got {}",
+                result.mime_type
+            ),
+        });
+    }
+    if result.image_base64.len() > MAX_SCREENSHOT_BASE64_CHARS {
+        return Err(ClientFailure::ToolFailed {
+            detail: "screenshot image exceeds the maximum size".to_string(),
+        });
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&result.image_base64)
+        .map_err(|error| ClientFailure::ToolFailed {
+            detail: format!("screenshot base-64 decode failed: {error}"),
+        })?;
+
+    if bytes.is_empty() {
+        return Err(ClientFailure::ToolFailed {
+            detail: "screenshot image is empty".to_string(),
+        });
+    }
+
+    // Sniff the magic bytes. Reject anything that is not actually PNG.
+    let format = image::guess_format(&bytes).map_err(|_| ClientFailure::ToolFailed {
+        detail: "screenshot bytes are not a recognized image".to_string(),
+    })?;
+    if format != image::ImageFormat::Png {
+        return Err(ClientFailure::ToolFailed {
+            detail: "screenshot bytes are not PNG".to_string(),
+        });
+    }
+
+    // Read dimensions from the PNG header without decoding pixels.
+    let (width, height) =
+        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|_| ClientFailure::ToolFailed {
+                detail: "screenshot PNG header could not be read".to_string(),
+            })?;
+
+    if width == 0 || height == 0 {
+        return Err(ClientFailure::ToolFailed {
+            detail: "screenshot has a zero dimension".to_string(),
+        });
+    }
+    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+        return Err(ClientFailure::ToolFailed {
+            detail: format!(
+                "screenshot dimensions {}×{} exceed the maximum {MAX_IMAGE_DIMENSION}",
+                width, height
+            ),
+        });
+    }
+
+    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if byte_len > MAX_IMAGE_BYTES {
+        return Err(ClientFailure::ToolFailed {
+            detail: format!("screenshot size {byte_len} exceeds the maximum {MAX_IMAGE_BYTES}"),
+        });
+    }
+
+    // Build the content-addressed identity. Use DocumentBlob for the
+    // canonical v5 UUID → byte mapping every Tidebreak image path shares.
+    let blob = DocumentBlob::from_bytes(&bytes);
+    let image_ref = ImageRef {
+        blob_id: blob.id,
+        media_type: ImageMediaType::Png,
+        width,
+        height,
+        byte_len,
+    };
+    image_ref
+        .validate()
+        .map_err(|reason| ClientFailure::ToolFailed {
+            detail: format!("screenshot image is invalid: {reason}"),
+        })?;
+
+    Ok((image_ref, ImageData::new(ImageMediaType::Png, bytes)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,6 +2081,224 @@ mod tests {
         assert!(err.contains("--browser-id"), "error: {err}");
     }
 
+    fn browser_args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_browser_wait_supports_each_bounded_condition() {
+        let cases = [
+            (vec!["--url-changed"], BrowserWaitCondition::UrlChanged),
+            (
+                vec!["--load-state", "ready"],
+                BrowserWaitCondition::LoadState {
+                    state: tidebreak_core::BrowserLoadState::Ready,
+                },
+            ),
+            (
+                vec!["--text-present", "Done"],
+                BrowserWaitCondition::TextPresent {
+                    text: "Done".to_string(),
+                },
+            ),
+            (
+                vec!["--text-absent", "Loading"],
+                BrowserWaitCondition::TextAbsent {
+                    text: "Loading".to_string(),
+                },
+            ),
+        ];
+
+        for (condition_args, expected) in cases {
+            let mut args = browser_args(&[
+                "wait",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "7",
+            ]);
+            args.extend(condition_args.into_iter().map(str::to_string));
+            args.extend(browser_args(&["--timeout-ms", "30000"]));
+
+            match parse_browser(args).unwrap() {
+                BrowserCommand::Wait {
+                    browser_id,
+                    snapshot_id,
+                    document_epoch,
+                    condition,
+                    timeout_ms,
+                } => {
+                    assert_eq!(browser_id, "browser-1");
+                    assert_eq!(snapshot_id, "snapshot-1");
+                    assert_eq!(document_epoch, 7);
+                    assert_eq!(condition, expected);
+                    assert_eq!(timeout_ms, Some(30_000));
+                }
+                other => panic!("expected Wait, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_browser_wait_requires_identity_and_exactly_one_condition() {
+        for args in [
+            browser_args(&[
+                "wait",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--url-changed",
+            ]),
+            browser_args(&[
+                "wait",
+                "--browser-id",
+                "browser-1",
+                "--document-epoch",
+                "1",
+                "--url-changed",
+            ]),
+            browser_args(&[
+                "wait",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--url-changed",
+            ]),
+            browser_args(&[
+                "wait",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+            ]),
+        ] {
+            assert!(parse_browser(args).is_err());
+        }
+
+        let err = parse_browser(browser_args(&[
+            "wait",
+            "--browser-id",
+            "browser-1",
+            "--snapshot-id",
+            "snapshot-1",
+            "--document-epoch",
+            "1",
+            "--url-changed",
+            "--text-present",
+            "Done",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("only one wait condition"), "error: {err}");
+    }
+
+    #[test]
+    fn parse_browser_wait_enforces_timeout_bounds() {
+        for timeout in ["99", "30001"] {
+            let err = parse_browser(browser_args(&[
+                "wait",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--url-changed",
+                "--timeout-ms",
+                timeout,
+            ]))
+            .unwrap_err();
+            assert!(err.contains("between 100 and 30000"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_browser_screenshot_requires_identity_and_bounds_dimensions() {
+        match parse_browser(browser_args(&[
+            "screenshot",
+            "--browser-id",
+            "browser-1",
+            "--snapshot-id",
+            "snapshot-1",
+            "--document-epoch",
+            "9",
+            "--max-width",
+            "1440",
+            "--max-height",
+            "0",
+        ]))
+        .unwrap()
+        {
+            BrowserCommand::Screenshot {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                max_width,
+                max_height,
+            } => {
+                assert_eq!(browser_id, "browser-1");
+                assert_eq!(snapshot_id, "snapshot-1");
+                assert_eq!(document_epoch, 9);
+                assert_eq!(max_width, Some(1440));
+                assert_eq!(max_height, Some(0));
+            }
+            other => panic!("expected Screenshot, got {other:?}"),
+        }
+
+        for args in [
+            browser_args(&[
+                "screenshot",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+            ]),
+            browser_args(&[
+                "screenshot",
+                "--browser-id",
+                "browser-1",
+                "--document-epoch",
+                "1",
+            ]),
+            browser_args(&[
+                "screenshot",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+            ]),
+            browser_args(&[
+                "screenshot",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--max-width",
+                "0",
+            ]),
+            browser_args(&[
+                "screenshot",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--max-height",
+                "4097",
+            ]),
+        ] {
+            assert!(parse_browser(args).is_err());
+        }
+    }
+
     #[test]
     fn parse_browser_rejects_unknown_flag() {
         let err = parse_browser(vec!["list".to_string(), "--unknown".to_string()]).unwrap_err();
@@ -1538,10 +2364,76 @@ mod tests {
         assert!(args.is_well_formed());
     }
 
-    // -- Tool advertisement (three exact tools) ----------------------------
+    #[test]
+    fn browser_wait_summary_reports_status_without_echoing_page_data() {
+        let result = BrowserWaitResult {
+            browser_id: "browser-1".to_string(),
+            status: tidebreak_core::BrowserWaitStatus::Resolved,
+            message: "Wait condition satisfied".to_string(),
+            document_epoch: 3,
+            url: Some("https://example.com".to_string()),
+            title: Some("Example".to_string()),
+        };
+
+        let summary = format_browser_wait_summary(&result);
+        assert!(summary.contains("Resolved"));
+        assert!(summary.contains("browser-1"));
+        assert!(!summary.contains("https://example.com"));
+    }
 
     #[test]
-    fn registry_contains_exactly_three_browser_tools() {
+    fn screenshot_output_attaches_pixels_without_serializing_base64() {
+        const ONE_PIXEL_PNG: &str =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let result = BrowserScreenshotResult {
+            browser_id: "browser-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            document_epoch: 4,
+            image_base64: ONE_PIXEL_PNG.to_string(),
+            mime_type: "image/png".to_string(),
+        };
+
+        let output = screenshot_tool_output(&result).unwrap();
+        assert!(!output.content.contains(ONE_PIXEL_PNG));
+        assert!(output.data.is_none());
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].width, 1);
+        assert_eq!(output.images[0].height, 1);
+        assert!(output.image_data.contains(output.images[0].blob_id));
+
+        let durable = serde_json::to_string(&output).unwrap();
+        assert!(!durable.contains(ONE_PIXEL_PNG));
+        assert!(!durable.contains("imageBase64"));
+    }
+
+    #[test]
+    fn screenshot_output_rejects_mismatched_or_invalid_png_data() {
+        let mismatched = BrowserScreenshotResult {
+            browser_id: "browser-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            document_epoch: 4,
+            image_base64: "bm90IGEgcG5n".to_string(),
+            mime_type: "image/jpeg".to_string(),
+        };
+        assert!(matches!(
+            screenshot_tool_output(&mismatched),
+            Err(ClientFailure::ToolFailed { .. })
+        ));
+
+        let invalid_png = BrowserScreenshotResult {
+            mime_type: "image/png".to_string(),
+            ..mismatched
+        };
+        assert!(matches!(
+            screenshot_tool_output(&invalid_png),
+            Err(ClientFailure::ToolFailed { .. })
+        ));
+    }
+
+    // -- Tool advertisement (five exact tools) ----------------------------
+
+    #[test]
+    fn registry_contains_exactly_five_browser_tools() {
         let client = browser_client_stub();
         let tools = ToolRegistry::new()
             .with(Box::new(BrowserListTool {
@@ -1552,13 +2444,25 @@ mod tests {
             }))
             .with(Box::new(BrowserSnapshotTool {
                 client: client.clone(),
+            }))
+            .with(Box::new(BrowserWaitTool {
+                client: client.clone(),
+            }))
+            .with(Box::new(BrowserScreenshotTool {
+                client: client.clone(),
             }));
         let specs = tools.specs();
         let mut names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         names.sort();
         assert_eq!(
             names,
-            ["browser_list", "browser_navigate", "browser_snapshot"]
+            [
+                "browser_list",
+                "browser_navigate",
+                "browser_screenshot",
+                "browser_snapshot",
+                "browser_wait"
+            ]
         );
     }
 
@@ -1574,9 +2478,17 @@ mod tests {
         let snapshot = BrowserSnapshotTool {
             client: client.clone(),
         };
+        let wait = BrowserWaitTool {
+            client: client.clone(),
+        };
+        let screenshot = BrowserScreenshotTool {
+            client: client.clone(),
+        };
         assert_eq!(list.approval_class(), ApprovalClass::ReadOnly);
         assert_eq!(navigate.approval_class(), ApprovalClass::Sensitive);
         assert_eq!(snapshot.approval_class(), ApprovalClass::ReadOnly);
+        assert_eq!(wait.approval_class(), ApprovalClass::ReadOnly);
+        assert_eq!(screenshot.approval_class(), ApprovalClass::ReadOnly);
     }
 
     fn browser_client_stub() -> BrowserClient {

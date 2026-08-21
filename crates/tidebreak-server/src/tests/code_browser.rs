@@ -16,8 +16,9 @@ use tidebreak_core::{
     db, Attention, AttentionSource, AttentionState, BrowserContentTrust, BrowserControllerState,
     BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
     BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeRepo,
-    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSessionSummary, BrowserSnapshotArgs,
+    BrowserViewport, BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodePermissionMode,
+    CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
     CodeWorkspaceStatus, DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
@@ -133,6 +134,51 @@ impl BrowserRuntime for FakeBrowserRuntime {
             nodes: vec![],
             frames: vec![],
             truncated: false,
+        })
+    }
+    async fn wait(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserWaitArgs,
+    ) -> Result<BrowserWaitResult, BrowserRuntimeError> {
+        self.record("wait", scope);
+        if args.browser_id != "browser-1" {
+            return Err(BrowserRuntimeError::UnknownBrowserId(
+                args.browser_id.clone(),
+            ));
+        }
+        if self.stale {
+            return Err(BrowserRuntimeError::StaleTarget);
+        }
+        Ok(BrowserWaitResult {
+            browser_id: args.browser_id.clone(),
+            status: BrowserWaitStatus::Resolved,
+            message: "Wait condition satisfied.".into(),
+            document_epoch: 2,
+            url: Some("https://example.com".into()),
+            title: Some("Example".into()),
+        })
+    }
+    async fn screenshot(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserScreenshotArgs,
+    ) -> Result<BrowserScreenshotResult, BrowserRuntimeError> {
+        self.record("screenshot", scope);
+        if args.browser_id != "browser-1" {
+            return Err(BrowserRuntimeError::UnknownBrowserId(
+                args.browser_id.clone(),
+            ));
+        }
+        if self.stale {
+            return Err(BrowserRuntimeError::StaleTarget);
+        }
+        Ok(BrowserScreenshotResult {
+            browser_id: args.browser_id.clone(),
+            snapshot_id: args.snapshot_id.clone(),
+            document_epoch: 2,
+            image_base64: "AAAA".into(),
+            mime_type: "image/png".into(),
         })
     }
     fn revoke_session(&self, scope: &BrowserRuntimeScope) {
@@ -493,6 +539,266 @@ async fn navigate_refuses_non_http() {
 }
 
 #[tokio::test]
+async fn wait_roundtrip() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "wait",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "condition": {"kind": "load_state", "state": "ready"},
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["status"], "resolved");
+    assert_eq!(b["browserId"], "browser-1");
+}
+
+#[tokio::test]
+async fn wait_refuses_missing_browser_id() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    assert_eq!(
+        post(
+            a.addr,
+            "wait",
+            Some(&t),
+            serde_json::json!({
+                "browser_id": "browser-9",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "condition": {"kind": "load_state", "state": "ready"}
+            })
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn wait_refuses_non_well_formed() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    assert_eq!(
+        post(
+            a.addr,
+            "wait",
+            Some(&t),
+            serde_json::json!({"browser_id":"b-1","snapshot_id":"s","document_epoch":0,"condition":{"kind":"text_present","text":""},"timeout_ms":99999})
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn wait_stale_409() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "wait",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "condition": {"kind": "load_state", "state": "ready"}
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn wait_missing_runtime_501() {
+    let a = browser_app(None).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "wait",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "condition": {"kind": "load_state", "state": "ready"}
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn screenshot_roundtrip() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "screenshot",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["mimeType"], "image/png");
+    assert_eq!(b["browserId"], "browser-1");
+}
+
+#[tokio::test]
+async fn screenshot_refuses_non_well_formed() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    assert_eq!(
+        post(
+            a.addr,
+            "screenshot",
+            Some(&t),
+            serde_json::json!({"browser_id":"b-1","snapshot_id":"s","document_epoch":0,"max_width":999999})
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn screenshot_stale_409() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "screenshot",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn screenshot_missing_runtime_501() {
+    let a = browser_app(None).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "screenshot",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn new_routes_require_capability_token() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let _t = mint_token(&a.code, ws, s);
+    for (rt, body) in [
+        (
+            "wait",
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "condition": {"kind": "load_state", "state": "ready"}
+            }),
+        ),
+        (
+            "screenshot",
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2
+            }),
+        ),
+    ] {
+        assert_eq!(
+            post(a.addr, rt, None, body).await.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
+async fn new_routes_refuse_wrong_workspace_scope() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (_, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, WorkspaceId::new(), s);
+    for (rt, body) in [
+        (
+            "wait",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0,"condition":{"kind":"load_state","state":"ready"}}),
+        ),
+        (
+            "screenshot",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0}),
+        ),
+    ] {
+        assert_eq!(
+            post(a.addr, rt, Some(&t), body).await.status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    assert!(a.fake.as_ref().unwrap().subjects().is_empty());
+}
+
+#[tokio::test]
+async fn new_routes_refuse_ended_session() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Ended).await;
+    let t = mint_token(&a.code, ws, s);
+    for (rt, body) in [
+        (
+            "wait",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0,"condition":{"kind":"load_state","state":"ready"}}),
+        ),
+        (
+            "screenshot",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0}),
+        ),
+    ] {
+        assert_eq!(
+            post(a.addr, rt, Some(&t), body).await.status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+    }
+    assert!(a.fake.as_ref().unwrap().subjects().is_empty());
+}
+
+#[tokio::test]
 async fn snapshot_needs_browser_id() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
     let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
@@ -518,6 +824,25 @@ async fn bodies_reject_subject_ids() {
         (
             "snapshot",
             serde_json::json!({"browser_id":"b-1","owner_id":"g"}),
+        ),
+        (
+            "wait",
+            serde_json::json!({
+                "browser_id":"b-1",
+                "snapshot_id":"snapshot-1",
+                "document_epoch":0,
+                "condition":{"kind":"url_changed"},
+                "session_id":"g"
+            }),
+        ),
+        (
+            "screenshot",
+            serde_json::json!({
+                "browser_id":"b-1",
+                "snapshot_id":"snapshot-1",
+                "document_epoch":0,
+                "owner_id":"g"
+            }),
         ),
     ] {
         assert_eq!(

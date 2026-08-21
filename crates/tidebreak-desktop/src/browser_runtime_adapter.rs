@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use tauri::AppHandle;
 use tidebreak_core::{
     BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSnapshotArgs, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
+    BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
 };
 use tidebreak_server::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use uuid::Uuid;
@@ -73,6 +74,38 @@ impl BrowserRuntime for DesktopBrowserRuntime {
     ) -> Result<BrowserPageSnapshot, BrowserRuntimeError> {
         let capability_id = self.sessions.capability_for(&self.registry, scope)?;
         crate::browser_semantics::browser_semantic_snapshot(
+            &self.app,
+            &self.registry,
+            capability_id,
+            args.clone(),
+        )
+        .await
+        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn wait(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserWaitArgs,
+    ) -> Result<BrowserWaitResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::browser_semantics::browser_wait(
+            &self.app,
+            &self.registry,
+            capability_id,
+            args.clone(),
+        )
+        .await
+        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn screenshot(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserScreenshotArgs,
+    ) -> Result<BrowserScreenshotResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::browser_semantics::browser_screenshot(
             &self.app,
             &self.registry,
             capability_id,
@@ -211,7 +244,22 @@ impl SessionCapabilities {
 }
 
 fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeError {
-    match error.as_str() {
+    // Strip known error-site prefixes so the inner authorization or stale
+    // reason is classified rather than collapsed to Failed.
+    fn strip_prefix(error: &str) -> &str {
+        for prefix in [
+            "screenshot authorization lapsed: ",
+            "screenshot recording failed: ",
+        ] {
+            if let Some(inner) = error.strip_prefix(prefix) {
+                return inner;
+            }
+        }
+        error
+    }
+
+    let inner = strip_prefix(error.as_str());
+    match inner {
         "browser capability is unavailable" => return BrowserRuntimeError::SessionEnded,
         "browser origin is not shared with this agent"
         | "browser origin is not shared for this operation"
@@ -239,14 +287,15 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
     let Some(browser_id) = browser_id else {
         return BrowserRuntimeError::Failed(error);
     };
+    let inner = strip_prefix(error.as_str());
     if matches!(
-        error.as_str(),
+        inner,
         "browser session is not registered"
             | "browser session is not open"
             | "browser is hidden"
             | "browser is not controlled by this agent"
             | "browser is controlled by another agent"
-    ) || error == format!("browser session {browser_id} belongs to a different workspace")
+    ) || inner == format!("browser session {browser_id} belongs to a different workspace")
     {
         return BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned());
     }
@@ -457,6 +506,41 @@ mod tests {
         assert_eq!(
             map_native_error(Some("browser-1"), message.clone()),
             BrowserRuntimeError::Failed(message)
+        );
+    }
+
+    #[test]
+    fn map_native_error_classifies_prefixed_screenshot_errors() {
+        // Prefixed authorization-lapse errors classify the inner cause.
+        assert_eq!(
+            map_native_error(
+                Some("browser-1"),
+                "screenshot authorization lapsed: browser capability is unavailable".to_owned(),
+            ),
+            BrowserRuntimeError::SessionEnded
+        );
+        assert_eq!(
+            map_native_error(
+                Some("browser-1"),
+                "screenshot authorization lapsed: browser is hidden".to_owned(),
+            ),
+            BrowserRuntimeError::UnknownBrowserId("browser-1".to_owned())
+        );
+        assert_eq!(
+            map_native_error(
+                Some("browser-1"),
+                "screenshot recording failed: browser document changed while screenshot was being captured".to_owned(),
+            ),
+            BrowserRuntimeError::StaleTarget
+        );
+    }
+
+    #[test]
+    fn map_native_error_preserves_original_error_on_unmatched_prefix() {
+        let original = "screenshot authorization lapsed: unknown browser reason".to_owned();
+        assert_eq!(
+            map_native_error(Some("browser-1"), original.clone()),
+            BrowserRuntimeError::Failed(original)
         );
     }
 }
