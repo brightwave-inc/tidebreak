@@ -125,6 +125,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_clears_preconfigured_command_environment() {
+        const AMBIENT_SENTINEL: &str = "TIDEBREAK_TEST_AMBIENT";
+
+        let mut cmd = tokio::process::Command::new("/bin/true");
+        cmd.env(AMBIENT_SENTINEL, "must-be-cleared");
+
+        apply_child_env_tokio(&mut cmd, Vec::new(), &[], None);
+
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .all(|(name, _)| name != std::ffi::OsStr::new(AMBIENT_SENTINEL)),
+            "the helper must clear command entries configured before its trusted environment is applied"
+        );
+    }
+
+    #[test]
     fn reserved_snapshot_keys_are_stripped_case_insensitively() {
         // A lowercase reserved key in the probe snapshot must not survive,
         // mirroring the case-insensitive `filter_child_env` contract.
