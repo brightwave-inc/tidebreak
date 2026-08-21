@@ -1418,10 +1418,12 @@ impl CodeRuntime {
             session.model = Some(model);
             let _ = save_session(&self.db, &session).await?;
         }
-        // A fenced sibling means an engine from a previous boot may still be
-        // alive in this checkout, outside every lock this process holds. The
-        // turn lock cannot see it, so nothing in the workspace writes until it
-        // is reaped (record 55).
+        // A sibling fenced for an unaccounted engine — an orphan from a
+        // previous boot, an ambiguous pid, a lost resume — may still be alive
+        // in this checkout, outside every lock this process holds. The turn
+        // lock cannot see it, so nothing in the workspace writes until it is
+        // reaped (record 55). A sibling fenced for repeated turn failures is
+        // not that: its engine answered every time, so it does not stop us.
         if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
             return Err(ServerError::conflict_kind("workspace_fenced", reason));
         }
@@ -1496,7 +1498,18 @@ impl CodeRuntime {
         let siblings = list_sessions_for_workspace(&self.db, owner, session.workspace_id).await?;
         Ok(siblings
             .iter()
-            .find(|other| other.id != session.id && other.lifecycle == CodeSessionLifecycle::Fenced)
+            .find(|other| {
+                other.id != session.id
+                    && other.lifecycle == CodeSessionLifecycle::Fenced
+                    // Only a fence that implies an unaccounted engine process
+                    // stops the workspace. A sibling fenced for repeated turn
+                    // failures answered every time; its worktree is not at
+                    // risk, so this session keeps working.
+                    && other
+                        .fence_reason
+                        .as_ref()
+                        .is_none_or(FenceReason::blocks_workspace)
+            })
             .map(|fenced| {
                 format!(
                     "another session in this workspace is fenced until it is reaped ({})",
