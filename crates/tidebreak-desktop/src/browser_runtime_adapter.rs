@@ -136,26 +136,42 @@ impl SessionCapabilities {
                     return Err(BrowserRuntimeError::SessionEnded);
                 }
 
-                let active = match entry.get_mut() {
-                    SessionCapabilityState::Active(active) => active,
+                let previous = match entry.get() {
+                    SessionCapabilityState::Active(active) => active.capability_id,
                     SessionCapabilityState::Revoked => unreachable!("checked above"),
                 };
                 let workspace = scope.workspace.to_string();
                 if registry
-                    .heartbeat_agent_capability(active.capability_id, &workspace)
+                    .heartbeat_agent_capability(previous, &workspace)
                     .is_ok()
                 {
-                    return Ok(active.capability_id);
+                    return Ok(previous);
                 }
 
                 // A live code session may outlast the native capability's
-                // short TTL. Rotate it under the session-state lock so a
-                // concurrent revoke cannot resurrect the session.
-                let previous = active.capability_id;
-                let replacement = registry.issue_agent_capability(&workspace, "Code agent");
-                active.capability_id = replacement;
-                registry.revoke_agent_capability(previous);
-                Ok(replacement)
+                // short TTL. Rotate it atomically under both registries so a
+                // concurrent revoke cannot resurrect the session and active
+                // controller ownership does not become a permanent Stop.
+                match registry.rotate_expired_agent_capability(
+                    previous,
+                    &workspace,
+                    "Code agent",
+                ) {
+                    Ok(replacement) => {
+                        match entry.get_mut() {
+                            SessionCapabilityState::Active(active) => {
+                                active.capability_id = replacement;
+                            }
+                            SessionCapabilityState::Revoked => unreachable!("checked above"),
+                        }
+                        Ok(replacement)
+                    }
+                    Err(_) => {
+                        *entry.get_mut() = SessionCapabilityState::Revoked;
+                        registry.revoke_agent_capability(previous);
+                        Err(BrowserRuntimeError::SessionEnded)
+                    }
+                }
             }
             Entry::Vacant(entry) => {
                 let capability_id =
@@ -290,5 +306,53 @@ mod tests {
             sessions.capability_for(&registry, &original),
             Err(BrowserRuntimeError::SessionEnded)
         );
+    }
+
+    #[test]
+    fn expired_capability_rotates_without_stranding_agent_control() {
+        use tidebreak_core::{
+            BrowserGrantCapability, BrowserOrigin, BrowserOriginScope,
+        };
+
+        let registry = BrowserRegistry::default();
+        let sessions = SessionCapabilities::default();
+        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let workspace = scope.workspace.to_string();
+        registry
+            .register(
+                "browser-1",
+                &workspace,
+                "https://example.com".to_owned(),
+                true,
+            )
+            .unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com").unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                &workspace,
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+
+        let previous = sessions.capability_for(&registry, &scope).unwrap();
+        registry
+            .begin_agent_control(previous, "browser-1")
+            .unwrap();
+        registry.expire_agent_capability_for_test(previous);
+
+        let replacement = sessions.capability_for(&registry, &scope).unwrap();
+
+        assert_ne!(replacement, previous);
+        assert!(registry
+            .heartbeat_agent_capability(previous, &workspace)
+            .is_err());
+        registry
+            .begin_agent_control(replacement, "browser-1")
+            .unwrap();
     }
 }
