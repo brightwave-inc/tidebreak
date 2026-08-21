@@ -1402,7 +1402,12 @@ async fn bind_inner(
         .with_office_converter(office_converter)
         .with_host_tool_broker(host_tool_broker),
     );
-    let foreground_web_search = web_search::foreground_tool(store.clone(), secrets.clone());
+    let foreground_web_search = web_search::foreground_tool(
+        store.clone(),
+        secrets.clone(),
+        resolver.clone(),
+        boot_default_model(),
+    );
     let web_extract = web_search::foreground_extract_tool(store.clone(), secrets.clone());
     // Computer use exists only where there is a display to capture and a
     // trusted client to drive it: the desktop profile on macOS, where the
@@ -1582,6 +1587,8 @@ async fn bind_inner(
         sandbox_web_search_worker::SandboxWebSearchWorker::with_attempts(
             state.store.clone(),
             state.secrets.clone(),
+            state.resolver.clone(),
+            state.agent_config.model.clone(),
             state.agent_run_wake.clone(),
             state.sandbox_attempts.clone(),
             sandbox_web_search_worker::SandboxWebSearchWorkerConfig::default(),
@@ -1910,12 +1917,21 @@ fn agent_deps_with_cancellation_acceleration(
     // an explicit ordered wait parks only when results are needed. The bounded
     // sandbox worker below never receives either orchestration definition.
     tools.register_foreground_agent_orchestration();
-    let model = std::env::var("TIDEBREAK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let model = boot_default_model();
     let agent_config = AgentConfig {
         model,
         ..AgentConfig::default()
     };
     (tools, agent_config)
+}
+
+/// The model this process launched with.
+///
+/// Read in two places — the boot agent config, and the web-search resolver's
+/// last fallback when neither a chat nor the global `chat` role names a model —
+/// so it lives in one.
+fn boot_default_model() -> String {
+    std::env::var("TIDEBREAK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
 /// Register the computer-use contracts as validated client tools.
