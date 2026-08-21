@@ -1801,7 +1801,10 @@ done
 
     #[test]
     fn browser_present_appends_exactly_one_trusted_config_override() {
-        let spec = BrowserChannelSpec::new(std::path::PathBuf::from("/tmp/browser-cap.json"), std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
         let plan = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
             &[],
@@ -1830,7 +1833,10 @@ done
 
     #[test]
     fn browser_override_is_after_extra_argv() {
-        let spec = BrowserChannelSpec::new(std::path::PathBuf::from("/tmp/browser-cap.json"), std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
         let plan = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
             &["--extra".into(), "--flag".into()],
@@ -1847,7 +1853,10 @@ done
     #[test]
     fn browser_capfile_path_is_never_in_argv() {
         let capfile = std::path::PathBuf::from("/tmp/tidebreak-browser-abc123.json");
-        let spec = BrowserChannelSpec::new(capfile.clone(), std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+        let spec = BrowserChannelSpec::new(
+            capfile.clone(),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
         let plan = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
             &[],
@@ -1865,7 +1874,10 @@ done
 
     #[test]
     fn browser_env_key_is_stripped_from_plan_even_when_browser_is_some() {
-        let spec = BrowserChannelSpec::new(std::path::PathBuf::from("/tmp/browser-cap.json"), std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
         let plan = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
             &[],
