@@ -177,11 +177,8 @@ async fn recover_once(app: &AppHandle) -> bool {
         for call in calls.into_iter().filter(|call| {
             !recovered_call_ids.contains(&call.id) && is_foreground_browser_call(call)
         }) {
-            let receipt = ForegroundBrowserReceipt::new(
-                chat.id,
-                call.id,
-                state.receipts.executor_id(),
-            );
+            let receipt =
+                ForegroundBrowserReceipt::new(chat.id, call.id, state.receipts.executor_id());
             if let Err(error) = execute_receipt(app, &state, &registry, receipt).await {
                 eprintln!("tidebreak-desktop: foreground browser execution deferred: {error}");
                 failed = true;
@@ -242,7 +239,9 @@ async fn execute_receipt(
             .receipts
             .remove_foreground_browser(receipt.call_id)
             .map_err(private_receipt_error)?;
-        return Err("local control plane returned an invalid foreground browser request".to_owned());
+        return Err(
+            "local control plane returned an invalid foreground browser request".to_owned(),
+        );
     }
     if call
         .client_executor_id
@@ -281,7 +280,9 @@ async fn execute_receipt(
         || claim.call.client_executor_id != Some(receipt.executor_id)
         || !validate_call_identity(&claim.call, receipt.chat_id, receipt.call_id)
     {
-        return Err("local control plane returned an invalid foreground browser request".to_owned());
+        return Err(
+            "local control plane returned an invalid foreground browser request".to_owned(),
+        );
     }
 
     client
@@ -294,16 +295,16 @@ async fn execute_receipt(
         .save_foreground_browser(&receipt)
         .map_err(private_receipt_error)?;
 
-    let resolution = match state.foreground_browser.capability_for(
-        registry,
-        context.chat_id,
-        &workspace_id,
-    ) {
-        Ok(capability_id) => {
-            execute_operation(app, state, registry, context, capability_id, &claim.call).await
-        }
-        Err(error) => map_native_error(None, error),
-    };
+    let resolution =
+        match state
+            .foreground_browser
+            .capability_for(registry, context.chat_id, &workspace_id)
+        {
+            Ok(capability_id) => {
+                execute_operation(app, state, registry, context, capability_id, &claim.call).await
+            }
+            Err(error) => map_native_error(None, error),
+        };
     receipt.resolution = Some(resolution);
     state
         .receipts
@@ -338,7 +339,9 @@ async fn recover_after_claim_conflict(
             .receipts
             .remove_foreground_browser(receipt.call_id)
             .map_err(private_receipt_error)?;
-        return Err("local control plane returned an invalid foreground browser request".to_owned());
+        return Err(
+            "local control plane returned an invalid foreground browser request".to_owned(),
+        );
     }
     if call.client_executor_id != Some(receipt.executor_id) {
         return state
@@ -634,10 +637,7 @@ fn completed_with_images(
 }
 
 fn invalid_request() -> StoredResolution {
-    unavailable(
-        "invalid_request",
-        "The browser request was not available.",
-    )
+    unavailable("invalid_request", "The browser request was not available.")
 }
 
 fn map_native_error(browser_id: Option<&str>, error: String) -> StoredResolution {
@@ -914,8 +914,7 @@ mod tests {
         } = map_native_error(
             Some("copied-browser-id"),
             "browser session belongs to a different workspace: secret-scope".to_owned(),
-        )
-        else {
+        ) else {
             panic!("a scope mismatch must fail");
         };
         assert_eq!(error_code, "unknown_browser");
@@ -966,9 +965,7 @@ mod tests {
         let debug = format!("{receipt:?}");
         assert!(!debug.contains(&receipt.lease_token.to_string()));
         assert!(!debug.contains("foreground-chat:"));
-        store
-            .remove_foreground_browser(receipt.call_id)
-            .unwrap();
+        store.remove_foreground_browser(receipt.call_id).unwrap();
         assert!(store.load_foreground_browsers().unwrap().is_empty());
     }
 }

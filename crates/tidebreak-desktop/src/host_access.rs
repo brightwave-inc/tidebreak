@@ -26,8 +26,7 @@ pub(crate) struct HostAccess {
     pub(super) output_writebacks: Mutex<()>,
     pub(super) root_changes: Mutex<()>,
     pub(super) computer_use: crate::client_execution::computer_use::ComputerUseState,
-    pub(super) foreground_browser:
-        crate::client_execution::browser::ForegroundBrowserExecutorState,
+    pub(super) foreground_browser: crate::client_execution::browser::ForegroundBrowserExecutorState,
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,

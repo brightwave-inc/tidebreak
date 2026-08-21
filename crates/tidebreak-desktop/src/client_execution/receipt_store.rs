@@ -1498,9 +1498,7 @@ impl ReceiptStore {
                 serde_json::from_slice(&bytes).map_err(invalid_data)?;
             receipt.validate()?;
             if receipt.call_id != call_id || !call_ids.insert(call_id) {
-                return Err(invalid_data(
-                    "foreground-browser receipt identity mismatch",
-                ));
+                return Err(invalid_data("foreground-browser receipt identity mismatch"));
             }
             receipts.push(receipt);
         }
