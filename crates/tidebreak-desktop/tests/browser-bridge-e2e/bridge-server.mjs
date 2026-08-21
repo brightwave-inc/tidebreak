@@ -269,17 +269,19 @@ export async function startBridgeServer({
         if (stoppedControl) controller.halted = true;
 
         json(response, {
-          sessions: [
-            {
-              browserId: "browser-1",
-              url: fixtureOrigin,
-              title: "Agent browser fixture",
-              loadState: "ready",
-              visible: !hiddenBrowser,
-              engine: defaultEngine(),
-              controller,
-            },
-          ],
+          sessions: hiddenBrowser
+            ? []
+            : [
+                {
+                  browserId: "browser-1",
+                  url: fixtureOrigin,
+                  title: "Agent browser fixture",
+                  loadState: "ready",
+                  visible: true,
+                  engine: defaultEngine(),
+                  controller,
+                },
+              ],
         });
         return;
       }
@@ -657,8 +659,28 @@ export async function startBridgeServer({
           return;
         }
 
-        // Stale document epoch → 409
-        if (staleSnapshot && document_epoch !== currentDocumentEpoch) {
+        // Hidden targets are not addressable through an observation
+        // capability, matching BrowserRegistry::list_for_capability and the
+        // desktop adapter's fail-closed mapping.
+        if (hiddenBrowser) {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
+        }
+
+        // A Stop that already happened refuses a new operation. The separate
+        // waitOutcome="stopped" fixture models Stop racing an in-flight wait.
+        if (stoppedControl) {
+          errJson(response, 403, "forbidden", "browser control was stopped by the user");
+          return;
+        }
+
+        // Snapshot identity and epoch are authoritative even without an
+        // explicitly forced stale fixture.
+        if (
+          staleSnapshot ||
+          document_epoch !== currentDocumentEpoch ||
+          snapshot_id !== currentSnapshotId
+        ) {
           errJson(
             response,
             409,
@@ -682,10 +704,7 @@ export async function startBridgeServer({
         // Deterministic wait outcome
         let status;
         let message;
-        if (stoppedControl) {
-          status = "stopped";
-          message = "Browser control was stopped by the user.";
-        } else if (waitOutcome === "timed_out") {
+        if (waitOutcome === "timed_out") {
           status = "timed_out";
           const effectiveTimeout = timeout_ms ?? DEFAULT_BROWSER_WAIT_TIMEOUT_MS;
           message = `Wait timed out after ${effectiveTimeout} ms.`;
@@ -801,8 +820,23 @@ export async function startBridgeServer({
           return;
         }
 
-        // Stale document epoch → 409
-        if (staleSnapshot && document_epoch !== currentDocumentEpoch) {
+        if (hiddenBrowser) {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
+        }
+
+        if (stoppedControl) {
+          errJson(response, 403, "forbidden", "browser control was stopped by the user");
+          return;
+        }
+
+        // Screenshot publication must echo a host-issued snapshot for the
+        // exact live document generation.
+        if (
+          staleSnapshot ||
+          document_epoch !== currentDocumentEpoch ||
+          snapshot_id !== currentSnapshotId
+        ) {
           errJson(
             response,
             409,
@@ -818,7 +852,7 @@ export async function startBridgeServer({
             response,
             409,
             "stale_browser_target",
-            "browser session was replaced while waiting"
+            "browser session was replaced while capturing the screenshot"
           );
           return;
         }

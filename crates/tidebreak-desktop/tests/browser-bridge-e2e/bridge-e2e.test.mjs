@@ -405,11 +405,11 @@ test("wait returns timed_out when configured with waitOutcome", async () => {
   }
 });
 
-test("wait returns stopped when control is halted", async () => {
+test("wait returns stopped when Stop races an in-flight wait", async () => {
   const stoppedBridge = await startBridgeServer({
     port: 0,
     fixtureOrigin: fixture.origin,
-    stoppedControl: true,
+    waitOutcome: "stopped",
   });
 
   try {
@@ -892,6 +892,41 @@ test("stopped control does not prevent list but signals halted state", async () 
       true,
       "stopped control must set halted=true"
     );
+
+    const snap = await callBrowserRoute(
+      stoppedBridge.endpoint,
+      "snapshot",
+      { browser_id: "browser-1" },
+      token
+    );
+    assert.equal(snap.status, 200);
+
+    const wait = await callBrowserRoute(
+      stoppedBridge.endpoint,
+      "wait",
+      {
+        browser_id: "browser-1",
+        snapshot_id: snap.body.snapshotId,
+        document_epoch: snap.body.documentEpoch,
+        condition: { kind: "load_state", state: "ready" },
+      },
+      token
+    );
+    assert.equal(wait.status, 403);
+    assert.match(wait.body.message, /stopped/i);
+
+    const screenshot = await callBrowserRoute(
+      stoppedBridge.endpoint,
+      "screenshot",
+      {
+        browser_id: "browser-1",
+        snapshot_id: snap.body.snapshotId,
+        document_epoch: snap.body.documentEpoch,
+      },
+      token
+    );
+    assert.equal(screenshot.status, 403);
+    assert.match(screenshot.body.message, /stopped/i);
   } finally {
     await close(stoppedBridge.server);
   }
@@ -899,7 +934,7 @@ test("stopped control does not prevent list but signals halted state", async () 
 
 // ── negative: hidden browser ────────────────────────────────────────────────
 
-test("hidden browser is listed but visible=false", async () => {
+test("hidden browser is omitted from list and cannot be observed", async () => {
   const hiddenBridge = await startBridgeServer({
     port: 0,
     fixtureOrigin: fixture.origin,
@@ -910,9 +945,32 @@ test("hidden browser is listed but visible=false", async () => {
     const token = hiddenBridge.tokenRegistry.issue();
     const list = await callBrowserRoute(hiddenBridge.endpoint, "list", null, token);
     assert.equal(list.status, 200);
-    const session = list.body.sessions?.[0];
-    assert.ok(session, "list must return a session");
-    assert.equal(session.visible, false, "hidden browser must have visible=false");
+    assert.deepEqual(list.body.sessions, []);
+
+    const wait = await callBrowserRoute(
+      hiddenBridge.endpoint,
+      "wait",
+      {
+        browser_id: "browser-1",
+        snapshot_id: "snapshot-hidden",
+        document_epoch: 2,
+        condition: { kind: "load_state", state: "ready" },
+      },
+      token
+    );
+    assert.equal(wait.status, 404);
+
+    const screenshot = await callBrowserRoute(
+      hiddenBridge.endpoint,
+      "screenshot",
+      {
+        browser_id: "browser-1",
+        snapshot_id: "snapshot-hidden",
+        document_epoch: 2,
+      },
+      token
+    );
+    assert.equal(screenshot.status, 404);
   } finally {
     await close(hiddenBridge.server);
   }
@@ -993,6 +1051,44 @@ test("stale document epoch on screenshot returns 409 conflict", async () => {
   } finally {
     await close(staleBridge.server);
   }
+});
+
+test("forged snapshot id on wait and screenshot returns 409", async () => {
+  const token = bridge.tokenRegistry.issue();
+  const snap = await callBrowserRoute(
+    bridgeEndpoint,
+    "snapshot",
+    { browser_id: "browser-1" },
+    token
+  );
+  assert.equal(snap.status, 200);
+
+  const wait = await callBrowserRoute(
+    bridgeEndpoint,
+    "wait",
+    {
+      browser_id: "browser-1",
+      snapshot_id: "snapshot-forged",
+      document_epoch: snap.body.documentEpoch,
+      condition: { kind: "load_state", state: "ready" },
+    },
+    token
+  );
+  assert.equal(wait.status, 409);
+  assert.equal(wait.body.kind, "stale_browser_target");
+
+  const screenshot = await callBrowserRoute(
+    bridgeEndpoint,
+    "screenshot",
+    {
+      browser_id: "browser-1",
+      snapshot_id: "snapshot-forged",
+      document_epoch: snap.body.documentEpoch,
+    },
+    token
+  );
+  assert.equal(screenshot.status, 409);
+  assert.equal(screenshot.body.kind, "stale_browser_target");
 });
 
 test("stale instance (session replaced) on wait returns 409", async () => {
