@@ -46,6 +46,7 @@ async fn seed_owner(
             archive_script: None,
             quick_actions: Vec::new(),
             created_at: Utc::now(),
+            removed_at: None,
         },
     )
     .await
@@ -263,6 +264,7 @@ async fn postgres_repository_paths_are_unique_per_owner() {
         archive_script: None,
         quick_actions: Vec::new(),
         created_at: Utc::now(),
+        removed_at: None,
     };
     insert_repo(&store, &repo(&alice)).await.unwrap();
     insert_repo(&store, &repo(&bob)).await.unwrap();

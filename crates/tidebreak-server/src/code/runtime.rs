@@ -10,11 +10,11 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 
 use tidebreak_core::db::code::{
-    delete_repo, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
-    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
-    list_events, list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
-    list_sessions_for_workspace, list_turns, list_workspaces, save_approval, save_repo,
-    save_session, save_workspace,
+    delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session,
+    get_workspace, insert_repo, insert_session, insert_workspace, list_approvals, list_events,
+    list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
+    list_sessions_for_workspace, list_turns, list_workspaces, mark_repo_removed, save_approval,
+    save_repo, save_session, save_workspace,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -622,6 +622,7 @@ impl CodeRuntime {
             archive_script,
             quick_actions: Vec::new(),
             created_at: Utc::now(),
+            removed_at: None,
         };
         insert_repo(&self.db, &repo).await?;
         Ok(repo)
@@ -651,7 +652,31 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn delete_repo(&self, owner: &OwnerId, id: RepoId) -> Result<(), ServerError> {
+    /// Refuse work that materializes a checkout for a removed registration.
+    ///
+    /// Reading a removed repository stays allowed: its archived workspaces and
+    /// their transcripts resolve through it, which is the reason the row is
+    /// kept at all.
+    fn refuse_removed_repo(repo: &CodeRepo) -> Result<(), ServerError> {
+        if repo.removed_at.is_some() {
+            return Err(ServerError::conflict_kind(
+                "repo_removed",
+                "this repository registration was removed; register it again to start new work",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Remove a repository registration, keeping every archived workspace and
+    /// transcript that hangs off it.
+    ///
+    /// The row survives on purpose. Hard-deleting it strands that history: on
+    /// SQLite the workspace foreign key is not enforced, so the rows stay
+    /// behind with nothing to reach them through, and on PostgreSQL it is
+    /// enforced, so the delete fails against the very archived workspaces this
+    /// path requires. Reclaiming the checkout on disk is a separate act with
+    /// its own confirmation.
+    pub(crate) async fn remove_repo(&self, owner: &OwnerId, id: RepoId) -> Result<(), ServerError> {
         let workspaces = list_workspaces(&self.db, owner, Some(id)).await?;
         if workspaces
             .iter()
@@ -659,10 +684,10 @@ impl CodeRuntime {
         {
             return Err(ServerError::conflict_kind(
                 "repo_has_workspaces",
-                "archive every workspace before deleting the repository",
+                "archive every workspace before removing the repository",
             ));
         }
-        if !delete_repo(&self.db, owner, id).await? {
+        if !mark_repo_removed(&self.db, owner, id, Utc::now()).await? {
             return Err(ServerError::not_found(format!("repo {id} not found")));
         }
         Ok(())
@@ -676,6 +701,7 @@ impl CodeRuntime {
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
         let repo = self.get_repo(owner, repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
         let title = title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -910,6 +936,7 @@ impl CodeRuntime {
             ));
         }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
         let repo_root = std::path::Path::new(&repo.root_path);
         if !worktree::branch_exists(repo_root, &workspace.branch_name)
             .await

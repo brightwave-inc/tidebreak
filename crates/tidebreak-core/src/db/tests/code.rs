@@ -8,8 +8,8 @@ use crate::code::{
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
     insert_approval, insert_repo, insert_session, insert_turn, insert_workspace, list_approvals,
-    list_events, list_repos, list_sessions, list_turns, save_session, set_session_subagents,
-    set_workspace_title_if, CodeJournalError,
+    list_events, list_repos, list_sessions, list_turns, mark_repo_removed, save_session,
+    set_session_subagents, set_workspace_title_if, CodeJournalError,
 };
 use crate::OwnerId;
 use chrono::Utc;
@@ -51,6 +51,7 @@ async fn seed_owner(
             archive_script: None,
             quick_actions: Vec::new(),
             created_at: now(),
+            removed_at: None,
         },
     )
     .await
@@ -676,6 +677,7 @@ async fn the_same_repository_path_can_belong_to_two_owners() {
                 archive_script: None,
                 quick_actions: Vec::new(),
                 created_at: now(),
+                removed_at: None,
             },
         )
         .await
@@ -892,4 +894,78 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Removing a repository must not take its history with it.
+///
+/// A hard delete cannot do this. SQLite does not enforce the workspace
+/// foreign key, so it would leave the workspace, session, turn, and event
+/// rows behind with no reachable repository to find them through; PostgreSQL
+/// does enforce it, so the same delete fails against exactly the archived
+/// workspaces this path requires. Soft removal is what makes the two backends
+/// agree and keeps the transcript searchable afterwards.
+#[tokio::test]
+async fn a_removed_repo_keeps_its_workspaces_and_transcript() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session_id, turn_id) = seed_owner(&store, &owner, "example").await;
+
+    let repo = list_repos(&store, &owner).await.unwrap().remove(0);
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+
+    assert!(mark_repo_removed(&store, &owner, repo.id, now())
+        .await
+        .unwrap());
+
+    // Gone from the list the user picks a repository from.
+    assert!(list_repos(&store, &owner).await.unwrap().is_empty());
+
+    // Still resolvable, because the history hangs off it.
+    let stored = get_repo(&store, &owner, repo.id).await.unwrap().unwrap();
+    assert!(stored.removed_at.is_some());
+    assert!(get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(get_turn(&store, &owner, turn_id).await.unwrap().is_some());
+}
+
+/// Removal is once. A second call reports that nothing changed rather than
+/// silently restamping the timestamp a reader may be showing.
+#[tokio::test]
+async fn removing_an_already_removed_repo_reports_no_change() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "example").await;
+    let repo = list_repos(&store, &owner).await.unwrap().remove(0);
+
+    assert!(mark_repo_removed(&store, &owner, repo.id, now())
+        .await
+        .unwrap());
+    assert!(!mark_repo_removed(&store, &owner, repo.id, now())
+        .await
+        .unwrap());
+}
+
+/// Another owner's repository is not removable, the way it is not readable.
+#[tokio::test]
+async fn a_repo_is_not_removable_by_another_owner() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::local();
+    let bob = OwnerId::new("bob").unwrap();
+    seed_owner(&store, &alice, "alice").await;
+    let repo = list_repos(&store, &alice).await.unwrap().remove(0);
+
+    assert!(!mark_repo_removed(&store, &bob, repo.id, now())
+        .await
+        .unwrap());
+    assert_eq!(list_repos(&store, &alice).await.unwrap().len(), 1);
 }

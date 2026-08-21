@@ -103,7 +103,12 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
 - **`code_repo`** — `id`, `root_path` (unique, canonical toplevel),
   `display_name`, `default_base_ref`, `branch_prefix`, `setup_script`,
   `archive_script`, `quick_actions` (JSON array of
-  `{name, command, auto_run_on_create}`), `created_at`.
+  `{name, command, auto_run_on_create}`), `created_at`, `removed_at`.
+  Removal is soft: `DELETE /code/repos/{id}` stamps `removed_at` and hides the
+  registration, keeping every archived workspace and transcript that hangs off
+  it reachable. Deleting the row would strand that history on SQLite, which
+  does not enforce the workspace foreign key, and fail outright on PostgreSQL,
+  which does. Reclaiming the checkout on disk is a separate, explicit act.
 - **`code_workspace`** — `id`, `repo_id`, `title`, `worktree_path`,
   `branch_name`, `base_ref`, `status`
   (`Creating | SetupFailed | Active | Archived`), `pr` (JSON digest:

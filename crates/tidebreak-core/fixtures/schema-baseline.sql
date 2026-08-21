@@ -1305,7 +1305,8 @@ CREATE TABLE "code_repo" (
     "setup_script" text,
     "archive_script" text,
     "quick_actions" jsonb_text NOT NULL,
-    "created_at" timestamp_with_timezone_text NOT NULL
+    "created_at" timestamp_with_timezone_text NOT NULL,
+    "removed_at" timestamp_with_timezone_text
 );
 
 CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path");
@@ -1422,7 +1423,7 @@ CREATE TABLE "code_approval" (
     "decided_at" timestamp_with_timezone_text,
     FOREIGN KEY ("session_id") REFERENCES "code_session" ("id"),
     FOREIGN KEY ("turn_id") REFERENCES "code_turn" ("id"),
-    CHECK ("state" IN ('pending', 'approved', 'denied'))
+    CHECK ("state" IN ('pending', 'approved', 'denied', 'abandoned'))
 );
 
 CREATE INDEX "idx_code_approval_session_state" ON "code_approval" ("session_id", "state");

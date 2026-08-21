@@ -1668,6 +1668,7 @@ pub mod code_repo {
         #[sea_orm(column_type = "JsonBinary")]
         pub quick_actions: Json,
         pub created_at: DateTimeUtc,
+        pub removed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
