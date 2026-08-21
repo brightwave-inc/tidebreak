@@ -94,7 +94,7 @@ async fn code_app_with_optional_browser(
         browser_runtime.map(|runtime| -> Arc<dyn BrowserRuntime> { runtime });
     let browser_bridge_command = installed_browser_runtime
         .as_ref()
-        .map(|_| std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+        .map(|_| crate::code::browser_channel::test_bridge_command());
     let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().to_path_buf(),
