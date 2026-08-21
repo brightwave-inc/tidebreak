@@ -146,7 +146,7 @@ pub(crate) struct CodeRuntime {
     /// overlap: two harnesses editing the same files, and two checkpoints
     /// racing for `.git/index.lock`, is corruption rather than concurrency.
     /// A worker takes the workspace's lock for the length of a turn, so a
-    /// sibling's turn starts after this one ends. See record 54.
+    /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     pr_cache: PrDigestCache,
     pub(crate) delivery_cache: DeliveryCache,
@@ -1068,7 +1068,7 @@ impl CodeRuntime {
     /// A workspace holds any number of interactive sessions and at most one
     /// watch session, so the guard below covers watch only. The worktree they
     /// share is protected by the per-workspace turn lock rather than by a cap
-    /// on conversations; see record 54.
+    /// on conversations; see record 55.
     pub(crate) async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
@@ -1263,7 +1263,7 @@ impl CodeRuntime {
         // A fenced sibling means an engine from a previous boot may still be
         // alive in this checkout, outside every lock this process holds. The
         // turn lock cannot see it, so nothing in the workspace writes until it
-        // is reaped (record 54).
+        // is reaped (record 55).
         if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
             return Err(ServerError::conflict_kind("workspace_fenced", reason));
         }
@@ -1907,7 +1907,7 @@ impl CodeRuntime {
     ///
     /// Every session in the workspace hands the same `Arc` to its worker, so
     /// the lock outlives any one session and a worker recovered after a
-    /// restart rejoins the same queue. See record 54.
+    /// restart rejoins the same queue. See record 55.
     pub(super) fn worktree_turn_lock(
         &self,
         workspace_id: WorkspaceId,

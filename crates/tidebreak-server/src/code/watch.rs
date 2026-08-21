@@ -410,7 +410,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         .await;
     }
     // Another session's turn owns the worktree right now; wait. The turn lock
-    // in the worker is what actually serializes the checkout (record 54);
+    // in the worker is what actually serializes the checkout (record 55);
     // skipping the cycle here avoids waking a harness that would only queue.
     let sessions = list_sessions_for_workspace(&runtime.db, &owner, watch.workspace_id).await?;
     if sessions
