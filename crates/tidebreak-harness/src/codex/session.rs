@@ -14,14 +14,14 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tokio::time::{timeout, Instant};
 use tracing::warn;
 
+use crate::browser_channel::apply_child_env_tokio;
 use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
-    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
-    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
-    StreamLineBuffer, TurnInput, TurnOutcome,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
+    TurnInput, TurnOutcome,
 };
-use crate::browser_channel::apply_child_env_tokio;
 use tidebreak_core::{CodePermissionMode, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);

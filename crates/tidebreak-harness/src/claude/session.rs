@@ -12,15 +12,15 @@ use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
+use crate::browser_channel::apply_child_env_tokio;
 use crate::child::{turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
-    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
-    StreamLineBuffer, TurnInput, TurnOutcome,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
+    TurnInput, TurnOutcome,
 };
-use crate::browser_channel::apply_child_env_tokio;
 use tidebreak_core::CodePermissionMode;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);

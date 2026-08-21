@@ -106,8 +106,12 @@ mod tests {
             .find(|(name, _)| name.as_str() == BROWSER_CAPFILE_ENV_KEY)
             .expect("trusted pair was injected");
         assert_eq!(key, BROWSER_CAPFILE_ENV_KEY);
-        assert_eq!(value, trusted.to_string_lossy());
-        assert_eq!(env.len(), 1, "no other entries when nothing else is supplied");
+        assert_eq!(value.as_str(), trusted.to_string_lossy().as_ref());
+        assert_eq!(
+            env.len(),
+            1,
+            "no other entries when nothing else is supplied"
+        );
     }
 
     #[test]

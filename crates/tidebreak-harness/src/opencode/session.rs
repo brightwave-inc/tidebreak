@@ -14,14 +14,14 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
+use crate::browser_channel::apply_child_env_tokio;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::opencode::parse::OpencodeStreamParser;
 use crate::{
-    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
-    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
-    StreamLineBuffer, TurnInput, TurnOutcome,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
+    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
+    TurnInput, TurnOutcome,
 };
-use crate::browser_channel::apply_child_env_tokio;
 use tidebreak_core::CodePermissionMode;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
