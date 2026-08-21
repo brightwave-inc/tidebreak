@@ -129,17 +129,14 @@ impl BrowserTokenRegistry {
         }
         // Recreate the empty directory with mode 0700.
         if let Err(e) = std::fs::create_dir_all(&self.capfile_dir) {
-            return Err(format!(
-                "failed to recreate browser capfile directory: {e}"
-            ));
+            return Err(format!("failed to recreate browser capfile directory: {e}"));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) = std::fs::set_permissions(
-                &self.capfile_dir,
-                std::fs::Permissions::from_mode(0o700),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(&self.capfile_dir, std::fs::Permissions::from_mode(0o700))
+            {
                 return Err(format!("could not set capfile directory mode: {e}"));
             }
         }
@@ -156,10 +153,7 @@ impl BrowserTokenRegistry {
     ///
     /// Returns an error if the loopback base has not been set or the capfile
     /// cannot be written. On error no state is committed.
-    pub(crate) fn issue(
-        &self,
-        subject: BrowserSubject,
-    ) -> Result<BrowserChannelSpec, String> {
+    pub(crate) fn issue(&self, subject: BrowserSubject) -> Result<BrowserChannelSpec, String> {
         let loopback_base = self
             .loopback_base
             .lock()
@@ -182,8 +176,7 @@ impl BrowserTokenRegistry {
 
         // Write the new capfile. If this fails, unlock and leave state
         // unchanged — nothing was committed.
-        match write_capfile(&capfile_path, CAPFILE_VERSION, &loopback_base, &token)
-        {
+        match write_capfile(&capfile_path, CAPFILE_VERSION, &loopback_base, &token) {
             Ok(()) => {}
             Err(e) => return Err(e),
         }
@@ -271,9 +264,9 @@ fn resolve_absolute_trusted(joined: &Path) -> Result<PathBuf, String> {
         .file_name()
         .ok_or_else(|| "capfile path has no trailing component".to_owned())?;
 
-    let canonical_parent = parent.canonicalize().map_err(|e| {
-        format!("cannot resolve data directory for browser capfiles: {e}")
-    })?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve data directory for browser capfiles: {e}"))?;
 
     let absolute = canonical_parent.join(suffix);
 
@@ -291,9 +284,7 @@ fn resolve_absolute_trusted(joined: &Path) -> Result<PathBuf, String> {
             // Does not exist yet — fine, it will be created on first use.
         }
         Err(e) => {
-            return Err(format!(
-                "cannot inspect browser capfile directory: {e}"
-            ));
+            return Err(format!("cannot inspect browser capfile directory: {e}"));
         }
         _ => {
             // Exists and is not a symlink — fine.
@@ -327,9 +318,7 @@ fn write_capfile(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Err(e) =
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-        {
+        if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
             return Err(format!("could not set capfile directory mode: {e}"));
         }
     }
@@ -342,14 +331,11 @@ fn write_capfile(
         "token": token,
     });
 
-    let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| format!("failed to serialize capfile: {e}"))?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| format!("failed to serialize capfile: {e}"))?;
 
     // Random temp name to avoid collision with concurrent issuances.
-    let tmp_name = format!(
-        ".{}.tmp",
-        uuid::Uuid::new_v4().to_string().replace('-', "")
-    );
+    let tmp_name = format!(".{}.tmp", uuid::Uuid::new_v4().to_string().replace('-', ""));
     let tmp_path = parent.join(&tmp_name);
 
     // Open with create_new so two issuers cannot share a temp file.
@@ -392,8 +378,7 @@ fn write_capfile(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Err(e) =
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+        if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
         {
             drop(file);
             let _ = std::fs::remove_file(&tmp_path);
@@ -436,8 +421,7 @@ mod tests {
 
     fn read_token_from_capfile(path: &Path) -> String {
         let contents = std::fs::read_to_string(path).expect("read capfile");
-        let value: serde_json::Value =
-            serde_json::from_str(&contents).expect("parse capfile");
+        let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
         value["token"].as_str().unwrap().to_owned()
     }
 
@@ -450,11 +434,7 @@ mod tests {
         let sub = subject("indep");
 
         let spec = reg.issue(sub.clone()).unwrap();
-        let file_stem = spec
-            .capability_file
-            .file_stem()
-            .unwrap()
-            .to_string_lossy();
+        let file_stem = spec.capability_file.file_stem().unwrap().to_string_lossy();
         let token = read_token_from_capfile(&spec.capability_file);
 
         // The token must not appear in the filename.
@@ -595,14 +575,11 @@ mod tests {
         let sub = subject("schema");
 
         let spec = reg.issue(sub).unwrap();
-        let contents =
-            std::fs::read_to_string(&spec.capability_file).expect("read capfile");
-        let value: serde_json::Value =
-            serde_json::from_str(&contents).expect("parse capfile");
+        let contents = std::fs::read_to_string(&spec.capability_file).expect("read capfile");
+        let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
 
         let obj = value.as_object().expect("capfile must be a JSON object");
-        let expected: HashSet<&str> =
-            ["version", "endpoint", "token"].iter().copied().collect();
+        let expected: HashSet<&str> = ["version", "endpoint", "token"].iter().copied().collect();
         let actual: HashSet<&str> = obj.keys().map(String::as_str).collect();
 
         assert_eq!(
@@ -621,8 +598,7 @@ mod tests {
         let sub = subject("endpoint");
 
         let spec = reg.issue(sub).unwrap();
-        let contents =
-            std::fs::read_to_string(&spec.capability_file).unwrap();
+        let contents = std::fs::read_to_string(&spec.capability_file).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
 
         assert_eq!(
@@ -660,9 +636,7 @@ mod tests {
 
         // The capfile subtree should be empty (only recreated dir exists).
         assert!(capfile_dir.exists());
-        let entries: Vec<_> = std::fs::read_dir(&capfile_dir)
-            .unwrap()
-            .collect();
+        let entries: Vec<_> = std::fs::read_dir(&capfile_dir).unwrap().collect();
         assert!(
             entries.is_empty(),
             "capfile dir must be empty after cleanup"
@@ -790,16 +764,9 @@ mod tests {
         let tmp_count = std::fs::read_dir(parent)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with('.')
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
             .count();
-        assert_eq!(
-            tmp_count, 0,
-            "no .tmp files should survive atomic rename"
-        );
+        assert_eq!(tmp_count, 0, "no .tmp files should survive atomic rename");
     }
 
     #[test]
@@ -857,7 +824,10 @@ mod tests {
             // Restore permissions immediately.
             std::fs::set_permissions(capdir, std::fs::Permissions::from_mode(0o700))
                 .expect("restore write permission");
-            assert!(result.is_err(), "issue must fail when directory is read-only");
+            assert!(
+                result.is_err(),
+                "issue must fail when directory is read-only"
+            );
             true
         };
 
