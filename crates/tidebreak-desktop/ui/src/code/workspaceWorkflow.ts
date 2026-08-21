@@ -313,6 +313,8 @@ export type WorkflowShortcut =
 export type WorkflowShortcutResolution =
   | { run: WorkspaceWorkflowAction }
   | { stopWatch: true }
+  /** Arm host auto-merge rather than merging now. */
+  | { autoMerge: true }
   | { blocked: string };
 
 /**
@@ -383,17 +385,23 @@ export function resolveWorkflowShortcut(
 }
 
 /**
- * Merge only when the pull request is actually mergeable.
+ * Land the pull request: merge it now when it is green, otherwise ask GitHub
+ * to merge it once the remaining requirements pass.
  *
- * Merging publishes to a shared branch and is the one step decision 42 keeps
- * for the user, so the chord runs the real merge rather than asking an agent
- * to. That makes "is it green" a question this has to answer honestly: the
- * same `prMergeControls` table the review sidebar's Merge button reads, so the
+ * One chord for one intent. The reader pressing it means "this is done, get it
+ * in" whether the checks have finished or not, and the two ways to say that
+ * differ only in when GitHub acts. The confirmation names which one is about
+ * to happen, so the difference is visible before anything lands.
+ *
+ * Merging publishes to a shared branch and is the step decision 42 keeps for
+ * the user, so the chord runs the real merge rather than asking an agent to.
+ * That makes "is it green" a question this has to answer honestly: the same
+ * `prMergeControls` table the review sidebar's Merge button reads, so the
  * chord can never offer a merge the button refuses.
  *
- * Local state blocks too. Uncommitted or unpushed work is not in the pull
- * request, and merging without it lands a branch the reader thought was
- * finished.
+ * Local state blocks both paths. Uncommitted or unpushed work is not in the
+ * pull request, and landing without it leaves behind work the reader thought
+ * was going in.
  */
 function mergeIfGreen(model: WorkspaceWorkflowModel): WorkflowShortcutResolution {
   if (model.stage === "dirty") {
@@ -406,6 +414,7 @@ function mergeIfGreen(model: WorkspaceWorkflowModel): WorkflowShortcutResolution
   if (!pr) return { blocked: "No pull request yet" };
   const controls = prMergeControls(prWorkflowStatus(pr).state);
   if (controls.canMerge) return { run: "merge" };
+  if (controls.canEnableAutoMerge) return { autoMerge: true };
   return {
     blocked:
       controls.explanation ?? `Pull request #${pr.number} cannot merge yet`,

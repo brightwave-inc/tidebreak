@@ -345,11 +345,14 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInEditable: true,
   },
   {
+    // Green merges now; anything else GitHub can still land arms auto-merge.
+    // One chord for one intent — "get this in" — with the confirmation naming
+    // which of the two is about to happen.
     id: "code-merge-pr",
     codes: ["KeyM"],
     mod: true,
     shift: true,
-    description: "Merge the pull request",
+    description: "Merge, or auto-merge once the checks pass",
     group: "Ship",
     scope: "code",
     allowInEditable: true,

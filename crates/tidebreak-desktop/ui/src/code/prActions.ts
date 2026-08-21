@@ -192,13 +192,24 @@ export function prMergeControls(state: PrWorkflowState): {
   }
 }
 
+/** The workflow actions an agent carries out, as opposed to an endpoint. */
+export type PrPromptAction = Exclude<
+  PrWorkflowAction,
+  "watch_and_fix" | "mark_ready" | "merge"
+>;
+
 /**
- * Prompt actions run in the workspace's interactive session. "Watch and fix"
- * is not one of them: it starts a durable server-side watch task instead
- * (`POST /code/workspaces/{id}/watch`).
+ * Prompt actions run in the workspace's interactive session.
+ *
+ * Three of the workflow actions are deliberately absent. "Watch and fix"
+ * starts a durable server-side watch task (`POST
+ * /code/workspaces/{id}/watch`). Merging and readying a draft are
+ * pull-request state changes, which decision 42 reserves for the user: they
+ * run through their own endpoints, and excluding them from this type is what
+ * stops a merge prompt from being wired back up by accident.
  */
 export function prWorkflowPrompt(
-  action: Exclude<PrWorkflowAction, "watch_and_fix">,
+  action: PrPromptAction,
   pr: PullRequestDigest,
 ): string {
   const number = `#${pr.number}`;
@@ -206,12 +217,6 @@ export function prWorkflowPrompt(
   const context = prWorkflowPromptContext(pr);
   let instruction: string;
   switch (action) {
-    case "mark_ready":
-      instruction = `Mark pull request ${number} ready for review. First confirm the current head is pushed and the pull request is still a draft. Do not merge it. Report the result.`;
-      break;
-    case "merge":
-      instruction = `Merge pull request ${number} into ${base}. Re-check the current head SHA, required checks, reviews, conflicts, and queue requirements immediately before merging. Use the repository's preferred merge or merge-queue path. Do not change the branch unless the merge requires it. Report the result.`;
-      break;
     case "fix_errors":
       instruction = `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
       break;

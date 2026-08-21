@@ -9,6 +9,7 @@ export type CodeWorkspacePrMutation =
   | "commit"
   | "push"
   | "create_pr"
+  | "mark_ready"
   | "merge"
   | "auto_merge"
   | "watch"

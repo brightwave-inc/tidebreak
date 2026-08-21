@@ -32,7 +32,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { prWorkflowPrompt, type PrWorkflowAction } from "./prActions";
+import { prWorkflowPrompt, type PrPromptAction } from "./prActions";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import {
@@ -65,6 +65,7 @@ export function WorkspaceWorkflowControl({
     ApiClient,
     | "pushCodeWorkspace"
     | "createCodePullRequest"
+    | "markCodePrReady"
     | "mergeCodePr"
     | "startCodeWatch"
     | "stopCodeWatch"
@@ -147,6 +148,14 @@ export function WorkspaceWorkflowControl({
       void stopWatch();
       return;
     }
+    if ("autoMerge" in resolution) {
+      if (busy !== null) {
+        toast.message("Another workspace action is already running");
+        return;
+      }
+      void mergePr(true);
+      return;
+    }
     if (busy !== null || agentActionRunning) {
       toast.message("Another workspace action is already running");
       return;
@@ -157,7 +166,7 @@ export function WorkspaceWorkflowControl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowShortcutPending, workspaceId]);
 
-  function runAgentAction(action: Exclude<PrWorkflowAction, "watch_and_fix">) {
+  function runAgentAction(action: PrPromptAction) {
     const pr = model.pr;
     if (!pr) return;
     setDetailsOpen(false);
@@ -192,29 +201,34 @@ export function WorkspaceWorkflowControl({
    * names the method, so the reader sees which one before it lands. Pick a
    * different one from the review sidebar.
    */
-  async function mergePr(method: CodePrMergeMethod = "squash") {
+  async function mergePr(auto = false, method: CodePrMergeMethod = "squash") {
     const pr = model.pr;
     if (!pr) return;
     setDetailsOpen(false);
+    const base = pr.base_branch ?? "its base branch";
+    // Two forms of the same verb: the immediate merge reads as something done
+    // to the pull request, the armed one as something GitHub will do.
+    const [landed, lands] =
+      method === "squash"
+        ? ["squash-merged", "squash-merges"]
+        : method === "rebase"
+          ? ["rebased and merged", "rebases and merges"]
+          : ["merged", "merges"];
     const ok = await confirm({
-      title: `Merge #${pr.number}?`,
-      description: `The pull request is ${
-        method === "squash"
-          ? "squash-merged"
-          : method === "rebase"
-            ? "rebased and merged"
-            : "merged"
-      } into ${pr.base_branch ?? "its base branch"} on GitHub.`,
-      confirmLabel: "Merge",
+      title: auto ? `Auto-merge #${pr.number}?` : `Merge #${pr.number}?`,
+      description: auto
+        ? `GitHub ${lands} the pull request into ${base} once the remaining requirements pass.`
+        : `The pull request is ${landed} into ${base} on GitHub.`,
+      confirmLabel: auto ? "Enable auto-merge" : "Merge",
     });
     if (!ok) return;
     try {
-      const next = await resource.runMutation("merge", () =>
-        client.mergeCodePr(workspaceId, { method, auto: false }),
+      const next = await resource.runMutation(auto ? "auto_merge" : "merge", () =>
+        client.mergeCodePr(workspaceId, { method, auto }),
       );
       if (!next) return;
       resource.adopt(next);
-      toast.success("Merged");
+      toast.success(auto ? "Auto-merge enabled" : "Merged");
     } catch (err) {
       // The host's own refusal is the useful sentence here, so it goes to the
       // status line rather than being flattened into a generic failure.
@@ -222,6 +236,31 @@ export function WorkspaceWorkflowControl({
         err instanceof HttpError && err.kind === "pr_not_mergeable"
           ? err.message
           : friendlyErrorMessage(err, "Could not merge");
+      resource.setMutationError(message);
+      toast.error(message);
+    }
+  }
+
+  /**
+   * Take the pull request out of draft through the user-initiated endpoint.
+   *
+   * Readying a draft is a pull-request state change, which decision 42 keeps
+   * off the agent path for the same reason merging is: it puts work in front
+   * of reviewers, and an agent should not decide when that happens.
+   */
+  async function markReady() {
+    const pr = model.pr;
+    if (!pr) return;
+    setDetailsOpen(false);
+    try {
+      const next = await resource.runMutation("mark_ready", () =>
+        client.markCodePrReady(workspaceId),
+      );
+      if (!next) return;
+      resource.adopt(next);
+      toast.success("Marked ready for review");
+    } catch (err) {
+      const message = friendlyErrorMessage(err, "Could not mark it ready");
       resource.setMutationError(message);
       toast.error(message);
     }
@@ -299,6 +338,9 @@ export function WorkspaceWorkflowControl({
         return;
       case "merge":
         await mergePr();
+        return;
+      case "mark_ready":
+        await markReady();
         return;
       default:
         runAgentAction(action);

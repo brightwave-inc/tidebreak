@@ -158,10 +158,10 @@ describe("prWorkflowPrompt", () => {
         },
       ],
     });
-    expect(prWorkflowPrompt("merge", digest)).toMatch(/#41/);
-    expect(prWorkflowPrompt("merge", digest)).toMatch(/main/);
-    expect(prWorkflowPrompt("merge", digest)).toMatch(/Fix login/);
-    expect(prWorkflowPrompt("merge", digest)).toMatch(/fix-login -> main/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/#41/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/main/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/Fix login/);
+    expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/fix-login -> main/);
     expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/ci \/ ui/);
     expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/Tests failed/);
     expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/actions\/runs\/7/);
@@ -171,6 +171,17 @@ describe("prWorkflowPrompt", () => {
     expect(prWorkflowPrompt("address_feedback", digest)).toMatch(
       /requested changes/,
     );
-    expect(prWorkflowPrompt("mark_ready", digest)).toMatch(/ready for review/);
+  });
+
+  it("has no prompt for the pull-request state changes", () => {
+    // Decision 42 keeps merging and readying a draft on user-initiated
+    // endpoints. Excluding them from the prompt type is what stops either from
+    // being wired back onto the agent path, where an agent's own shell would
+    // route around the `gh` runner that refuses merge argv. These lines must
+    // not compile.
+    // @ts-expect-error merging is not an agent action
+    expect(() => prWorkflowPrompt("merge", pr({}))).toBeDefined();
+    // @ts-expect-error readying a draft is not an agent action
+    expect(() => prWorkflowPrompt("mark_ready", pr({}))).toBeDefined();
   });
 });

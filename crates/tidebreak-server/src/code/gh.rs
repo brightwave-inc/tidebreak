@@ -400,6 +400,31 @@ pub(crate) async fn merge_pull_request(
     Ok(())
 }
 
+/// Mark the workspace's own draft pull request ready for review.
+///
+/// The worktree's branch is what `gh` resolves the pull request from, the same
+/// way the merge operation does, so this needs no repository coordinates —
+/// that is the difference from [`mark_pull_request_ready`], which serves the
+/// repository-qualified delivery surface.
+///
+/// It stays on the general runner. Readying a draft is a user state change but
+/// not a merge, and widening the merge-only runner to carry it would undo the
+/// point of having two runners (decision 42).
+pub(crate) async fn mark_workspace_pull_request_ready(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    cache: &PrDigestCache,
+    gh_search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(gh_search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    run_gh(worktree, &binary, &["pr", "ready"], GH_TIMEOUT)
+        .await
+        .map_err(|error| classify_observed_gh(error, &observation))?;
+    cache.invalidate(workspace_id);
+    Ok(())
+}
+
 /// Turn a `gh pr merge` failure into something the PR card can show.
 pub(crate) fn classify_merge_error(err: String) -> GhError {
     let bounded = bound_text(&err);
@@ -2096,6 +2121,54 @@ exit 3
         }
         let after = std::fs::read_to_string(&log).unwrap();
         assert_eq!(logged, after, "a refused command must never reach gh");
+    }
+
+    #[tokio::test]
+    async fn readying_a_draft_runs_pr_ready_and_cannot_reach_the_merge_runner() {
+        // Readying a draft is a user state change but not a merge, so it rides
+        // the general runner (decision 42). Two things have to hold: it really
+        // runs `gh pr ready` in the worktree, and the runner it uses still
+        // refuses merge argv — otherwise widening the app to ready a draft
+        // would have quietly widened it to merge.
+        let shim_dir = TempDir::new().unwrap();
+        let log = shim_dir.path().join("log");
+        write_executable(
+            &shim_dir.path().join("gh"),
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = pr ] && [ "$2" = ready ]; then exit 0; fi
+echo unexpected "$@" >&2
+exit 3
+"#,
+                log = log.display()
+            ),
+        );
+        let work = TempDir::new().unwrap();
+        let cache = PrDigestCache::default();
+        let workspace = WorkspaceId::new();
+        mark_workspace_pull_request_ready(
+            work.path(),
+            workspace,
+            &cache,
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .expect("gh pr ready should run");
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(logged.contains("pr ready"), "{logged}");
+        assert!(!logged.contains("merge"), "{logged}");
+
+        let refused = run_gh(
+            work.path(),
+            &shim_dir.path().join("gh"),
+            &["pr", "merge", "--squash"],
+            GH_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("refusing"), "{refused}");
     }
 
     #[tokio::test]

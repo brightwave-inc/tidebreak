@@ -101,6 +101,15 @@ pub async fn merge_workspace_pr(
     Ok(Json(pr_snapshot(status, watch)))
 }
 
+pub async fn mark_workspace_pr_ready(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
+    let status = code.mark_workspace_pr_ready(id).await?;
+    let watch = code.latest_watch(id).await?;
+    Ok(Json(pr_snapshot(status, watch)))
+}
+
 pub async fn run_workspace_action(
     code: ScopedCode,
     Path((id, name)): Path<(WorkspaceId, String)>,

@@ -201,6 +201,7 @@ describe("resolveWorkflowShortcut", () => {
     );
     if ("run" in resolution) return resolution.run;
     if ("stopWatch" in resolution) return "stop_watch";
+    if ("autoMerge" in resolution) return "auto_merge";
     return `blocked: ${resolution.blocked}`;
   }
 
@@ -288,11 +289,24 @@ describe("resolveWorkflowShortcut", () => {
     };
     expect(chord("merge", green)).toBe("merge");
 
+    // Not green but still landable: the reader means "get this in" either way,
+    // so the chord arms auto-merge and GitHub finishes the job. Which one is
+    // about to happen is named in the confirmation, not guessed at here.
+    for (const snapshot of [
+      pr({ checks: [{ name: "ci", bucket: "fail" }] }),
+      pr({ checks: [{ name: "ci", bucket: "pending" }] }),
+      pr({ merge_state_status: "behind" }),
+      pr({ review_decision: "changes_requested" }),
+    ]) {
+      expect(chord("merge", { ...CLEAN, pr: snapshot })).toBe("auto_merge");
+    }
+
+    // Neither path is open in these states, so the chord says why. Conflicts
+    // and drafts cannot even be queued, and the last two are already landing.
     for (const [snapshot, reason] of [
       [pr({ draft: true }), "Mark the pull request ready for review on GitHub before merging it."],
       [pr({ mergeable: "conflicting" }), "Resolve the merge conflicts before merging directly."],
-      [pr({ checks: [{ name: "ci", bucket: "fail" }] }), "Fix the failing checks before merging directly."],
-      [pr({ merge_state_status: "behind" }), "Update the branch from its base before merging directly."],
+      [pr({ in_merge_queue: true }), "This pull request is already waiting in the merge queue."],
       [pr({ auto_merge_enabled: true }), "Auto-merge is already enabled and will merge after the remaining requirements pass."],
     ] as const) {
       expect(chord("merge", { ...CLEAN, pr: snapshot })).toBe(

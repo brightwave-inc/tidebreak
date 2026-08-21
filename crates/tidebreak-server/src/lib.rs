@@ -902,6 +902,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::merge_workspace_pr),
         )
         .route(
+            "/code/workspaces/{id}/pr/ready",
+            post(routes::code::mark_workspace_pr_ready),
+        )
+        .route(
             "/code/workspaces/{id}/watch",
             post(routes::code::start_workspace_watch).delete(routes::code::stop_workspace_watch),
         )

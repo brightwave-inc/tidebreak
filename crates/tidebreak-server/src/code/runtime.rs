@@ -1064,6 +1064,28 @@ impl CodeRuntime {
         self.workspace_pr(owner, id).await
     }
 
+    /// Take the workspace's pull request out of draft and return a fresh
+    /// status. Decision 42 keeps pull-request state changes on a user-initiated
+    /// endpoint rather than on any agent or automation path, so this is the
+    /// only route to `gh pr ready` for a workspace.
+    pub(crate) async fn mark_workspace_pr_ready(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let workspace = self.require_live_workspace(owner, id).await?;
+        let gh_path = self.gh_search_path_owned();
+        gh::mark_workspace_pull_request_ready(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            &self.pr_cache,
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)?;
+        self.workspace_pr(owner, id).await
+    }
+
     pub(crate) async fn create_workspace_pr(
         &self,
         owner: &OwnerId,
