@@ -297,6 +297,49 @@ describe("CodeBrowserTab", () => {
     );
   });
 
+  it("keeps a native view hidden when an overlay opens while creation is in flight", async () => {
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const runtime = browserHost({ createGate });
+    const view = render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    view.rerender(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+        obscured
+      />,
+    );
+    releaseCreate?.();
+
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      }),
+    );
+    expect(runtime.calls).not.toContainEqual({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      action: { type: "set_visible", visible: true },
+    });
+  });
+
   it("replaces the native session when the same panel slot selects another browser tab", async () => {
     const runtime = browserHost();
     const view = render(

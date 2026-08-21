@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,6 +47,22 @@ async function openPopoverAndSetCustomWidth(
   await user.clear(input);
   await user.type(input, value);
   fireEvent.submit(input.closest("form")!);
+  return input;
+}
+
+function StatefulControl({
+  initialViewport = DEFAULT_VIEWPORT,
+}: {
+  initialViewport?: typeof DEFAULT_VIEWPORT;
+}) {
+  const [viewport, setViewport] = useState(initialViewport);
+  return (
+    <BrowserViewportControl
+      viewport={viewport}
+      renderedWidth={null}
+      onViewportChange={setViewport}
+    />
+  );
 }
 
 describe("BrowserViewportControl", () => {
@@ -111,6 +128,56 @@ describe("BrowserViewportControl", () => {
     expect(desktop).toHaveAttribute("aria-checked", "false");
   });
 
+  it("focuses the active preset when opened from the keyboard", async () => {
+    renderControl({
+      viewport: { preset: "tablet", customWidth: 800 },
+    });
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /Viewport: Tablet/i });
+
+    trigger.focus();
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByRole("radio", { name: "Tablet" })).toHaveFocus();
+  });
+
+  it("moves selection and focus with arrows, Home, and End", async () => {
+    render(<StatefulControl />);
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /Viewport: Fit/i });
+
+    trigger.focus();
+    await user.keyboard("{Enter}");
+
+    const fit = screen.getByRole("radio", { name: "Fit" });
+    const desktop = screen.getByRole("radio", { name: "Desktop" });
+    const tablet = screen.getByRole("radio", { name: "Tablet" });
+    const custom = screen.getByRole("radio", { name: "Custom" });
+    expect(fit).toHaveFocus();
+
+    await user.keyboard("{ArrowRight}");
+    expect(desktop).toHaveFocus();
+    expect(desktop).toHaveAttribute("aria-checked", "true");
+
+    await user.keyboard("{ArrowDown}");
+    expect(tablet).toHaveFocus();
+    expect(tablet).toHaveAttribute("aria-checked", "true");
+
+    await user.keyboard("{ArrowLeft}");
+    expect(desktop).toHaveFocus();
+
+    await user.keyboard("{ArrowUp}");
+    expect(fit).toHaveFocus();
+
+    await user.keyboard("{End}");
+    expect(custom).toHaveFocus();
+    expect(custom).toHaveAttribute("aria-checked", "true");
+
+    await user.keyboard("{Home}");
+    expect(fit).toHaveFocus();
+    expect(fit).toHaveAttribute("aria-checked", "true");
+  });
+
   it("validates and commits custom width input", async () => {
     const { onViewportChange } = renderControl();
     const user = userEvent.setup();
@@ -122,18 +189,14 @@ describe("BrowserViewportControl", () => {
     );
   });
 
-  it("clamps below-minimum custom width and shows an error", async () => {
+  it("rejects a below-minimum custom width without applying it", async () => {
     const { onViewportChange } = renderControl();
     const user = userEvent.setup();
 
-    await openPopoverAndSetCustomWidth(user, "50");
+    const input = await openPopoverAndSetCustomWidth(user, "50");
 
-    expect(onViewportChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        preset: "custom",
-        customWidth: MIN_CUSTOM_WIDTH,
-      }),
-    );
+    expect(onViewportChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue(50);
     expect(
       screen.getByText(
         `Width must be between ${MIN_CUSTOM_WIDTH} and ${MAX_CUSTOM_WIDTH}`,
@@ -141,18 +204,14 @@ describe("BrowserViewportControl", () => {
     ).toBeVisible();
   });
 
-  it("clamps above-maximum custom width and shows an error", async () => {
+  it("rejects an above-maximum custom width without applying it", async () => {
     const { onViewportChange } = renderControl();
     const user = userEvent.setup();
 
-    await openPopoverAndSetCustomWidth(user, "99999");
+    const input = await openPopoverAndSetCustomWidth(user, "99999");
 
-    expect(onViewportChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        preset: "custom",
-        customWidth: MAX_CUSTOM_WIDTH,
-      }),
-    );
+    expect(onViewportChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue(99999);
     expect(
       screen.getByText(
         `Width must be between ${MIN_CUSTOM_WIDTH} and ${MAX_CUSTOM_WIDTH}`,
@@ -180,10 +239,18 @@ describe("BrowserViewportControl", () => {
     ).toBeVisible();
   });
 
-  it("syncs the custom width field when the viewport changes externally", () => {
+  it("syncs the custom width field when the viewport changes externally", async () => {
     const { rerender } = renderControl({
       viewport: { preset: "custom", customWidth: 500 },
     });
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: /Viewport: Custom 500/i }),
+    );
+    const input = screen.getByRole("spinbutton", {
+      name: "Custom viewport width in pixels",
+    });
+    expect(input).toHaveValue(500);
 
     // External change — e.g. preset switch resets customWidth
     rerender(
@@ -193,11 +260,6 @@ describe("BrowserViewportControl", () => {
         onViewportChange={vi.fn()}
       />,
     );
-    const input = screen.queryByRole("spinbutton", {
-      name: "Custom viewport width in pixels",
-    });
-    if (input) {
-      expect(input).toHaveValue(String(DEFAULT_CUSTOM_WIDTH));
-    }
+    expect(input).toHaveValue(DEFAULT_CUSTOM_WIDTH);
   });
 });
