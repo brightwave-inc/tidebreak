@@ -486,9 +486,7 @@ mod tests {
         assert!(instructions.contains("--text-present"));
         assert!(instructions.contains("--text-absent"));
         assert!(instructions.contains("--timeout-ms"));
-        assert!(
-            instructions.contains("browser screenshot --browser-id <id> --snapshot-id <id>")
-        );
+        assert!(instructions.contains("browser screenshot --browser-id <id> --snapshot-id <id>"));
         assert!(instructions.contains("--max-width"));
         assert!(instructions.contains("--max-height"));
     }

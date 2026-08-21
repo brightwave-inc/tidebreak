@@ -19,15 +19,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use tidebreak_core::{
     browser_list_tool_spec, browser_navigate_tool_spec, browser_screenshot_tool_spec,
-    browser_snapshot_tool_spec, browser_wait_tool_spec,
-    validate_browser_list_arguments, validate_browser_navigate_arguments,
-    validate_browser_screenshot_arguments, validate_browser_snapshot_arguments,
-    validate_browser_wait_arguments, AgentError, ApprovalClass, AutoApproveGate,
-    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData, ImageMediaType, ImageRef,
-    Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec, MAX_IMAGE_BYTES,
-    MAX_IMAGE_DIMENSION,
+    browser_snapshot_tool_spec, browser_wait_tool_spec, validate_browser_list_arguments,
+    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    validate_browser_snapshot_arguments, validate_browser_wait_arguments, AgentError,
+    ApprovalClass, AutoApproveGate, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult,
+    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
+    BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData,
+    ImageMediaType, ImageRef, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
+    ToolSpec, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -707,7 +706,9 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                             return Err("--document-epoch requires a value".to_string());
                         }
                         let e: u64 = value.parse().map_err(|_| {
-                            format!("--document-epoch expects a non-negative integer, got {value:?}")
+                            format!(
+                                "--document-epoch expects a non-negative integer, got {value:?}"
+                            )
                         })?;
                         document_epoch = Some(e);
                     }
@@ -769,7 +770,7 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                         }
                         if value.chars().count() > 512 {
                             return Err(
-                                "--text-present value must be at most 512 characters".to_string(),
+                                "--text-present value must be at most 512 characters".to_string()
                             );
                         }
                         condition = Some(BrowserWaitCondition::TextPresent { text: value });
@@ -786,7 +787,7 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                         }
                         if value.chars().count() > 512 {
                             return Err(
-                                "--text-absent value must be at most 512 characters".to_string(),
+                                "--text-absent value must be at most 512 characters".to_string()
                             );
                         }
                         condition = Some(BrowserWaitCondition::TextAbsent { text: value });
@@ -862,7 +863,9 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                             return Err("--document-epoch requires a value".to_string());
                         }
                         let e: u64 = value.parse().map_err(|_| {
-                            format!("--document-epoch expects a non-negative integer, got {value:?}")
+                            format!(
+                                "--document-epoch expects a non-negative integer, got {value:?}"
+                            )
                         })?;
                         document_epoch = Some(e);
                     }
@@ -1045,9 +1048,7 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
                 max_height,
             };
             if !args.is_well_formed() {
-                return Err(AgentError::msg(
-                    "screenshot arguments are not well-formed",
-                ));
+                return Err(AgentError::msg("screenshot arguments are not well-formed"));
             }
             let result = browser_screenshot(&client, &args)
                 .await
@@ -1369,11 +1370,7 @@ fn format_browser_list_summary(result: &BrowserListResult) -> String {
             )
         })
         .collect();
-    format!(
-        "{} browser session(s):\n{}",
-        lines.len(),
-        lines.join("\n")
-    )
+    format!("{} browser session(s):\n{}", lines.len(), lines.join("\n"))
 }
 
 /// Build a concise model-readable summary of a wait result.
@@ -1387,10 +1384,7 @@ fn format_browser_wait_summary(result: &BrowserWaitResult) -> String {
 /// Build a concise model-readable summary of a screenshot capture.
 /// The text mentions dimensions and epoch; pixel bytes are in the
 /// accompanying [`ImageRef`] / [`ImageData`] pair only.
-fn format_screenshot_summary(
-    result: &BrowserScreenshotResult,
-    image: &ImageRef,
-) -> String {
+fn format_screenshot_summary(result: &BrowserScreenshotResult, image: &ImageRef) -> String {
     format!(
         "Screenshot of browser {} captured at epoch {} (snapshot {}): {}×{}, {:.1} kiB.",
         result.browser_id,
@@ -1461,14 +1455,12 @@ fn decode_screenshot_image(
     }
 
     // Read dimensions from the PNG header without decoding pixels.
-    let (width, height) = image::ImageReader::with_format(
-        std::io::Cursor::new(&bytes),
-        image::ImageFormat::Png,
-    )
-    .into_dimensions()
-    .map_err(|_| ClientFailure::ToolFailed {
-        detail: "screenshot PNG header could not be read".to_string(),
-    })?;
+    let (width, height) =
+        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|_| ClientFailure::ToolFailed {
+                detail: "screenshot PNG header could not be read".to_string(),
+            })?;
 
     if width == 0 || height == 0 {
         return Err(ClientFailure::ToolFailed {
@@ -1501,9 +1493,11 @@ fn decode_screenshot_image(
         height,
         byte_len,
     };
-    image_ref.validate().map_err(|reason| ClientFailure::ToolFailed {
-        detail: format!("screenshot image is invalid: {reason}"),
-    })?;
+    image_ref
+        .validate()
+        .map_err(|reason| ClientFailure::ToolFailed {
+            detail: format!("screenshot image is invalid: {reason}"),
+        })?;
 
     Ok((image_ref, ImageData::new(ImageMediaType::Png, bytes)))
 }
@@ -2094,10 +2088,7 @@ mod tests {
     #[test]
     fn parse_browser_wait_supports_each_bounded_condition() {
         let cases = [
-            (
-                vec!["--url-changed"],
-                BrowserWaitCondition::UrlChanged,
-            ),
+            (vec!["--url-changed"], BrowserWaitCondition::UrlChanged),
             (
                 vec!["--load-state", "ready"],
                 BrowserWaitCondition::LoadState {
