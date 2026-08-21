@@ -200,7 +200,7 @@ async fn browser_app(fake: Option<Arc<FakeBrowserRuntime>>) -> BrowserApp {
     let browser_runtime = fake
         .as_ref()
         .map(|runtime| -> Arc<dyn BrowserRuntime> { runtime.clone() });
-    let bridge = std::path::PathBuf::from("/usr/local/bin/tidebreak");
+    let bridge = crate::code::browser_channel::test_bridge_command();
     let code = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().into(),
@@ -295,7 +295,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
 }
 
 fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: CodeSessionId) -> String {
-    let bridge = std::path::Path::new("/usr/local/bin/tidebreak");
+    let bridge = crate::code::browser_channel::test_bridge_command();
     let sp = code
         .browser_tokens
         .issue(
@@ -304,7 +304,7 @@ fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: CodeSessionId) -> String {
                 workspace: ws,
                 session: s,
             },
-            bridge,
+            &bridge,
         )
         .unwrap();
     let c = std::fs::read_to_string(&sp.capability_file).unwrap();

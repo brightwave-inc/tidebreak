@@ -46,9 +46,9 @@ const LOG_ENV_VAR: &str = "TIDEBREAK_LOG";
 /// `info` for the workspace's own crates, `warn` for dependencies.
 const DEFAULT_DIRECTIVES: &str = "warn,tidebreak_cli=info,tidebreak_code_execution=info,\
     tidebreak_core=info,tidebreak_desktop=info,tidebreak_egress=info,\
-    tidebreak_host_broker=info,tidebreak_mcp=info,tidebreak_router=info,\
-    tidebreak_sandbox_agent=info,tidebreak_sandbox_protocol=info,tidebreak_server=info,\
-    tidebreak_shell_policy=info";
+    tidebreak_harness=info,tidebreak_host_broker=info,tidebreak_mcp=info,\
+    tidebreak_router=info,tidebreak_sandbox_agent=info,tidebreak_sandbox_protocol=info,\
+    tidebreak_server=info,tidebreak_shell_policy=info";
 
 /// Install the process-global subscriber, writing to `logs/tidebreak.log`
 /// under `data_dir`.
@@ -301,6 +301,39 @@ mod tests {
         assert!(
             contents.contains("gateway endpoint unreachable"),
             "message missing: {contents:?}"
+        );
+    }
+
+    /// Every workspace crate needs a directive, or it sits at the global
+    /// `warn` floor and anything it logs below that is invisible. That is how
+    /// `tidebreak_harness` came to swallow unrecognized engine events: the
+    /// crate was absent, so its diagnostics never reached the log.
+    #[test]
+    fn every_workspace_crate_has_a_log_directive() {
+        let listed: std::collections::HashSet<&str> = DEFAULT_DIRECTIVES
+            .split(',')
+            .filter_map(|directive| directive.split('=').next())
+            .map(str::trim)
+            .collect();
+
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/ is the manifest's parent");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(crates_dir).expect("read crates/") {
+            let entry = entry.expect("crate dir entry");
+            if !entry.path().join("Cargo.toml").is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().replace('-', "_");
+            if !listed.contains(name.as_str()) {
+                missing.push(name);
+            }
+        }
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "workspace crates with no log directive, so they sit at warn: {missing:?}"
         );
     }
 }

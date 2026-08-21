@@ -1,7 +1,7 @@
 // Deterministic scripted harness that drives the mock /code/browser bridge
 // using the real v1 capfile protocol. This simulates what a provider
 // adapter (Claude, Codex, OpenCode) does: read the capfile, extract
-// endpoint + token, then call the three browser tools in sequence.
+// endpoint + token, then call the five browser tools in sequence.
 //
 // It also simulates a "browser-mcp" style process that accepts a capfile
 // path from TIDEBREAK_BROWSER_CAPFILE and validates the tool registry.
@@ -115,18 +115,26 @@ export async function callBrowserRoute(endpoint, route, body, token) {
 // ── tool registry contract ──────────────────────────────────────────────────
 
 /**
- * The exact three browser tools this slice advertises. These names MUST
+ * The exact five browser tools this slice advertises. These names MUST
  * match the constants in crates/tidebreak-core/src/browser.rs.
  */
-export const BROWSER_TOOLS = ["browser_list", "browser_navigate", "browser_snapshot"];
+export const BROWSER_TOOLS = [
+  "browser_list",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_wait",
+  "browser_screenshot",
+];
 
 /**
- * Tools that MUST NOT be advertised in this slice.
+ * Tools that MUST NOT be advertised in this slice. browser_act and all
+ * semantic action tools remain intentionally absent while
+ * semantic_actions is false.
  */
-export const FORBIDDEN_TOOLS = ["act", "wait", "screenshot"];
+export const FORBIDDEN_TOOLS = ["act"];
 
 /**
- * Assert the tool registry contains exactly the three browser tools and
+ * Assert the tool registry contains exactly the five browser tools and
  * nothing from the forbidden set.
  */
 export function assertToolRegistry(tools) {
@@ -148,7 +156,7 @@ export function assertToolRegistry(tools) {
     }
   }
 
-  // Only the three tools, nothing more
+  // Only the five tools, nothing more
   const extra = [...names].filter((n) => !BROWSER_TOOLS.includes(n));
   if (extra.length > 0) {
     throw new Error(
@@ -229,13 +237,67 @@ export function assertSnapshotShape(body) {
   }
 }
 
-// ── harness: list → navigate → snapshot ─────────────────────────────────────
+/**
+ * Assert the browser_wait response has the expected camelCase shape.
+ */
+export function assertWaitShape(body) {
+  if (typeof body.browserId !== "string") {
+    throw new Error("wait result missing browserId");
+  }
+  if (typeof body.status !== "string") {
+    throw new Error("wait result missing status");
+  }
+  if (!["resolved", "timed_out", "stopped"].includes(body.status)) {
+    throw new Error(
+      `wait status is ${body.status}, expected resolved/timed_out/stopped`
+    );
+  }
+  if (typeof body.message !== "string") {
+    throw new Error("wait result missing message");
+  }
+  if (typeof body.documentEpoch !== "number") {
+    throw new Error("wait result missing documentEpoch");
+  }
+  // url and title are Option<String> — present in this mock but optional on the wire
+}
+
+/**
+ * Assert the browser_screenshot response has the expected camelCase shape.
+ */
+export function assertScreenshotShape(body) {
+  if (typeof body.browserId !== "string") {
+    throw new Error("screenshot result missing browserId");
+  }
+  if (typeof body.snapshotId !== "string") {
+    throw new Error("screenshot result missing snapshotId");
+  }
+  if (typeof body.documentEpoch !== "number") {
+    throw new Error("screenshot result missing documentEpoch");
+  }
+  if (typeof body.imageBase64 !== "string") {
+    throw new Error("screenshot result missing imageBase64");
+  }
+  if (body.mimeType !== "image/png") {
+    throw new Error(
+      `screenshot mimeType is ${body.mimeType}, expected image/png`
+    );
+  }
+  // Verify the base64 string is a valid PNG (starts with the PNG signature)
+  const decoded = Buffer.from(body.imageBase64, "base64");
+  // PNG signature: 0x89504E470D0A1A0A
+  if (decoded.length < 8 || decoded[0] !== 0x89 || decoded[1] !== 0x50 || decoded[2] !== 0x4e || decoded[3] !== 0x47) {
+    throw new Error("screenshot imageBase64 is not a valid PNG");
+  }
+}
+
+// ── harness: list → navigate → snapshot → wait → screenshot ────────────────
 
 /**
  * Drive the deterministic positive contract: list → navigate → snapshot
- * against a bridge server using the real capfile protocol.
+ * → wait → screenshot against a bridge server using the real capfile
+ * protocol.
  *
- * Returns the final snapshot body for further assertion.
+ * Returns the final screenshot body for further assertion.
  */
 export async function drivePositiveContract(endpoint, token, fixtureOrigin) {
   // 1. List
@@ -269,7 +331,43 @@ export async function drivePositiveContract(endpoint, token, fixtureOrigin) {
   }
   assertSnapshotShape(snapshot.body);
 
-  return snapshot.body;
+  const snapshotId = snapshot.body.snapshotId;
+  const documentEpoch = snapshot.body.documentEpoch;
+
+  // 4. Wait (load_state ready — deterministic resolve)
+  const wait = await callBrowserRoute(
+    endpoint,
+    "wait",
+    {
+      browser_id: "browser-1",
+      snapshot_id: snapshotId,
+      document_epoch: documentEpoch,
+      condition: { kind: "load_state", state: "ready" },
+    },
+    token
+  );
+  if (wait.status !== 200) {
+    throw new Error(`wait failed with ${wait.status}: ${JSON.stringify(wait.body)}`);
+  }
+  assertWaitShape(wait.body);
+
+  // 5. Screenshot
+  const screenshot = await callBrowserRoute(
+    endpoint,
+    "screenshot",
+    {
+      browser_id: "browser-1",
+      snapshot_id: snapshotId,
+      document_epoch: documentEpoch,
+    },
+    token
+  );
+  if (screenshot.status !== 200) {
+    throw new Error(`screenshot failed with ${screenshot.status}: ${JSON.stringify(screenshot.body)}`);
+  }
+  assertScreenshotShape(screenshot.body);
+
+  return screenshot.body;
 }
 
 // ── negative contract helpers ───────────────────────────────────────────────

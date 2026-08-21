@@ -123,6 +123,10 @@ const unmanaged: import("./api").ManagedPolicy = {
 allow_local_mcp_servers: false,
 };
 const getPolicy = vi.fn(async () => unmanaged);
+/** The catalog fetch — the boot step a failing remote machine takes down. */
+const listModels = vi.hoisted(() =>
+  vi.fn(async () => ({ models: [] as unknown[], roles: [] as unknown[] })),
+);
 const getGatewayStatus = vi.fn(async () => ({
   base_url: "https://gateway.example",
   signed_in: false,
@@ -130,8 +134,35 @@ const getGatewayStatus = vi.fn(async () => ({
   sign_in: { state: "idle" },
 }));
 
-vi.mock("./boot", () => ({
-  resolveServerInfo: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:1", token: "t" })),
+/** Boot's first step, held here so a test can make it fail and then recover. */
+const resolveServerInfo = vi.hoisted(() =>
+  vi.fn(async () => ({
+    baseUrl: "http://127.0.0.1:1",
+    token: "t",
+    attachment: "local" as "local" | "remote",
+    gatewayAuth: false,
+  })),
+);
+/** What the shell says this window is attached to, independent of the client. */
+const remoteMachineState = vi.hoisted(() =>
+  vi.fn(async () => ({
+    attachment: "local" as "local" | "remote",
+    baseUrl: null as string | null,
+  })),
+);
+const disconnectRemoteMachine = vi.hoisted(() =>
+  vi.fn(async () => ({ attachment: "local" as const, baseUrl: null })),
+);
+
+vi.mock("./boot", () => ({ resolveServerInfo }));
+
+// Partial: the shell reaches for three of this module's functions and the
+// settings panel for the rest, so replacing the whole module would break
+// routes these tests do not mean to touch.
+vi.mock("./remoteMachine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./remoteMachine")>()),
+  remoteMachineState,
+  disconnectRemoteMachine,
 }));
 
 vi.mock("./api", () => ({
@@ -139,7 +170,7 @@ vi.mock("./api", () => ({
     getPolicy = getPolicy;
     getGatewayStatus = getGatewayStatus;
     gatewaySignIn = vi.fn(async () => ({ authorization_url: "http://gw/authorize" }));
-    listModels = vi.fn(async () => ({ models: [], roles: [] }));
+    listModels = listModels;
     listProviders = vi.fn(async () => ({ providers: [] }));
     getSettings = getSettings;
     listCodeRepos = listCodeRepos;
@@ -296,6 +327,19 @@ beforeEach(() => {
       y: 0,
       toJSON: () => ({}),
     } as DOMRect);
+  listModels.mockReset();
+  listModels.mockResolvedValue({ models: [], roles: [] });
+  resolveServerInfo.mockReset();
+  resolveServerInfo.mockResolvedValue({
+    baseUrl: "http://127.0.0.1:1",
+    token: "t",
+    attachment: "local",
+    gatewayAuth: false,
+  });
+  remoteMachineState.mockReset();
+  remoteMachineState.mockResolvedValue({ attachment: "local", baseUrl: null });
+  disconnectRemoteMachine.mockReset();
+  disconnectRemoteMachine.mockResolvedValue({ attachment: "local", baseUrl: null });
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
@@ -403,6 +447,72 @@ describe("app shell", () => {
     expect(
       await screen.findByLabelText("Work needs attention"),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * A boot failure used to be a locked door: the raw string and nothing to do
+   * about it. On a remote attachment that cost the reader the whole app,
+   * because the only command that forgets the machine lives behind Settings,
+   * and Settings lives behind the client that just failed to reach it.
+   */
+  it("offers a way off an unreachable remote machine", async () => {
+    remoteMachineState.mockResolvedValue({
+      attachment: "remote",
+      baseUrl: "https://tidebreak.example.com",
+    });
+    resolveServerInfo.mockResolvedValue({
+      baseUrl: "https://tidebreak.example.com",
+      token: "t",
+      attachment: "remote",
+      gatewayAuth: true,
+    });
+    listModels.mockRejectedValue(new TypeError("Load failed"));
+    const user = userEvent.setup();
+    await mountApp();
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent(
+      "Could not reach https://tidebreak.example.com.",
+    );
+    expect(failure).toHaveTextContent("TypeError: Load failed");
+
+    // Detaching forgets the machine and boots again, this time against the
+    // server inside the app — so the shell that comes up is a working one.
+    listModels.mockResolvedValue({ models: [], roles: [] });
+    resolveServerInfo.mockResolvedValue({
+      baseUrl: "http://127.0.0.1:1",
+      token: "t",
+      attachment: "local",
+      gatewayAuth: false,
+    });
+    await user.click(screen.getByRole("button", { name: /Work on this computer/ }));
+
+    await waitFor(() => expect(disconnectRemoteMachine).toHaveBeenCalledOnce());
+    expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
+  });
+
+  it("retries boot when the connection itself failed", async () => {
+    resolveServerInfo.mockRejectedValue(new Error("server failed to start"));
+    const user = userEvent.setup();
+    await mountApp();
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Tidebreak could not start its server.");
+    // Nothing to detach from, so the screen does not offer it.
+    expect(
+      screen.queryByRole("button", { name: /Work on this computer/ }),
+    ).not.toBeInTheDocument();
+
+    resolveServerInfo.mockResolvedValue({
+      baseUrl: "http://127.0.0.1:1",
+      token: "t",
+      attachment: "local",
+      gatewayAuth: false,
+    });
+    await user.click(screen.getByRole("button", { name: /Try again/ }));
+
+    expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("keeps the shell up with a retryable list when loading chats fails", async () => {
