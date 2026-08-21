@@ -88,9 +88,7 @@ impl BrowserCapfile {
             AgentError::config(format!("browser capfile cannot be read ({error})"))
         })?;
         if !metadata.file_type().is_file() {
-            return Err(AgentError::config(
-                "browser capfile must be a regular file",
-            ));
+            return Err(AgentError::config("browser capfile must be a regular file"));
         }
         if metadata.len() > CAPFILE_MAX_BYTES {
             return Err(AgentError::config("browser capfile exceeds the size limit"));
