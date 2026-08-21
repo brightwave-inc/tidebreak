@@ -237,7 +237,7 @@ impl CodeRuntime {
         let cleanup = self.browser_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
         Box::pin(async move {
-            cleanup.map_err(|e| ServerError::internal(e))?;
+            cleanup.map_err(ServerError::internal)?;
             let actions = runtime.recover().await;
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so
@@ -1771,7 +1771,7 @@ impl CodeRuntime {
         let browser = self
             .browser_tokens
             .issue(browser_subject)
-            .map_err(|e| ServerError::internal(e))?;
+            .map_err(ServerError::internal)?;
 
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
