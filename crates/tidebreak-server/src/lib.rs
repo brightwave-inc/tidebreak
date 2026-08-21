@@ -1045,12 +1045,10 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
 }
 
-
 /// Liveness probe — no auth, no state.
 async fn healthz() -> &'static str {
     "ok"
 }
-
 
 /// A bound server: the loopback address and per-launch token are known, so the
 /// spawning client can be told where to connect before the accept loop starts.
@@ -1087,7 +1085,6 @@ pub struct Server {
     _listen_endpoint: listen_endpoint::ListenEndpointGuard,
 }
 
-
 /// The claim one process makes on a data directory for as long as it serves it.
 ///
 /// An OS advisory lock on a file in the directory, held open for the process's
@@ -1098,7 +1095,6 @@ pub struct Server {
 struct InstanceLock {
     _file: std::fs::File,
 }
-
 
 impl InstanceLock {
     fn acquire(config: &Config) -> Result<Self> {
@@ -1136,7 +1132,6 @@ impl InstanceLock {
     }
 }
 
-
 struct AbortTask(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortTask {
@@ -1144,7 +1139,6 @@ impl Drop for AbortTask {
         self.0.abort();
     }
 }
-
 
 impl Server {
     /// The loopback address the server is listening on.
@@ -1195,7 +1189,6 @@ impl Server {
     }
 }
 
-
 /// Default model when none is configured via settings or per-chat. Overridable
 /// with `TIDEBREAK_MODEL`.
 const DEFAULT_MODEL: &str = "gpt-5.6-sol";
@@ -1215,10 +1208,10 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
-
 
 /// Bind the API and mount external MCP servers from `TIDEBREAK_MCP_CONFIG`.
 ///
@@ -1236,10 +1229,10 @@ pub async fn bind_configured(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
-
 
 /// Bind the API with a stable app-private native executor identity.
 ///
@@ -1262,10 +1255,10 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
-
 
 /// Desktop counterpart to [`bind_configured`], retaining the stable native
 /// executor identity used by host-owned continuations.
@@ -1287,10 +1280,10 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
-
 
 /// Desktop binding with the native bridges only the product app can provide:
 /// the resolver that turns connected folders into per-invocation local
@@ -1318,7 +1311,6 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     )
     .await
 }
-
 
 /// Desktop binding with the native host bridges plus a browser runtime that
 /// must be available before code-session recovery starts.
@@ -1356,7 +1348,6 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     .await
 }
 
-
 /// Desktop binding with the native host bridges plus a browser channel
 /// binding (runtime + bridge executable) that must be available before
 /// code-session recovery starts.
@@ -1377,9 +1368,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     binding: Option<BrowserChannelBinding>,
 ) -> Result<Server> {
     let (browser_runtime, browser_bridge_command) = match binding {
-        Some(binding) => {
-            (Some(binding.runtime), Some(binding.bridge_command))
-        }
+        Some(binding) => (Some(binding.runtime), Some(binding.bridge_command)),
         None => (None, None),
     };
     bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
@@ -1436,7 +1425,6 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     .await
 }
 
-
 /// The secret store the configured profile keeps its credentials in.
 ///
 /// Wrapped in a [`CachingSecretProvider`] so a key costs one keychain read per
@@ -1462,7 +1450,6 @@ fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
     )
 }
 
-
 /// Re-home the configured profile's credentials — see [`secret_rehome`].
 ///
 /// Opens the profile's store to enumerate the per-record connected-app
@@ -1474,7 +1461,6 @@ pub async fn rehome_configured_secrets(
     let store = connect_store(config).await?;
     secret_rehome::rehome_secrets(&*store, &*secret_provider(config)).await
 }
-
 
 // Every parameter is one optional native bridge an embedding may supply;
 // bundling them into a struct would only rename the arity.
@@ -1939,7 +1925,6 @@ async fn bind_inner(
     })
 }
 
-
 /// Assemble the tools and per-turn tuning for a real launch.
 ///
 /// The model **provider** is not built here — it is resolved per turn by the
@@ -1980,7 +1965,6 @@ fn agent_deps(
         cancellation_acceleration,
     )
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn agent_deps_with_cancellation_acceleration(
@@ -2138,7 +2122,6 @@ fn agent_deps_with_cancellation_acceleration(
     (tools, agent_config)
 }
 
-
 /// Register the computer-use contracts as validated client tools.
 ///
 /// Registered only when the caller determined the host can honor them (the
@@ -2204,7 +2187,6 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
     }
 }
 
-
 /// Open the durable store the profile selects.
 ///
 /// Desktop opens SQLite under `data_dir`. Self-host opens the database named
@@ -2217,7 +2199,6 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
 async fn connect_store(config: &Config) -> Result<Arc<dyn Store>> {
     Ok(connect_db(config).await?)
 }
-
 
 async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
     match config.profile {
@@ -2245,7 +2226,6 @@ async fn connect_db(config: &Config) -> Result<Arc<DbStore>> {
         )),
     }
 }
-
 
 /// How many pooled connections a host process opens.
 ///
@@ -2277,7 +2257,6 @@ pub(crate) fn host_connect_options(url: &str) -> sea_orm::ConnectOptions {
         .acquire_timeout(HOST_ACQUIRE_TIMEOUT);
     options
 }
-
 
 #[cfg(test)]
 mod tests;
