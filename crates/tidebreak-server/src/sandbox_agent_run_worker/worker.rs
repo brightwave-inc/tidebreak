@@ -443,7 +443,7 @@ impl SandboxAgentRunWorker {
                     .await;
             }
         }
-        let supports_vendor_web_search = if self.resolver.enforces_model_registry() {
+        let search_capabilities = if self.resolver.enforces_model_registry() {
             let Some(policy) =
                 crate::providers::resolve_model_policy(&*self.store, &model, true).await?
             else {
@@ -456,13 +456,16 @@ impl SandboxAgentRunWorker {
                     "managed gateway execution requires a frozen model identity",
                 ));
             }
-            let supports_vendor_web_search = policy.supports_vendor_web_search;
+            let capabilities = (
+                policy.supports_vendor_web_search,
+                policy.supports_search_subrequest,
+            );
             crate::providers::apply_model_policy(
                 &mut agent_config,
                 &policy,
                 chat.reasoning_effort,
             )?;
-            supports_vendor_web_search
+            capabilities
         } else {
             crate::providers::apply_free_form_model(
                 &mut agent_config,
@@ -471,8 +474,9 @@ impl SandboxAgentRunWorker {
             )?;
             // A model reached without the registry claims nothing, here as
             // everywhere else: no row asserts that its adapter emits a
-            // provider-executed search, so this run is not offered one.
-            false
+            // provider-executed search, or that its provider would accept a
+            // search sub-request, so this run is offered neither.
+            (false, false)
         };
         // One host setting governs both surfaces. A background run is the
         // conversation's own work delegated to a child, so the operator's
@@ -481,7 +485,8 @@ impl SandboxAgentRunWorker {
         agent_config.web_search = crate::web_search::resolve_turn_web_search(
             &*self.store,
             &*self.secrets,
-            supports_vendor_web_search,
+            search_capabilities.0,
+            search_capabilities.1,
         )
         .await?;
         // Same source the foreground turn freezes into its operating prompt:

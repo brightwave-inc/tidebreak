@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 import {
@@ -8,6 +8,9 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
+import type { ComposerWorkspaceFiles } from "@/Composer";
+import { useCodeUiStore } from "@/code/CodeUiStore";
+import { FORK_FRAMING, forkTranscriptFile } from "@/code/fork";
 import { StartSessionPrompt } from "@/code/StartSessionPrompt";
 import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
@@ -28,10 +31,18 @@ function withRouter(children: ReactNode) {
 function StartSession({
   harnesses,
   starting = false,
+  workspaceFiles,
 }: {
   harnesses: typeof harnessDoctor.harnesses;
   starting?: boolean;
+  workspaceFiles?: ComposerWorkspaceFiles;
 }) {
+  // A fork seeds the framing line the same way the workspace page does, so
+  // the story shows the state the reader actually lands in.
+  useEffect(() => {
+    if (!workspaceFiles) return;
+    useCodeUiStore.getState().offerComposerPrompt("ws-1", FORK_FRAMING);
+  }, [workspaceFiles]);
   return (
     <StartSessionPrompt
       workspaceId="ws-1"
@@ -40,6 +51,7 @@ function StartSession({
       selectedMode={null}
       onSelectMode={fn()}
       onStart={fn()}
+      workspaceFiles={workspaceFiles}
     />
   );
 }
@@ -68,4 +80,42 @@ export const Starting: Story = {
 /** Engines that need install or sign-in before a session can start. */
 export const NeedsSetup: Story = {
   args: { harnesses: harnessDoctorDegraded.harnesses },
+};
+
+/**
+ * A fork: the parent's transcript is already in the worktree, so the child
+ * gets a path rather than an upload, and the framing line stays editable.
+ * Any engine can be the one that reads it.
+ */
+export const ForkedFromAnotherAgent: Story = {
+  args: {
+    workspaceFiles: {
+      items: [
+        forkTranscriptFile({
+          path: ".tidebreak/forks/9c1f4a2e.md",
+          byte_len: 48_120,
+          turns: 14,
+          truncated: false,
+        }),
+      ],
+      onRemove: fn(),
+    },
+  },
+};
+
+/** A long parent: the oldest turns did not fit, and the chip says so. */
+export const ForkedFromALongSession: Story = {
+  args: {
+    workspaceFiles: {
+      items: [
+        forkTranscriptFile({
+          path: ".tidebreak/forks/3b70de55.md",
+          byte_len: 524_288,
+          turns: 6,
+          truncated: true,
+        }),
+      ],
+      onRemove: fn(),
+    },
+  },
 };

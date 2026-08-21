@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, NativeExtractor,
-    OutboundOrigin, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher, SearxngBaseUrl,
-    SearxngProvider, StoredExtractedPage, TavilyProvider, TokioHostResolver, WebExtractFailure,
-    WebExtractRequest, WebExtractResponse, WebExtractTool, WebSearchCredential,
-    WebSearchCredentialState, WebSearchCredentials, WebSearchProvider, WebSearchProviderKind,
-    WebSearchResolver, WebSearchResolverError, WebSearchTool,
+    BraveProvider, ExaProvider, ExtractedPageSink, ExtractedPageSinkError, ModelProviderSearch,
+    NativeExtractor, OutboundOrigin, PageExtractor, ReqwestHttpClient, ReqwestPageFetcher,
+    SearchModel, SearxngBaseUrl, SearxngProvider, StoredExtractedPage, TavilyProvider,
+    TokioHostResolver, WebExtractFailure, WebExtractRequest, WebExtractResponse, WebExtractTool,
+    WebSearchCredential, WebSearchCredentialState, WebSearchCredentials, WebSearchProvider,
+    WebSearchProviderKind, WebSearchResolver, WebSearchResolverError, WebSearchTool,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -25,6 +25,8 @@ use tidebreak_core::{
 };
 
 use crate::error::ServerError;
+use crate::model_roles::{self, ModelRole};
+use crate::resolver::ProviderResolver;
 
 const NETWORK_OFF_ERROR_CODE: &str = "chat_network_off";
 const NETWORK_OFF_MESSAGE: &str =
@@ -324,6 +326,8 @@ fn host_is_available(config: &WebSearchConfig, has_credential: bool) -> bool {
     match config.provider {
         // Nothing to authenticate with; the instance URL is what it needs.
         Some(WebSearchProviderKind::Searxng) => config.searxng_base_url().is_some(),
+        // Not selectable here, so reaching this arm means hand-edited storage.
+        Some(WebSearchProviderKind::ModelProvider) => false,
         Some(_) => has_credential,
         None => false,
     }
@@ -333,17 +337,27 @@ fn host_is_available(config: &WebSearchConfig, has_credential: bool) -> bool {
 /// capabilities.
 ///
 /// `supports_vendor` is the resolved model row's claim that the routing adapter
-/// emits a provider-executed search for it — not that the vendor documents one
-/// — so a model reached over a pass-through route resolves as if it had none.
+/// emits a provider-executed search *during the turn* — not that the vendor
+/// documents one — so a model reached over a pass-through route resolves as if
+/// it had none.
+///
+/// `supports_subrequest` is the weaker, more widely available claim: the host
+/// can search on this model's behalf with one dedicated call to its provider.
+/// It resolves to [`TurnWebSearch::Host`], because that is what it is — the
+/// model is offered the host's own tool, and the host decides what runs behind
+/// it. Where a model has both, the in-turn search wins: it costs no extra
+/// round-trip and the model steers it directly.
 ///
 /// Nothing here consults the chat's permission mode. A vendor search is
 /// provider-internal: it makes no egress from this host, reaches no new party
 /// with the conversation's data, and is already finished by the time Tidebreak
-/// sees it, so there is no decision an approval card could still gate.
+/// sees it, so there is no decision an approval card could still gate. A
+/// sub-request reaches the same party the conversation is already with.
 pub async fn resolve_turn_web_search(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     supports_vendor: bool,
+    supports_subrequest: bool,
 ) -> Result<TurnWebSearch> {
     let config = read_config(store).await?;
     let vendor = || {
@@ -358,6 +372,10 @@ pub async fn resolve_turn_web_search(
         // configuration error it always has.
         WebSearchMode::Host => TurnWebSearch::Host,
         WebSearchMode::Vendor if supports_vendor => vendor(),
+        // The model's own provider, reached through the host's tool because
+        // that is the only shape its endpoint will accept alongside an agent
+        // turn's tools.
+        WebSearchMode::Vendor if supports_subrequest => TurnWebSearch::Host,
         WebSearchMode::Vendor => TurnWebSearch::Off,
         WebSearchMode::Automatic => {
             let has_credential = host_has_credential(&config, secrets).await;
@@ -546,25 +564,112 @@ async fn required_credential(
     }
 }
 
-/// Resolve the explicitly selected provider for host execution. The returned
+/// The model one chat would search through, when its provider can serve a
+/// dedicated search sub-request.
+///
+/// `None` covers every reason a chat has no such route: an unreadable or
+/// unregistered selection, a pass-through endpoint that cannot promise the
+/// vendor's request shape, and a provider with no hosted search at all
+/// (Anthropic, whose rows carry a native in-turn search instead).
+///
+/// The selection is read the way a new execution reads it — the chat's own
+/// override, then the global `chat` role selection, then the process default —
+/// so the search runs on the model the reader believes they are talking to.
+async fn chat_search_model(
+    store: &dyn Store,
+    chat: ChatId,
+    default_model: &str,
+) -> Option<SearchModel> {
+    let selected = match store
+        .get_chat(chat)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|chat| chat.model)
+    {
+        Some(model) => model,
+        None => model_roles::read_selection(store, ModelRole::Chat)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| default_model.to_owned()),
+    };
+    let policy = crate::providers::resolve_model_policy(store, &selected, true)
+        .await
+        .ok()
+        .flatten()?;
+    if !policy.supports_search_subrequest {
+        return None;
+    }
+    Some(SearchModel {
+        provider: Some(tidebreak_core::ProviderId::new(policy.provider.as_str())),
+        model: policy.route_model.clone(),
+        reasoning_model: policy.supports_reasoning,
+        reasoning_efforts: policy.reasoning_efforts.clone(),
+    })
+}
+
+/// Resolve the provider that will run one chat's host-side search. The returned
 /// provider is inert until its `search` method is called.
 ///
-/// Every path fails closed as `Ok(None)`: mode that never runs on this host
-/// (`off` / `vendor`), a missing key for the providers that need one, and a
-/// missing instance URL for the one that does not. Credentials left in the
-/// keychain after search is turned off must not keep host search live.
+/// Two backends can answer, and which one does is the operator's mode:
+///
+/// - `host` takes the configured engine and nothing else. An operator who named
+///   Brave meant Brave, and quietly searching through their model provider
+///   instead would send queries somewhere they did not choose.
+/// - `vendor` takes the chat's model provider and nothing else, by the mirror of
+///   the same argument.
+/// - `automatic` prefers the configured engine, because it is the deliberate
+///   choice, and falls back to the model provider so a host with no key still
+///   searches.
+///
+/// Every path fails closed as `Ok(None)`: `off`, a missing key for the engines
+/// that need one, a missing instance URL for the one that does not, and a chat
+/// whose model has no search sub-request. Credentials left in the keychain after
+/// search is turned off must not keep host search live.
 pub async fn resolve_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
+    chat: Option<ChatId>,
+    providers: Option<&Arc<dyn ProviderResolver>>,
+    default_model: &str,
 ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, ServerError> {
     let config = read_config(store).await?;
     config.validate()?;
-    // Host adapters only serve Host and Automatic. Vendor search never touches
-    // this path, and Off means no search at all — including when a prior key
-    // is still stored and a stale tool call still reaches the registry.
-    if matches!(config.mode, WebSearchMode::Off | WebSearchMode::Vendor) {
+    if matches!(config.mode, WebSearchMode::Off) {
         return Ok(None);
     }
+
+    // Resolved first so `automatic` can fall through to it, and so `vendor` has
+    // its only candidate. Building it makes no request: the model provider is
+    // as inert here as a bound HTTP client is.
+    let model_backed = async {
+        if matches!(config.mode, WebSearchMode::Host) {
+            return None;
+        }
+        let providers = providers?;
+        let model = chat_search_model(store, chat?, default_model).await?;
+        let backend: Arc<dyn WebSearchProvider> =
+            Arc::new(ModelProviderSearch::new(providers.resolve().await, model));
+        Some(backend)
+    };
+
+    if matches!(config.mode, WebSearchMode::Vendor) {
+        return Ok(model_backed.await);
+    }
+
+    let configured = configured_provider(secrets, &config).await?;
+    Ok(match configured {
+        Some(provider) => Some(provider),
+        None => model_backed.await,
+    })
+}
+
+/// The engine the operator selected and credentialed, if it is usable.
+async fn configured_provider(
+    secrets: &dyn SecretProvider,
+    config: &WebSearchConfig,
+) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, ServerError> {
     let Some(kind) = config.provider else {
         return Ok(None);
     };
@@ -580,6 +685,9 @@ pub async fn resolve_provider(
             let client = bound_client(base_url.origin(), config.timeout_ms)?;
             Arc::new(SearxngProvider::new(client, base_url))
         }
+        // Never an operator selection: it is chosen by mode, above, because the
+        // backend follows the chat rather than the configuration.
+        WebSearchProviderKind::ModelProvider => return Ok(None),
         kind => {
             let Some(credential) = required_credential(secrets, kind).await? else {
                 return Ok(None);
@@ -596,8 +704,11 @@ pub async fn resolve_provider(
                 WebSearchProviderKind::Brave => {
                     Arc::new(BraveProvider::new(client, credential).map_err(|_| unavailable())?)
                 }
-                // Handled above; `OutboundOrigin::fixed` has already refused it.
-                WebSearchProviderKind::Searxng => return Ok(None),
+                // Handled above; `OutboundOrigin::fixed` has already refused
+                // both.
+                WebSearchProviderKind::Searxng | WebSearchProviderKind::ModelProvider => {
+                    return Ok(None)
+                }
             }
         }
     };
@@ -607,16 +718,33 @@ pub async fn resolve_provider(
 struct HostWebSearchResolver {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    /// The model router, when this resolver serves search.
+    ///
+    /// `None` for extraction, which the model-backed backend cannot do: it
+    /// searches by asking a model what it found, and there is no equivalent for
+    /// "read exactly this page." Extraction routes to the configured engine or
+    /// to the native fetcher, exactly as it did before this backend existed.
+    providers: Option<Arc<dyn ProviderResolver>>,
+    /// The model this process launched with — the last fallback when neither
+    /// the chat nor the global `chat` role names one.
+    default_model: String,
 }
 
 #[async_trait]
 impl WebSearchResolver for HostWebSearchResolver {
     async fn resolve(
         &self,
+        chat: Option<ChatId>,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
-        resolve_provider(&*self.store, &*self.secrets)
-            .await
-            .map_err(|_| WebSearchResolverError)
+        resolve_provider(
+            &*self.store,
+            &*self.secrets,
+            chat,
+            self.providers.as_ref(),
+            &self.default_model,
+        )
+        .await
+        .map_err(|_| WebSearchResolverError)
     }
 }
 
@@ -627,12 +755,16 @@ impl WebSearchResolver for HostWebSearchResolver {
 pub(crate) fn foreground_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    providers: Arc<dyn ProviderResolver>,
+    default_model: String,
 ) -> Box<dyn Tool> {
     Box::new(ChatNetworkPolicyTool::new(
         store.clone(),
         Box::new(WebSearchTool::new(Arc::new(HostWebSearchResolver {
             store,
             secrets,
+            providers: Some(providers),
+            default_model,
         }))),
     ))
 }
@@ -746,6 +878,9 @@ pub(crate) fn foreground_extract_tool(
         Arc::new(HostWebSearchResolver {
             store: store.clone(),
             secrets,
+            // Search-only backend, so extraction never routes to it.
+            providers: None,
+            default_model: String::new(),
         }),
         Some(Arc::new(HostNativePageExtractor {
             store: store.clone(),
@@ -800,6 +935,47 @@ mod tests {
         .await
         .unwrap();
         (store, dir)
+    }
+
+    /// Resolution with no chat and no model router: the configured engine, or
+    /// nothing. This is what `resolve_provider` meant before it learned to
+    /// search through a chat's own model provider, and what every test written
+    /// against that behaviour still means.
+    async fn resolve_configured(
+        store: &dyn Store,
+        secrets: &dyn SecretProvider,
+    ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, ServerError> {
+        resolve_provider(store, secrets, None, None, "").await
+    }
+
+    /// A resolver standing in for the model router. It is never asked to
+    /// stream here — building the backend is all these tests observe — so an
+    /// unconfigured route is the honest fake.
+    struct TestModelRouter;
+
+    #[async_trait]
+    impl ProviderResolver for TestModelRouter {
+        async fn resolve(&self) -> Arc<dyn tidebreak_core::ModelProvider> {
+            Arc::new(crate::provider::UnconfiguredProvider)
+        }
+    }
+
+    /// Store a chat pinned to `model`, and return the router to resolve against.
+    async fn chat_on(store: &DbStore, model: &str) -> (ChatId, Arc<dyn ProviderResolver>) {
+        let chat = Chat {
+            id: ChatId::new(),
+            project_id: None,
+            title: None,
+            model: Some(model.to_owned()),
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: NetworkPolicy::Open,
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            created_at: Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        (chat.id, Arc::new(TestModelRouter))
     }
 
     struct UnexpectedNetworkTool;
@@ -915,7 +1091,10 @@ mod tests {
         assert_eq!(info.provider, Some(WebSearchProviderKind::Exa));
         assert!(!info.has_credential);
         assert!(!info.available);
-        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+        assert!(matches!(
+            resolve_configured(&store, &secrets).await,
+            Ok(None)
+        ));
         assert!(secrets.0.lock().unwrap().is_empty());
     }
 
@@ -937,7 +1116,10 @@ mod tests {
         let info = update_config(&store, &secrets, select(None)).await.unwrap();
         assert_eq!(info.provider, Some(WebSearchProviderKind::Searxng));
         assert!(!info.available);
-        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+        assert!(matches!(
+            resolve_configured(&store, &secrets).await,
+            Ok(None)
+        ));
 
         // A malformed instance URL is rejected at PUT time rather than
         // silently widening where the transport may dial.
@@ -966,7 +1148,7 @@ mod tests {
         assert!(!info.has_credential);
         assert!(info.available);
         assert!(matches!(
-            resolve_provider(&store, &secrets).await,
+            resolve_configured(&store, &secrets).await,
             Ok(Some(_))
         ));
         // Nothing about a credential-free provider touches the keychain, and
@@ -1000,7 +1182,10 @@ mod tests {
         assert_eq!(info.provider, None);
         assert!(!info.has_credential);
         assert!(!info.available);
-        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+        assert!(matches!(
+            resolve_configured(&store, &secrets).await,
+            Ok(None)
+        ));
     }
 
     /// The whole point of the mode: which search a turn gets, decided from
@@ -1009,7 +1194,8 @@ mod tests {
     async fn turn_resolution_prefers_a_usable_host_and_falls_back_to_the_vendor() {
         let (store, _dir) = test_store().await;
         let secrets = TestSecrets::default();
-        let resolve = |supports_vendor| resolve_turn_web_search(&store, &secrets, supports_vendor);
+        let resolve =
+            |supports_vendor| resolve_turn_web_search(&store, &secrets, supports_vendor, false);
         let vendor = TurnWebSearch::Vendor(VendorWebSearch {
             max_uses: VendorWebSearch::DEFAULT_MAX_USES,
         });
@@ -1056,6 +1242,164 @@ mod tests {
         assert_eq!(resolve(true).await.unwrap(), TurnWebSearch::Off);
     }
 
+    /// The screenshot this whole path exists to fix: automatic mode, no key
+    /// stored, a chat on a model whose provider has no in-turn search. Before
+    /// the sub-request backend the turn held a host tool with nothing behind
+    /// it, and the reader got "web search needs a provider".
+    #[tokio::test]
+    async fn a_model_with_only_a_sub_request_still_gets_a_working_host_tool() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let resolve =
+            |vendor, subrequest| resolve_turn_web_search(&store, &secrets, vendor, subrequest);
+
+        // Automatic with nothing configured: the tool is offered either way,
+        // but now something answers it.
+        assert_eq!(resolve(false, true).await.unwrap(), TurnWebSearch::Host);
+
+        // Vendor mode is where the difference is visible. It used to mean
+        // "off" for these models, because they claim no in-turn search.
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: None,
+                mode: Some(WebSearchMode::Vendor),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve(false, true).await.unwrap(), TurnWebSearch::Host);
+        assert_eq!(resolve(false, false).await.unwrap(), TurnWebSearch::Off);
+
+        // A model with both keeps the in-turn search: it costs no extra
+        // round-trip and the model steers it directly.
+        assert_eq!(
+            resolve(true, true).await.unwrap(),
+            TurnWebSearch::Vendor(VendorWebSearch {
+                max_uses: VendorWebSearch::DEFAULT_MAX_USES,
+            })
+        );
+    }
+
+    /// An operator who named an engine meant that engine. Falling back to the
+    /// chat's model provider would send their queries somewhere they did not
+    /// choose, which is the one thing explicit host mode rules out.
+    #[tokio::test]
+    async fn host_mode_never_resolves_the_model_backed_backend() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let (chat, router) = chat_on(&store, "openai::gpt-5.6-sol").await;
+
+        for mode in [WebSearchMode::Host, WebSearchMode::Off] {
+            update_config(
+                &store,
+                &secrets,
+                WebSearchConfigUpdate {
+                    provider: None,
+                    mode: Some(mode),
+                    timeout_ms: None,
+                    searxng_base_url: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let resolved = resolve_provider(&store, &secrets, Some(chat), Some(&router), "")
+                .await
+                .unwrap();
+            assert!(resolved.is_none(), "{mode:?} resolved a backend");
+        }
+
+        // Vendor mode is the same chat and the same router, and it does
+        // resolve — so the refusals above are the mode, not a broken fixture.
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: None,
+                mode: Some(WebSearchMode::Vendor),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+        let resolved = resolve_provider(&store, &secrets, Some(chat), Some(&router), "")
+            .await
+            .unwrap()
+            .expect("vendor mode resolves the chat's own model provider");
+        assert_eq!(resolved.kind(), WebSearchProviderKind::ModelProvider);
+    }
+
+    /// Anthropic rows carry a native in-turn search, so they need nothing here
+    /// — and a chat on one must not quietly acquire a second, worse search
+    /// path built on an extra round-trip.
+    #[tokio::test]
+    async fn a_chat_whose_model_has_no_sub_request_resolves_nothing() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let (chat, router) = chat_on(&store, "anthropic::claude-opus-5").await;
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: None,
+                mode: Some(WebSearchMode::Vendor),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let resolved = resolve_provider(&store, &secrets, Some(chat), Some(&router), "")
+            .await
+            .unwrap();
+
+        assert!(resolved.is_none());
+    }
+
+    /// Automatic prefers what the operator configured, and only falls through
+    /// to the model provider when this host has nothing to run.
+    #[tokio::test]
+    async fn automatic_prefers_a_usable_engine_over_the_model_provider() {
+        let (store, _dir) = test_store().await;
+        let secrets = TestSecrets::default();
+        let (chat, router) = chat_on(&store, "openai::gpt-5.6-sol").await;
+        update_config(
+            &store,
+            &secrets,
+            WebSearchConfigUpdate {
+                provider: Some(Some(WebSearchProviderKind::Exa)),
+                mode: Some(WebSearchMode::Automatic),
+                timeout_ms: None,
+                searxng_base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Selected but unusable: no key, so the model provider answers.
+        let resolved = resolve_provider(&store, &secrets, Some(chat), Some(&router), "")
+            .await
+            .unwrap()
+            .expect("an unusable engine falls through");
+        assert_eq!(resolved.kind(), WebSearchProviderKind::ModelProvider);
+
+        // With the key in place the operator's choice wins again.
+        write_credential(&secrets, WebSearchProviderKind::Exa, "key")
+            .await
+            .unwrap();
+        let resolved = resolve_provider(&store, &secrets, Some(chat), Some(&router), "")
+            .await
+            .unwrap()
+            .expect("a credentialed engine resolves");
+        assert_eq!(resolved.kind(), WebSearchProviderKind::Exa);
+    }
+
     /// `PUT { "provider": null }` is the documented disable and what
     /// `settings web-search select off` sends. It must turn search off for the
     /// turn surface, not leave mode automatic so a vendor-capable model still
@@ -1080,7 +1424,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            resolve_turn_web_search(&store, &secrets, true)
+            resolve_turn_web_search(&store, &secrets, true, false)
                 .await
                 .unwrap(),
             TurnWebSearch::Host
@@ -1103,19 +1447,22 @@ mod tests {
         assert_eq!(info.mode, WebSearchMode::Off);
         assert!(!info.available);
         assert_eq!(
-            resolve_turn_web_search(&store, &secrets, true)
+            resolve_turn_web_search(&store, &secrets, true, false)
                 .await
                 .unwrap(),
             TurnWebSearch::Off
         );
         assert_eq!(
-            resolve_turn_web_search(&store, &secrets, false)
+            resolve_turn_web_search(&store, &secrets, false, false)
                 .await
                 .unwrap(),
             TurnWebSearch::Off
         );
         // A leftover key must not keep host search live under Off.
-        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+        assert!(matches!(
+            resolve_configured(&store, &secrets).await,
+            Ok(None)
+        ));
 
         // Selecting a provider again without an explicit mode restores a
         // usable default rather than leaving Off stuck under a selection.
@@ -1133,7 +1480,7 @@ mod tests {
         .unwrap();
         assert_eq!(info.mode, WebSearchMode::Automatic);
         assert_eq!(
-            resolve_turn_web_search(&store, &secrets, true)
+            resolve_turn_web_search(&store, &secrets, true, false)
                 .await
                 .unwrap(),
             TurnWebSearch::Host
@@ -1171,12 +1518,15 @@ mod tests {
         assert!(info.has_credential);
         assert!(!info.available);
         assert_eq!(
-            resolve_turn_web_search(&store, &secrets, true)
+            resolve_turn_web_search(&store, &secrets, true, false)
                 .await
                 .unwrap(),
             TurnWebSearch::Off
         );
-        assert!(matches!(resolve_provider(&store, &secrets).await, Ok(None)));
+        assert!(matches!(
+            resolve_configured(&store, &secrets).await,
+            Ok(None)
+        ));
     }
 
     /// A configuration written before the mode existed keeps the behavior it

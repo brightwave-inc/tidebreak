@@ -76,6 +76,7 @@ import type {
   PullRequestCommentKind,
   CodePrCommentsSnapshot,
   QueuedCodeTurn,
+  CodeForkTranscript,
 } from "../api/types";
 import type {
   CodeEvent as WireCodeEvent,
@@ -128,6 +129,7 @@ import type {
   CodeDeliverySourceError as WireCodeDeliverySourceError,
   CodeDeliveryWorkflowJob as WireCodeDeliveryWorkflowJob,
   CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
+  CodeForkTranscript as WireCodeForkTranscript,
   CodeGitHubCapability as WireCodeGitHubCapability,
   CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget as WireCodeGitHubRepositoryTarget,
@@ -1087,6 +1089,32 @@ export function parseCodeCloneDefaults(
   };
 }
 
+export function parseCodeForkTranscript(
+  value: unknown,
+): CodeForkTranscript | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeForkTranscript>(value, [
+      "path",
+      "byte_len",
+      "turns",
+      "truncated",
+    ]) ||
+    typeof value.path !== "string" ||
+    typeof value.byte_len !== "number" ||
+    typeof value.turns !== "number" ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    path: value.path,
+    byte_len: value.byte_len,
+    turns: value.turns,
+    truncated: value.truncated,
+  };
+}
+
 export function parseCodeWorktreeRoot(
   value: unknown,
 ): CodeWorktreeRoot | null {
@@ -1629,16 +1657,26 @@ export function parseCodeSessionList(
   return sessions;
 }
 
-/** The one session a workspace page should attach, if any. */
-export function liveCodeSession(
+/**
+ * The conversations a workspace page should offer, oldest first.
+ *
+ * A workspace runs several agents (record 55). The list arrives newest first,
+ * but the tab strip reads left to right in the order the agents were started,
+ * so the first one keeps its place and a new one appends to the right.
+ */
+export function liveCodeSessions(
   sessions: readonly CodeSessionSnapshot[],
-): CodeSessionSnapshot | null {
-  return (
-    sessions.find(
+): CodeSessionSnapshot[] {
+  return sessions
+    .filter(
       (session) =>
         session.kind === "interactive" && session.lifecycle !== "ended",
-    ) ?? null
-  );
+    )
+    .sort(
+      (left, right) =>
+        left.created_at.localeCompare(right.created_at) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {

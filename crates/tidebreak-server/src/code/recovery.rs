@@ -632,7 +632,13 @@ mod tests {
         })
         .await
         .unwrap();
-        let handle = crate::code::session_worker::spawn_session_worker(session, engine, sink, None);
+        let handle = crate::code::session_worker::spawn_session_worker(
+            session,
+            engine,
+            sink,
+            None,
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        );
         let (reply, _turn) = tokio::sync::oneshot::channel();
         handle
             .commands
