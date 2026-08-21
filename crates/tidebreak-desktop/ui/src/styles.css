@@ -1555,6 +1555,19 @@ body {
   overflow-wrap: anywhere;
 }
 
+.boot .boot-error-hint {
+  max-width: 34rem;
+  font-size: 0.8rem;
+}
+
+.boot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
 /* A transcript phase whose row threw while rendering. Deliberately quiet: the
    conversation around it is intact, and the step itself is recoverable from the
    durable record. */
