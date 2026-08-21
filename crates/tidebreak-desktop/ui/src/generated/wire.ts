@@ -1233,6 +1233,20 @@ export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_s
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
 
 /**
+ * A written fork transcript: `POST /code/sessions/{id}/fork`.
+ *
+ * `path` is worktree-relative, which is what the child agent needs: the file
+ * already sits in its working directory, so the prompt names a path rather
+ * than carrying the bytes.
+ */
+export type CodeForkTranscript = { path: string, byte_len: number, turns: number, 
+/**
+ * True when anything was left out to fit the size cap: the oldest
+ * turns, or the end of a turn too large on its own.
+ */
+truncated: boolean, };
+
+/**
  * Whether the local GitHub CLI can serve delivery requests.
  */
 export type CodeGitHubCapability = { found: boolean, authenticated?: boolean, viewer_login?: string, remediation: string, };

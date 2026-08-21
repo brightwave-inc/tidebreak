@@ -36,6 +36,7 @@ use super::checkpoint::{
 };
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
+use super::fork;
 use super::gh::{
     self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
 };
@@ -1641,6 +1642,33 @@ impl CodeRuntime {
         let turns = list_turns(&self.db, owner, session_id).await?;
         let events = list_events(&self.db, owner, session_id, 0).await?;
         Ok((session, turns, events))
+    }
+
+    /// Write this session's transcript into its worktree for a fork to read.
+    ///
+    /// The child is a sibling session in the same worktree, so the file only
+    /// has to exist where the engine already works. Nothing is handed over
+    /// here: the caller creates the child and names the path in its first
+    /// message.
+    pub(crate) async fn fork_transcript(
+        &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
+    ) -> Result<fork::WrittenTranscript, ServerError> {
+        let session = self.get_session(owner, session_id).await?;
+        let workspace = self
+            .require_live_workspace(owner, session.workspace_id)
+            .await?;
+        let turns = list_turns(&self.db, owner, session_id).await?;
+        let events = list_events(&self.db, owner, session_id, 0).await?;
+        fork::write_transcript(
+            std::path::Path::new(&workspace.worktree_path),
+            &session,
+            &turns,
+            &events,
+        )
+        .await
+        .map_err(|err| ServerError::internal(format!("could not write the fork transcript: {err}")))
     }
 
     pub(crate) async fn workspace_tree(

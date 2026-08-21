@@ -76,6 +76,7 @@ import type {
   PullRequestCommentKind,
   CodePrCommentsSnapshot,
   QueuedCodeTurn,
+  CodeForkTranscript,
 } from "../api/types";
 import type {
   CodeEvent as WireCodeEvent,
@@ -128,6 +129,7 @@ import type {
   CodeDeliverySourceError as WireCodeDeliverySourceError,
   CodeDeliveryWorkflowJob as WireCodeDeliveryWorkflowJob,
   CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
+  CodeForkTranscript as WireCodeForkTranscript,
   CodeGitHubCapability as WireCodeGitHubCapability,
   CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget as WireCodeGitHubRepositoryTarget,
@@ -1084,6 +1086,32 @@ export function parseCodeCloneDefaults(
     ...(value.gh_authenticated !== undefined
       ? { gh_authenticated: value.gh_authenticated }
       : {}),
+  };
+}
+
+export function parseCodeForkTranscript(
+  value: unknown,
+): CodeForkTranscript | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeForkTranscript>(value, [
+      "path",
+      "byte_len",
+      "turns",
+      "truncated",
+    ]) ||
+    typeof value.path !== "string" ||
+    typeof value.byte_len !== "number" ||
+    typeof value.turns !== "number" ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    path: value.path,
+    byte_len: value.byte_len,
+    turns: value.turns,
+    truncated: value.truncated,
   };
 }
 

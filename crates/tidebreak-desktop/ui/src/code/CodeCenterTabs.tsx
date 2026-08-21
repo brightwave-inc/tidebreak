@@ -17,6 +17,7 @@ import {
   FileCode,
   FileDiff,
   GitBranch,
+  GitFork,
   GitPullRequest,
   Globe2,
   SquareTerminal,
@@ -104,6 +105,7 @@ export function CodeCenterTabs({
   onSelectConversation,
   onNewConversation,
   onCloseConversation,
+  onForkConversation,
   onSelectEditor,
   onCloseEditor,
   onCloseAllEditors,
@@ -134,6 +136,8 @@ export function CodeCenterTabs({
   /** Offer "New agent" in the plus menu. */
   onNewConversation?: () => void;
   onCloseConversation?: (sessionId: string | null) => void;
+  /** Copy this agent's transcript into the worktree and open a new agent on it. */
+  onForkConversation?: (sessionId: string) => void;
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;
   onCloseAllEditors: () => void;
@@ -218,6 +222,7 @@ export function CodeCenterTabs({
     >
       {conversations.map((conversation, index) => {
         const active = conversation === activeConversation;
+        const forkable = conversation.id;
         const Icon = conversation.harness
           ? HARNESS_ICONS[conversation.harness]
           : Bot;
@@ -283,6 +288,19 @@ export function CodeCenterTabs({
               </div>
             </ContextMenuTrigger>
             <TabContextMenuContent label={conversation.label}>
+              {/* A draft has no transcript yet, so it has nothing to fork. */}
+              {onForkConversation && forkable !== null && (
+                <>
+                  <ContextMenuItem
+                    className="gap-3 py-2"
+                    onSelect={() => onForkConversation(forkable)}
+                  >
+                    <GitFork />
+                    Fork this agent
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                </>
+              )}
               <ContextMenuItem
                 className="gap-3 py-2"
                 disabled={editorTabs.length === 0}

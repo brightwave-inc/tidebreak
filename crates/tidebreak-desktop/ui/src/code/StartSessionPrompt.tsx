@@ -7,6 +7,7 @@ import type {
   HarnessKind,
   ModelInfo,
 } from "../api/types";
+import type { ComposerWorkspaceFiles } from "@/Composer";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { HarnessPicker } from "./HarnessPicker";
@@ -45,6 +46,7 @@ export function StartSessionPrompt({
   client,
   catalogModels = NO_CATALOG_MODELS,
   defaultModelKey = null,
+  workspaceFiles,
 }: {
   workspaceId: string;
   harnesses: HarnessDoctorEntry[];
@@ -60,6 +62,8 @@ export function StartSessionPrompt({
   client?: Pick<ApiClient, "listCodeHarnessModels">;
   catalogModels?: ModelInfo[];
   defaultModelKey?: string | null;
+  /** Worktree files the first message names — a fork's transcript. */
+  workspaceFiles?: ComposerWorkspaceFiles;
 }) {
   const [picked, setPicked] = useState<HarnessKind | null>(null);
   const [model, setModel] = useState<string | undefined>();
@@ -165,6 +169,7 @@ export function StartSessionPrompt({
           modelOptions={modelOptions}
           modelLoading={modelLoading}
           promptScope={workspaceId}
+          workspaceFiles={workspaceFiles}
           onModelChange={setModel}
           onModeChange={onSelectMode}
           onSend={async (message) => {
