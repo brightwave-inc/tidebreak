@@ -134,6 +134,9 @@ pub(crate) struct CodeRuntime {
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     pub(crate) browser_tokens: BrowserTokenRegistry,
+    /// The desktop browser adapter, installed after assembly. Absent in
+    /// headless deployments and tests that do not register one.
+    browser_runtime: Mutex<Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -185,6 +188,7 @@ impl CodeRuntime {
             worktree_root_default,
             approvals: ApprovalBridge::new(),
             browser_tokens,
+            browser_runtime: Mutex::new(None),
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -272,6 +276,7 @@ impl CodeRuntime {
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
             browser_tokens,
+            browser_runtime: Mutex::new(None),
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -295,6 +300,50 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
         *self.gh_search_path.lock().expect("gh search path") = path;
+    }
+
+    /// Install the desktop browser adapter after assembly, replacing any
+    /// previous one. Called by [`crate::Server::set_browser_runtime`].
+    ///
+    /// This is the single source of truth — routes read through
+    /// [`Self::browser_runtime`] and lifecycle revocation reads the same
+    /// `Arc`.
+    pub(crate) fn set_browser_runtime(
+        &self,
+        runtime: Arc<dyn crate::code::browser_runtime::BrowserRuntime>,
+    ) {
+        *self.browser_runtime.lock().expect("browser runtime") = Some(runtime);
+    }
+
+    /// Return the installed browser adapter, if any.
+    pub(crate) fn browser_runtime(
+        &self,
+    ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
+        self.browser_runtime.lock().expect("browser runtime").clone()
+    }
+
+    /// Revoke the session browser token AND the desktop adapter
+    /// capability. Idempotent — safe to call multiple times.
+    ///
+    /// The token registry is invalidated first so in-flight requests are
+    /// rejected. The adapter Arc is cloned and released before
+    /// `revoke_session` is called (deadlock-safe).
+    fn revoke_browser_session(
+        &self,
+        session_id: CodeSessionId,
+        owner: &OwnerId,
+        workspace_id: &WorkspaceId,
+    ) {
+        let scope = crate::code::browser_runtime::BrowserRuntimeScope {
+            owner: owner.clone(),
+            workspace: *workspace_id,
+            session: session_id,
+        };
+        self.browser_tokens.revoke(session_id);
+        let adapter = self.browser_runtime.lock().expect("browser runtime").clone();
+        if let Some(runtime) = adapter {
+            runtime.revoke_session(&scope);
+        }
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -1294,6 +1343,13 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        // Invalidate the session browser token so in-flight browser route
+        // calls are rejected immediately. The installed revocation hook
+        // fires synchronously from browser_tokens.revoke(), so the desktop
+        // adapter receives its Stop before the engine is interrupted.
+        // Token reissue happens on the next turn submission through
+        // attach_and_spawn_worker.
+        self.browser_tokens.revoke(id);
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
