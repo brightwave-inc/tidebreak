@@ -205,4 +205,46 @@ describe("WebSearchPanel", () => {
     await screen.findByRole("alert");
     expect(putWebSearchConfig).not.toHaveBeenCalled();
   });
+
+  /**
+   * The verdict is the one place the panel says whether search will actually
+   * run. Automatic falls back to the chat's own model provider, so an install
+   * with no key is working rather than broken — reporting it as unconfigured
+   * sends the reader to buy an API key they do not need.
+   */
+  it("reports automatic as working when only the model's own search is left", async () => {
+    const { client } = clientFor({
+      has_credential: false,
+      available: false,
+      timeout_ms: 20_000,
+      mode: "automatic",
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    expect(await screen.findByText(/Built-in search only/)).toBeTruthy();
+    expect(
+      screen.getByText(/searches through the model it is running on/),
+    ).toBeTruthy();
+  });
+
+  /**
+   * Explicit host mode is the one state that still strands a chat: the operator
+   * ruled out the model provider, so an unkeyed engine really does mean no
+   * search, and the panel must keep saying so.
+   */
+  it("still reports explicit host mode without a key as unconfigured", async () => {
+    const { client } = clientFor({
+      provider: "exa",
+      has_credential: false,
+      available: false,
+      timeout_ms: 20_000,
+      mode: "host",
+    });
+
+    render(<WebSearchPanel client={client} />);
+
+    expect(await screen.findByText(/Not configured/)).toBeTruthy();
+    expect(screen.getByText(/needs an API key/)).toBeTruthy();
+  });
 });

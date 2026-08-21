@@ -15,7 +15,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use chrono::Utc;
 use tidebreak_core::{
-    AgentError, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store, ToolCallResolution,
+    AgentError, ChatId, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store,
+    ToolCallResolution,
 };
 use tokio::sync::Notify;
 
@@ -32,8 +33,13 @@ pub(crate) trait SandboxWebSearch: Send + Sync {
     /// Resolve host policy and credentials without sending a request. The
     /// worker revalidates its durable lease after this await and immediately
     /// before it calls `WebSearchProvider::search`.
+    ///
+    /// The chat decides which backend answers when the host searches through
+    /// the conversation's own model provider, so a background call resolves
+    /// against the chat it belongs to rather than against host settings alone.
     async fn resolve(
         &self,
+        chat: ChatId,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>;
 }
 
@@ -48,16 +54,25 @@ pub(crate) enum SandboxWebSearchError {
 struct HostSandboxWebSearch {
     store: Arc<dyn Store>,
     secrets: Arc<dyn tidebreak_core::SecretProvider>,
+    providers: Arc<dyn crate::resolver::ProviderResolver>,
+    default_model: String,
 }
 
 #[async_trait]
 impl SandboxWebSearch for HostSandboxWebSearch {
     async fn resolve(
         &self,
+        chat: ChatId,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError> {
-        web_search::resolve_provider(&*self.store, &*self.secrets)
-            .await
-            .map_err(|_| SandboxWebSearchError::Failed)
+        web_search::resolve_provider(
+            &*self.store,
+            &*self.secrets,
+            Some(chat),
+            Some(&self.providers),
+            &self.default_model,
+        )
+        .await
+        .map_err(|_| SandboxWebSearchError::Failed)
     }
 }
 
@@ -117,13 +132,20 @@ impl SandboxWebSearchWorker {
     pub(crate) fn with_attempts(
         store: Arc<dyn Store>,
         secrets: Arc<dyn tidebreak_core::SecretProvider>,
+        providers: Arc<dyn crate::resolver::ProviderResolver>,
+        default_model: String,
         wake: Arc<Notify>,
         attempts: Arc<SandboxAttemptGuard>,
         config: SandboxWebSearchWorkerConfig,
     ) -> Self {
         Self::with_search_and_attempts(
             store.clone(),
-            Arc::new(HostSandboxWebSearch { store, secrets }),
+            Arc::new(HostSandboxWebSearch {
+                store,
+                secrets,
+                providers,
+                default_model,
+            }),
             wake,
             attempts,
             config,
@@ -262,7 +284,7 @@ impl SandboxWebSearchWorker {
         let resolution = match parse_web_search_request(&call) {
             Err(resolution) => resolution,
             Ok(request) => match {
-                let resolve = self.search.resolve();
+                let resolve = self.search.resolve(call.chat_id);
                 tokio::pin!(resolve);
                 tokio::select! {
                     resolved = &mut resolve => Some(resolved),
@@ -504,6 +526,7 @@ mod tests {
     impl SandboxWebSearch for BlockingResolution {
         async fn resolve(
             &self,
+            _chat: ChatId,
         ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>
         {
             let _drop = DropMarker(self.dropped.clone());
@@ -552,6 +575,7 @@ mod tests {
     impl SandboxWebSearch for FakeSearch {
         async fn resolve(
             &self,
+            _chat: ChatId,
         ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>
         {
             self.resolution.clone()

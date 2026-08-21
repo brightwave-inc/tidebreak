@@ -221,13 +221,13 @@ purpose:
 - **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
   and power turn-scoped diffs; the surface that restores a workspace to an
   earlier checkpoint waits until review flows have settled.
-- **Multiple sessions per workspace.** The data model keeps room for
-  follow-up and successor sessions in one worktree; v1 runs one active
-  session per workspace. Watch tasks
-  ([record 50](decisions/0050-watch-and-fix-is-a-durable-task.md)) take the
-  first step: one interactive session plus one watch session may share a
-  worktree, serialized so only one turn runs at a time. Free-form
-  concurrent sessions stay parked.
+- **Parallel turns in one worktree.** Several agents may share a workspace
+  ([record 55](decisions/0055-multiple-sessions-per-workspace.md)), but their
+  turns are serialized on the checkout: two harnesses editing one tree is
+  corruption, not concurrency. Running turns side by side would mean a
+  worktree per session, which splits the branch, the diff, and the pull
+  request the workspace is keyed to. Reconsider only with a reason to give
+  one workspace several trees.
 - **Changing a session's permission mode after it starts.** The mode is
   chosen at session creation, refused per harness capability there
   ([record 33](decisions/0033-code-mode-approvals.md),

@@ -289,6 +289,7 @@ impl ApprovalChannelSpec {
 
 /// Session-private browser capability-file path and trusted bridge
 /// executable.
+
 ///
 /// The trusted browser runtime writes a short-lived JSON capability file
 /// at `capability_file` before the engine child is spawned. The adapter
@@ -311,6 +312,7 @@ impl ApprovalChannelSpec {
 /// one only when both the native [`BrowserRuntime`] and the bridge
 /// executable are present (issue #2372).
 ///
+
 /// This struct carries only the metadata adapters need to construct the
 /// launch environment. The mint, write, and revoke lifecycle is owned by
 /// the trusted browser runtime (issue #2342).
