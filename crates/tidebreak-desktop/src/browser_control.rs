@@ -326,6 +326,18 @@ struct StoredSemanticSnapshot {
     targets: HashMap<String, BrowserTargetRecord>,
 }
 
+/// Instance and document identity read while re-validating live agent
+/// authorization under one registry lock.
+///
+/// Long-running observations take a fence before and after their async work
+/// and compare, so a result is never attributed to a session, document, or
+/// authority it did not come from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BrowserObservationFence {
+    pub(crate) instance_id: u64,
+    pub(crate) document_epoch: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BrowserTargetError {
     StaleTarget,
@@ -1298,6 +1310,96 @@ impl BrowserRegistry {
             return Err("browser document changed while screenshot was being captured".to_owned());
         }
         record.screenshot_epoch = Some(epoch);
+        Ok(())
+    }
+
+    /// Re-check, under one registry lock, that the capability, workspace,
+    /// visibility, halt latch, controller, and observe grant that authorized
+    /// an observation are all still live, and return the record's instance
+    /// id and document epoch for fencing.
+    ///
+    /// The grant is evaluated against the record's current origin, so a
+    /// navigation to an unshared origin revokes the fence.
+    pub(crate) fn observation_fence(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<BrowserObservationFence, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        if !record.visible {
+            return Err("browser is hidden".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.controller.kind != BrowserControllerKind::Agent
+            || record.controller_capability_id != Some(capability_id)
+        {
+            return Err("browser is not controlled by this agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared for this operation".to_owned());
+        }
+        Ok(BrowserObservationFence {
+            instance_id: record.instance_id,
+            document_epoch: record.document_epoch,
+        })
+    }
+
+    /// Watch the halt latch so a long-running observation can abort the
+    /// moment the user hits Stop, instead of noticing at its next poll.
+    pub(crate) fn subscribe_halt(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<watch::Receiver<bool>, String> {
+        let state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        Ok(record.dispatch.halt.subscribe())
+    }
+
+    /// Confirm that `snapshot_id` names the live stored semantic snapshot at
+    /// `document_epoch`. A screenshot must never echo a model-supplied
+    /// snapshot id the host did not issue for the current document.
+    pub(crate) fn validate_snapshot_id(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        snapshot_id: &str,
+        document_epoch: u64,
+    ) -> Result<(), String> {
+        let state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if record.document_epoch != document_epoch {
+            return Err("browser document changed since the snapshot was taken".to_owned());
+        }
+        let Some(snapshot) = &record.semantic_snapshot else {
+            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+        };
+        if snapshot.snapshot_id != snapshot_id || snapshot.document_epoch != document_epoch {
+            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+        }
         Ok(())
     }
 
@@ -2615,5 +2717,51 @@ mod tests {
             reclaimed.controller.unwrap().label.as_deref(),
             Some("Next agent")
         );
+    }
+
+    #[test]
+    fn screenshot_snapshot_ids_are_validated_against_the_stored_snapshot() {
+        let (registry, _) = ready_registry(true);
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), target("Continue"))]),
+            )
+            .unwrap();
+
+        registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snapshot-1", 0)
+            .expect("the live snapshot id validates");
+        assert!(registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snapshot-forged", 0)
+            .is_err());
+        assert!(registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snapshot-1", 1)
+            .is_err());
+        assert!(registry
+            .validate_snapshot_id("browser-1", "other-workspace", "snapshot-1", 0)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn observation_fence_and_halt_watch_fail_closed_on_stop() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+
+        let fence = registry.observation_fence(capability, "browser-1").unwrap();
+        assert_eq!(fence.instance_id, instance);
+        assert_eq!(fence.document_epoch, 0);
+
+        let mut halt = registry.subscribe_halt("browser-1", "workspace-1").unwrap();
+        assert!(!*halt.borrow_and_update());
+
+        registry
+            .stop_agent_control("browser-1", "workspace-1")
+            .await
+            .unwrap();
+        assert!(*halt.borrow_and_update());
+        assert!(registry.observation_fence(capability, "browser-1").is_err());
     }
 }

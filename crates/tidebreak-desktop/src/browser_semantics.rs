@@ -23,8 +23,8 @@ use uuid::Uuid;
 
 use crate::{
     browser_control::{
-        BrowserDispatchEffect, BrowserLoadState, BrowserRegistry, BrowserTargetError,
-        BrowserTargetFingerprint, BrowserTargetRecord,
+        BrowserDispatchEffect, BrowserLoadState, BrowserRegistry, BrowserSnapshot,
+        BrowserTargetError, BrowserTargetFingerprint, BrowserTargetRecord,
     },
     code_browser::browser_label,
 };
@@ -567,7 +567,8 @@ pub(crate) async fn browser_wait(
             BrowserDispatchEffect::Observe,
             None,
             move || async move {
-                poll_wait_condition(app, dispatch_registry, workspace_id, arguments).await
+                poll_wait_condition(app, dispatch_registry, capability_id, workspace_id, arguments)
+                    .await
             },
         )
         .await
@@ -576,10 +577,11 @@ pub(crate) async fn browser_wait(
 async fn poll_wait_condition(
     app: AppHandle,
     registry: BrowserRegistry,
+    capability_id: Uuid,
     workspace_id: String,
     arguments: tidebreak_core::BrowserWaitArgs,
 ) -> Result<tidebreak_core::BrowserWaitResult, String> {
-    use tidebreak_core::{BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus};
+    use tidebreak_core::{BrowserWaitCondition, BrowserWaitStatus};
 
     let label = browser_label(&arguments.browser_id)?;
     let webview = app
@@ -587,8 +589,13 @@ async fn poll_wait_condition(
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
     let timeout_ms = arguments.bounded_timeout_ms();
-    let poll_ms = std::cmp::max(80u64, std::cmp::min(timeout_ms / 20, 500u64));
+    let poll_ms = (timeout_ms / 20).clamp(80, 500);
     let start = std::time::Instant::now();
+
+    // The fence pins the controlled instance this wait started against; the
+    // halt receiver lets Stop abort an in-flight probe or sleep immediately.
+    let start_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+    let mut halt = registry.subscribe_halt(&arguments.browser_id, &workspace_id)?;
 
     // Capture the starting URL for UrlChanged condition
     let start_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
@@ -597,63 +604,136 @@ async fn poll_wait_condition(
     loop {
         let snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
         let Some(document_epoch) = snapshot.document_epoch else {
-            return Ok(BrowserWaitResult {
-                browser_id: arguments.browser_id.clone(),
-                status: BrowserWaitStatus::TimedOut,
-                message: "browser document epoch is unavailable".to_owned(),
-                document_epoch: 0,
-                url: snapshot.url,
-                title: snapshot.title,
-            });
+            return Ok(wait_result(
+                &arguments.browser_id,
+                &snapshot,
+                BrowserWaitStatus::TimedOut,
+                "browser document epoch is unavailable".to_owned(),
+            ));
         };
 
-        if snapshot.agent_access.as_ref().is_some_and(|a| a.halted) {
-            return Ok(BrowserWaitResult {
-                browser_id: arguments.browser_id.clone(),
-                status: BrowserWaitStatus::Stopped,
-                message: "Browser control was stopped by the user.".to_owned(),
-                document_epoch,
-                url: snapshot.url,
-                title: snapshot.title,
-            });
+        if *halt.borrow_and_update()
+            || snapshot.agent_access.as_ref().is_some_and(|access| access.halted)
+        {
+            return Ok(wait_result(
+                &arguments.browser_id,
+                &snapshot,
+                BrowserWaitStatus::Stopped,
+                "Browser control was stopped by the user.".to_owned(),
+            ));
         }
 
-        let satisfied = match &arguments.condition {
-            BrowserWaitCondition::LoadState { state } => snapshot.load_state == Some(*state),
-            BrowserWaitCondition::UrlChanged => snapshot.url != start_url,
-            BrowserWaitCondition::TextPresent { text } => {
-                page_contains_text(&webview, text).await.unwrap_or(false)
+        // Race the condition probe against the halt latch so Stop aborts an
+        // in-flight text probe instead of letting it settle.
+        let satisfied = tokio::select! {
+            changed = halt.changed() => {
+                if changed.is_err() {
+                    return Err("browser session was replaced while waiting".to_owned());
+                }
+                continue;
             }
-            BrowserWaitCondition::TextAbsent { text } => {
-                !page_contains_text(&webview, text).await.unwrap_or(true)
-            }
+            satisfied = evaluate_wait_condition(
+                &webview,
+                &arguments.condition,
+                &snapshot,
+                start_url.as_deref(),
+            ) => satisfied,
         };
 
         if satisfied {
+            // Completion-time fencing: report Resolved only while the
+            // capability, grant, controller, visibility, and instance that
+            // authorized this wait are all still live.
             let final_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
-            return Ok(BrowserWaitResult {
-                browser_id: arguments.browser_id.clone(),
-                status: BrowserWaitStatus::Resolved,
-                message: "Wait condition satisfied.".to_owned(),
-                document_epoch: final_snapshot.document_epoch.unwrap_or(0),
-                url: final_snapshot.url,
-                title: final_snapshot.title,
-            });
+            if *halt.borrow_and_update()
+                || final_snapshot.agent_access.as_ref().is_some_and(|access| access.halted)
+            {
+                return Ok(wait_result(
+                    &arguments.browser_id,
+                    &final_snapshot,
+                    BrowserWaitStatus::Stopped,
+                    "Browser control was stopped by the user.".to_owned(),
+                ));
+            }
+            let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+            if fence.instance_id != start_fence.instance_id {
+                return Err("browser session was replaced while waiting".to_owned());
+            }
+            // UrlChanged resolves across documents by design. Every other
+            // condition was probed against `document_epoch`; if the document
+            // changed while the probe was in flight, discard the stale
+            // result and re-evaluate against the new document.
+            if fence.document_epoch == document_epoch
+                || matches!(arguments.condition, BrowserWaitCondition::UrlChanged)
+            {
+                return Ok(wait_result(
+                    &arguments.browser_id,
+                    &final_snapshot,
+                    BrowserWaitStatus::Resolved,
+                    "Wait condition satisfied.".to_owned(),
+                ));
+            }
+            continue;
         }
 
-        if start.elapsed().as_millis() as u64 >= timeout_ms {
+        let elapsed = start.elapsed().as_millis() as u64;
+        if elapsed >= timeout_ms {
             let final_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
-            return Ok(BrowserWaitResult {
-                browser_id: arguments.browser_id.clone(),
-                status: BrowserWaitStatus::TimedOut,
-                message: format!("Wait timed out after {timeout_ms} ms."),
-                document_epoch: final_snapshot.document_epoch.unwrap_or(0),
-                url: final_snapshot.url,
-                title: final_snapshot.title,
-            });
+            return Ok(wait_result(
+                &arguments.browser_id,
+                &final_snapshot,
+                BrowserWaitStatus::TimedOut,
+                format!("Wait timed out after {timeout_ms} ms."),
+            ));
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+        // Bound the sleep to the remaining deadline, and let Stop interrupt
+        // it instead of waiting out the full poll interval.
+        let sleep_ms = poll_ms.min(timeout_ms - elapsed);
+        tokio::select! {
+            changed = halt.changed() => {
+                if changed.is_err() {
+                    return Err("browser session was replaced while waiting".to_owned());
+                }
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {}
+        }
+    }
+}
+
+async fn evaluate_wait_condition(
+    webview: &Webview,
+    condition: &tidebreak_core::BrowserWaitCondition,
+    snapshot: &BrowserSnapshot,
+    start_url: Option<&str>,
+) -> bool {
+    use tidebreak_core::BrowserWaitCondition;
+
+    match condition {
+        BrowserWaitCondition::LoadState { state } => snapshot.load_state == Some(*state),
+        BrowserWaitCondition::UrlChanged => snapshot.url.as_deref() != start_url,
+        BrowserWaitCondition::TextPresent { text } => {
+            page_contains_text(webview, text).await.unwrap_or(false)
+        }
+        BrowserWaitCondition::TextAbsent { text } => {
+            !page_contains_text(webview, text).await.unwrap_or(true)
+        }
+    }
+}
+
+fn wait_result(
+    browser_id: &str,
+    snapshot: &BrowserSnapshot,
+    status: tidebreak_core::BrowserWaitStatus,
+    message: String,
+) -> tidebreak_core::BrowserWaitResult {
+    tidebreak_core::BrowserWaitResult {
+        browser_id: browser_id.to_owned(),
+        status,
+        message,
+        document_epoch: snapshot.document_epoch.unwrap_or(0),
+        url: snapshot.url.clone(),
+        title: snapshot.title.clone(),
     }
 }
 
@@ -706,7 +786,8 @@ pub(crate) async fn browser_screenshot(
             BrowserDispatchEffect::Observe,
             None,
             move || async move {
-                capture_screenshot(app, dispatch_registry, workspace_id, arguments).await
+                capture_screenshot(app, dispatch_registry, capability_id, workspace_id, arguments)
+                    .await
             },
         )
         .await
@@ -715,17 +796,26 @@ pub(crate) async fn browser_screenshot(
 async fn capture_screenshot(
     app: AppHandle,
     registry: BrowserRegistry,
+    capability_id: Uuid,
     workspace_id: String,
     arguments: tidebreak_core::BrowserScreenshotArgs,
 ) -> Result<tidebreak_core::BrowserScreenshotResult, String> {
     use tidebreak_core::BrowserScreenshotResult;
 
     let label = browser_label(&arguments.browser_id)?;
-    let host_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
-    let document_epoch = host_snapshot
-        .document_epoch
-        .ok_or_else(|| "browser document epoch is unavailable".to_owned())?;
 
+    // The screenshot is bound to the live stored semantic snapshot; the
+    // snapshot id echoed back to the model is never trusted from the
+    // request alone.
+    registry.validate_snapshot_id(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+    )?;
+
+    let start_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+    let document_epoch = start_fence.document_epoch;
     if document_epoch != arguments.document_epoch {
         return Err("browser document changed since the snapshot was taken".to_owned());
     }
@@ -734,7 +824,24 @@ async fn capture_screenshot(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    let image_base64 = capture_browser_image(&webview).await?;
+    let image_base64 =
+        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
+
+    // Completion-time fencing: discard the image unless the capability,
+    // grant, controller, visibility, instance, epoch, and stored snapshot
+    // are all still live after the async capture.
+    let end_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+    if end_fence.instance_id != start_fence.instance_id
+        || end_fence.document_epoch != document_epoch
+    {
+        return Err("browser document changed while screenshot was being captured".to_owned());
+    }
+    registry.validate_snapshot_id(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        document_epoch,
+    )?;
     registry
         .record_screenshot_epoch(&arguments.browser_id, &workspace_id, document_epoch)
         .map_err(|_| "browser document changed while screenshot was being captured".to_owned())?;
@@ -749,44 +856,66 @@ async fn capture_screenshot(
 }
 
 #[cfg(target_os = "macos")]
-async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
+async fn capture_browser_image(
+    webview: &Webview,
+    max_width: Option<u64>,
+    max_height: Option<u64>,
+) -> Result<String, String> {
     use std::ffi::c_void;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use block2::RcBlock;
-    use objc2::runtime::{AnyObject, Sel};
-    use objc2_foundation::{NSError, NSString};
+    use objc2::encode::{Encode, Encoding};
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSError;
     use objc2_web_kit::WKWebView;
+    use tidebreak_core::browser::{
+        MAX_BROWSER_SCREENSHOT_DIMENSION, MAX_BROWSER_SCREENSHOT_PNG_BYTES,
+    };
     use tokio::{sync::oneshot, time::timeout};
-
-    extern "C" {
-        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> *mut c_void;
-        fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
-    }
 
     const SCREENSHOT_TIMEOUT_SECONDS: u64 = 30;
 
-    unsafe fn get_class(name: &[u8]) -> *mut c_void {
-        objc_getClass(name.as_ptr().cast())
+    /// Core Graphics geometry mirrored with the exact Objective-C encodings
+    /// so `msg_send!` can pass and return `NSRect` by value on every macOS
+    /// architecture. The layouts match `objc2-core-foundation`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
     }
 
-    unsafe fn sel(name: &str) -> Sel {
-        Sel::register(name).unwrap_or_else(|_| std::process::abort())
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGSize {
+        width: f64,
+        height: f64,
     }
 
-    unsafe fn msg0(receiver: *mut c_void, name: &str) -> *mut c_void {
-        objc_msgSend(receiver, sel(name).as_ptr().cast())
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
     }
 
-    /// Bytes pointer from an NSData object (message sent to the actual
-    /// object pointer, not a Rust wrapper).
-    unsafe fn ns_data_bytes(data: *mut c_void) -> *const u8 {
-        objc_msgSend(data, sel("bytes").as_ptr().cast()) as *const u8
+    unsafe impl Encode for CGPoint {
+        const ENCODING: Encoding =
+            Encoding::Struct("CGPoint", &[Encoding::Double, Encoding::Double]);
     }
 
-    unsafe fn ns_data_len(data: *mut c_void) -> usize {
-        objc_msgSend(data, sel("length").as_ptr().cast()) as usize
+    unsafe impl Encode for CGSize {
+        const ENCODING: Encoding =
+            Encoding::Struct("CGSize", &[Encoding::Double, Encoding::Double]);
+    }
+
+    unsafe impl Encode for CGRect {
+        const ENCODING: Encoding =
+            Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
     }
 
     // Convert an NSImage snapshot to PNG base64 via NSBitmapImageRep.
@@ -803,74 +932,121 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
         }
 
         // [snapshot representations] → NSArray<NSImageRep>
-        let reps = msg0(snapshot as *mut c_void, "representations");
-        if reps.is_null() {
+        let representations: *mut AnyObject = msg_send![snapshot, representations];
+        if representations.is_null() {
             return Err("screenshot has no image representations".to_owned());
         }
-        if msg0(reps, "count") as usize == 0 {
+        let representation_count: usize = msg_send![representations, count];
+        if representation_count == 0 {
             return Err("screenshot image has zero representations".to_owned());
         }
 
-        // NSPNGFileType = 4
+        let bitmap_class = AnyClass::get(c"NSBitmapImageRep")
+            .ok_or_else(|| "AppKit NSBitmapImageRep is unavailable".to_owned())?;
+        let dictionary_class = AnyClass::get(c"NSDictionary")
+            .ok_or_else(|| "Foundation NSDictionary is unavailable".to_owned())?;
+
+        // AppKit declares the PNG properties parameter nonnull, so pass an
+        // empty dictionary rather than nil.
+        let empty_properties: *mut AnyObject = msg_send![dictionary_class, dictionary];
+        if empty_properties.is_null() {
+            return Err("screenshot PNG properties were unavailable".to_owned());
+        }
+
+        // NSBitmapImageFileTypePNG = 4
         let png_type: usize = 4;
-
-        let bmp_cls = get_class(b"NSBitmapImageRep ");
-
-        // [NSBitmapImageRep representationOfImageRepsInArray:reps
-        //                                      usingType:png_type
-        //                                    properties:nil]
-        let png_data = objc_msgSend(
-            bmp_cls,
-            sel("representationOfImageRepsInArray:usingType:properties:")
-                .as_ptr()
-                .cast(),
-            reps,
-            png_type,
-            std::ptr::null_mut::<c_void>(),
-        );
+        let png_data: *mut AnyObject = msg_send![
+            bitmap_class,
+            representationOfImageRepsInArray: representations,
+            usingType: png_type,
+            properties: empty_properties
+        ];
         if png_data.is_null() {
             return Err("screenshot PNG conversion failed".to_owned());
         }
 
-        let bytes_ptr = ns_data_bytes(png_data);
-        let byte_len = ns_data_len(png_data);
+        let bytes_ptr: *const c_void = msg_send![png_data, bytes];
+        let byte_len: usize = msg_send![png_data, length];
         if bytes_ptr.is_null() || byte_len == 0 {
             return Err("screenshot PNG data is empty".to_owned());
         }
-        let buf = std::slice::from_raw_parts(bytes_ptr, byte_len);
+        if byte_len > MAX_BROWSER_SCREENSHOT_PNG_BYTES {
+            return Err(format!(
+                "screenshot PNG of {byte_len} bytes exceeds the encoded-image ceiling"
+            ));
+        }
+        let buf = std::slice::from_raw_parts(bytes_ptr.cast::<u8>(), byte_len);
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         Ok(BASE64.encode(buf))
     }
 
-    unsafe fn take_snapshot_with_block(
+    /// Build a `WKSnapshotConfiguration` cropping the capture when the view
+    /// exceeds the requested or absolute maximum dimensions. Returns `None`
+    /// when the full visible viewport already fits.
+    unsafe fn snapshot_configuration(
         view: &WKWebView,
-        handler: &RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
-    ) {
-        let sel = sel("takeSnapshotWithConfiguration:completionHandler:");
-        let nil: *mut c_void = std::ptr::null_mut();
-        let raw_block: *mut c_void = RcBlock::as_ptr(handler).cast();
-        objc_msgSend(
-            (view as *const WKWebView).cast::<c_void>() as *mut c_void,
-            sel.as_ptr().cast(),
-            nil,
-            raw_block,
-        );
+        max_width: Option<u64>,
+        max_height: Option<u64>,
+    ) -> Result<Option<Retained<AnyObject>>, String> {
+        let bounds: CGRect = msg_send![view, bounds];
+        let ceiling = MAX_BROWSER_SCREENSHOT_DIMENSION as f64;
+        let mut width = bounds.size.width.min(ceiling);
+        let mut height = bounds.size.height.min(ceiling);
+        if let Some(limit) = max_width {
+            width = width.min(limit as f64);
+        }
+        // A `max_height` of zero means "use the viewport height".
+        if let Some(limit) = max_height.filter(|limit| *limit > 0) {
+            height = height.min(limit as f64);
+        }
+        if width >= bounds.size.width && height >= bounds.size.height {
+            return Ok(None);
+        }
+        let configuration_class = AnyClass::get(c"WKSnapshotConfiguration")
+            .ok_or_else(|| "WebKit WKSnapshotConfiguration is unavailable".to_owned())?;
+        let configuration: Option<Retained<AnyObject>> = msg_send![configuration_class, new];
+        let configuration =
+            configuration.ok_or_else(|| "screenshot configuration was unavailable".to_owned())?;
+        let rect = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize { width, height },
+        };
+        let _: () = msg_send![&*configuration, setRect: rect];
+        Ok(Some(configuration))
     }
 
     let (sender, receiver) = oneshot::channel();
-    let sender = Mutex::new(Some(sender));
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let block_sender = Arc::clone(&sender);
 
     webview
         .with_webview(move |platform| unsafe {
             let view: &WKWebView = &*platform.inner().cast();
+            let configuration = match snapshot_configuration(view, max_width, max_height) {
+                Ok(configuration) => configuration,
+                Err(error) => {
+                    if let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) {
+                        let _ = sender.send(Err(error));
+                    }
+                    return;
+                }
+            };
+            let configuration_ptr: *mut AnyObject = match &configuration {
+                Some(configuration) => Retained::as_ptr(configuration).cast_mut(),
+                None => std::ptr::null_mut(),
+            };
             let handler = RcBlock::new(move |snapshot: *mut AnyObject, error: *mut NSError| {
-                let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) else {
+                let Some(sender) = block_sender.lock().ok().and_then(|mut s| s.take()) else {
                     return;
                 };
                 let result = snapshot_to_png_base64(snapshot, error);
                 let _ = sender.send(result);
             });
-            take_snapshot_with_block(view, &handler);
+            let _: () = msg_send![
+                view,
+                takeSnapshotWithConfiguration: configuration_ptr,
+                completionHandler: &*handler
+            ];
         })
         .map_err(|error| format!("browser host: {error}"))?;
 
@@ -881,7 +1057,11 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn capture_browser_image(_webview: &Webview) -> Result<String, String> {
+async fn capture_browser_image(
+    _webview: &Webview,
+    _max_width: Option<u64>,
+    _max_height: Option<u64>,
+) -> Result<String, String> {
     Err("screenshot capture is not available on this platform yet".to_owned())
 }
 

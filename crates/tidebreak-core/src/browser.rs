@@ -61,6 +61,8 @@ pub const MAX_BROWSER_WAIT_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_BROWSER_ACTION_VALUE_CHARS: usize = 8_192;
 /// Maximum width or height for a screenshot in CSS pixels.
 pub const MAX_BROWSER_SCREENSHOT_DIMENSION: u64 = 4_096;
+/// Hard ceiling for encoded image bytes before base64 (8 MiB).
+pub const MAX_BROWSER_SCREENSHOT_PNG_BYTES: usize = 8 * 1024 * 1024;
 
 /// Whether a host browser is idle, loading, ready, or failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
