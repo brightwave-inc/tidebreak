@@ -1730,8 +1730,7 @@ mod tests {
             // Send a response claiming a tiny body but actually streaming a
             // huge one.
             let padding = "x".repeat(128 * 1024); // 128 KiB > 64 KiB navigate cap
-            let response =
-                "HTTP/1.1 200 OK\r\n\
+            let response = "HTTP/1.1 200 OK\r\n\
                  Content-Type: application/json\r\n\
                  Transfer-Encoding: chunked\r\n\
                  Connection: close\r\n\r\n";
