@@ -14,6 +14,12 @@
 //! itself, and the provisioned gateway policy (`gateway-policy.json`, see
 //! [`crate::managed_policy`]), whose loss would resolve the profile
 //! unmanaged and orphan the gateway session it authorized.
+//!
+//! The data directory is not the whole story, though. Code worktrees live
+//! outside it on purpose (Decision 53), so dropping the database strands every
+//! tree on disk with nothing pointing at it. Those are user work and the reset
+//! does not touch them; it records them first, in a third sidecar written by
+//! [`crate::code::worktree_orphans`].
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -63,7 +69,7 @@ where
     C: FnOnce(String) -> F,
     F: Future<Output = Result<DbStore>>,
 {
-    let needs_marker = prepare(&config.data_dir)?;
+    let needs_marker = prepare(&config.data_dir).await?;
     let store = connector(config.database_url()?).await?;
     if needs_marker {
         write_current_marker(&config.data_dir)?;
@@ -73,14 +79,14 @@ where
 
 /// Prepare the SQLite files and return whether a current marker must be
 /// recorded after migrations succeed.
-fn prepare(data_dir: &Path) -> Result<bool> {
+async fn prepare(data_dir: &Path) -> Result<bool> {
     let product_major = tidebreak_core::VERSION
         .split_once('.')
         .map_or(tidebreak_core::VERSION, |(major, _)| major);
-    prepare_for_product_major(data_dir, product_major)
+    prepare_for_product_major(data_dir, product_major).await
 }
 
-fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<bool> {
+async fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<bool> {
     if product_major != "0" {
         return Err(AgentError::config(format!(
             "pre-v1 local SQLite schema lifecycle is disabled for product major {product_major}"
@@ -101,21 +107,21 @@ fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<boo
             if saved.lifecycle == PRE_V1_LIFECYCLE && saved.epoch < DESKTOP_SCHEMA_EPOCH =>
         {
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
-            reset_pre_v1_state(&database)?;
+            reset_pre_v1_state(&database).await?;
             Ok(true)
         }
         None if database.exists() => {
             // Databases predating this marker are from the disposable pre-v1
             // development line. The v1 lifecycle will always retain a marker.
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
-            reset_pre_v1_state(&database)?;
+            reset_pre_v1_state(&database).await?;
             Ok(true)
         }
         None => {
             // Clean up journals left after an interrupted reset even when the
             // main database file is already gone.
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
-            reset_pre_v1_state(&database)?;
+            reset_pre_v1_state(&database).await?;
             Ok(true)
         }
         Some(saved) => Err(AgentError::config(format!(
@@ -173,16 +179,22 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
         })
 }
 
-fn reset_pre_v1_state(database: &Path) -> Result<()> {
+async fn reset_pre_v1_state(database: &Path) -> Result<()> {
+    let data_dir = database
+        .parent()
+        .ok_or_else(|| AgentError::config("local SQLite database path has no parent directory"))?;
+    // Code worktrees are the one piece of durable state a reset can strand
+    // without touching: they live outside the data directory, and the rows
+    // naming them are inside the database about to be deleted. Read them out
+    // while the database still exists, so the trees are written down rather
+    // than silently orphaned.
+    crate::code::worktree_orphans::record_orphaned_worktrees(database, data_dir).await;
     remove_sqlite_files(database)?;
     // Host-broker authority is durable beside SQLite, not inside it. An epoch
     // wipe throws away every conversation id the product will ever know; grants
     // and attachments keyed to those ids would otherwise keep authorizing work
     // against subjects that can never come back. Clear the broker's durable
     // files with the database during disposable pre-v1 resets.
-    let data_dir = database
-        .parent()
-        .ok_or_else(|| AgentError::config("local SQLite database path has no parent directory"))?;
     remove_host_broker_durable_state(data_dir)
 }
 
@@ -317,13 +329,17 @@ fn write_current_marker_inner(data_dir: &Path, failure: MarkerWriteFailure) -> R
     })
 }
 
+/// Atomically move `temporary` over `destination`.
+///
+/// Shared with [`crate::code::worktree_orphans`], which writes its own sidecar
+/// into this directory with the same publish-or-leave-the-old-one guarantee.
 #[cfg(unix)]
-fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(temporary, destination)
 }
 
 #[cfg(windows)]
-fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -354,7 +370,7 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace_file(_temporary: &Path, _destination: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(_temporary: &Path, _destination: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         ErrorKind::Unsupported,
         "atomic schema marker replacement is unsupported on this platform",
@@ -374,9 +390,13 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use tidebreak_core::{Chat, ChatId, Store};
+    use tidebreak_core::{
+        db, Chat, ChatId, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId, RepoId, Store,
+        WorkspaceId,
+    };
 
     use super::*;
+    use crate::code;
 
     fn chat() -> Chat {
         Chat {
@@ -458,6 +478,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn epoch_reset_records_the_code_worktrees_it_orphans_and_leaves_them_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::desktop(dir.path());
+        let first = connect(&config).await.unwrap();
+        // A worktree lives outside the data directory on purpose, so it is
+        // still there after the reset with nothing left pointing at it.
+        let worktree = dir.path().parent().unwrap().join("orphan-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("uncommitted.rs"), b"user work").unwrap();
+        // A workspace whose tree is already gone is not an orphan.
+        let vanished = dir.path().parent().unwrap().join("already-gone");
+        seed_workspace(&first, "orphan", &worktree).await;
+        seed_workspace(&first, "vanished", &vanished).await;
+        first.close().await.unwrap();
+        write_older_epoch_marker(dir.path());
+
+        let reset = connect(&config).await.unwrap();
+
+        assert!(reset.list_chats().await.unwrap().is_empty());
+        let recorded: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                dir.path()
+                    .join(code::worktree_orphans::ORPHANED_WORKTREES_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let worktrees = recorded["worktrees"].as_array().unwrap();
+        assert_eq!(worktrees.len(), 1, "recorded: {recorded:#}");
+        assert_eq!(
+            worktrees[0]["worktree_path"],
+            worktree.display().to_string()
+        );
+        assert_eq!(worktrees[0]["branch_name"], "tidebreak/orphan");
+        assert_eq!(worktrees[0]["repo_root_path"], "/nonexistent-repo/orphan");
+        assert_eq!(worktrees[0]["title"], "orphan");
+        assert_eq!(
+            std::fs::read(worktree.join("uncommitted.rs")).unwrap(),
+            b"user work",
+            "the reset must not touch a tree it only recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_epoch_reset_keeps_what_the_first_one_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::desktop(dir.path());
+        let sidecar = dir
+            .path()
+            .join(code::worktree_orphans::ORPHANED_WORKTREES_FILE);
+        let first_tree = dir.path().parent().unwrap().join("first-orphan");
+        let second_tree = dir.path().parent().unwrap().join("second-orphan");
+        std::fs::create_dir_all(&first_tree).unwrap();
+        std::fs::create_dir_all(&second_tree).unwrap();
+
+        for (title, worktree) in [("first", &first_tree), ("second", &second_tree)] {
+            let store = connect(&config).await.unwrap();
+            seed_workspace(&store, title, worktree).await;
+            store.close().await.unwrap();
+            write_older_epoch_marker(dir.path());
+            connect(&config).await.unwrap().close().await.unwrap();
+        }
+
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+        let paths: Vec<&str> = recorded["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|worktree| worktree["worktree_path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                first_tree.display().to_string().as_str(),
+                second_tree.display().to_string().as_str()
+            ],
+            "a later reset must add to the record, not replace it"
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_reset_with_no_code_worktrees_writes_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::desktop(dir.path());
+        connect(&config).await.unwrap().close().await.unwrap();
+        write_older_epoch_marker(dir.path());
+
+        connect(&config).await.unwrap();
+
+        assert!(!dir
+            .path()
+            .join(code::worktree_orphans::ORPHANED_WORKTREES_FILE)
+            .exists());
+    }
+
+    async fn seed_workspace(store: &DbStore, title: &str, worktree_path: &Path) {
+        let repo_id = RepoId::new();
+        db::code::insert_repo(
+            store,
+            &CodeRepo {
+                id: repo_id,
+                owner: OwnerId::local(),
+                root_path: format!("/nonexistent-repo/{title}"),
+                display_name: "reset-test".into(),
+                default_base_ref: "main".into(),
+                branch_prefix: "tidebreak/".into(),
+                setup_script: None,
+                archive_script: None,
+                quick_actions: vec![],
+                created_at: Utc::now(),
+                removed_at: None,
+                cloned_from: None,
+            },
+        )
+        .await
+        .unwrap();
+        db::code::insert_workspace(
+            store,
+            &CodeWorkspace {
+                id: WorkspaceId::new(),
+                owner: OwnerId::local(),
+                repo_id,
+                title: title.to_owned(),
+                worktree_path: worktree_path.display().to_string(),
+                branch_name: format!("tidebreak/{title}"),
+                base_ref: "main".into(),
+                status: CodeWorkspaceStatus::Active,
+                pr: None,
+                created_at: Utc::now(),
+                archived_at: None,
+                released_at: None,
+                released_tip: None,
+                bundle_bytes: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn write_older_epoch_marker(data_dir: &Path) {
+        std::fs::write(
+            data_dir.join(MARKER_FILE),
+            serde_json::to_vec(&SchemaMarker {
+                lifecycle: PRE_V1_LIFECYCLE.to_owned(),
+                epoch: DESKTOP_SCHEMA_EPOCH - 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn current_schema_epoch_preserves_database_and_removes_retired_vectors() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());
@@ -487,15 +660,7 @@ mod tests {
         // An explicit close, not a drop: the epoch reset below deletes the
         // SQLite files, which Windows refuses while a handle is open.
         first.close().await.unwrap();
-        std::fs::write(
-            dir.path().join(MARKER_FILE),
-            serde_json::to_vec(&SchemaMarker {
-                lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-                epoch: DESKTOP_SCHEMA_EPOCH - 1,
-            })
-            .unwrap(),
-        )
-        .unwrap();
+        write_older_epoch_marker(dir.path());
 
         let reset = connect(&config).await.unwrap();
 
@@ -637,8 +802,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn released_package_guard_prevents_all_reset_deletions() {
+    #[tokio::test]
+    async fn released_package_guard_prevents_all_reset_deletions() {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join(DATABASE_FILE);
         let vector = dir.path().join(VECTOR_DIRECTORY).join("keep-me");
@@ -649,7 +814,9 @@ mod tests {
         std::fs::create_dir_all(vector.parent().unwrap()).unwrap();
         std::fs::write(&vector, b"vector").unwrap();
 
-        let error = prepare_for_product_major(dir.path(), "1").unwrap_err();
+        let error = prepare_for_product_major(dir.path(), "1")
+            .await
+            .unwrap_err();
 
         assert!(error.to_string().contains("disabled for product major 1"));
         assert_eq!(std::fs::read(database).unwrap(), b"database");
@@ -662,8 +829,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unsupported_lifecycle_performs_no_deletions() {
+    #[tokio::test]
+    async fn unsupported_lifecycle_performs_no_deletions() {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join(DATABASE_FILE);
         let vector = dir.path().join(VECTOR_DIRECTORY).join("keep-me");
@@ -680,7 +847,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(prepare(dir.path()).is_err());
+        assert!(prepare(dir.path()).await.is_err());
 
         assert_eq!(std::fs::read(database).unwrap(), b"database");
         assert_eq!(std::fs::read(vector).unwrap(), b"vector");
