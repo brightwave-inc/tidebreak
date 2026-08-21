@@ -1573,6 +1573,7 @@ impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecutio
 async fn agent_deps_for_test(
     dir: &std::path::Path,
     computer_use: bool,
+    foreground_browser: bool,
 ) -> (ToolRegistry, AgentConfig) {
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -1607,6 +1608,7 @@ async fn agent_deps_for_test(
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
         computer_use,
+        foreground_browser,
     )
 }
 
@@ -1616,7 +1618,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Disabled (self-host, non-macOS, or any non-desktop profile): none of
     // the contracts exist, so no surface can advertise or checkpoint them.
-    let (tools, _) = agent_deps_for_test(dir.path(), false).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert!(
             tools.registered_class(name).is_none(),
@@ -1634,7 +1636,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Enabled: every contract registers as a validated client tool the server
     // parks for the desktop to claim; the server itself never executes one.
-    let (tools, _) = agent_deps_for_test(dir.path(), true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), true, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert_eq!(
             tools.execution(name),
@@ -1735,7 +1737,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 #[tokio::test]
 async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut tools, config) = agent_deps_for_test(dir.path(), false).await;
+    let (mut tools, config) = agent_deps_for_test(dir.path(), false, false).await;
     assert!(
         config.system_prompt.is_none(),
         "prompt must not be frozen before boot-time tools are mounted"
@@ -2049,5 +2051,223 @@ async fn promoting_a_document_shares_it_with_the_project_and_keeps_the_original(
     assert_eq!(
         promote(project.id, loose.id).await.status(),
         StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn foreground_browser_tools_absent_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, false).await;
+    for name in tidebreak_core::BROWSER_TOOLS {
+        assert!(
+            tools.registered_class(name).is_none(),
+            "{name} must not register when foreground_browser is false"
+        );
+        assert!(
+            tools.execution(name).is_none(),
+            "{name} must not execute when foreground_browser is false"
+        );
+    }
+    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &{
+        AgentConfig::default()
+    });
+    let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
+    assert!(
+        !prompt.contains("browser_list"),
+        "no browser tools in system prompt without foreground_browser: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_browser_tools_register_exactly_five() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+
+    // Exactly five observation tools register as client-executed.
+    let observation_tools = [
+        tidebreak_core::BROWSER_LIST_TOOL,
+        tidebreak_core::BROWSER_NAVIGATE_TOOL,
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        tidebreak_core::BROWSER_WAIT_TOOL,
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+    ];
+    for &name in &observation_tools {
+        assert_eq!(
+            tools.execution(name),
+            Some(tidebreak_core::ToolCallExecution::Client),
+            "{name} must be client-executed"
+        );
+        assert!(
+            tools.get(name).is_none(),
+            "{name} has no server-side executor"
+        );
+    }
+
+    // The act tool must NOT be registered.
+    assert!(
+        tools.registered_class(tidebreak_core::BROWSER_ACT_TOOL).is_none(),
+        "browser_act must not register when foreground_browser is true — it requires separate semantic_actions capability"
+    );
+    assert!(
+        tools.execution(tidebreak_core::BROWSER_ACT_TOOL).is_none(),
+        "browser_act must not execute even if foreground_browser is true"
+    );
+}
+
+#[tokio::test]
+async fn foreground_browser_tools_have_correct_approval_classes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+
+    // Observation reads are ReadOnly.
+    for &name in &[
+        tidebreak_core::BROWSER_LIST_TOOL,
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        tidebreak_core::BROWSER_WAIT_TOOL,
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+    ] {
+        assert_eq!(
+            tools.registered_class(name),
+            Some(ApprovalClass::ReadOnly),
+            "{name} never mutates and must be ReadOnly"
+        );
+    }
+
+    // Navigate is Sensitive — it can cross origins.
+    assert_eq!(
+        tools.registered_class(tidebreak_core::BROWSER_NAVIGATE_TOOL),
+        Some(ApprovalClass::Sensitive),
+        "browser_navigate can cross origins and must be Sensitive"
+    );
+}
+
+#[tokio::test]
+async fn foreground_browser_tools_reject_malformed_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+
+    // list has no required fields — an empty object must pass.
+    assert!(
+        tools.client_arguments_are_valid(tidebreak_core::BROWSER_LIST_TOOL, &serde_json::json!({}))
+    );
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_LIST_TOOL,
+        &serde_json::json!({ "unknown": true })
+    ));
+
+    // navigate must have a valid browser_id and url.
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_NAVIGATE_TOOL,
+        &serde_json::json!({})
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_NAVIGATE_TOOL,
+        &serde_json::json!({ "browser_id": "bad/id", "url": "https://example.com" })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_NAVIGATE_TOOL,
+        &serde_json::json!({ "browser_id": "browser-1", "url": "file:///etc/passwd" })
+    ));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_NAVIGATE_TOOL,
+        &serde_json::json!({ "browser_id": "browser-1", "url": "https://example.com" })
+    ));
+
+    // snapshot must have a valid browser_id.
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        &serde_json::json!({})
+    ));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        &serde_json::json!({ "browser_id": "browser-1" })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        &serde_json::json!({ "browser_id": "browser-1", "max_nodes": 0 })
+    ));
+
+    // wait must have required fields and bounded timeout.
+    assert!(!tools
+        .client_arguments_are_valid(tidebreak_core::BROWSER_WAIT_TOOL, &serde_json::json!({})));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_WAIT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "condition": { "kind": "load_state", "state": "ready" }
+        })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_WAIT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "condition": { "kind": "text_present", "text": "Submit" },
+            "timeout_ms": 50
+        })
+    ));
+
+    // screenshot must have valid dimensions.
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+        &serde_json::json!({})
+    ));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0
+        })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "max_width": 0
+        })
+    ));
+}
+
+#[tokio::test]
+async fn foreground_browser_plan_mode_includes_reads_excludes_navigate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+
+    // Plan mode surfaces only ReadOnly tools (specs_for_surface(_, true)).
+    let plan_specs = tools
+        .specs_for_surface(true, true)
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::HashSet<_>>();
+
+    // Observation reads are in plan mode.
+    for &name in &[
+        tidebreak_core::BROWSER_LIST_TOOL,
+        tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+        tidebreak_core::BROWSER_WAIT_TOOL,
+        tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+    ] {
+        assert!(
+            plan_specs.contains(name),
+            "plan mode must include read {name}"
+        );
+    }
+
+    // Navigate, as Sensitive, is excluded from plan mode.
+    assert!(
+        !plan_specs.contains(tidebreak_core::BROWSER_NAVIGATE_TOOL),
+        "plan mode must exclude browser_navigate (Sensitive)"
+    );
+
+    // The act tool was never registered, so it cannot appear.
+    assert!(
+        !plan_specs.contains(tidebreak_core::BROWSER_ACT_TOOL),
+        "plan mode must not contain browser_act"
     );
 }
