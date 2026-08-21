@@ -109,6 +109,7 @@ mod wire_types;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
@@ -147,6 +148,52 @@ use tidebreak_core::{
 /// [`BrowserRuntime`] behind an `Arc` and installs it with
 /// [`bind`] or one of its desktop variants.
 pub use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
+
+/// Bind-time pairing of the native browser runtime and the trusted bridge
+/// executable.
+///
+/// Both halves must be present for the server to mint browser channels. The
+/// desktop constructs this when it has a [`BrowserRuntime`] and has resolved
+/// the absolute path to the `tidebreak` CLI sidecar that sits beside the
+/// host broker. When either half is absent, no browser tools are advertised
+/// or injected — sessions work exactly as before the browser channel existed.
+///
+/// `bridge_command` must be an absolute path. The desktop sibling resolver
+/// owns existence, file-type, and executable checks; the server boundary
+/// validates absoluteness as defense in depth.
+#[derive(Clone)]
+pub struct BrowserChannelBinding {
+    /// The native browser adapter.
+    pub runtime: Arc<dyn BrowserRuntime>,
+    /// Absolute path to the trusted bridge executable.
+    pub bridge_command: PathBuf,
+}
+
+impl BrowserChannelBinding {
+    /// Construct a binding from both required halves.
+    ///
+    /// `bridge_command` must be absolute; the desktop sibling resolver must
+    /// have already verified existence and executability.
+    #[must_use]
+    pub fn new(runtime: Arc<dyn BrowserRuntime>, bridge_command: PathBuf) -> Self {
+        Self {
+            runtime,
+            bridge_command,
+        }
+    }
+
+    /// Return the native runtime.
+    #[must_use]
+    pub fn runtime(&self) -> &Arc<dyn BrowserRuntime> {
+        &self.runtime
+    }
+
+    /// Return the absolute bridge executable path.
+    #[must_use]
+    pub fn bridge_command(&self) -> &std::path::Path {
+        &self.bridge_command
+    }
+}
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
@@ -1248,7 +1295,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
-    bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
         config,
         client_executor_id,
         folder_grant_resolver,
@@ -1263,6 +1310,15 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
 
 /// Desktop binding with the native host bridges plus a browser runtime that
 /// must be available before code-session recovery starts.
+///
+/// This function is preserved for source compatibility. A caller that
+/// supplies only a runtime — without the bridge executable — gets no
+/// browser tools: the bridge command is required too. The runtime remains
+/// installed for the native route seam, but session creation leaves
+/// `SessionSpec::browser` unset until both halves are present.
+/// New callers should use
+/// [`bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding`]
+/// directly.
 #[allow(clippy::too_many_arguments)]
 pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
     config: Config,
@@ -1274,8 +1330,80 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        browser_runtime,
+        None,
+    )
+    .await
+}
+
+/// Desktop binding with the native host bridges plus a browser channel
+/// binding (runtime + bridge executable) that must be available before
+/// code-session recovery starts.
+///
+/// When `binding` is `None`, no browser tools are advertised or injected.
+/// When both halves are present (the binding always carries both, by
+/// construction), session creation mints a session-private capability
+/// file and injects the bridge executable path into engine config.
+#[allow(clippy::too_many_arguments)]
+pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    binding: Option<BrowserChannelBinding>,
+) -> Result<Server> {
+    let (browser_runtime, browser_bridge_command) = match binding {
+        Some(binding) => (Some(binding.runtime), Some(binding.bridge_command)),
+        None => (None, None),
+    };
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        browser_runtime,
+        browser_bridge_command,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
+    browser_bridge_command: Option<PathBuf>,
+) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
+    }
+    if let Some(bridge) = browser_bridge_command
+        .as_ref()
+        .filter(|bridge| !bridge.is_absolute())
+    {
+        return Err(AgentError::config(format!(
+            "browser bridge command must be an absolute path: {}",
+            bridge.display()
+        )));
     }
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
     bind_inner(
@@ -1288,6 +1416,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         local_voice,
         host_folders,
         browser_runtime,
+        browser_bridge_command,
     )
     .await
 }
@@ -1342,6 +1471,7 @@ async fn bind_inner(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
+    browser_bridge_command: Option<PathBuf>,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1566,6 +1696,7 @@ async fn bind_inner(
         state.config.code_worktree_root_default.clone(),
         code_host_tool_broker,
         browser_runtime,
+        browser_bridge_command,
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

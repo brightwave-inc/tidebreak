@@ -137,6 +137,13 @@ pub(crate) struct CodeRuntime {
     /// The desktop browser adapter, installed before recovery starts. Absent
     /// in headless deployments and tests that do not register one.
     browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+    /// Absolute path to the trusted bridge executable (the `tidebreak` CLI
+    /// sidecar). Absent in headless deployments and tests that do not
+    /// register one. When both `browser_runtime` and this are `Some`,
+    /// session creation mints a [`SessionSpec`] with `browser: Some`; when
+    /// either is `None`, `browser` stays `None` and no browser tools are
+    /// advertised or injected.
+    browser_bridge_command: Option<PathBuf>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -171,6 +178,7 @@ impl CodeRuntime {
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+        browser_bridge_command: Option<PathBuf>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -190,6 +198,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
+            browser_bridge_command,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -260,7 +269,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
-        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None)
+        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None)
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -269,6 +278,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+        browser_bridge_command: Option<PathBuf>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -288,6 +298,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
+            browser_bridge_command,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -1809,15 +1820,30 @@ impl CodeRuntime {
             attached.subagents.clone(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
-        let browser_subject = BrowserSubject {
-            owner: session.owner.clone(),
-            workspace: session.workspace_id,
-            session: session.id,
+
+        // Mint a browser channel only when both halves are present: the
+        // native BrowserRuntime (the desktop adapter) and the trusted
+        // bridge executable (the CLI sidecar). If either is absent, browser
+        // stays None — no browser tools are advertised or injected, and the
+        // session works exactly as before the browser channel existed.
+        let browser = match (
+            self.browser_runtime.as_ref(),
+            self.browser_bridge_command.as_ref(),
+        ) {
+            (Some(_runtime), Some(bridge)) => {
+                let browser_subject = BrowserSubject {
+                    owner: session.owner.clone(),
+                    workspace: session.workspace_id,
+                    session: session.id,
+                };
+                Some(
+                    self.browser_tokens
+                        .issue(browser_subject, bridge)
+                        .map_err(ServerError::internal)?,
+                )
+            }
+            _ => None,
         };
-        let browser = self
-            .browser_tokens
-            .issue(browser_subject)
-            .map_err(ServerError::internal)?;
 
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
@@ -1830,7 +1856,7 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser: Some(browser),
+            browser,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
@@ -2409,6 +2435,7 @@ mod managed_node_wait_tests {
         let runtime = CodeRuntime::new(
             Arc::new(db),
             data_dir.path().to_path_buf(),
+            None,
             None,
             None,
             None,

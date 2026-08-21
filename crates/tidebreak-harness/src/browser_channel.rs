@@ -88,17 +88,23 @@ mod tests {
         );
     }
 
+    /// Fixture bridge command path used by every test spec construction.
+    fn bridge_fixture() -> PathBuf {
+        PathBuf::from("/usr/local/bin/tidebreak")
+    }
+
     #[test]
     fn spec_new_roundtrips() {
         let path = PathBuf::from("/tmp/browser-cap.json");
-        let spec = BrowserChannelSpec::new(path.clone());
+        let spec = BrowserChannelSpec::new(path.clone(), bridge_fixture());
         assert_eq!(spec.capability_file, path);
+        assert_eq!(spec.bridge_command, bridge_fixture());
     }
 
     #[test]
     fn apply_with_browser_injects_the_trusted_pair_last() {
         let trusted = PathBuf::from("/tmp/trusted-cap.json");
-        let browser = BrowserChannelSpec::new(trusted.clone());
+        let browser = BrowserChannelSpec::new(trusted.clone(), bridge_fixture());
 
         let env = final_env(Vec::new(), &[], Some(&browser));
         let (key, value) = env
@@ -182,7 +188,7 @@ mod tests {
         // applying the browser injection after plan.env: if a conflicting
         // value for the reserved key is present, the trusted path wins last.
         let trusted = PathBuf::from("/tmp/trusted-cap.json");
-        let browser = BrowserChannelSpec::new(trusted.clone());
+        let browser = BrowserChannelSpec::new(trusted.clone(), bridge_fixture());
         let plan_env = vec![(
             BROWSER_CAPFILE_ENV_KEY.to_owned(),
             "/tmp/plan-conflict-cap.json".to_owned(),

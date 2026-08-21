@@ -16,9 +16,9 @@ use tidebreak_core::{
     db, Attention, AttentionSource, AttentionState, BrowserContentTrust, BrowserControllerState,
     BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
     BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
+    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeRepo,
+    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
+    CodeWorkspaceStatus, DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -142,11 +142,13 @@ async fn browser_app(fake: Option<Arc<FakeBrowserRuntime>>) -> BrowserApp {
     let browser_runtime = fake
         .as_ref()
         .map(|runtime| -> Arc<dyn BrowserRuntime> { runtime.clone() });
+    let bridge = std::path::PathBuf::from("/usr/local/bin/tidebreak");
     let code = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().into(),
         AdapterRegistry::new(),
         browser_runtime,
+        Some(bridge),
     ));
     let mut state = AppState::new(
         Config::desktop(dir.path()),
@@ -179,10 +181,28 @@ async fn serve(router: Router) -> std::net::SocketAddr {
 }
 
 async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, CodeSessionId) {
+    let repo_id = RepoId::new();
+    db::code::insert_repo(
+        db,
+        &CodeRepo {
+            id: repo_id,
+            owner: OwnerId::local(),
+            root_path: "/nonexistent-repo".into(),
+            display_name: "browser-test".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: vec![],
+            created_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
     let ws = CodeWorkspace {
         id: WorkspaceId::new(),
         owner: OwnerId::local(),
-        repo_id: RepoId::new(),
+        repo_id,
         title: "browser".into(),
         worktree_path: "/nonexistent".into(),
         branch_name: "tidebreak/browser".into(),
@@ -217,13 +237,17 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
 }
 
 fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: CodeSessionId) -> String {
+    let bridge = std::path::Path::new("/usr/local/bin/tidebreak");
     let sp = code
         .browser_tokens
-        .issue(BrowserSubject {
-            owner: OwnerId::local(),
-            workspace: ws,
-            session: s,
-        })
+        .issue(
+            BrowserSubject {
+                owner: OwnerId::local(),
+                workspace: ws,
+                session: s,
+            },
+            bridge,
+        )
         .unwrap();
     let c = std::fs::read_to_string(&sp.capability_file).unwrap();
     serde_json::from_str::<serde_json::Value>(&c).unwrap()["token"]
