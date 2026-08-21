@@ -28,6 +28,7 @@ use tidebreak_harness::{
 };
 
 use super::approval_bridge::ApprovalBridge;
+use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
@@ -132,6 +133,7 @@ pub(crate) struct CodeRuntime {
     pub(crate) worktree_root_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
+    pub(crate) browser_tokens: BrowserTokenRegistry,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -174,6 +176,7 @@ impl CodeRuntime {
             data_dir: data_dir.clone(),
             worktree_root_default,
             approvals: ApprovalBridge::new(),
+            browser_tokens: BrowserTokenRegistry::new(&data_dir),
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -199,6 +202,7 @@ impl CodeRuntime {
 
     /// Bound after listen so Claude can be pointed at the loopback MCP route.
     fn set_loopback_base(&self, base: String) {
+        self.browser_tokens.set_loopback_base(&base);
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
     }
@@ -220,6 +224,7 @@ impl CodeRuntime {
         loopback_base: String,
     ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
         self.set_loopback_base(loopback_base);
+        self.browser_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
         async move {
             let actions = runtime.recover().await;
@@ -245,6 +250,7 @@ impl CodeRuntime {
             data_dir,
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
+            browser_tokens: BrowserTokenRegistry::new(&data_dir),
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -1350,6 +1356,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
+        self.browser_tokens.revoke(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1428,6 +1435,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
+        self.browser_tokens.revoke(session.id);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1641,6 +1649,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
+            self.browser_tokens.revoke(session.id);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1737,6 +1746,13 @@ impl CodeRuntime {
             attached.subagents.clone(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
+        let browser_subject = BrowserSubject {
+            owner: session.owner.clone(),
+            workspace: session.workspace_id,
+            session: session.id,
+        };
+        let browser = self.browser_tokens.issue(browser_subject).ok();
+
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
@@ -1748,12 +1764,13 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser: None,
+            browser,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
+                self.browser_tokens.revoke(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -1772,6 +1789,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
+                self.browser_tokens.revoke(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
