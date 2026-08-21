@@ -16,9 +16,9 @@ use tidebreak_core::{
     db, Attention, AttentionSource, AttentionState, BrowserContentTrust, BrowserControllerState,
     BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
     BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeSession,
-    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus,
-    DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
+    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeRepo,
+    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
+    CodeWorkspaceStatus, DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -181,10 +181,28 @@ async fn serve(router: Router) -> std::net::SocketAddr {
 }
 
 async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, CodeSessionId) {
+    let repo_id = RepoId::new();
+    db::code::insert_repo(
+        db,
+        &CodeRepo {
+            id: repo_id,
+            owner: OwnerId::local(),
+            root_path: "/nonexistent-repo".into(),
+            display_name: "browser-test".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: vec![],
+            created_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
     let ws = CodeWorkspace {
         id: WorkspaceId::new(),
         owner: OwnerId::local(),
-        repo_id: RepoId::new(),
+        repo_id,
         title: "browser".into(),
         worktree_path: "/nonexistent".into(),
         branch_name: "tidebreak/browser".into(),
