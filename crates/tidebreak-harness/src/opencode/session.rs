@@ -1345,7 +1345,8 @@ mod tests {
             .map(|(_, value)| value.as_str());
         if cfg!(windows) {
             let config: serde_json::Value =
-                serde_json::from_str(config_str.expect("case-insensitive match on Windows")).unwrap();
+                serde_json::from_str(config_str.expect("case-insensitive match on Windows"))
+                    .unwrap();
             assert_eq!(config["theme"], "dark");
         } else {
             assert!(
