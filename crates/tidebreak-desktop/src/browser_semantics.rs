@@ -1566,6 +1566,104 @@ const SNAPSHOT_SCRIPT: &str = r#"
 })()
 "#;
 
+const INSPECT_OVERLAY_SCRIPT: &str = r#"
+(() => {
+  const existing = document.getElementById("__tidebreak_inspect_overlay__");
+  if (existing) return "already_injected";
+  const style = document.createElement("style");
+  style.id = "__tidebreak_inspect_style__";
+  style.textContent = `
+    .__tidebreak_inspect_overlay__ {
+      all: initial;
+      position: fixed;
+      pointer-events: none;
+      z-index: 2147483647;
+      border: 1.5px solid rgba(20, 130, 240, 0.72);
+      background: rgba(20, 130, 240, 0.09);
+      border-radius: 3px;
+      box-sizing: border-box;
+      transition: opacity 0.12s ease;
+    }
+    .__tidebreak_inspect_label__ {
+      all: initial;
+      position: fixed;
+      z-index: 2147483647;
+      pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 9px;
+      font-weight: 600;
+      line-height: 1;
+      color: rgb(20, 130, 240);
+      background: rgba(255, 255, 255, 0.92);
+      padding: 1.5px 4px;
+      border-radius: 2px;
+      border: 1px solid rgba(20, 130, 240, 0.38);
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const INTERACTIVE_SELECTOR = "a[href], button, input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='tab'], [tabindex]:not([tabindex='-1'])";
+
+  const isVisible = (element) => {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none"
+      && style.visibility !== "hidden"
+      && Number(style.opacity || 1) !== 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+
+  const highlight = () => {
+    const candidates = document.querySelectorAll(INTERACTIVE_SELECTOR);
+    const overlay = document.createElement("div");
+    overlay.id = "__tidebreak_inspect_overlay__";
+    candidates.forEach((element, index) => {
+      if (!isVisible(element)) return;
+      const rect = element.getBoundingClientRect();
+      const marker = document.createElement("div");
+      marker.className = "__tidebreak_inspect_overlay__";
+      marker.style.left = rect.left + "px";
+      marker.style.top = rect.top + "px";
+      marker.style.width = rect.width + "px";
+      marker.style.height = rect.height + "px";
+      overlay.appendChild(marker);
+
+      const label = document.createElement("span");
+      label.className = "__tidebreak_inspect_label__";
+      label.style.left = rect.left + "px";
+      label.style.top = Math.max(0, rect.top - 11) + "px";
+      label.textContent = (element.localName || "element")
+        + (element.id ? "#" + element.id : "")
+        + (element.className && typeof element.className === "string"
+          ? "." + element.className.split(" ").filter(Boolean).slice(0, 2).join(".")
+          : "");
+      overlay.appendChild(label);
+    });
+    document.body.appendChild(overlay);
+    return "injected";
+  };
+
+  window.__tidebreak_highlight_inspect__ = highlight;
+  return highlight();
+})()
+"#;
+
+const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
+(() => {
+  const overlay = document.getElementById("__tidebreak_inspect_overlay__");
+  if (overlay) overlay.remove();
+  const style = document.getElementById("__tidebreak_inspect_style__");
+  if (style) style.remove();
+  delete window.__tidebreak_highlight_inspect__;
+  return "removed";
+})()
+"#;
+
 const ACTION_SCRIPT: &str = r#"
 (() => {
   const payload = __PAYLOAD__;
@@ -1729,6 +1827,37 @@ const ACTION_SCRIPT: &str = r#"
   return result("ok", "Action completed. Take a new snapshot before the next action.");
 })()
 "#;
+
+pub(crate) async fn browser_inject_inspect_overlay(
+    app: &tauri::AppHandle,
+    _registry: &crate::browser_control::BrowserRegistry,
+    browser_id: &str,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let label = crate::code_browser::browser_label(browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+
+    let _result: String = evaluate_json(&webview, INSPECT_OVERLAY_SCRIPT).await?;
+    Ok(())
+}
+
+pub(crate) async fn browser_remove_inspect_overlay(
+    app: &tauri::AppHandle,
+    _registry: &crate::browser_control::BrowserRegistry,
+    browser_id: &str,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let label = crate::code_browser::browser_label(browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+
+    let _result: String = evaluate_json(&webview, REMOVE_INSPECT_OVERLAY_SCRIPT).await?;
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {

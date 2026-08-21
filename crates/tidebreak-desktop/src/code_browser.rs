@@ -22,6 +22,9 @@ use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 use crate::browser_control::BROWSER_DATA_STORE_IDENTIFIER;
+use crate::browser_semantics::{
+    browser_inject_inspect_overlay, browser_remove_inspect_overlay,
+};
 use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
@@ -69,6 +72,10 @@ enum CodeBrowserAction {
     RevokeAgentAccess,
     StopAgentControl,
     TakeHumanControl,
+    SetInspect {
+        enabled: bool,
+    },
+    RemoveInspect,
     Close,
 }
 
@@ -155,6 +162,46 @@ pub(crate) async fn code_browser_command(
                 ))
             }
         },
+        CodeBrowserAction::SetInspect { enabled } => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            registry.set_inspect(&request.browser_id, &request.workspace_id, enabled)?;
+            if enabled {
+                let _ = browser_inject_inspect_overlay(
+                    &app,
+                    &registry,
+                    &request.browser_id,
+                    &request.workspace_id,
+                )
+                .await;
+            } else {
+                let _ = browser_remove_inspect_overlay(
+                    &app,
+                    &registry,
+                    &request.browser_id,
+                    &request.workspace_id,
+                )
+                .await;
+            }
+            registry.snapshot(&request.browser_id, &request.workspace_id)
+        }
+        CodeBrowserAction::RemoveInspect => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let _ = browser_remove_inspect_overlay(
+                &app,
+                &registry,
+                &request.browser_id,
+                &request.workspace_id,
+            )
+            .await;
+            registry.clear_inspect(&request.browser_id, &request.workspace_id)?;
+            registry.snapshot(&request.browser_id, &request.workspace_id)
+        }
         CodeBrowserAction::Close => {
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;

@@ -28,6 +28,7 @@ export type BrowserSession = {
   notice: BrowserNotice | null;
   history: BrowserHistoryEntry[];
   historyIndex: number;
+  inspectEnabled: boolean;
   updatedAt: number;
 };
 
@@ -56,6 +57,7 @@ export function createBrowserSession({
     notice: null,
     history: url ? [{ url }] : [],
     historyIndex: url ? 0 : -1,
+    inspectEnabled: false,
     updatedAt: now,
   };
 }

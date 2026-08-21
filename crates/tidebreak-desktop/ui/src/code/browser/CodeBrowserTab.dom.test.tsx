@@ -1518,3 +1518,72 @@ describe("BrowserToolbar compact", () => {
   });
 
 });
+
+
+describe("BrowserToolbar inspect mode", () => {
+  it("shows the Inspect toggle when the engine supports semantic snapshots and the page is ready", async () => {
+    const runtime = browserHost({
+      existing: true,
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+    });
+  });
+
+  it("hides the Inspect toggle when the engine does not support semantic snapshots", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+    expect(screen.queryByRole("button", { name: "Inspect page elements" })).toBeNull();
+  });
+
+  it("remains usable in compact toolbar layouts", async () => {
+    mockedClientWidth = 320;
+    const runtime = browserHost({
+      existing: true,
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+      expect(document.querySelector('[data-compact="true"]')).not.toBeNull();
+    });
+  });
+});

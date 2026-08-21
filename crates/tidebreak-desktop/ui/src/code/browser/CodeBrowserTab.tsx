@@ -165,9 +165,15 @@ function CodeBrowserTabSession({
         snapshot.workspaceId === workspaceId
       ) {
         setRuntime(snapshot);
+        if (snapshot.inspectEnabled !== undefined) {
+          updateSession((current) => ({
+            ...current,
+            inspectEnabled: snapshot.inspectEnabled!,
+          }));
+        }
       }
     },
-    [browserId, workspaceId],
+    [browserId, workspaceId, updateSession],
   );
 
   const cancelNativeReveal = useCallback(() => {
@@ -413,6 +419,7 @@ function CodeBrowserTabSession({
         );
         setAddress(browserDisplayAddress(event.url));
         setAddressError(null);
+        updateSession((current) => ({ ...current, inspectEnabled: false }));
       } else if (event.type === "navigation_finished" && event.url) {
         updateSession((current) =>
           finishBrowserNavigation(current, event.url!),
@@ -727,6 +734,16 @@ function CodeBrowserTabSession({
         onOverlayOpenChange={setHistoryOpen}
         onAgentAccessOpenChange={setAgentAccessOpen}
         agentAccessOpen={agentAccessOpen}
+        onToggleInspect={() => {
+          const next = !session.inspectEnabled;
+          updateSession((current) => ({ ...current, inspectEnabled: next }));
+          void runHostAction(
+            next
+              ? { type: "set_inspect", enabled: true }
+              : { type: "remove_inspect" },
+          );
+        }}
+        inspectEnabled={session.inspectEnabled}
         viewportControl={
           <BrowserViewportControl
             viewport={viewport}

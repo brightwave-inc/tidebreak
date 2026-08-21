@@ -11,6 +11,7 @@ import {
   type RefObject,
 } from "react";
 import {
+  ScanEye,
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
@@ -101,6 +102,8 @@ export function BrowserToolbar({
   onOverlayOpenChange,
   onAgentAccessOpenChange,
   agentAccessOpen = false,
+  onToggleInspect,
+  inspectEnabled,
   viewportControl,
 }: {
   session: BrowserSession;
@@ -126,6 +129,8 @@ export function BrowserToolbar({
   onOverlayOpenChange: (open: boolean) => void;
   onAgentAccessOpenChange?: (open: boolean) => void;
   agentAccessOpen?: boolean;
+  onToggleInspect?: () => void;
+  inspectEnabled?: boolean;
   viewportControl?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -254,6 +259,27 @@ export function BrowserToolbar({
           onAgentAccessOpenChange={onAgentAccessOpenChange}
           agentAccessOpen={agentAccessOpen}
         />
+
+        {engine?.capabilities.semanticSnapshot && session.url && session.loadState === "ready" && (
+          <WithTooltip label={inspectEnabled ? "Hide inspect highlights" : "Inspect page elements"}>
+            <Button
+              type="button"
+              variant={inspectEnabled ? "secondary" : "ghost"}
+              size={compactToolbar ? "icon-xs" : "icon-sm"}
+              onClick={onToggleInspect}
+              aria-pressed={inspectEnabled || undefined}
+              aria-label={inspectEnabled ? "Hide inspect highlights" : "Inspect page elements"}
+              className={cn(
+                inspectEnabled && "bg-info-background/55 text-info-foreground hover:bg-info-background hover:text-info-foreground",
+              )}
+            >
+              <ScanEye />
+              <span className="sr-only">
+                {inspectEnabled ? "Inspect on" : "Inspect"}
+              </span>
+            </Button>
+          </WithTooltip>
+        )}
 
         {viewportControl && (
           <div className="shrink-0">
