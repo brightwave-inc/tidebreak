@@ -108,11 +108,11 @@ impl ClaudeSession {
             argv.push("--model".into());
             argv.push(model.to_owned());
         }
-        if let Some(channel) = &self.spec.approval {
-            if let Some(flags) = crate::claude::approvals::launch_args_for_approval_channel(channel)
-            {
-                argv.extend(flags);
-            }
+        if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
+            self.spec.approval.as_ref(),
+            self.spec.browser.as_ref(),
+        ) {
+            argv.extend(flags);
         }
         if let Some(resume) = self.resume_ref.lock().expect("claude resume").clone() {
             argv.push("--resume".into());
@@ -420,7 +420,9 @@ mod encode_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::ApprovalChannelSpec;
     use crate::HarnessEventSink;
+    use std::path::PathBuf;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
@@ -429,6 +431,73 @@ mod tests {
     #[async_trait]
     impl HarnessEventSink for Discard {
         async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    struct NoopCompleter;
+
+    #[async_trait]
+    impl crate::ApprovalCompleter for NoopCompleter {
+        async fn complete(
+            &self,
+            _call_id: &str,
+            _decision: crate::ApprovalDecision,
+        ) -> Result<(), crate::HarnessError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn compose_plan_for_merges_mcp_channels_into_one_config_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let approval = ApprovalChannelSpec {
+            mcp_endpoint_url: "http://127.0.0.1:9999/code/mcp/approval-prompt".into(),
+            token: "session-token".into(),
+            completer: Arc::new(NoopCompleter),
+        };
+        let browser =
+            BrowserChannelSpec::new(PathBuf::from("/tmp/session-browser-cap.json"));
+        let session = ClaudeSession::new(SessionSpec {
+            worktree: dir.path().to_path_buf(),
+            permission_mode: CodePermissionMode::Plan,
+            model: None,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: Some(approval),
+            binary: dir.path().join("claude"),
+            sink: Arc::new(Discard),
+            browser: Some(browser),
+        });
+        let plan = session.compose_plan_for(None, false).unwrap();
+        assert_eq!(
+            plan.argv.iter().filter(|arg| *arg == "--mcp-config").count(),
+            1,
+            "compose must use the merged helper exactly once"
+        );
+        let config_index = plan
+            .argv
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .unwrap();
+        let config: serde_json::Value =
+            serde_json::from_str(&plan.argv[config_index + 1]).unwrap();
+        assert!(
+            config["mcpServers"].get("tb-approvals").is_some(),
+            "merged config keeps the approval HTTP server"
+        );
+        assert!(
+            config["mcpServers"].get("tb-browser").is_some(),
+            "merged config adds the browser stdio server"
+        );
+        assert_eq!(
+            plan.argv
+                .iter()
+                .filter(|arg| *arg == "--permission-prompt-tool")
+                .count(),
+            1,
+            "both channels keep exactly one permission-prompt-tool flag"
+        );
     }
 
     /// A failing engine is indistinguishable from a finished one on stdout
