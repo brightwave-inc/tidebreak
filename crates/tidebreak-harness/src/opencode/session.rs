@@ -1,7 +1,6 @@
 //! Long-lived `opencode serve` child driven over HTTP + SSE.
 
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
