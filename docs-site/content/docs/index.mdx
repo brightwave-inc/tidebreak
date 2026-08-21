@@ -3,9 +3,11 @@ title: What Tidebreak is
 description: A local-first AI agent desktop app that runs on your machine with the models and tools you choose.
 ---
 
-Tidebreak is a desktop app for handing real work to an AI agent. You start a
-chat, attach the files the work depends on, and the agent reads them, runs
-code, searches the web, and writes the result out as a file you can save.
+Tidebreak is a desktop app for handing real work to an AI agent, and it has two
+surfaces. In a **chat**, you attach the files the work depends on and the agent
+reads them, runs code, searches the web, and writes the result out as a file you
+can save. In **code mode**, you point it at a git repository and supervise a
+coding agent working in an isolated worktree.
 
 It runs on your machine. Your conversations, your documents, and the files the
 agent produces live in a local database and a local folder. Your provider API
@@ -41,8 +43,12 @@ formats, and behavior change frequently. Expect rough edges.
   Fireworks, Together, OpenRouter, a local Ollama daemon, and any
   OpenAI-compatible endpoint. You can switch models mid-conversation without
   losing the thread.
-- **Decide how much rope to give it.** Every chat has a permission mode, from
-  read-only planning up to full autonomy.
+- **Drive coding agents over a repository.** [Code mode](/code-mode) runs
+  Claude Code, Codex CLI, opencode, or Grok CLI in its own git worktree per
+  workspace, with per-turn diffs, a review step, a terminal, and a pull-request
+  flow.
+- **Decide how much rope to give it.** Every chat and every coding session has a
+  permission mode, from read-only planning up to full autonomy.
 
 ## Who it's for
 

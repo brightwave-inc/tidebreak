@@ -11,10 +11,17 @@ change.
 
 ## Tidebreak in one minute
 
-Tidebreak is a local agent runtime. A user chooses a model and starts a chat,
-which is the current product's single workspace. Sources, connected folders,
-scratch, messages, and tool activity are all resolved through that
-exact conversation. The runtime can ask the model for an answer, call tools over
+Tidebreak is a local agent runtime with two product surfaces. In chat — the
+surface this document describes in detail — a user chooses a model and starts a
+conversation, and sources, connected folders, scratch, messages, and tool
+activity are all resolved through that exact conversation.
+
+The second surface is code mode: a registered git repository, one worktree and
+branch per workspace, and durable sessions driving an external coding-agent
+harness. It reuses this runtime's shape — the same job records, leases, event
+sequencing, and approval flow — behind an adapter contract rather than the
+in-process model loop. [`docs/code-mode.md`](code-mode.md) is the reference for
+it; this page stays with chat except where the two share machinery. The runtime can ask the model for an answer, call tools over
 folders connected to the chat, read sources attached to the chat, pause for
 approval before a sensitive action, and stream progress back to the client.
 

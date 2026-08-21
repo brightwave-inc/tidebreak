@@ -1,0 +1,113 @@
+---
+title: Code mode
+description: Point Tidebreak at a git repository and supervise coding agents — Claude Code, Codex CLI, opencode, and Grok CLI — each in its own worktree.
+---
+
+Chats are built around files. Code mode is built around a repository. You
+register a local git repo, open a **workspace** for a piece of work, and run a
+coding agent inside it — with the same permission modes, approval cards, and
+review step the rest of Tidebreak uses.
+
+Switch surfaces with the **Work / Code** control at the top of the sidebar.
+
+## Repos, workspaces, and sessions
+
+Three nouns, and they nest:
+
+- A **repo** is a local git repository you registered: its root path, the base
+  branch new work starts from, and a branch prefix.
+- A **workspace** is one unit of work on that repo. It owns exactly one git
+  worktree and one branch for its whole life, and it carries the pull-request
+  state for that branch.
+- A **session** is one conversation with one harness inside a workspace.
+
+The worktree is the important part. Each workspace is a separate checkout, so
+several agents can work on the same repository at once without writing over
+each other, and none of them touches the copy you have open in your editor.
+
+By default worktrees are created under `~/Tidebreak/workspaces`. You can change
+where the next one goes in settings; existing workspaces stay where they are,
+because git records absolute paths and moving a checkout is a repair operation
+rather than a rename.
+
+## Harnesses
+
+A **harness** is the coding-agent CLI Tidebreak drives. Four are supported:
+
+| Harness | Notes |
+| --- | --- |
+| Claude Code | The reference tier — the most complete integration |
+| Codex CLI | |
+| opencode | |
+| Grok CLI | Honors Auto and Allow only; see below |
+
+Tidebreak drives the harness you already have installed and signed in. It
+observes that authentication and never brokers it — your Claude or OpenAI
+subscription stays between you and the tool it belongs to. **Settings → Coding
+harnesses** runs a doctor that reports which harnesses it found and what is
+missing.
+
+Each harness runs on the model you configured for it, so the model choices from
+[Models and providers](/models-and-providers) apply here too.
+
+## A turn, and the review that follows
+
+A turn is one exchange with the agent. While it runs you see tool activity as
+it happens, and approval cards whenever the agent asks for something its
+permission mode does not cover. Denying opens a field so you can say why, and
+that reason goes back to the agent.
+
+When the turn ends you get a review card: what changed, how long it took, and
+the diffstat. Diffs open per file and are anchored per turn, so you can read
+one turn's work without untangling it from the rest.
+
+Nothing reaches your branch because a turn finished. The worktree holds the
+change until you commit it.
+
+## Permission modes
+
+Code mode uses the same four modes as chats — Plan, Ask, Auto, and Allow all —
+with the same meaning: how much the agent may do before it stops to ask. The
+selector sits in the composer, per session.
+
+<Callout type="warn">
+Grok CLI is the exception. It has no approval channel, and its plan and sandbox
+flags do not confine it, so only **Auto** and **Allow all** are offered. Auto is
+its unsupervised default. Tidebreak states this where you pick the mode rather
+than pretending the other two are available.
+</Callout>
+
+## Terminals
+
+Every workspace has a terminal, opened as a drawer at the bottom of the
+surface. It runs in that workspace's worktree, so you are always in the
+checkout the agent is working in. Use it for the things that are faster to type
+than to ask for — a test run, a git command, a quick look at a file.
+
+## Pull requests
+
+The review sidebar carries git state, the pull request, and its comments. From
+there you can push the branch, open a pull request, watch its checks, read
+review comments, and merge — without leaving the workspace that produced the
+change.
+
+Pull-request operations shell out to your own `gh` CLI. Tidebreak observes that
+authentication the same way it observes a harness login. If `gh` is missing or
+signed out, you get copyable instructions rather than a button that fails.
+
+## What it does not do yet
+
+Code mode is a full surface, not a preview, but some things are deliberately
+out of scope for now:
+
+- No in-app code editor. Tidebreak reviews changes; it does not replace the
+  editor you write in.
+- Checkpoints are recorded, but there is no restore-from-checkpoint surface
+  yet.
+- No remote execution — harnesses run on your machine, not in a managed
+  sandbox.
+- No mobile client for watching a run.
+
+The longer-term direction is to drop the mode switch entirely: one conversation
+concept, where binding it to a workspace is what makes it behave like code
+mode.
