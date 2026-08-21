@@ -606,11 +606,32 @@ fn desktop_sibling_exe_from(exe: &Path, name: &str) -> Result<PathBuf, String> {
     {
         return Err("sibling exe name must be a single file name".to_string());
     }
+    if !exe.is_absolute() {
+        return Err(format!(
+            "current exe path must be absolute, got: {}",
+            exe.display()
+        ));
+    }
+    let exe = exe
+        .canonicalize()
+        .map_err(|error| format!("could not resolve current exe {}: {error}", exe.display()))?;
+    if !exe.is_absolute() {
+        return Err(format!(
+            "resolved current exe path must be absolute, got: {}",
+            exe.display()
+        ));
+    }
     let exe_dir = exe
         .parent()
         .ok_or_else(|| "current exe has no parent directory".to_string())?;
     let extension = cfg!(target_os = "windows").then_some(".exe").unwrap_or("");
     let path = exe_dir.join(format!("{name}{extension}"));
+    if !path.is_absolute() {
+        return Err(format!(
+            "sibling exe path must be absolute, got: {}",
+            path.display()
+        ));
+    }
     let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
         format!(
             "sibling exe {name} not found at {} ({error})",
@@ -1055,6 +1076,12 @@ mod resource_dir_tests {
         dir.join(format!("tidebreak{extension}"))
     }
 
+    fn write_desktop(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = desktop_path(dir);
+        fs::write(&path, []).expect("desktop exe");
+        path
+    }
+
     #[test]
     fn cargo_dev_fallback_accepts_custom_target_dir_with_lock() {
         let dir = temp_dir("with-lock");
@@ -1076,8 +1103,8 @@ mod resource_dir_tests {
     #[test]
     fn desktop_sibling_exe_rejects_missing_file() {
         let dir = temp_dir("sibling-missing");
-        let err =
-            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
+        let desktop = write_desktop(&dir);
+        let err = desktop_sibling_exe_from(&desktop, "tidebreak").expect_err("should fail");
         assert!(
             err.contains("not found"),
             "error should mention not found: {err}"
@@ -1094,14 +1121,24 @@ mod resource_dir_tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn desktop_sibling_exe_rejects_relative_current_exe() {
+        let err = desktop_sibling_exe_from(
+            std::path::Path::new("relative/tidebreak-desktop"),
+            "tidebreak",
+        )
+        .expect_err("should fail");
+        assert!(err.contains("must be absolute"), "error: {err}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn desktop_sibling_exe_rejects_non_executable_on_unix() {
         let dir = temp_dir("sibling-noexec");
+        let desktop = write_desktop(&dir);
         let exe_path = sibling_path(&dir);
         fs::write(&exe_path, []).expect("write");
-        let err =
-            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
+        let err = desktop_sibling_exe_from(&desktop, "tidebreak").expect_err("should fail");
         assert!(err.contains("not executable"), "error: {err}");
         let _ = fs::remove_dir_all(dir);
     }
@@ -1110,27 +1147,54 @@ mod resource_dir_tests {
     #[test]
     fn desktop_sibling_exe_accepts_executable_on_unix() {
         let dir = temp_dir("sibling-exec");
+        let desktop = write_desktop(&dir);
         let exe_path = sibling_path(&dir);
         fs::write(&exe_path, []).expect("write");
         let mut perms = fs::metadata(&exe_path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&exe_path, perms).expect("chmod");
         assert_eq!(
-            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").unwrap(),
-            exe_path
+            desktop_sibling_exe_from(&desktop, "tidebreak").unwrap(),
+            exe_path.canonicalize().expect("canonical sibling")
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_sibling_exe_resolves_beside_the_real_binary_not_a_launch_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let real_dir = temp_dir("sibling-real");
+        let launch_dir = temp_dir("sibling-launch-link");
+        let real_desktop = write_desktop(&real_dir);
+        let real_sibling = sibling_path(&real_dir);
+        fs::write(&real_sibling, []).expect("write sibling");
+        let mut perms = fs::metadata(&real_sibling).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&real_sibling, perms).expect("chmod");
+        let launch_path = desktop_path(&launch_dir);
+        symlink(&real_desktop, &launch_path).expect("desktop symlink");
+
+        assert_eq!(
+            desktop_sibling_exe_from(&launch_path, "tidebreak").unwrap(),
+            real_sibling.canonicalize().expect("canonical sibling")
+        );
+
+        let _ = fs::remove_dir_all(launch_dir);
+        let _ = fs::remove_dir_all(real_dir);
     }
 
     #[cfg(not(unix))]
     #[test]
     fn desktop_sibling_exe_accepts_regular_file() {
         let dir = temp_dir("sibling-file");
+        let desktop = write_desktop(&dir);
         let exe_path = sibling_path(&dir);
         fs::write(&exe_path, []).expect("write");
         assert_eq!(
-            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").unwrap(),
-            exe_path
+            desktop_sibling_exe_from(&desktop, "tidebreak").unwrap(),
+            exe_path.canonicalize().expect("canonical sibling")
         );
         let _ = fs::remove_dir_all(dir);
     }
