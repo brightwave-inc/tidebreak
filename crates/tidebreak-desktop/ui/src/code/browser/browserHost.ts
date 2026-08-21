@@ -59,6 +59,8 @@ export type BrowserHostAction =
   | { type: "revoke_agent_access" }
   | { type: "stop_agent_control" }
   | { type: "take_human_control" }
+  | { type: "set_inspect"; enabled: boolean }
+  | { type: "remove_inspect" }
   | { type: "close" };
 
 export type BrowserHostSnapshot = {
@@ -85,6 +87,7 @@ export type BrowserHostSnapshot = {
   };
   controller?: BrowserController;
   agentAccess?: BrowserAgentAccess;
+  inspectEnabled?: boolean;
 };
 
 export type BrowserHostEvent = {

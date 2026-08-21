@@ -120,6 +120,8 @@ pub(crate) struct BrowserSnapshot {
     pub(crate) controller: Option<BrowserController>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_access: Option<BrowserAgentAccess>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) inspect_enabled: Option<bool>,
 }
 
 impl BrowserSnapshot {
@@ -137,6 +139,7 @@ impl BrowserSnapshot {
             engine: None,
             controller: None,
             agent_access: None,
+            inspect_enabled: None,
         }
     }
 }
@@ -256,6 +259,7 @@ struct BrowserRecord {
     dispatch: BrowserDispatchState,
     semantic_snapshot: Option<StoredSemanticSnapshot>,
     screenshot_epoch: Option<u64>,
+    inspect_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -372,6 +376,7 @@ impl BrowserRecord {
             engine: Some(self.engine.clone()),
             controller: Some(self.controller.clone()),
             agent_access: Some(agent_access),
+            inspect_enabled: Some(self.inspect_enabled),
         }
     }
 
@@ -451,6 +456,7 @@ impl BrowserRegistry {
                 dispatch: BrowserDispatchState::default(),
                 semantic_snapshot: None,
                 screenshot_epoch: None,
+                inspect_enabled: false,
             },
         );
         Ok(instance_id)
@@ -517,6 +523,36 @@ impl BrowserRegistry {
             record.screenshot_epoch = None;
         }
         record.visible = visible;
+        Ok(())
+    }
+
+    pub(crate) fn set_inspect(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        record.inspect_enabled = enabled;
+        if !enabled {
+            record.semantic_snapshot = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_inspect(&self, browser_id: &str, workspace_id: &str) -> Result<(), String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        record.inspect_enabled = false;
         Ok(())
     }
 
@@ -993,6 +1029,7 @@ impl BrowserRegistry {
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
             record.screenshot_epoch = None;
+            record.inspect_enabled = false;
             (Arc::clone(&record.dispatch.gate), record.instance_id)
         };
 
@@ -1318,6 +1355,7 @@ impl BrowserRegistry {
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
             record.screenshot_epoch = None;
+            record.inspect_enabled = false;
         })
     }
 
