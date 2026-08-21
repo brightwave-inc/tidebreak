@@ -1,4 +1,7 @@
 import {
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -17,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
+import { BrowserViewportControl } from "./BrowserViewportControl";
 import {
   type BrowserBounds,
   type BrowserHostAction,
@@ -35,6 +39,12 @@ import {
   restoreOrCreateBrowserSession,
   writeStoredBrowserSession,
 } from "./browserPersistence";
+import {
+  type BrowserViewport,
+  restoreOrDefaultViewport,
+  viewportTargetWidth,
+  writeStoredViewport,
+} from "./browserViewport";
 import {
   beginBrowserNavigation,
   canBrowserGoBack,
@@ -104,11 +114,17 @@ function CodeBrowserTabSession({
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
   const persistTimer = useRef<number | null>(null);
   const sessionRef = useRef(session);
+  const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
+  const viewportRef = useRef(viewport);
+  const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const [renderedViewportWidth, setRenderedViewportWidth] = useState<number | null>(
+    null,
+  );
   const visible = !obscured && !historyOpen && session.loadState !== "failed";
   const visibleRef = useRef(visible);
 
   sessionRef.current = session;
-  visibleRef.current = visible;
+  viewportRef.current = viewport;
 
   const updateSession = useCallback(
     (update: (current: BrowserSession) => BrowserSession) => {
@@ -139,7 +155,7 @@ function CodeBrowserTabSession({
       type: "set_visible",
       visible: mountedRef.current && visibleRef.current,
     }));
-    const bounds = readBrowserBounds(surfaceRef.current);
+    const bounds = readBrowserBounds(viewportSurfaceRef.current);
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
       lastNativeBounds.current = bounds;
       recordRuntime(
@@ -186,6 +202,10 @@ function CodeBrowserTabSession({
     },
     [browserId],
   );
+
+  useEffect(() => {
+    writeStoredViewport(viewport);
+  }, [viewport]);
 
   useEffect(() => {
     if (session.loadState !== "loading") {
@@ -241,7 +261,7 @@ function CodeBrowserTabSession({
       }
 
       if (!current.url) return;
-      const bounds = readBrowserBounds(surfaceRef.current);
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) return;
 
       try {
@@ -379,7 +399,7 @@ function CodeBrowserTabSession({
   }, [browserId, host, recordRuntime, settleCreatedNativeView, updateSession, workspaceId]);
 
   useEffect(() => {
-    const surface = surfaceRef.current;
+    const surface = viewportSurfaceRef.current;
     if (!surface || !host.available()) return;
     let frame: number | null = null;
 
@@ -453,7 +473,7 @@ function CodeBrowserTabSession({
         );
         return;
       }
-      const bounds = readBrowserBounds(surfaceRef.current);
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) throw new Error("The browser surface is not ready");
       recordRuntime(await host.command(workspaceId, browserId, {
         type: "create",
@@ -615,6 +635,14 @@ function CodeBrowserTabSession({
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
         onOverlayOpenChange={setHistoryOpen}
+        viewportControl={
+          <BrowserViewportControl
+            viewport={viewport}
+            renderedWidth={renderedViewportWidth}
+            onViewportChange={setViewport}
+            disabled={!session.url}
+          />
+        }
       />
       {notice && (
         <BrowserNoticeRow
@@ -637,14 +665,21 @@ function CodeBrowserTabSession({
         />
       )}
       <div ref={surfaceRef} className="relative min-h-0 flex-1 overflow-hidden">
-        {!showNative && (
-          <BrowserFallback
-            error={session.error}
-            hasUrl={Boolean(session.url)}
-            onRetry={session.url ? () => void navigate() : undefined}
-            onOpenExternal={session.url ? () => void openExternal() : undefined}
-          />
-        )}
+        <ViewportSurface
+          viewport={viewport}
+          showNative={showNative}
+          surfaceRef={viewportSurfaceRef}
+          onViewportBoundsChange={setRenderedViewportWidth}
+        >
+          {!showNative && (
+            <BrowserFallback
+              error={session.error}
+              hasUrl={Boolean(session.url)}
+              onRetry={session.url ? () => void navigate() : undefined}
+              onOpenExternal={session.url ? () => void openExternal() : undefined}
+            />
+          )}
+        </ViewportSurface>
       </div>
     </section>
   );
@@ -721,6 +756,80 @@ export function BrowserFallback({
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Centers and clips the native webview column inside the browser surface.
+ *
+ * For Fit, the column fills the surface. For fixed presets and custom widths,
+ * the column is constrained to the target width (clamped to the surface),
+ * centered horizontally, and reports its actual rendered width so the toolbar
+ * can display it without a second control. The native webview is positioned
+ * at the column's bounds so it visually matches the simulated viewport.
+ *
+ * A muted backdrop fills the gutter on either side of a fixed/custom column so
+ * the simulated device frame reads as a deliberate inset, not a broken layout.
+ */
+function ViewportSurface({
+  viewport,
+  showNative,
+  surfaceRef,
+  onViewportBoundsChange,
+  children,
+}: {
+  viewport: BrowserViewport;
+  showNative: boolean;
+  surfaceRef: RefObject<HTMLDivElement | null>;
+  onViewportBoundsChange: (width: number | null) => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const el = surfaceRef.current;
+    if (!el) return;
+    let frame: number | null = null;
+    const sync = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const rect = surfaceRef.current?.getBoundingClientRect();
+        onViewportBoundsChange(rect && rect.width > 0 ? rect.width : null);
+      });
+    };
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    sync();
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [surfaceRef, onViewportBoundsChange]);
+
+  const isFit = viewport.preset === "fit";
+  const targetWidth = isFit ? null : viewportTargetWidth(viewport);
+  const style: CSSProperties = isFit
+    ? {}
+    : { width: targetWidth ? `${targetWidth}px` : undefined, maxWidth: "100%" };
+
+  return (
+    <div className="absolute inset-0 flex justify-center overflow-hidden">
+      {!isFit && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 bg-muted/30"
+        />
+      )}
+      <div
+        ref={surfaceRef}
+        className={cn(
+          "relative min-h-0",
+          isFit ? "flex-1 w-full" : "h-full shrink-0",
+        )}
+        style={style}
+      >
+        {showNative ? null : children}
       </div>
     </div>
   );

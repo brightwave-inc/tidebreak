@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type FormEvent } from "react";
+import { useEffect, useId, useRef, type FormEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -61,6 +61,7 @@ export function BrowserToolbar({
   onSelectHistory,
   onOpenExternal,
   onOverlayOpenChange,
+  viewportControl,
 }: {
   session: BrowserSession;
   address: string;
@@ -83,6 +84,7 @@ export function BrowserToolbar({
   onSelectHistory: (index: number) => void;
   onOpenExternal: () => void;
   onOverlayOpenChange: (open: boolean) => void;
+  viewportControl?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const addressErrorId = useId();
@@ -194,6 +196,10 @@ export function BrowserToolbar({
           onShare={onShareAgent}
           onRevoke={onRevokeAgent}
         />
+
+        {viewportControl && (
+          <div className="shrink-0">{viewportControl}</div>
+        )}
 
         <DropdownMenu onOpenChange={onOverlayOpenChange}>
           <WithTooltip label="History">
