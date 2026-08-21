@@ -298,6 +298,22 @@ mod tests {
     }
 
     #[test]
+    fn a_live_session_reuses_its_native_capability_across_channel_reissue() {
+        let registry = BrowserRegistry::default();
+        let sessions = SessionCapabilities::default();
+        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let workspace = scope.workspace.to_string();
+
+        let first = sessions.capability_for(&registry, &scope).unwrap();
+        let second = sessions.capability_for(&registry, &scope).unwrap();
+
+        assert_eq!(second, first);
+        assert!(registry
+            .heartbeat_agent_capability(second, &workspace)
+            .is_ok());
+    }
+
+    #[test]
     fn reused_session_id_with_another_scope_fails_closed() {
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();

@@ -342,20 +342,33 @@ impl CodeRuntime {
         self.browser_runtime.clone()
     }
 
-    /// Revoke the session browser token AND the desktop adapter
-    /// capability. Idempotent — safe to call multiple times.
+    /// Revoke the session browser token and permanently tombstone its native
+    /// adapter authority. Idempotent — safe to call multiple times.
     ///
-    /// The token registry is invalidated first and the adapter scope is
-    /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
-    /// The adapter call happens after the registry lock is released.
-    fn revoke_browser_session(&self, session_id: CodeSessionId) {
-        let subject = self.browser_tokens.revoke(session_id);
-        if let Some(subject) = subject {
-            if let Some(runtime) = &self.browser_runtime {
-                let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
-                runtime.revoke_session(&scope);
-            }
+    /// Terminal paths pass the database-backed session scope explicitly so
+    /// the adapter is still tombstoned when a prior launch failure already
+    /// removed the transient bearer token and capfile.
+    fn revoke_browser_session(&self, session: &CodeSession) {
+        self.browser_tokens.revoke(session.id);
+        if let Some(runtime) = &self.browser_runtime {
+            let scope = crate::code::browser_runtime::BrowserRuntimeScope {
+                owner: session.owner.clone(),
+                workspace: session.workspace_id,
+                session: session.id,
+            };
+            runtime.revoke_session(&scope);
         }
+    }
+
+    /// Revoke only the outgoing worker's bearer token and capfile.
+    ///
+    /// Reap and launch-failure paths replace a worker while preserving the
+    /// same logical code session. Its native browser capability therefore
+    /// stays live and can be reused by the fresh channel. Only terminal end
+    /// paths call [`Self::revoke_browser_session`] and plant the adapter's
+    /// enduring tombstone.
+    fn revoke_browser_channel(&self, session_id: CodeSessionId) {
+        self.browser_tokens.revoke(session_id);
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -1426,9 +1439,9 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
-        // Invalidate the session browser token so in-flight browser route
-        // calls are rejected immediately, then revoke the native scope.
-        self.revoke_browser_session(id);
+        // Interrupt stops only the active turn. The worker and logical code
+        // session continue, so its browser capfile and native capability must
+        // remain live for later turns.
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
@@ -1512,7 +1525,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        self.revoke_browser_session(id);
+        self.revoke_browser_channel(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1591,7 +1604,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
-        self.revoke_browser_session(session.id);
+        self.revoke_browser_session(&session);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1838,7 +1851,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            self.revoke_browser_session(session.id);
+            self.revoke_browser_session(&session);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1983,7 +1996,7 @@ impl CodeRuntime {
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
-                self.revoke_browser_session(session.id);
+                self.revoke_browser_channel(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -2002,7 +2015,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
-                self.revoke_browser_session(session.id);
+                self.revoke_browser_channel(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
