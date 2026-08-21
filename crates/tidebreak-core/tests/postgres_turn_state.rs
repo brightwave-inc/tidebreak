@@ -56,7 +56,7 @@ async fn postgres_turn_admission_serializes_processes_and_recovers_expiry() {
     };
     let first_token = uuid::Uuid::new_v4();
     let first_lease = match first
-        .begin_turn_admission(&request, first_token, chrono::Duration::milliseconds(50))
+        .begin_turn_admission(&request, first_token, chrono::Duration::seconds(30))
         .await
         .unwrap()
     {
@@ -84,7 +84,9 @@ async fn postgres_turn_admission_serializes_processes_and_recovers_expiry() {
         BeginTurnAdmissionOutcome::IdentityConflict
     );
 
-    tokio::time::sleep(StdDuration::from_millis(75)).await;
+    // Expire the reservation explicitly instead of asking a loaded runner to
+    // finish every assertion above inside a lease short enough to sleep past.
+    expire_postgres_turn_admission(&url, request.id).await;
     let takeover_token = uuid::Uuid::new_v4();
     let takeover_lease = match second
         .begin_turn_admission(&request, takeover_token, chrono::Duration::seconds(1))
@@ -96,6 +98,24 @@ async fn postgres_turn_admission_serializes_processes_and_recovers_expiry() {
     };
     assert!(!first.release_turn_admission(first_lease).await.unwrap());
     assert!(second.release_turn_admission(takeover_lease).await.unwrap());
+}
+
+/// Move a reservation's lease into the past, so the next admission sees an
+/// expired lease without waiting for one.
+///
+/// PostgreSQL admission fences on `clock_timestamp()`, so the expiry has to be
+/// written against the same clock rather than the test process's.
+async fn expire_postgres_turn_admission(url: &str, turn_id: TurnId) {
+    let connection = Database::connect(url).await.unwrap();
+    let updated = connection
+        .execute_unprepared(&format!(
+            "UPDATE turn_admission SET lease_expires_at = clock_timestamp() - interval '1 second' \
+             WHERE id = '{}'",
+            turn_id.0
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
 }
 
 async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts: i32) {
