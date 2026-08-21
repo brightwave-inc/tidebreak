@@ -1508,8 +1508,13 @@ mod tests {
         // Same commit, not merely a branch of the same name.
         assert_eq!(branch_tip(&repo, "tidebreak/work").await.unwrap(), tip);
         run(&repo, &["git", "checkout", "tidebreak/work"]);
+        // Normalize: git checks out with CRLF under Windows' default
+        // `core.autocrlf`, and the round trip is about the content, not the
+        // platform's line endings.
         assert_eq!(
-            std::fs::read_to_string(repo.join("feature.txt")).unwrap(),
+            std::fs::read_to_string(repo.join("feature.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "work\n"
         );
     }

@@ -5827,8 +5827,12 @@ async fn release_frees_the_branch_and_restore_rebuilds_it_from_the_bundle() {
     let restored_body: serde_json::Value = restored.json().await.unwrap();
     assert_eq!(restored_body["status"], "active");
     assert!(restored_body["released_at"].is_null());
+    // Normalize: git checks out with CRLF under Windows' default
+    // `core.autocrlf`.
     assert_eq!(
-        std::fs::read_to_string(path.join("kept.txt")).unwrap(),
+        std::fs::read_to_string(path.join("kept.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
         "survives release\n",
         "the released commit did not come back"
     );
