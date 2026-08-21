@@ -57,6 +57,8 @@ pub enum BrowserRuntimeError {
     UnknownBrowserId(String),
     /// The subject's browser authority has ended.
     SessionEnded,
+    /// The subject is live but does not have a native grant for the target.
+    NotAuthorized(String),
     /// The engine or platform cannot perform this operation.
     Unsupported(String),
     /// The page or target changed since the snapshot the caller is acting
