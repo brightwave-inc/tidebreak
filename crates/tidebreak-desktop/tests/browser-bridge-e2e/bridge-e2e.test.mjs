@@ -265,6 +265,38 @@ test("absolute launch rejects JSON-escaped backslash path leakage", async () => 
   );
 });
 
+test("absolute launch rejects JSON-escaped backslash path in argv", async () => {
+  const backslashDir = join(tmpDir, "browser\\caps-argv");
+  const { capfilePath } = await writeCapfile(backslashDir, bridgeEndpoint);
+  const benignProbe = `
+    import { readFile } from "node:fs/promises";
+    const path = process.env.TIDEBREAK_BROWSER_CAPFILE;
+    const capfile = JSON.parse(await readFile(path, "utf8"));
+    process.stdout.write(JSON.stringify({
+      endpoint: capfile.endpoint,
+      tools: [
+        { name: "browser_list" },
+        { name: "browser_navigate" },
+        { name: "browser_snapshot" }
+      ]
+    }));
+  `;
+
+  await assert.rejects(
+    simulateAbsoluteLaunch({
+      capfilePath,
+      command: process.execPath,
+      args: [
+        "--input-type=module",
+        "--eval",
+        benignProbe,
+        JSON.stringify({ debugPath: capfilePath }),
+      ],
+    }),
+    /capfile path escaped into child process argv/
+  );
+});
+
 test("token never appears in capfile path", async () => {
   const { capfilePath, token } = await writeCapfile(tmpDir, bridgeEndpoint);
 

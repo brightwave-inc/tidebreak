@@ -323,13 +323,13 @@ export async function simulateAbsoluteLaunch({
   const result = await runChild(command, args, env);
   const allArgv = [command, ...args].join(" ");
   if (
-    allArgv.includes(token) ||
+    outputContainsSecret(allArgv, token) ||
     outputContainsSecret(result.stdout, token) ||
     outputContainsSecret(result.stderr, token)
   ) {
     throw new Error("token escaped through child process argv or output");
   }
-  if (allArgv.includes(capfilePath)) {
+  if (outputContainsSecret(allArgv, capfilePath)) {
     throw new Error("capfile path escaped into child process argv");
   }
   if (
