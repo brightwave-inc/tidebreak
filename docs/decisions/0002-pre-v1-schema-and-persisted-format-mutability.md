@@ -10,6 +10,7 @@
   [`crates/tidebreak-core/src/event.rs`](../../crates/tidebreak-core/src/event.rs)
   (the journal payload and its shape fixture),
   [`crates/tidebreak-core/fixtures/schema-baseline.sql`](../../crates/tidebreak-core/fixtures/schema-baseline.sql)
+  and [`schema-baseline.postgres.sql`](../../crates/tidebreak-core/fixtures/schema-baseline.postgres.sql)
   (the rendered baseline and its drift test)
 
 ## Context
@@ -114,13 +115,19 @@ window being open, and it is why the window closes at v1.
 The suspension has a hard boundary and one failure mode: a persisted-format
 change that lands *without* an epoch bump. Fixtures now catch it on both sides.
 `journal-events.json` and `code-journal-events.json` pin the payloads;
-`schema-baseline.sql` pins the rendered SQLite DDL for every baseline table,
-index, and seed row. Each one fails with a message naming the epoch.
+`schema-baseline.sql` and `schema-baseline.postgres.sql` pin the rendered DDL
+for every baseline table, index, and seed row. Each one fails with a message
+naming the epoch.
 
-The table fixture closes the gap this record originally accepted, and retires
-the review instruction that stood in for it. What it still does not see is a
-Postgres-only difference: it renders one backend, because the epoch it points
-at guards one profile.
+The table fixtures close the gap this record originally accepted, and retire
+the review instruction that stood in for it. Both backends are rendered: the
+epoch repairs the SQLite profile, but the durable self-host store is
+PostgreSQL, and SQLite's type affinity collapses distinctions that are real
+there — `uuid`, `jsonb`, and `timestamp with time zone` all render as text
+variants under SQLite. A change visible only in those types would otherwise
+ship unguarded, which matters more as the chain in
+[`docs/releases.md`](../releases.md#preparing-and-shipping-100) replaces the
+epoch.
 
 Anything relying on local data surviving across builds cannot be built pre-v1.
 

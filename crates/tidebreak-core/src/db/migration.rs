@@ -166,7 +166,7 @@ async fn ensure_code_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::prelude::SqliteQueryBuilder;
+    use sea_orm_migration::prelude::{PostgresQueryBuilder, SqliteQueryBuilder};
     use sea_orm_migration::MigratorTrait;
 
     use super::Migrator;
@@ -310,9 +310,13 @@ mod tests {
     /// compatibility contract. It does not know what the epoch is. It knows
     /// the schema moved, and that a human owes it a decision.
     ///
-    /// SQLite is what it renders: the epoch guards the desktop profile, and
-    /// one backend is enough to catch a change. A Postgres-only difference is
-    /// not something this fixture claims to see.
+    /// Both backends are rendered. The epoch guards the desktop profile, so
+    /// SQLite is what a bump repairs — but the self-host store is PostgreSQL
+    /// and durable, and the two builders do not agree on everything: a type
+    /// that collapses in SQLite, or a constraint it parses and ignores, is a
+    /// real schema difference that a SQLite-only fixture cannot see. The
+    /// second render costs one file and closes that gap ahead of the
+    /// migration chain, which will be written against PostgreSQL first.
     ///
     /// Regenerate with `UPDATE_SCHEMA_FIXTURE=1 cargo test -p tidebreak-core`.
     ///
@@ -321,8 +325,6 @@ mod tests {
     /// becomes an ordered migration rather than a bump.
     #[test]
     fn the_schema_baseline_is_pinned() {
-        const SCHEMA_FIXTURE: &str = "fixtures/schema-baseline.sql";
-
         // sea-query renders one statement per line. Break each column and
         // table constraint onto its own line so a one-column edit reviews as a
         // one-line diff rather than a rewritten table. Splitting on `, ` only
@@ -337,35 +339,56 @@ mod tests {
                 .replace(" )", "\n)")
         }
 
-        let mut rendered = String::new();
-        for entry in super::baseline::tables() {
-            rendered.push_str(&readable(&entry.table.to_string(SqliteQueryBuilder)));
-            rendered.push_str(";\n\n");
-            for index in entry.indexes {
-                rendered.push_str(&index.to_string(SqliteQueryBuilder));
+        // The builders are unit structs that `to_string` consumes and that
+        // implement neither Copy nor Clone, so take a constructor and mint a
+        // fresh one per statement.
+        fn render<B>(builder: fn() -> B) -> String
+        where
+            B: sea_orm::sea_query::SchemaBuilder,
+        {
+            let mut rendered = String::new();
+            for entry in super::baseline::tables() {
+                rendered.push_str(&readable(&entry.table.to_string(builder())));
+                rendered.push_str(";\n\n");
+                for index in entry.indexes {
+                    rendered.push_str(&index.to_string(builder()));
+                    rendered.push_str(";\n");
+                }
+                rendered.push('\n');
+            }
+            for seed in super::baseline::SEED_STATEMENTS {
+                rendered.push_str(seed);
                 rendered.push_str(";\n");
             }
-            rendered.push('\n');
-        }
-        for seed in super::baseline::SEED_STATEMENTS {
-            rendered.push_str(seed);
-            rendered.push_str(";\n");
+            rendered
         }
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SCHEMA_FIXTURE);
-        if std::env::var_os("UPDATE_SCHEMA_FIXTURE").is_some() {
-            std::fs::create_dir_all(path.parent().expect("the fixture path has a parent"))
-                .expect("the fixture directory is creatable");
-            std::fs::write(&path, &rendered).expect("the fixture path is writable");
-            return;
-        }
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            existing, rendered,
-            "the schema baseline changed; if this is deliberate, bump \
+        let updating = std::env::var_os("UPDATE_SCHEMA_FIXTURE").is_some();
+        for (fixture, rendered) in [
+            (
+                "fixtures/schema-baseline.sql",
+                render(|| SqliteQueryBuilder),
+            ),
+            (
+                "fixtures/schema-baseline.postgres.sql",
+                render(|| PostgresQueryBuilder),
+            ),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
+            if updating {
+                std::fs::create_dir_all(path.parent().expect("the fixture path has a parent"))
+                    .expect("the fixture directory is creatable");
+                std::fs::write(&path, &rendered).expect("the fixture path is writable");
+                continue;
+            }
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            assert_eq!(
+                existing, rendered,
+                "the schema baseline changed; if this is deliberate, bump \
              DESKTOP_SCHEMA_EPOCH in tidebreak-server so existing databases are \
              discarded, then regenerate with UPDATE_SCHEMA_FIXTURE=1 cargo \
              test -p tidebreak-core"
-        );
+            );
+        }
     }
 }
