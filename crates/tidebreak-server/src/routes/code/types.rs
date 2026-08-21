@@ -402,6 +402,17 @@ pub struct PatchWorkspaceBody {
 /// Body of `POST /code/workspaces/{id}/archive`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RemoveRepoQuery {
+    /// Delete the checkout on disk as well as the registration.
+    ///
+    /// Honored only when Tidebreak cloned it. A registered directory is the
+    /// user's, and removal leaves it alone whatever this says.
+    #[serde(default)]
+    pub reclaim_checkout: bool,
+}
+
+/// Body of `POST /code/workspaces/{id}/archive` and `/release`.
+#[derive(Debug, Deserialize)]
 pub struct ArchiveWorkspaceBody {
     #[serde(default)]
     pub force: bool,

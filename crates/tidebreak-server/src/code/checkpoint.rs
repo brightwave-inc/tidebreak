@@ -1468,6 +1468,7 @@ mod tests {
                 quick_actions: Vec::new(),
                 created_at: chrono::Utc::now(),
                 removed_at: None,
+                cloned_from: None,
             },
         )
         .await

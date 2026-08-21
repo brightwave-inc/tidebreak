@@ -6,11 +6,11 @@ use uuid::Uuid;
 use crate::code::runtime::RepoRegistration;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
-use crate::extract::{Json, Path};
+use crate::extract::{Json, Path, Query};
 
 use super::types::{
     CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CreateRepoBody,
-    PatchRepoBody,
+    PatchRepoBody, RemoveRepoQuery,
 };
 use tidebreak_core::RepoId;
 
@@ -22,6 +22,10 @@ pub async fn create_repo(
         .register_repo(
             PathBuf::from(body.path),
             RepoRegistration {
+                // A registration names a directory that already exists, so it
+                // is never Tidebreak's to delete. Only the clone path sets
+                // this, and a client cannot claim it.
+                cloned_from: None,
                 display_name: body.display_name,
                 default_base_ref: body.default_base_ref,
                 branch_prefix: body.branch_prefix,
@@ -86,11 +90,20 @@ pub async fn patch_repo(
     Ok(Json(CodeRepoSnapshot::from(repo)))
 }
 
+/// `DELETE /code/repos/{id}` — remove a registration, optionally reclaiming
+/// the checkout.
+///
+/// Removal is soft: archived workspaces and their transcripts stay reachable.
+/// `reclaim_checkout` additionally deletes the directory, and is honored only
+/// for a repository Tidebreak cloned — 409 `checkout_not_reclaimable`
+/// otherwise, and `checkout_not_a_repository` if the path stopped being the
+/// checkout that was cloned.
 pub async fn delete_repo(
     code: ScopedCode,
     Path(id): Path<RepoId>,
+    Query(query): Query<RemoveRepoQuery>,
 ) -> Result<StatusCode, ServerError> {
-    code.remove_repo(id).await?;
+    code.remove_repo(id, query.reclaim_checkout).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

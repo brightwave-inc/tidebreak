@@ -48,6 +48,7 @@ async fn seed_owner(
             quick_actions: Vec::new(),
             created_at: Utc::now(),
             removed_at: None,
+            cloned_from: None,
         },
     )
     .await
@@ -269,6 +270,7 @@ async fn postgres_repository_paths_are_unique_per_owner() {
         quick_actions: Vec::new(),
         created_at: Utc::now(),
         removed_at: None,
+        cloned_from: None,
     };
     let removed = repo(&alice);
     insert_repo(&store, &removed).await.unwrap();

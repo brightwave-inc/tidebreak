@@ -5901,3 +5901,67 @@ fn branch_exists_in(repo_root: &std::path::Path, branch: &str) -> bool {
         .map(|out| out.status.success())
         .unwrap_or(false)
 }
+
+/// Reclaim deletes only a checkout Tidebreak made.
+///
+/// A registered repository is a directory the user already had, and the clone
+/// parent is a setting that moves, so there is no path test that stays
+/// honest. The recorded origin is the whole guard: without it this route is a
+/// recursive delete pointed at someone's own work.
+#[tokio::test]
+async fn reclaim_refuses_a_checkout_tidebreak_did_not_clone() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let repo_id = json_id(&repo_body);
+    let root = std::path::PathBuf::from(&repo);
+
+    let refused = client
+        .delete(format!(
+            "http://{addr}/code/repos/{repo_id}?reclaim_checkout=true"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "checkout_not_reclaimable");
+    assert!(
+        root.join(".git").exists(),
+        "a registered checkout must survive a refused reclaim"
+    );
+
+    // The registration still goes away; only the directory is spared.
+    let removed = client
+        .delete(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(
+        root.join(".git").exists(),
+        "removal must not delete the user's checkout"
+    );
+    let listed = client
+        .get(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert!(listed.is_empty(), "a removed registration leaves the list");
+}

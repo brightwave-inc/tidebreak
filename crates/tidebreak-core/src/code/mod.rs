@@ -601,6 +601,11 @@ pub struct CodeRepo {
     /// stops appearing in the repo list but keeps its archived workspaces and
     /// their transcripts reachable.
     pub removed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The remote this checkout was cloned from, when Tidebreak cloned it.
+    ///
+    /// `None` means the user registered a directory that already existed.
+    /// Only a checkout Tidebreak created is Tidebreak's to delete.
+    pub cloned_from: Option<String>,
 }
 
 /// Persisted workspace record.

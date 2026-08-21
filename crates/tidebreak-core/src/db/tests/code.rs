@@ -53,6 +53,7 @@ async fn seed_owner(
             quick_actions: Vec::new(),
             created_at: now(),
             removed_at: None,
+            cloned_from: None,
         },
     )
     .await
@@ -682,6 +683,7 @@ async fn the_same_repository_path_can_belong_to_two_owners() {
                 quick_actions: Vec::new(),
                 created_at: now(),
                 removed_at: None,
+                cloned_from: None,
             },
         )
         .await
@@ -967,6 +969,7 @@ async fn a_removed_repo_path_can_be_registered_again() {
         quick_actions: Vec::new(),
         created_at: now(),
         removed_at: None,
+        cloned_from: None,
     };
     insert_repo(&store, &replacement).await.unwrap();
 
@@ -1014,4 +1017,58 @@ async fn a_repo_is_not_removable_by_another_owner() {
         .await
         .unwrap());
     assert_eq!(list_repos(&store, &alice).await.unwrap().len(), 1);
+}
+
+/// Provenance is what makes a checkout reclaimable, so it must survive the
+/// round trip rather than being inferred later from a path.
+#[tokio::test]
+async fn a_cloned_repo_records_where_it_came_from() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let cloned = RepoId::new();
+    insert_repo(
+        &store,
+        &CodeRepo {
+            id: cloned,
+            owner: owner.clone(),
+            root_path: "/tmp/cloned-repo".into(),
+            display_name: "cloned".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: Vec::new(),
+            created_at: now(),
+            removed_at: None,
+            cloned_from: Some("https://example.invalid/team/repo.git".into()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let stored = get_repo(&store, &owner, cloned).await.unwrap().unwrap();
+    assert_eq!(
+        stored.cloned_from.as_deref(),
+        Some("https://example.invalid/team/repo.git")
+    );
+
+    // A registered repository records nothing, which is what keeps reclaim
+    // from ever pointing at a directory the user brought.
+    let (session_id, _) = seed_owner(&store, &owner, "registered").await;
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    let registered = get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .repo_id;
+    assert!(get_repo(&store, &owner, registered)
+        .await
+        .unwrap()
+        .unwrap()
+        .cloned_from
+        .is_none());
 }
