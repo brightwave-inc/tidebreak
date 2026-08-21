@@ -1520,16 +1520,7 @@ async fn bind_inner(
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
-    // The in-app browser adapter, where the embedding supplies one. The
-    // revocation hook makes session end synchronous end-to-end: the same
-    // `browser_tokens.revoke` that invalidates the session's bearer tells
-    // the native side to drop its capability before the end call returns.
     if let Some(browser_runtime) = browser_runtime {
-        let revoked_runtime = browser_runtime.clone();
-        let hook: code::browser_channel::RevocationHook = Arc::new(move |session| {
-            revoked_runtime.revoke_session(session);
-        });
-        code.browser_tokens.set_revocation_hook(hook);
         state.set_browser_runtime(browser_runtime);
     }
     // Before `initialize`: a boot-file or persisted replacement derives the
