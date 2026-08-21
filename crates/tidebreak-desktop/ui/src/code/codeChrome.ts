@@ -122,6 +122,74 @@ export function closeFocusedCodeTab(layout: LayoutState): LayoutState | null {
   return null;
 }
 
+/**
+ * The center strip the keyboard acts on, as one ordered list.
+ *
+ * A chord names a position on screen, so this counts what the reader can see
+ * rather than what the URL stores: the main agent is position 0 of the primary
+ * strip and file tabs follow it, and when the right-hand split holds focus the
+ * strip is that group alone — it draws no main-agent tab.
+ */
+function centerStrip(layout: LayoutState): {
+  region: CodeEditorRegion;
+  /** Whether position 0 is the conversation rather than an editor tab. */
+  hasConversation: boolean;
+  count: number;
+  position: number;
+} {
+  const chrome = splitCodeChromeLayout(layout);
+  if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
+    return {
+      region: "secondary",
+      hasConversation: false,
+      count: chrome.splitEditors.tabs.length,
+      position: chrome.splitEditors.activeIndex,
+    };
+  }
+  const editors = chrome.editors.tabs.length;
+  const onConversation =
+    editors === 0 || Boolean(chrome.editors.conversationFocused);
+  return {
+    region: "primary",
+    hasConversation: true,
+    count: editors + 1,
+    position: onConversation ? 0 : chrome.editors.activeIndex + 1,
+  };
+}
+
+/** How many tabs the focused center strip draws, counting the main agent. */
+export function centerTabCount(layout: LayoutState): number {
+  return centerStrip(layout).count;
+}
+
+/** Bring the center strip's `position`th tab forward, counting from zero. */
+export function selectCenterTab(
+  layout: LayoutState,
+  position: number,
+): LayoutState {
+  const strip = centerStrip(layout);
+  if (position < 0 || position >= strip.count) return layout;
+  if (!strip.hasConversation) {
+    return focusEditorTab(layout, position, strip.region);
+  }
+  if (position === 0) return focusConversation(layout);
+  return focusEditorTab(layout, position - 1, strip.region);
+}
+
+/**
+ * Step through the center strip, wrapping at both ends.
+ *
+ * Cycling wraps because that is what the chord does in every browser, and
+ * because a strip short enough to cycle by hand is one the reader can see the
+ * whole of — stopping at the end would read as the key having failed.
+ */
+export function stepCenterTab(layout: LayoutState, delta: number): LayoutState {
+  const strip = centerStrip(layout);
+  if (strip.count <= 1) return layout;
+  const next = (strip.position + delta + strip.count) % strip.count;
+  return selectCenterTab(layout, next);
+}
+
 /** Show the conversation while keeping file and diff tabs open. */
 export function focusConversation(layout: LayoutState): LayoutState {
   return {
@@ -402,6 +470,36 @@ export function moveEditorTab(
     without,
     target as CodeEditorPanel,
     "primary",
+  );
+}
+
+/**
+ * Send the focused tab to the other editor group.
+ *
+ * The strip draws this as two separate controls — a split button on the left
+ * group, "Move to main group" on the right — because a button sits on one side
+ * and can only mean one thing. A chord has no side, so it reads which group
+ * holds focus and moves that tab the only way it can go. Returns the layout
+ * unchanged when the conversation holds focus: a conversation is not a tab the
+ * split can hold.
+ */
+export function splitFocusedEditor(layout: LayoutState): LayoutState {
+  const chrome = splitCodeChromeLayout(layout);
+  if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
+    return moveEditorTab(
+      layout,
+      "secondary",
+      chrome.splitEditors.activeIndex,
+      "primary",
+    );
+  }
+  if (chrome.editors.tabs.length === 0) return layout;
+  if (chrome.editors.conversationFocused) return layout;
+  return moveEditorTab(
+    layout,
+    "primary",
+    chrome.editors.activeIndex,
+    "secondary",
   );
 }
 

@@ -107,6 +107,9 @@ export function CodeInspector({
     : (digest?.pr_state ?? workspace?.pr);
   const scope = useCodeUiStore((state) => state.inspectorScope);
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
+  const filesSearchPending = useCodeUiStore(
+    (state) => state.filesSearchPending,
+  );
   const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
   const [file, setFile] = useState<string | undefined>();
   const turnId = scope?.turnId;
@@ -122,6 +125,13 @@ export function CodeInspector({
     setTab(requestedTab.tab);
     onRequestedTabHandled?.(requestedTab.revision);
   }, [onRequestedTabHandled, requestedTab]);
+
+  // Search lives on the Files tab, so the find chord has to land there first.
+  // The panel itself clears the flag once it has the caret; this only moves
+  // the tab, which is a no-op when Files is already up.
+  useEffect(() => {
+    if (filesSearchPending) setTab("files");
+  }, [filesSearchPending]);
 
   function openFile(next: string, line?: number) {
     if (onOpenFile) {

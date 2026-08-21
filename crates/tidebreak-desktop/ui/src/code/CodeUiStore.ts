@@ -242,6 +242,24 @@ export type CodeUiStore = {
   runComposerPrompt: (scope: string, prompt: string) => boolean;
   takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
   finishComposerAction: (scope: string) => void;
+  /**
+   * Asks raised by the shell keymap that only a workspace surface can carry
+   * out.
+   *
+   * The shortcut listener lives above the route, so it cannot reach into the
+   * workspace's own state; it raises a flag here and the surface that owns the
+   * affordance takes it, the same way a queued composer prompt is taken. A
+   * flag rather than a counter because the ask does not queue — pressing the
+   * chord twice before the panel mounts is still one ask — and taking it is
+   * what keeps a later remount from repeating it.
+   */
+  quickOpenPending: boolean;
+  filesSearchPending: boolean;
+  requestQuickOpen: () => void;
+  takeQuickOpen: () => boolean;
+  /** Opens the review sidebar too: search is dead while that rail is hidden. */
+  requestFilesSearch: () => void;
+  takeFilesSearch: () => boolean;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
@@ -255,6 +273,23 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   terminalDrawerHeights: readStoredTerminalDrawerHeights(),
   pendingComposerPrompt: null,
   composerActionScope: null,
+  quickOpenPending: false,
+  filesSearchPending: false,
+  requestQuickOpen: () => set({ quickOpenPending: true }),
+  takeQuickOpen: () => {
+    if (!get().quickOpenPending) return false;
+    set({ quickOpenPending: false });
+    return true;
+  },
+  requestFilesSearch: () => {
+    storeReviewSidebarOpen(true);
+    set({ reviewSidebarOpen: true, filesSearchPending: true });
+  },
+  takeFilesSearch: () => {
+    if (!get().filesSearchPending) return false;
+    set({ filesSearchPending: false });
+    return true;
+  },
   offerComposerPrompt: (scope, prompt) =>
     set({ pendingComposerPrompt: { scope, text: prompt, submit: false } }),
   runComposerPrompt: (scope, prompt) => {

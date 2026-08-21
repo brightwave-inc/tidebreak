@@ -188,6 +188,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const setReviewSidebarOpen = useCodeUiStore(
     (state) => state.setReviewSidebarOpen,
   );
+  const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
     null,
@@ -438,6 +439,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     setQuickOpenTarget(region);
     setQuickOpenRequest((request) => request + 1);
   }
+
+  // The shell keymap raises the ask above the route; the workspace is what can
+  // answer it. Taking the flag is what stops a remount from reopening the
+  // picker over whatever the reader moved on to.
+  const splitFocused =
+    Boolean(layout.editorSplit?.focused) && chrome.splitEditors.tabs.length > 0;
+  useEffect(() => {
+    if (!quickOpenPending) return;
+    if (!useCodeUiStore.getState().takeQuickOpen()) return;
+    requestNewTab(splitFocused ? "secondary" : "primary");
+  }, [quickOpenPending, splitFocused]);
 
   /** Attach a child task's transcript (or the conversation when undefined). */
   function openWorkspaceTask(sessionId: string | undefined) {

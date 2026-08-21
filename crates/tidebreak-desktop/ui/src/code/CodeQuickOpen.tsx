@@ -22,7 +22,13 @@ import { friendlyErrorMessage } from "@/lib/utils";
 const QUICK_OPEN_LIMIT = 5000;
 const VISIBLE_RESULTS = 12;
 
-/** Centered, keyboard-first filename quick open for Cmd/Ctrl+P. */
+/**
+ * Centered, keyboard-first filename quick open.
+ *
+ * The chords that reach it — Cmd+T and Cmd+P — are in the shell keymap rather
+ * than a listener here, so they appear in the shortcuts dialog and respect the
+ * guard that keeps every shell chord out of an open dialog.
+ */
 export function CodeQuickOpen({
   client,
   workspaceId,
@@ -34,7 +40,7 @@ export function CodeQuickOpen({
   workspaceId: string;
   contentRevision: number;
   onOpenFile: (path: string) => void;
-  /** Increment to open the picker from a visible New tab control. */
+  /** Increment to open the picker: a New tab control, or the shell keymap. */
   openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
@@ -51,17 +57,6 @@ export function CodeQuickOpen({
     setOpenWorkspaceId(workspaceId);
     setOpen(true);
   }, [workspaceId]);
-
-  useEffect(() => {
-    function onQuickOpen(event: KeyboardEvent) {
-      if (event.key.toLowerCase() !== "p") return;
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
-      event.preventDefault();
-      reveal();
-    }
-    window.addEventListener("keydown", onQuickOpen);
-    return () => window.removeEventListener("keydown", onQuickOpen);
-  }, [reveal]);
 
   useEffect(() => {
     if (openRequest > 0) reveal();

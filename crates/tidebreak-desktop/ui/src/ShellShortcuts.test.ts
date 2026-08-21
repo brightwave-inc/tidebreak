@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   groupedShellShortcuts,
   isEditableTarget,
+  numberedTabIndex,
   resolveShellShortcut,
   SHELL_SHORTCUTS,
   shortcutKeycaps,
@@ -243,6 +244,21 @@ describe("shortcut help", () => {
       expect(listed).toHaveLength(live.length);
       expect(new Set(listed)).toEqual(new Set(live));
     }
+  });
+});
+
+describe("numbered tabs", () => {
+  it("sends 9 to the last tab and ignores digits past the strip", () => {
+    // Browsers count from one and keep the last digit for the end of the
+    // strip however long it is, so 9 is "the last" rather than "the ninth".
+    expect(numberedTabIndex("Digit1", 4)).toBe(0);
+    expect(numberedTabIndex("Digit4", 4)).toBe(3);
+    expect(numberedTabIndex("Digit9", 4)).toBe(3);
+    // A digit past the end does nothing, rather than quietly meaning the end:
+    // that would make every unused digit a second way to say 9.
+    expect(numberedTabIndex("Digit5", 4)).toBeNull();
+    expect(numberedTabIndex("Numpad2", 4)).toBe(1);
+    expect(numberedTabIndex("Digit1", 0)).toBeNull();
   });
 });
 

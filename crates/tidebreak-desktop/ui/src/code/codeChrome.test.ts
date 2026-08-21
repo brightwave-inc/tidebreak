@@ -9,6 +9,9 @@ import {
   closeFocusedCodeTab,
   closeOtherEditorTabs,
   codeBrowserIds,
+  centerTabCount,
+  selectCenterTab,
+  stepCenterTab,
   focusCodeChromeTab,
   focusConversation,
   focusEditorTab,
@@ -17,6 +20,7 @@ import {
   openCodeEditor,
   removedCodeBrowserIds,
   splitCodeChromeLayout,
+  splitFocusedEditor,
   toggleTerminalLayout,
 } from "./codeChrome";
 
@@ -345,6 +349,102 @@ describe("code chrome layout", () => {
     expect(mergeEditorSplit(split).tabs.filter((tab) => tab.type === "file")).toEqual([
       { type: "file", path: "src/lib.rs" },
     ]);
+  });
+
+  it("counts the main agent as the first numbered tab", () => {
+    // Cmd+1 names a position on screen, and position one is the main agent —
+    // the tab the strip always draws first and the URL never stores as one.
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: false,
+    };
+
+    expect(centerTabCount(layout)).toBe(3);
+    expect(selectCenterTab(layout, 0).conversationFocused).toBe(true);
+    const second = selectCenterTab(layout, 2);
+    expect(second.conversationFocused).toBe(false);
+    expect(second.tabs[second.activeIndex]).toEqual({
+      type: "diff",
+      path: "src/main.rs",
+    });
+    // The terminal is a drawer, not a tab, so it is not position four.
+    expect(selectCenterTab(layout, 3)).toBe(layout);
+  });
+
+  it("numbers the split group on its own, with no main agent in it", () => {
+    // The right-hand group draws editor tabs only, so its first position is a
+    // file rather than the conversation the left group leads with.
+    const layout = {
+      tabs: [{ type: "file" as const, path: "src/lib.rs" }],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: false,
+      editorSplit: {
+        tabs: [
+          { type: "file" as const, path: "README.md" },
+          { type: "file" as const, path: "Cargo.toml" },
+        ],
+        activeIndex: 0,
+        focused: true,
+      },
+    };
+
+    expect(centerTabCount(layout)).toBe(2);
+    expect(selectCenterTab(layout, 1).editorSplit?.activeIndex).toBe(1);
+  });
+
+  it("wraps when cycling past either end of the strip", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: true,
+    };
+
+    // Back from the main agent lands on the last tab, not on nothing.
+    expect(stepCenterTab(layout, -1).activeIndex).toBe(1);
+    expect(stepCenterTab(layout, 1).activeIndex).toBe(0);
+    // A strip of one is the conversation alone; cycling has nowhere to go.
+    expect(stepCenterTab(EMPTY_LAYOUT, 1)).toBe(EMPTY_LAYOUT);
+  });
+
+  it("sends the focused tab whichever way it can go", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "diff" as const, path: "src/main.rs" },
+      ],
+      activeIndex: 1,
+      fullscreen: false,
+    };
+
+    // From the left group the only direction is right.
+    const split = splitFocusedEditor(layout);
+    expect(split.tabs).toHaveLength(1);
+    expect(split.editorSplit?.tabs).toEqual([
+      { type: "diff", path: "src/main.rs" },
+    ]);
+    expect(split.editorSplit?.focused).toBe(true);
+
+    // And from the right group, back again: one chord, both directions.
+    expect(splitFocusedEditor(split).editorSplit?.tabs ?? []).toHaveLength(0);
+    expect(splitFocusedEditor(split).tabs).toHaveLength(2);
+
+    // The conversation is not a tab the split can hold, and an empty strip has
+    // nothing to send. Both decline by returning the layout untouched, which is
+    // what tells the shell to let the key through.
+    const onConversation = { ...layout, conversationFocused: true };
+    expect(splitFocusedEditor(onConversation)).toBe(onConversation);
+    expect(splitFocusedEditor(EMPTY_LAYOUT)).toBe(EMPTY_LAYOUT);
   });
 
   it("closes the editor tab that owns focus for the shell shortcut", () => {

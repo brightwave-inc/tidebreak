@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { useCodeUiStore } from "./CodeUiStore";
 import { FilesPanel } from "./FilesPanel";
 
 afterEach(() => {
@@ -207,13 +215,15 @@ describe("FilesPanel", () => {
     expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs", 12);
   });
 
-  it("focuses content search on Cmd+F and sends include and exclude globs", async () => {
+  it("takes a pending find ask and sends include and exclude globs", async () => {
     const client = makeClient();
     render(
       <FilesPanel client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
     );
     expect(await screen.findByText("README.md")).toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    // The find chord is a flag raised by the shell keymap, not a key this
+    // panel listens for: that is what lets Cmd+F work with the rail closed.
+    act(() => useCodeUiStore.getState().requestFilesSearch());
     const search = screen.getByRole("searchbox", { name: "Search file contents" });
     expect(search).toHaveFocus();
     await userEvent.setup().type(search, "crisp");

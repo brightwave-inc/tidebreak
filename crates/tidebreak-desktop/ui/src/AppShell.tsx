@@ -24,7 +24,11 @@ import {
 } from "./ChatDeletion";
 import { useChatListStore } from "./ChatListStore";
 import {
+  centerTabCount,
   closeFocusedCodeTab,
+  selectCenterTab,
+  splitFocusedEditor,
+  stepCenterTab,
   toggleTerminalLayout,
 } from "./code/codeChrome";
 import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
@@ -35,6 +39,7 @@ import {
   shellShortcutMode,
 } from "./code/routes";
 import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panel/panelUrl";
+import type { LayoutState } from "./panel/panelTypes";
 import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
 import { useComposerDrafts } from "./ComposerDrafts";
@@ -53,6 +58,7 @@ import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import {
+  numberedTabIndex,
   useShellShortcuts,
   type ShellShortcutHandlers,
   type ShellShortcutMode,
@@ -66,6 +72,19 @@ function focusComposer(): void {
   document
     .querySelector<HTMLTextAreaElement>("[data-composer-input]")
     ?.focus();
+}
+
+/**
+ * Whether a Monaco editor has the keyboard.
+ *
+ * Monaco binds its own Cmd+F to a find widget that searches the open file,
+ * which is what a reader inside a file means by the chord. The container class
+ * is Monaco's own and is on every instance, so this asks the DOM rather than
+ * tracking which of several editors last mounted.
+ */
+function isMonacoFocused(): boolean {
+  const active = document.activeElement;
+  return active instanceof Element && active.closest(".monaco-editor") !== null;
 }
 
 // Store actions are stable for the store's lifetime; these handles are for
@@ -167,6 +186,32 @@ export function AppShell() {
     };
   }, [navigate]);
 
+  /**
+   * Put the workspace's layout through one change and write it back.
+   *
+   * Every tab chord is the same three steps — read the layout out of the URL,
+   * hand it to one of the pure functions in `codeChrome`, navigate to the
+   * result — so they share this. Returning `false` declines the key: off a
+   * workspace there is no strip to act on, and a change that returned the
+   * layout untouched is one the strip could not make, so the key belongs to
+   * whatever is focused instead.
+   */
+  function applyCodeLayout(
+    change: (layout: LayoutState) => LayoutState,
+  ): boolean | void {
+    const { pathname, search } = router.state.location;
+    const workspaceId = codeWorkspaceIdFromPath(pathname);
+    if (!workspaceId) return false;
+    const layout = layoutFromSearch(search as PanelSearch);
+    const next = change(layout);
+    if (next === layout) return false;
+    void navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId },
+      search: searchFromLayout(next),
+    });
+  }
+
   // Shell shortcuts are defined here because these actions outlive any one
   // route: toggling the frame, starting a chat, reaching the composer, and
   // scaling the window all work wherever the reader is. Mode-scoped ones act
@@ -190,30 +235,32 @@ export function AppShell() {
     "toggle-code-review": () => {
       useCodeUiStore.getState().toggleReviewSidebar();
     },
-    "toggle-code-terminal": () => {
-      const { pathname, search } = router.state.location;
-      const workspaceId = codeWorkspaceIdFromPath(pathname);
-      if (!workspaceId) return;
-      const next = toggleTerminalLayout(layoutFromSearch(search as PanelSearch));
-      void navigate({
-        to: "/code/w/$workspaceId",
-        params: { workspaceId },
-        search: searchFromLayout(next),
-      });
+    "toggle-code-terminal": () => applyCodeLayout(toggleTerminalLayout),
+    "code-quick-open": () => {
+      const { pathname } = router.state.location;
+      if (!codeWorkspaceIdFromPath(pathname)) return false;
+      useCodeUiStore.getState().requestQuickOpen();
     },
-    "close-tab": () => {
-      const { pathname, search } = router.state.location;
-      const workspaceId = codeWorkspaceIdFromPath(pathname);
-      if (!workspaceId) return false;
-      const layout = layoutFromSearch(search as PanelSearch);
-      const next = closeFocusedCodeTab(layout);
-      if (!next) return false;
-      void navigate({
-        to: "/code/w/$workspaceId",
-        params: { workspaceId },
-        search: searchFromLayout(next),
-      });
+    "code-find": () => {
+      // Monaco owns Cmd+F while it has focus, and its find widget is the
+      // better answer inside a file than a filename search is. Declining the
+      // key hands it back to the editor rather than to the shell.
+      if (isMonacoFocused()) return false;
+      const { pathname } = router.state.location;
+      if (!codeWorkspaceIdFromPath(pathname)) return false;
+      useCodeUiStore.getState().requestFilesSearch();
     },
+    "code-prev-tab": () => applyCodeLayout((l) => stepCenterTab(l, -1)),
+    "code-next-tab": () => applyCodeLayout((l) => stepCenterTab(l, 1)),
+    "code-select-tab": (event) =>
+      applyCodeLayout((layout) => {
+        const position = numberedTabIndex(event.code, centerTabCount(layout));
+        return position === null ? layout : selectCenterTab(layout, position);
+      }),
+    "code-split-editor": () => applyCodeLayout(splitFocusedEditor),
+    // A closed tab is the one case the pure function reports with `null`, since
+    // "nothing here to close" is not the same as "closing changed nothing".
+    "close-tab": () => applyCodeLayout((l) => closeFocusedCodeTab(l) ?? l),
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,

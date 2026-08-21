@@ -16,6 +16,12 @@ export type ShellShortcutAction =
   | "code-new-workspace"
   | "toggle-code-review"
   | "toggle-code-terminal"
+  | "code-quick-open"
+  | "code-find"
+  | "code-prev-tab"
+  | "code-next-tab"
+  | "code-select-tab"
+  | "code-split-editor"
   | "close-tab"
   | "focus-composer"
   | "zoom-in"
@@ -168,6 +174,85 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     codes: ["KeyJ"],
     mod: true,
     description: "Show or hide the terminal",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // The tab strip's plus control opens the file picker first, so the chord
+    // that means "new tab" everywhere else opens the same thing here rather
+    // than a blank tab there is nothing to put in.
+    id: "code-quick-open",
+    codes: ["KeyT"],
+    mod: true,
+    description: "New tab: open a file by name",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-quick-open",
+    codes: ["KeyP"],
+    mod: true,
+    description: "Open a file by name",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-find",
+    codes: ["KeyF"],
+    mod: true,
+    description: "Search the worktree files",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // Cmd+Shift+[ and ] are the browser's tab-cycling chords. Shift is held,
+    // so the key the keyboard reports is the shifted glyph; both are listed
+    // and the unshifted one leads, because that is the label on the keycap.
+    id: "code-prev-tab",
+    keys: ["[", "{"],
+    mod: true,
+    shift: true,
+    description: "Previous tab",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-next-tab",
+    keys: ["]", "}"],
+    mod: true,
+    shift: true,
+    description: "Next tab",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-select-tab",
+    codes: [
+      "Digit1", "Digit2", "Digit3", "Digit4", "Digit5",
+      "Digit6", "Digit7", "Digit8", "Digit9",
+      "Numpad1", "Numpad2", "Numpad3", "Numpad4", "Numpad5",
+      "Numpad6", "Numpad7", "Numpad8", "Numpad9",
+    ],
+    mod: true,
+    description: "Go to a tab by number, or 9 for the last",
+    group: "Code",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // The chord VS Code uses for the same move. The strip needs two controls
+    // for it because a button sits on one side and can only point one way; a
+    // chord reads which group has focus and sends that tab the other way.
+    id: "code-split-editor",
+    keys: ["\\"],
+    mod: true,
+    description: "Move the focused tab to the other editor group",
     group: "Code",
     scope: "code",
     allowInEditable: true,
@@ -403,9 +488,33 @@ function hasOpenModalDialog(doc: Document): boolean {
   );
 }
 
+/**
+ * The tab a numbered chord names, or `null` when the strip is not that long.
+ *
+ * Browsers count from one and reserve the last digit for the last tab however
+ * many there are, so 9 means "the end" rather than "the ninth". `count` is
+ * what the strip actually holds, so 4 on a three-tab strip does nothing
+ * instead of silently jumping to the end.
+ */
+export function numberedTabIndex(code: string, count: number): number | null {
+  const digit = Number(code.replace(/^(Digit|Numpad)/, ""));
+  if (!Number.isInteger(digit) || digit < 1 || digit > 9) return null;
+  if (count <= 0) return null;
+  if (digit === 9) return count - 1;
+  return digit <= count ? digit - 1 : null;
+}
+
+/**
+ * What a shortcut does, given the event that triggered it.
+ *
+ * The event is passed rather than swallowed because one definition can stand
+ * for a family of chords: Cmd+1 through Cmd+9 are one action whose argument is
+ * the digit, and only the event knows which key was struck. Returning `false`
+ * declines the key and lets it through to whatever is focused.
+ */
 export type ShellShortcutHandlers = Record<
   ShellShortcutAction,
-  () => boolean | void
+  (event: KeyboardEvent) => boolean | void
 >;
 
 /**
@@ -440,7 +549,7 @@ export function useShellShortcuts(
         mode: modeRef.current(),
       });
       if (!def) return;
-      const handled = handlersRef.current[def.id]();
+      const handled = handlersRef.current[def.id](event);
       if (handled === false) return;
       event.preventDefault();
     }
