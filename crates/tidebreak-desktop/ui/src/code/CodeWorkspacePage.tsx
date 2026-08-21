@@ -218,6 +218,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     (state) => state.setReviewSidebarOpen,
   );
   const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
+  const archivePending = useCodeUiStore((state) => state.archivePending);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
     null,
@@ -560,6 +561,29 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!useCodeUiStore.getState().takeQuickOpen()) return;
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
+
+  /**
+   * Archive from the keyboard, through the same confirmation the menu uses.
+   *
+   * The page takes this one rather than the header control, because archiving
+   * is a workspace command and not a step in the pull-request workflow.
+   */
+  useEffect(() => {
+    if (!archivePending) return;
+    if (!useCodeUiStore.getState().takeArchiveWorkspace()) return;
+    if (!workspace) return;
+    if (workspace.status === "archived") {
+      toast.message("This workspace is already archived");
+      return;
+    }
+    run("archive", {
+      workspace,
+      title: title ?? workspace.title,
+      session: session ?? undefined,
+    });
+    // The chord is the trigger; the rest is state read when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivePending]);
 
   /**
    * Attach a child task's transcript (or the conversation when undefined).

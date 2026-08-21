@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   ChevronDown,
   CircleDotDashed,
@@ -11,11 +11,13 @@ import { toast } from "sonner";
 
 import { HttpError, type ApiClient } from "../api/client";
 import type {
+  CodePrMergeMethod,
   CodeWatchSnapshot,
   CodeWatchState,
   PullRequestDigest,
 } from "../api/types";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,11 +32,12 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { prWorkflowPrompt, type PrWorkflowAction } from "./prActions";
+import { prWorkflowPrompt, type PrPromptAction } from "./prActions";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import {
   checkSummary,
+  resolveWorkflowShortcut,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
@@ -62,6 +65,8 @@ export function WorkspaceWorkflowControl({
     ApiClient,
     | "pushCodeWorkspace"
     | "createCodePullRequest"
+    | "markCodePrReady"
+    | "mergeCodePr"
     | "startCodeWatch"
     | "stopCodeWatch"
   >;
@@ -76,8 +81,12 @@ export function WorkspaceWorkflowControl({
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const popoverTitleId = useId();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const runComposerPrompt = useCodeUiStore(
     (state) => state.runComposerPrompt,
+  );
+  const workflowShortcutPending = useCodeUiStore(
+    (state) => state.workflowShortcutPending,
   );
   const agentActionRunning = useCodeUiStore(
     (state) => state.composerActionScope !== null,
@@ -116,7 +125,48 @@ export function WorkspaceWorkflowControl({
       )
     : model.secondary;
 
-  function runAgentAction(action: Exclude<PrWorkflowAction, "watch_and_fix">) {
+  /**
+   * Carry out a Ship chord raised by the shell.
+   *
+   * Taken here rather than run there because the chord's meaning depends on the
+   * branch and pull-request state this control already holds. Effects run after
+   * the render that saw the request, so the model this resolves against is the
+   * current one. Taking the request is what keeps a remount from repeating it.
+   */
+  useEffect(() => {
+    if (workflowShortcutPending?.workspaceId !== workspaceId) return;
+    const shortcut = useCodeUiStore
+      .getState()
+      .takeWorkflowShortcut(workspaceId);
+    if (shortcut === null) return;
+    const resolution = resolveWorkflowShortcut(shortcut, model, watchActive);
+    if ("blocked" in resolution) {
+      toast.message(resolution.blocked);
+      return;
+    }
+    if ("stopWatch" in resolution) {
+      void stopWatch();
+      return;
+    }
+    if ("autoMerge" in resolution) {
+      if (busy !== null) {
+        toast.message("Another workspace action is already running");
+        return;
+      }
+      void mergePr(true);
+      return;
+    }
+    if (busy !== null || agentActionRunning) {
+      toast.message("Another workspace action is already running");
+      return;
+    }
+    void run(resolution.run);
+    // Only the request re-runs this. The rest is state the effect reads at the
+    // moment the chord arrives; listing it would re-fire on every status poll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowShortcutPending, workspaceId]);
+
+  function runAgentAction(action: PrPromptAction) {
     const pr = model.pr;
     if (!pr) return;
     setDetailsOpen(false);
@@ -133,6 +183,84 @@ export function WorkspaceWorkflowControl({
       toast.success("Watching the pull request");
     } catch (err) {
       const message = friendlyErrorMessage(err, "Could not start the watch");
+      resource.setMutationError(message);
+      toast.error(message);
+    }
+  }
+
+  /**
+   * Merge through the user-initiated endpoint, not through the agent.
+   *
+   * Decision 42 reserves merging for the user: the general `gh` runner refuses
+   * merge argv, and only `POST /code/workspaces/{id}/pr/merge` reaches the
+   * runner that allows it. Asking an agent to merge would route around that,
+   * so this button and its chord call the endpoint the review sidebar's Merge
+   * button calls.
+   *
+   * Squash is the default the review sidebar opens on, and the confirmation
+   * names the method, so the reader sees which one before it lands. Pick a
+   * different one from the review sidebar.
+   */
+  async function mergePr(auto = false, method: CodePrMergeMethod = "squash") {
+    const pr = model.pr;
+    if (!pr) return;
+    setDetailsOpen(false);
+    const base = pr.base_branch ?? "its base branch";
+    // Two forms of the same verb: the immediate merge reads as something done
+    // to the pull request, the armed one as something GitHub will do.
+    const [landed, lands] =
+      method === "squash"
+        ? ["squash-merged", "squash-merges"]
+        : method === "rebase"
+          ? ["rebased and merged", "rebases and merges"]
+          : ["merged", "merges"];
+    const ok = await confirm({
+      title: auto ? `Auto-merge #${pr.number}?` : `Merge #${pr.number}?`,
+      description: auto
+        ? `GitHub ${lands} the pull request into ${base} once the remaining requirements pass.`
+        : `The pull request is ${landed} into ${base} on GitHub.`,
+      confirmLabel: auto ? "Enable auto-merge" : "Merge",
+    });
+    if (!ok) return;
+    try {
+      const next = await resource.runMutation(auto ? "auto_merge" : "merge", () =>
+        client.mergeCodePr(workspaceId, { method, auto }),
+      );
+      if (!next) return;
+      resource.adopt(next);
+      toast.success(auto ? "Auto-merge enabled" : "Merged");
+    } catch (err) {
+      // The host's own refusal is the useful sentence here, so it goes to the
+      // status line rather than being flattened into a generic failure.
+      const message =
+        err instanceof HttpError && err.kind === "pr_not_mergeable"
+          ? err.message
+          : friendlyErrorMessage(err, "Could not merge");
+      resource.setMutationError(message);
+      toast.error(message);
+    }
+  }
+
+  /**
+   * Take the pull request out of draft through the user-initiated endpoint.
+   *
+   * Readying a draft is a pull-request state change, which decision 42 keeps
+   * off the agent path for the same reason merging is: it puts work in front
+   * of reviewers, and an agent should not decide when that happens.
+   */
+  async function markReady() {
+    const pr = model.pr;
+    if (!pr) return;
+    setDetailsOpen(false);
+    try {
+      const next = await resource.runMutation("mark_ready", () =>
+        client.markCodePrReady(workspaceId),
+      );
+      if (!next) return;
+      resource.adopt(next);
+      toast.success("Marked ready for review");
+    } catch (err) {
+      const message = friendlyErrorMessage(err, "Could not mark it ready");
       resource.setMutationError(message);
       toast.error(message);
     }
@@ -208,12 +336,20 @@ export function WorkspaceWorkflowControl({
       case "watch_and_fix":
         await startWatch();
         return;
+      case "merge":
+        await mergePr();
+        return;
+      case "mark_ready":
+        await markReady();
+        return;
       default:
         runAgentAction(action);
     }
   }
 
   return (
+    <>
+      {confirmDialog}
     <div
       className="border-border-subtle bg-page-background/70 flex min-w-0 max-w-[min(40vw,26rem)] shrink items-center overflow-hidden rounded-lg border shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
       data-testid="workspace-workflow-control"
@@ -562,6 +698,7 @@ export function WorkspaceWorkflowControl({
         </DropdownMenu>
       ) : null}
     </div>
+    </>
   );
 }
 

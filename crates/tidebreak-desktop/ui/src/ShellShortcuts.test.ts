@@ -121,6 +121,81 @@ describe("shell shortcut resolution", () => {
     ).toBe("toggle-sidebar");
   });
 
+  it("separates the shifted Ship chords from their unshifted neighbours", () => {
+    // Cmd+P opens a file and Cmd+Shift+P opens a pull request; Cmd+W closes a
+    // tab and Cmd+Shift+W starts a watch; Cmd+R reloads and Cmd+Shift+R
+    // rebases. Shift is the only thing between each pair, so a shift the
+    // matcher ignored would make three chords do the wrong, sometimes
+    // destructive, thing.
+    const pairs: Array<[string, ShellShortcutAction, ShellShortcutAction]> = [
+      ["KeyP", "code-quick-open", "code-create-pr"],
+      ["KeyW", "close-tab", "code-watch-pr"],
+      ["KeyR", "reload-app", "code-update-branch"],
+    ];
+    for (const [code, plain, shifted] of pairs) {
+      const context_ = context({ mode: "code" });
+      expect(
+        resolveShellShortcut(keyEvent({ code, shiftKey: false }), context_)?.id,
+      ).toBe(plain);
+      expect(
+        resolveShellShortcut(keyEvent({ code, shiftKey: true }), context_)?.id,
+      ).toBe(shifted);
+    }
+  });
+
+  it("keeps the Ship chords out of chat, where there is nothing to ship", () => {
+    const ship: Array<[Partial<KeyboardEvent>, ShellShortcutAction]> = [
+      [{ code: "Enter" }, "code-workflow-next"],
+      [{ code: "KeyM" }, "code-merge-pr"],
+      [{ code: "KeyO" }, "code-view-pr"],
+      [{ code: "KeyG" }, "code-source-control"],
+      [{ code: "KeyA" }, "code-archive-workspace"],
+    ];
+    for (const [event, id] of ship) {
+      const pressed = keyEvent({ ...event, shiftKey: true });
+      expect(resolveShellShortcut(pressed, context({ mode: "code" }))?.id).toBe(
+        id,
+      );
+      expect(
+        resolveShellShortcut(pressed, context({ mode: "chat" })),
+      ).toBeNull();
+    }
+    // Cmd+Shift+A in chat is still free for the text field's own use.
+    expect(
+      resolveShellShortcut(
+        keyEvent({ code: "KeyA", shiftKey: true }),
+        context({ mode: "chat" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("walks the rail on Cmd+Alt+Arrow, even from the composer", () => {
+    // Cmd+Shift+Arrow selects to the end of a text field, so rail walking takes
+    // Alt instead and stays usable while the reader is writing a prompt.
+    const up = keyEvent({
+      key: "ArrowUp",
+      code: "ArrowUp",
+      altKey: true,
+    });
+    expect(resolveShellShortcut(up, context({ mode: "code" }))?.id).toBe(
+      "code-prev-workspace",
+    );
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "ArrowDown", code: "ArrowDown", altKey: true }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("code-next-workspace");
+    // Without the command modifier it is Option+Arrow, which belongs to the
+    // text field and to nothing here.
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "ArrowUp", code: "ArrowUp", altKey: true, metaKey: false }),
+        context({ mode: "code" }),
+      ),
+    ).toBeNull();
+  });
+
   it("leaves Alt+Arrow to the field the reader is typing in", () => {
     // Option+Arrow jumps a word in every macOS text field. History navigation
     // takes it only when focus is somewhere the keys mean nothing else.
@@ -224,6 +299,13 @@ describe("shortcut help", () => {
     const zoomIn = SHELL_SHORTCUTS.find((def) => def.id === "zoom-in")!;
     expect(shortcutKeycaps(zoomIn, true)).toEqual(["⌘", "="]);
     expect(shortcutKeycaps(zoomIn, false)).toEqual(["Ctrl", "="]);
+    // Named keys draw as the glyph on the keycap, not as their DOM name.
+    const next = SHELL_SHORTCUTS.find((def) => def.id === "code-workflow-next")!;
+    expect(shortcutKeycaps(next, true)).toEqual(["⌘", "⇧", "↩"]);
+    const nextWorkspace = SHELL_SHORTCUTS.find(
+      (def) => def.id === "code-next-workspace",
+    )!;
+    expect(shortcutKeycaps(nextWorkspace, true)).toEqual(["⌘", "⌥", "↓"]);
     expect(usesCommandModifier("Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe(
       true,
     );
