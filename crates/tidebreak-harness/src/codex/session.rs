@@ -460,9 +460,7 @@ pub(crate) fn compose_app_server_plan(
         let escaped = serde_json::to_string(&spec.bridge_command().to_string_lossy())
             .unwrap_or_else(|_| String::from("\"\""));
         argv.push(
-            format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"
-            )
-            .into(),
+            format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"),
         );
     }
     let mut env = extra_env.to_vec();
