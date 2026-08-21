@@ -1566,7 +1566,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
 })()
 "#;
 
-const INSPECT_OVERLAY_SCRIPT: &str = r#"
+const INSPECT_OVERLAY_SCRIPT: &str = r##"
 (() => {
   const existing = document.getElementById("__tidebreak_inspect_overlay__");
   if (existing) return "already_injected";
@@ -1651,7 +1651,7 @@ const INSPECT_OVERLAY_SCRIPT: &str = r#"
   window.__tidebreak_highlight_inspect__ = highlight;
   return highlight();
 })()
-"#;
+"##;
 
 const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
 (() => {
