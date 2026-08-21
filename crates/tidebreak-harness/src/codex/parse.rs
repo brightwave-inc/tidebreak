@@ -482,12 +482,20 @@ impl CodexStreamParser {
         self.unrecognized += 1;
         let mut rendered = payload.to_string();
         crate::text::truncate_on_char_boundary(&mut rendered, MAX_UNRECOGNIZED_LOG);
-        tracing::debug!(
+        // The kind alone is what makes a dropped event findable later, and
+        // it carries no engine payload, so it rides at info. The truncated
+        // body stays at debug for whoever is actually chasing one.
+        tracing::info!(
             target: "tidebreak_harness::codex",
             unrecognized = self.unrecognized,
             kind = label,
-            payload = %rendered,
             "unrecognized engine event"
+        );
+        tracing::debug!(
+            target: "tidebreak_harness::codex",
+            kind = label,
+            payload = %rendered,
+            "unrecognized engine event payload"
         );
     }
 }
