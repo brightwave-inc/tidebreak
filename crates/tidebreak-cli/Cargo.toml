@@ -30,6 +30,7 @@ tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-server = { path = "../tidebreak-server" }
+async-trait = { workspace = true }
 # Decoding the broker's binary file reads, whose protocol shape is base64 —
 # `import_connected_file` publishes those bytes as a conversation source.
 base64 = { workspace = true }
@@ -44,6 +45,7 @@ tokio-tungstenite = { workspace = true }
 # The connected-folder executor's diagnostics belong in the profile's log file:
 # it polls, so stderr would flood a print run.
 tracing = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
