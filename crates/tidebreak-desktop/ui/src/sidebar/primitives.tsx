@@ -38,9 +38,11 @@ function SidebarResizeHandle({
 }) {
   const sidebarWidth = useUiStore((state) => state.sidebarWidth);
   const setSidebarWidth = useUiStore((state) => state.setSidebarWidth);
-  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(
-    null,
-  );
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const [dragging, setDragging] = useState(false);
 
   const endDrag = useCallback(
@@ -81,7 +83,9 @@ function SidebarResizeHandle({
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setSidebarWidth(drag.startWidth + (event.clientX - drag.startX), { persist: false });
+    setSidebarWidth(drag.startWidth + (event.clientX - drag.startX), {
+      persist: false,
+    });
   };
 
   const onDoubleClick = () => {
@@ -130,7 +134,11 @@ function SidebarResizeHandle({
   );
 }
 
-export function Sidebar({ className, children, ...props }: ComponentProps<"div">) {
+export function Sidebar({
+  className,
+  children,
+  ...props
+}: ComponentProps<"div">) {
   const collapsed = useUiStore((state) => state.sidebarCollapsed);
   const sidebarWidthPx = useUiStore((state) => state.sidebarWidth);
   const [resizing, setResizing] = useState(false);
@@ -182,7 +190,13 @@ export const SidebarContent = forwardRef<
   ComponentProps<"div"> & { asChild?: boolean }
 >(function SidebarContent({ asChild = false, className, ...props }, ref) {
   const Comp = asChild ? Slot : "div";
-  return <Comp ref={ref} className={cn("mt-2 flex grow flex-col", className)} {...props} />;
+  return (
+    <Comp
+      ref={ref}
+      className={cn("mt-2 flex grow flex-col", className)}
+      {...props}
+    />
+  );
 });
 
 export function SidebarFooter({
@@ -194,7 +208,10 @@ export function SidebarFooter({
   return <Comp className={cn("shrink-0 p-2", className)} {...props} />;
 }
 
-export function SidebarSectionTitle({ className, ...props }: ComponentProps<"div">) {
+export function SidebarSectionTitle({
+  className,
+  ...props
+}: ComponentProps<"div">) {
   return (
     <div
       className={cn(

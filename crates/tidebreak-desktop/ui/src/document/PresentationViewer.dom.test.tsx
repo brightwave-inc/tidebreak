@@ -2,7 +2,10 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import { clearFileDownloadCache, type FileBytesSource } from "./useFileDownload";
+import {
+  clearFileDownloadCache,
+  type FileBytesSource,
+} from "./useFileDownload";
 
 const presentationMocks = vi.hoisted(() => ({
   pptxProps: null as Record<string, unknown> | null,
@@ -78,14 +81,19 @@ it("renders PPTX directly with Extend and no upload or download actions", async 
   });
 });
 
-it.each([PPT, ODP])("keeps %s on the LibreOffice compatibility path", async (mediaType) => {
-  const { getByTestId, queryByTestId } = render(
-    <PresentationViewer source={source(mediaType)} mediaType={mediaType} />,
-  );
+it.each([PPT, ODP])(
+  "keeps %s on the LibreOffice compatibility path",
+  async (mediaType) => {
+    const { getByTestId, queryByTestId } = render(
+      <PresentationViewer source={source(mediaType)} mediaType={mediaType} />,
+    );
 
-  await waitFor(() => expect(getByTestId("converted-pdf-viewer")).toBeTruthy());
-  expect(queryByTestId("extend-pptx-viewer")).toBeNull();
-});
+    await waitFor(() =>
+      expect(getByTestId("converted-pdf-viewer")).toBeTruthy(),
+    );
+    expect(queryByTestId("extend-pptx-viewer")).toBeNull();
+  },
+);
 
 it("falls back to LibreOffice when the direct PPTX renderer rejects a deck", async () => {
   const { getByTestId } = render(

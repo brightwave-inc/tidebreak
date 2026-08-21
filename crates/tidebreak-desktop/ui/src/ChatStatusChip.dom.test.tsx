@@ -54,7 +54,9 @@ afterEach(() => {
 });
 
 it("summarizes activity on its face and opens the chat-scoped places", async () => {
-  const { onOpenOutputs, onOpenFolders, onOpenPermissions } = renderChip({ outputCount: 2 });
+  const { onOpenOutputs, onOpenFolders, onOpenPermissions } = renderChip({
+    outputCount: 2,
+  });
 
   // With the whole canvas available, the useful places are visible without a
   // disclosure click and the summary falls back to what the chat produced.
@@ -72,10 +74,14 @@ it("summarizes activity on its face and opens the chat-scoped places", async () 
 it("folds the open card down to an icon and restores it", async () => {
   renderChip({ outputCount: 2 });
 
-  await userEvent.click(screen.getByRole("button", { name: "Collapse work activity" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Collapse work activity" }),
+  );
   expect(screen.queryByLabelText("Work activity")).not.toBeInTheDocument();
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand work activity" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Expand work activity" }),
+  );
   expect(screen.getByLabelText("Work activity")).toHaveTextContent("2 outputs");
 });
 
@@ -85,7 +91,11 @@ it("folds the open card down to an icon and restores it", async () => {
  */
 it("counts live background runs and opens the agents table", async () => {
   const { onOpenAgents } = renderChip({
-    runs: [run("run-1", "running"), run("run-2", "retry_wait"), run("run-3", "completed")],
+    runs: [
+      run("run-1", "running"),
+      run("run-2", "retry_wait"),
+      run("run-3", "completed"),
+    ],
     compact: true,
   });
 

@@ -65,7 +65,10 @@ describe("ChatSessionStore", () => {
     const before = store.getState().messages;
     const effects = store
       .getState()
-      .applyEvent({ seq: 3, event: { type: "text_delta", text: "late" } }, deps);
+      .applyEvent(
+        { seq: 3, event: { type: "text_delta", text: "late" } },
+        deps,
+      );
     expect(effects).toEqual([]);
     expect(store.getState().messages).toBe(before);
   });

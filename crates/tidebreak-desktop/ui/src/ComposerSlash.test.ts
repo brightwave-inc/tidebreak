@@ -21,8 +21,18 @@ const CATALOG: PluginCatalog = {
       compatibility: { status: "unchecked", issues: [] },
       enabled: true,
       skills: [
-        { name: "docx", description: "Documents.", origin: "builtin", enabled: true },
-        { name: "pptx", description: "Decks.", origin: "builtin", enabled: false },
+        {
+          name: "docx",
+          description: "Documents.",
+          origin: "builtin",
+          enabled: true,
+        },
+        {
+          name: "pptx",
+          description: "Decks.",
+          origin: "builtin",
+          enabled: false,
+        },
       ],
     },
     {
@@ -35,12 +45,22 @@ const CATALOG: PluginCatalog = {
       compatibility: { status: "unchecked", issues: [] },
       enabled: false,
       skills: [
-        { name: "charts", description: "Plots.", origin: "builtin", enabled: true },
+        {
+          name: "charts",
+          description: "Plots.",
+          origin: "builtin",
+          enabled: true,
+        },
       ],
     },
   ],
   skills: [
-    { name: "notes", description: "Takes notes.", origin: "user", enabled: true },
+    {
+      name: "notes",
+      description: "Takes notes.",
+      origin: "user",
+      enabled: true,
+    },
   ],
   prompts: [
     {
@@ -112,9 +132,9 @@ describe("availableSlashOptions", () => {
       "notes",
       "weekly-update",
     ]);
-    expect(
-      available.filter((o) => o.unavailable).map((o) => o.name),
-    ).toEqual(["charts"]);
+    expect(available.filter((o) => o.unavailable).map((o) => o.name)).toEqual([
+      "charts",
+    ]);
   });
 
   it("drops a bundle only once every member it could add is on the message", () => {

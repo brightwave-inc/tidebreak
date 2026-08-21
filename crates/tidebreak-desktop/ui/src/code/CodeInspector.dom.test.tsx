@@ -89,7 +89,8 @@ function makeClient(): Pick<
           id: "99",
           kind: "inline",
           author: "reviewer",
-          avatar_url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
+          avatar_url:
+            "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
           url: "https://github.com/acme/app/pull/41#discussion_r99",
           body: "**Rename** this :rocket:",
           path: "src/login.rs",
@@ -132,9 +133,9 @@ it("leaves quick PR actions to the workspace header", async () => {
 
   await userEvent.setup().click(screen.getByRole("tab", { name: "Files" }));
   expect(screen.queryByTestId("pr-action-bar")).not.toBeInTheDocument();
-  await userEvent.setup().click(
-    screen.getByRole("tab", { name: "Source control" }),
-  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Source control" }));
   expect(screen.queryByTestId("pr-action-bar")).not.toBeInTheDocument();
 });
 
@@ -149,7 +150,9 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
     />,
   );
 
-  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Pull request" }));
   await screen.findByText("Fix login flow");
 
   // Draft wins over the open state token and offers no impossible merge action.
@@ -172,7 +175,9 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
 
   // Comments load on open, with the inline anchor visible.
   await waitFor(() =>
-    expect(screen.getByText("Rename", { selector: "strong" })).toBeInTheDocument(),
+    expect(
+      screen.getByText("Rename", { selector: "strong" }),
+    ).toBeInTheDocument(),
   );
   expect(screen.getByText(/this 🚀/)).toBeInTheDocument();
   expect(screen.getByText("src/login.rs:12")).toBeInTheDocument();
@@ -286,15 +291,17 @@ it("only enables direct merge for an affirmatively ready PR", async () => {
     <CodeInspector
       client={makeClient() as never}
       workspaceId="ws-1"
-      workspace={{
-        ...WORKSPACE,
-        pr: {
-          ...OPEN_PR,
-          mergeable: "mergeable",
-          merge_state_status: "clean",
-          checks: [{ name: "ci / ui", bucket: "pass" }],
-        },
-      } as never}
+      workspace={
+        {
+          ...WORKSPACE,
+          pr: {
+            ...OPEN_PR,
+            mergeable: "mergeable",
+            merge_state_status: "clean",
+            checks: [{ name: "ci / ui", bucket: "pass" }],
+          },
+        } as never
+      }
       contentRevision={0}
     />,
   );
@@ -344,7 +351,9 @@ it("routes manual refresh through the shared serialized PR resource", async () =
     />,
   );
 
-  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Pull request" }));
   await userEvent
     .setup()
     .click(screen.getByRole("button", { name: "Refresh pull request" }));
@@ -374,7 +383,9 @@ it("shows skipped checks as neutral and hides stale review state after merge", a
     />,
   );
 
-  await userEvent.setup().click(screen.getByRole("tab", { name: "Pull request" }));
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Pull request" }));
   expect(screen.getAllByText("Merged").length).toBeGreaterThan(0);
   expect(screen.getByText("1 passing")).toBeInTheDocument();
   expect(screen.getByText("1 skipped")).toBeInTheDocument();
@@ -398,7 +409,9 @@ it("attaches, locally resolves, hides, and restores a rich review comment", asyn
 
   await user.click(screen.getByRole("tab", { name: "Pull request" }));
   await screen.findByText("Rename", { selector: "strong" });
-  expect(document.querySelector("img[src^='data:image/svg+xml']")).not.toBeNull();
+  expect(
+    document.querySelector("img[src^='data:image/svg+xml']"),
+  ).not.toBeNull();
 
   await user.click(
     screen.getByRole("button", { name: "Comment actions for reviewer" }),
@@ -424,9 +437,13 @@ it("attaches, locally resolves, hides, and restores a rich review comment", asyn
     screen.getByRole("button", { name: "Comment actions for reviewer" }),
   );
   await user.click(screen.getByRole("menuitem", { name: "Hide in Tidebreak" }));
-  expect(screen.queryByText("Rename", { selector: "strong" })).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("Rename", { selector: "strong" }),
+  ).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Show 1 hidden" }));
-  expect(await screen.findByText("Rename", { selector: "strong" })).toBeInTheDocument();
+  expect(
+    await screen.findByText("Rename", { selector: "strong" }),
+  ).toBeInTheDocument();
 });
 
 it("exposes a tablist and passes the scoped turn into files and source", async () => {
@@ -498,9 +515,9 @@ it("keeps patch contents out of Source control and opens them in the center", as
     />,
   );
 
-  await userEvent.setup().click(
-    screen.getByRole("tab", { name: "Source control" }),
-  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Source control" }));
   await userEvent
     .setup()
     .click(screen.getByRole("button", { name: /Modified src\/login\.rs/ }));

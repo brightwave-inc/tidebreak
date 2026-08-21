@@ -29,7 +29,8 @@ function stubMediaQuery() {
     get matches() {
       return dark;
     },
-    addEventListener: (_: string, handler: () => void) => void handlers.add(handler),
+    addEventListener: (_: string, handler: () => void) =>
+      void handlers.add(handler),
     removeEventListener: (_: string, handler: () => void) =>
       void handlers.delete(handler),
     addListener: () => {},

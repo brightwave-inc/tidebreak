@@ -21,7 +21,9 @@ describe("UI foundations", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveAttribute("data-state", "open");
-    expect(dialog.closest("[data-radix-dialog-content], [role='dialog']")).toBeTruthy();
+    expect(
+      dialog.closest("[data-radix-dialog-content], [role='dialog']"),
+    ).toBeTruthy();
     expect(
       screen.getByRole("heading", { name: "Choose a model" }),
     ).toBeInTheDocument();
@@ -47,7 +49,10 @@ describe("UI foundations", () => {
     const user = userEvent.setup();
     render(
       <>
-        <ThinkingAccordion text="I considered the tradeoffs." streaming={false} />
+        <ThinkingAccordion
+          text="I considered the tradeoffs."
+          streaming={false}
+        />
         <AssistantSources
           sources={[
             {
@@ -63,7 +68,9 @@ describe("UI foundations", () => {
 
     const thought = screen.getByRole("button", { name: /Thought/i });
     expect(thought).toHaveAttribute("data-state", "closed");
-    expect(screen.queryByText("I considered the tradeoffs.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("I considered the tradeoffs."),
+    ).not.toBeInTheDocument();
 
     await user.click(thought);
     expect(thought).toHaveAttribute("data-state", "open");

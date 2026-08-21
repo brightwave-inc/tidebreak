@@ -145,29 +145,27 @@ describe("deliverable renderer projections", () => {
     },
   );
 
-  it.each([
-    "../escape.md",
-    "/tmp/private.md",
-    ".hidden.md",
-    "bad\u{202e}.md",
-  ])("rejects unsafe filename %s", (filename) => {
-    expect(() =>
-      parseDeliverablesCatalog({
-        deliverables: [
-          {
-            outputId,
-            filename,
-            mediaType: "text/markdown",
-            sizeBytes: 1,
-            revisionCount: 1,
-            updatedAt: "2026-07-24T00:00:00Z",
-            producingRunId: null,
-          },
-        ],
-        truncated: false,
-      }),
-    ).toThrow("Invalid output response");
-  });
+  it.each(["../escape.md", "/tmp/private.md", ".hidden.md", "bad\u{202e}.md"])(
+    "rejects unsafe filename %s",
+    (filename) => {
+      expect(() =>
+        parseDeliverablesCatalog({
+          deliverables: [
+            {
+              outputId,
+              filename,
+              mediaType: "text/markdown",
+              sizeBytes: 1,
+              revisionCount: 1,
+              updatedAt: "2026-07-24T00:00:00Z",
+              producingRunId: null,
+            },
+          ],
+          truncated: false,
+        }),
+      ).toThrow("Invalid output response");
+    },
+  );
 
   it("rejects canonical paths, missing opaque ids, and oversized previews", () => {
     expect(
@@ -334,7 +332,9 @@ describe("deliverable renderer projections", () => {
       status: "completed",
     });
     expect(invokeMock).toHaveBeenCalledTimes(2);
-    expect(invokeMock.mock.calls[1]?.[1]).toEqual(invokeMock.mock.calls[0]?.[1]);
+    expect(invokeMock.mock.calls[1]?.[1]).toEqual(
+      invokeMock.mock.calls[0]?.[1],
+    );
   });
 
   it("accepts an output file's bytes and rejects empty or mislabelled ones", () => {

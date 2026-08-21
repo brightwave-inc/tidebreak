@@ -149,7 +149,8 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
     lineHeight,
     verticalInsets,
   )}px`;
-  textarea.style.overflowY = textarea.scrollHeight > maximum ? "auto" : "hidden";
+  textarea.style.overflowY =
+    textarea.scrollHeight > maximum ? "auto" : "hidden";
 }
 
 /**
@@ -291,7 +292,9 @@ export type ComposerSlash = {
 };
 
 /** Whether attached images stop this turn from being sent, and why. */
-export function imageSendBlocker(images: ComposerImages | undefined): string | null {
+export function imageSendBlocker(
+  images: ComposerImages | undefined,
+): string | null {
   if (!images || images.items.length === 0) return null;
   if (imageUploadsInFlight(images.items)) return "Waiting for images to upload";
   if (images.items.some((item) => item.status === "failed")) {
@@ -464,9 +467,13 @@ export function Composer({
   const folderChips = folders ? composerFolderChips(folders) : [];
   const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
   /** What a pick can still reach, given what this message already carries. */
-  const libraryOptions = availableSlashOptions(slash?.options ?? [], invokedSkills, {
-    steering: active,
-  });
+  const libraryOptions = availableSlashOptions(
+    slash?.options ?? [],
+    invokedSkills,
+    {
+      steering: active,
+    },
+  );
   // The `/` list carries the built-in commands as well as the library; the
   // panel behind the tools menu is the library alone, because that is what its
   // label promises and a command is not something installed.
@@ -549,7 +556,12 @@ export function Composer({
       );
       return;
     }
-    applySlashReplacement(draft, token.start, token.start + 1 + token.query.length, "");
+    applySlashReplacement(
+      draft,
+      token.start,
+      token.start + 1 + token.query.length,
+      "",
+    );
     if (row.kind === "action") {
       if (row.action === "browse-files") files?.onAttach?.();
       else folders?.onAttach?.();
@@ -568,7 +580,9 @@ export function Composer({
   }
 
   /** The `@` list's keys. Only reached when the `/` list did not claim them. */
-  function handleMentionKey(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
+  function handleMentionKey(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): boolean {
     if (event.key === "Escape") {
       if (mentionToken === null) return false;
       setMentionToken(null);
@@ -714,7 +728,11 @@ export function Composer({
     // A list showing only the cap note has nothing to move through or pick, so
     // Enter stays what it always is: send.
     if (slashMatches.length === 0) return false;
-    const moved = nextOptionHighlight(event.key, slashIndex, slashMatches.length);
+    const moved = nextOptionHighlight(
+      event.key,
+      slashIndex,
+      slashMatches.length,
+    );
     if (moved !== null) {
       setSlashHighlight(moved);
       return true;
@@ -1144,8 +1162,8 @@ export function Composer({
                 voice.state === "recording"
                   ? "Stop recording"
                   : voice.state === "transcribing"
-                      ? "Transcribing…"
-                      : "Record voice input"
+                    ? "Transcribing…"
+                    : "Record voice input"
               }
             >
               <Button
@@ -1166,10 +1184,7 @@ export function Composer({
                         ? "Waiting for microphone permission"
                         : "Record voice message"
                 }
-                disabled={
-                  inputDisabled ||
-                  voice.state === "transcribing"
-                }
+                disabled={inputDisabled || voice.state === "transcribing"}
                 onClick={
                   voice.state === "recording" ? voice.onStop : voice.onStart
                 }
@@ -1246,12 +1261,14 @@ export function Composer({
       )}
       {cancelError && (
         <span className="text-xs text-destructive" role="status">
-          {"Couldn’t stop turn: "}{cancelError}
+          {"Couldn’t stop turn: "}
+          {cancelError}
         </span>
       )}
       {steerError && (
         <span className="text-xs text-destructive" role="alert">
-          {"Couldn’t redirect: "}{steerError}
+          {"Couldn’t redirect: "}
+          {steerError}
         </span>
       )}
       {steerStatus && !steerError && (
@@ -1271,23 +1288,28 @@ export function Composer({
       )}
       {attachError && (
         <span className="text-xs text-destructive" role="alert">
-          {"Couldn’t attach: "}{attachError}
+          {"Couldn’t attach: "}
+          {attachError}
         </span>
       )}
       {folders?.error && (
         <span className="text-xs text-destructive" role="alert">
-          {"Couldn’t update folders: "}{folders.error}
+          {"Couldn’t update folders: "}
+          {folders.error}
         </span>
       )}
       {images?.error && (
         <span className="text-xs text-destructive" role="alert">
-          {"Couldn’t attach image: "}{images.error}
+          {"Couldn’t attach image: "}
+          {images.error}
         </span>
       )}
       {images?.unsupportedModel && images.items.length > 0 && (
         <span className="text-xs text-destructive" role="alert">
           {images.unsupportedModel}
-          {" can’t read images. Choose a model that accepts image input, or remove the attached image."}
+          {
+            " can’t read images. Choose a model that accepts image input, or remove the attached image."
+          }
         </span>
       )}
       {confirmDialog}
@@ -1325,9 +1347,7 @@ function InvokedSkillChip({
   const label = option?.label ?? name;
   const Icon = option ? optionIcon(option) : Wand2;
   return (
-    <li
-      className="relative flex min-w-0 max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 py-1 pl-2 pr-7 text-muted-foreground"
-    >
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-full border border-border bg-muted/50 py-1 pl-2 pr-7 text-muted-foreground">
       <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-background">
         <Icon size={14} aria-hidden="true" />
       </span>
@@ -1398,7 +1418,11 @@ function FileAttachmentChip({
   return (
     <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
       <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
-        <DocumentIcon mediaType={file.mediaType} className="size-4" aria-hidden="true" />
+        <DocumentIcon
+          mediaType={file.mediaType}
+          className="size-4"
+          aria-hidden="true"
+        />
       </span>
       <span className="grid min-w-0 gap-px">
         <strong
@@ -1508,18 +1532,28 @@ function ImageAttachmentChip({
           // the server, so the reader sees what they attached immediately.
           // Contain, not cover: a wide dark screenshot cropped to a square
           // reads as a black tile.
-          <img className="size-full object-contain" src={attachment.previewUrl} alt="" />
+          <img
+            className="size-full object-contain"
+            src={attachment.previewUrl}
+            alt=""
+          />
         ) : (
           <ImageIcon size={16} aria-hidden="true" />
         )}
       </span>
       <span className="grid min-w-0 gap-px">
-        <strong className="max-w-[12rem] truncate text-xs font-semibold text-foreground" title={attachment.name}>
+        <strong
+          className="max-w-[12rem] truncate text-xs font-semibold text-foreground"
+          title={attachment.name}
+        >
           {attachment.name}
         </strong>
         {/* Only the outcome is announced. A live region on the percentage
             would read every tick of a bar that is already on screen. */}
-        <small className={cn("text-[0.68rem]", failed && "text-destructive")} role={failed ? "alert" : uploading ? undefined : "status"}>
+        <small
+          className={cn("text-[0.68rem]", failed && "text-destructive")}
+          role={failed ? "alert" : uploading ? undefined : "status"}
+        >
           {describeImageAttachment(attachment)}
         </small>
         {uploading && (

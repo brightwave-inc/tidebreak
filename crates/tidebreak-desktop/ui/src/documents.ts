@@ -35,7 +35,9 @@ export async function exportLibraryDocument(
   })) as boolean;
 }
 
-export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | null {
+export function parseLibraryImportBatch(
+  value: unknown,
+): LibraryImportBatch | null {
   if (value === null) return null;
   if (
     !isExactRecord(value, ["results"]) ||
@@ -46,7 +48,11 @@ export function parseLibraryImportBatch(value: unknown): LibraryImportBatch | nu
   }
   return {
     results: value.results.map((result) => {
-      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        Array.isArray(result)
+      ) {
         throw new Error("Invalid document import response");
       }
       const record = result as Record<string, unknown>;
@@ -133,7 +139,9 @@ function isSafeRendererText(value: string, maxCodePoints: number): boolean {
   const characters = [...value];
   return (
     characters.length <= maxCodePoints &&
-    characters.every((character) => !DISALLOWED_RENDERER_CATEGORY.test(character))
+    characters.every(
+      (character) => !DISALLOWED_RENDERER_CATEGORY.test(character),
+    )
   );
 }
 
@@ -148,5 +156,7 @@ function isExactRecord(
     return false;
   }
   const actual = Object.keys(value);
-  return actual.length === keys.length && actual.every((key) => keys.includes(key));
+  return (
+    actual.length === keys.length && actual.every((key) => keys.includes(key))
+  );
 }

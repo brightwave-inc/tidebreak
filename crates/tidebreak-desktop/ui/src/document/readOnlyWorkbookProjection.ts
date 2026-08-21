@@ -9,8 +9,7 @@ import {
 
 const OFFICE_DOCUMENT_RELATIONSHIPS =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-const DRAWINGML =
-  "http://schemas.openxmlformats.org/drawingml/2006/main";
+const DRAWINGML = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const DRAWINGML_CHART =
   "http://schemas.openxmlformats.org/drawingml/2006/chart";
 const SPREADSHEETML =
@@ -87,7 +86,10 @@ async function projectWorkbookDisplayCopy(
           const formula = localChild(cell, "f");
           if (!formula) continue;
 
-          const address = cell.getAttribute("r")?.replaceAll("$", "").toUpperCase();
+          const address = cell
+            .getAttribute("r")
+            ?.replaceAll("$", "")
+            .toUpperCase();
           const formulaText = formula.textContent?.trim();
           if (address && formulaText) formulas[address] = `=${formulaText}`;
 
@@ -152,7 +154,10 @@ async function projectWorkbookDisplayCopy(
     }
 
     if (sheetChanged) {
-      zip.file(sheet.path, new XMLSerializer().serializeToString(sheet.document));
+      zip.file(
+        sheet.path,
+        new XMLSerializer().serializeToString(sheet.document),
+      );
       changed = true;
     }
   }
@@ -368,8 +373,14 @@ function parseCellRange(value: string): CellRange | null {
   const end = rawEnd ? parseCellAddress(rawEnd) : null;
   if (!start || !end) return null;
   return {
-    end: { col: Math.max(start.col, end.col), row: Math.max(start.row, end.row) },
-    start: { col: Math.min(start.col, end.col), row: Math.min(start.row, end.row) },
+    end: {
+      col: Math.max(start.col, end.col),
+      row: Math.max(start.row, end.row),
+    },
+    start: {
+      col: Math.min(start.col, end.col),
+      row: Math.min(start.row, end.row),
+    },
   };
 }
 
@@ -594,10 +605,7 @@ async function readWorkbookSheetPaths(zip: JSZip): Promise<string[]> {
     const id = relationship.getAttribute("Id");
     const target = relationship.getAttribute("Target");
     if (id && target) {
-      targetByRelationship.set(
-        id,
-        resolveZipPath("xl/workbook.xml", target),
-      );
+      targetByRelationship.set(id, resolveZipPath("xl/workbook.xml", target));
     }
   }
 
@@ -620,7 +628,9 @@ function fallbackSheetPaths(zip: JSZip): string[] {
 }
 
 function sheetNumber(path: string): number {
-  return Number(path.match(/sheet(\d+)\.xml$/i)?.[1] ?? Number.MAX_SAFE_INTEGER);
+  return Number(
+    path.match(/sheet(\d+)\.xml$/i)?.[1] ?? Number.MAX_SAFE_INTEGER,
+  );
 }
 
 function resolveZipPath(baseFile: string, target: string): string {

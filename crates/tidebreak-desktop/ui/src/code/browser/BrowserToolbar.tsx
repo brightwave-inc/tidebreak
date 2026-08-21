@@ -189,7 +189,9 @@ export function BrowserToolbar({
               <span className="sr-only">Forward</span>
             </Button>
           </WithTooltip>
-          <WithTooltip label={session.loadState === "loading" ? "Stop" : "Reload"}>
+          <WithTooltip
+            label={session.loadState === "loading" ? "Stop" : "Reload"}
+          >
             <Button
               type="button"
               variant="ghost"
@@ -232,12 +234,14 @@ export function BrowserToolbar({
               placeholder="Address or search"
               aria-label="Address or search"
               aria-invalid={Boolean(addressError)}
-              aria-describedby={[
-                security ? securityId : null,
-                addressError ? addressErrorId : null,
-              ]
-                .filter(Boolean)
-                .join(" ") || undefined}
+              aria-describedby={
+                [
+                  security ? securityId : null,
+                  addressError ? addressErrorId : null,
+                ]
+                  .filter(Boolean)
+                  .join(" ") || undefined
+              }
               className="min-w-0 flex-1 bg-transparent font-medium text-foreground outline-none placeholder:font-normal placeholder:text-muted-foreground"
               onChange={(event) => onAddressChange(event.target.value)}
               onFocus={(event) => event.currentTarget.select()}
@@ -260,31 +264,47 @@ export function BrowserToolbar({
           agentAccessOpen={agentAccessOpen}
         />
 
-        {engine?.capabilities.semanticSnapshot && session.url && session.loadState === "ready" && (
-          <WithTooltip label={inspectEnabled ? "Hide inspect highlights" : "Inspect page elements"}>
-            <Button
-              type="button"
-              variant={inspectEnabled ? "secondary" : "ghost"}
-              size={compactToolbar ? "icon-xs" : "icon-sm"}
-              onClick={onToggleInspect}
-              aria-pressed={inspectEnabled || undefined}
-              aria-label={inspectEnabled ? "Hide inspect highlights" : "Inspect page elements"}
-              className={cn(
-                inspectEnabled && "bg-info-background/55 text-info-foreground hover:bg-info-background hover:text-info-foreground",
-              )}
+        {engine?.capabilities.semanticSnapshot &&
+          session.url &&
+          session.loadState === "ready" && (
+            <WithTooltip
+              label={
+                inspectEnabled
+                  ? "Hide inspect highlights"
+                  : "Inspect page elements"
+              }
             >
-              <ScanEye />
-              <span className="sr-only">
-                {inspectEnabled ? "Inspect on" : "Inspect"}
-              </span>
-            </Button>
-          </WithTooltip>
-        )}
+              <Button
+                type="button"
+                variant={inspectEnabled ? "secondary" : "ghost"}
+                size={compactToolbar ? "icon-xs" : "icon-sm"}
+                onClick={onToggleInspect}
+                aria-pressed={inspectEnabled || undefined}
+                aria-label={
+                  inspectEnabled
+                    ? "Hide inspect highlights"
+                    : "Inspect page elements"
+                }
+                className={cn(
+                  inspectEnabled &&
+                    "bg-info-background/55 text-info-foreground hover:bg-info-background hover:text-info-foreground",
+                )}
+              >
+                <ScanEye />
+                <span className="sr-only">
+                  {inspectEnabled ? "Inspect on" : "Inspect"}
+                </span>
+              </Button>
+            </WithTooltip>
+          )}
 
         {viewportControl && (
           <div className="shrink-0">
             {isValidElement(viewportControl)
-              ? cloneElement(viewportControl as ReactElement<{ compact?: boolean }>, { compact: compactToolbar })
+              ? cloneElement(
+                  viewportControl as ReactElement<{ compact?: boolean }>,
+                  { compact: compactToolbar },
+                )
               : viewportControl}
           </div>
         )}
@@ -467,9 +487,10 @@ function BrowserAgentAccessControl({
   }
 
   if (access.shared) {
-    const sharedLabel = access.scope === "loopback_workspace"
-      ? "Local sites shared"
-      : `${originLabel} shared`;
+    const sharedLabel =
+      access.scope === "loopback_workspace"
+        ? "Local sites shared"
+        : `${originLabel} shared`;
     return (
       <div
         className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md bg-success-background/65 px-1.5 text-[10px] font-medium text-success-foreground"
@@ -538,10 +559,7 @@ function CompactAgentAccessControl({
       <span className="sr-only" role="status">
         {statusLabel}
       </span>
-      <DropdownMenu
-        open={open}
-        onOpenChange={onOpenChangeControlled}
-      >
+      <DropdownMenu open={open} onOpenChange={onOpenChangeControlled}>
         <WithTooltip label={displayLabel}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -640,7 +658,11 @@ export function BrowserAgentControlRow({
       role="status"
     >
       <span className="relative grid size-5 shrink-0 place-items-center rounded-md bg-background/60">
-        {takeoverRequired ? <Hand className="size-3.5" /> : <Bot className="size-3.5" />}
+        {takeoverRequired ? (
+          <Hand className="size-3.5" />
+        ) : (
+          <Bot className="size-3.5" />
+        )}
         {!halted && !takeoverRequired && (
           <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-info ring-2 ring-info-background" />
         )}
@@ -689,7 +711,9 @@ function SecurityIcon({
     return (
       <>
         <LockKeyhole className={cn(className, "text-success")} />
-        <span id={id} className="sr-only">Secure</span>
+        <span id={id} className="sr-only">
+          Secure
+        </span>
       </>
     );
   }
@@ -697,7 +721,9 @@ function SecurityIcon({
     return (
       <>
         <Laptop className={cn(className, "text-info")} />
-        <span id={id} className="sr-only">Local</span>
+        <span id={id} className="sr-only">
+          Local
+        </span>
       </>
     );
   }
@@ -705,7 +731,9 @@ function SecurityIcon({
     return (
       <>
         <ShieldAlert className={cn(className, "text-warning")} />
-        <span id={id} className="sr-only">Not secure</span>
+        <span id={id} className="sr-only">
+          Not secure
+        </span>
       </>
     );
   }
@@ -730,9 +758,12 @@ export function BrowserNoticeRow({
     <div
       className={cn(
         "flex min-h-8 shrink-0 items-center gap-2 border-b px-3 py-1 text-xs",
-        tone === "info" && "border-info-border bg-info-background text-info-foreground",
-        tone === "warning" && "border-warning-border bg-warning-background text-warning-foreground",
-        tone === "critical" && "border-critical-border bg-critical-background text-critical-foreground",
+        tone === "info" &&
+          "border-info-border bg-info-background text-info-foreground",
+        tone === "warning" &&
+          "border-warning-border bg-warning-background text-warning-foreground",
+        tone === "critical" &&
+          "border-critical-border bg-critical-background text-critical-foreground",
       )}
     >
       <Icon className="size-3.5 shrink-0" />

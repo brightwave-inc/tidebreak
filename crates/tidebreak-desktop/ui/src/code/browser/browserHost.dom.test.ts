@@ -1,10 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  closeCodeBrowser,
-  type CodeBrowserHost,
-} from "./browserHost";
+import { closeCodeBrowser, type CodeBrowserHost } from "./browserHost";
 import {
   readStoredBrowserSession,
   writeStoredBrowserSession,
@@ -37,11 +34,9 @@ describe("browser host lifecycle", () => {
     await closeCodeBrowser("workspace-1", "browser-1", host);
 
     expect(readStoredBrowserSession("browser-1")).toBeNull();
-    expect(command).toHaveBeenCalledWith(
-      "workspace-1",
-      "browser-1",
-      { type: "close" },
-    );
+    expect(command).toHaveBeenCalledWith("workspace-1", "browser-1", {
+      type: "close",
+    });
   });
 
   it("still removes persisted state when no native desktop host exists", async () => {

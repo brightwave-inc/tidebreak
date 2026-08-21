@@ -55,8 +55,7 @@ export function providersSearch(
   search: Record<string, unknown>,
 ): ProvidersSearch {
   return {
-    provider:
-      typeof search.provider === "string" ? search.provider : undefined,
+    provider: typeof search.provider === "string" ? search.provider : undefined,
     focus: search.focus === "credential" ? "credential" : undefined,
   };
 }
@@ -330,8 +329,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  * page — so the Model Gateway section is dropped from its rail instead.
  */
 export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
-  return SETTINGS_SECTIONS.filter(
-    (section) => (managed ? !section.managedHidden : !section.unmanagedHidden),
+  return SETTINGS_SECTIONS.filter((section) =>
+    managed ? !section.managedHidden : !section.unmanagedHidden,
   );
 }
 

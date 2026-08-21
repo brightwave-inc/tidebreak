@@ -97,12 +97,7 @@ export function CodeSidebar() {
 
   useEffect(() => connectCodeUpdates(client), [client]);
 
-  const groups = arrangeWorkspaces(
-    prefs.sortMode,
-    repos,
-    workspaces,
-    digests,
-  );
+  const groups = arrangeWorkspaces(prefs.sortMode, repos, workspaces, digests);
 
   return (
     <SidebarFrame
@@ -182,7 +177,9 @@ export function CodeSidebar() {
                       ?.display_name ?? workspace.repo_id
                   }
                   active={pathname === `/code/w/${workspace.id}`}
-                  terminalOpen={terminalOpen && viewedWorkspaceId === workspace.id}
+                  terminalOpen={
+                    terminalOpen && viewedWorkspaceId === workspace.id
+                  }
                   density={prefs.density}
                   visibleMeta={{
                     // The group header already names the repo in by-repo
@@ -270,7 +267,12 @@ export function CodeSidebar() {
                     if (!pr) return;
                     // Same prepared prompt the header control composes; the
                     // navigation makes the started turn visible.
-                    if (!runComposerPrompt(workspace.id, prWorkflowPrompt(action, pr))) {
+                    if (
+                      !runComposerPrompt(
+                        workspace.id,
+                        prWorkflowPrompt(action, pr),
+                      )
+                    ) {
                       toast.error("Another agent action is already running");
                       return;
                     }

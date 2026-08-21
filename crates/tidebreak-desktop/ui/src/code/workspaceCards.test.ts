@@ -66,9 +66,7 @@ function digest(
   };
 }
 
-function idsOf(
-  groups: { workspaces: CodeWorkspaceSnapshot[] }[],
-): string[] {
+function idsOf(groups: { workspaces: CodeWorkspaceSnapshot[] }[]): string[] {
   return groups.flatMap((group) => group.workspaces.map((item) => item.id));
 }
 
@@ -124,7 +122,10 @@ describe("arrangeWorkspaces", () => {
   it("groups by repo in creation order within each repo", () => {
     const groups = arrangeWorkspaces("by-repo", repos, listed, {});
     expect(
-      groups.map((group) => [group.key, group.workspaces.map((item) => item.id)]),
+      groups.map((group) => [
+        group.key,
+        group.workspaces.map((item) => item.id),
+      ]),
     ).toEqual([
       ["app", ["ws-app-old", "ws-app-new"]],
       ["lib", ["ws-lib"]],
@@ -150,7 +151,10 @@ describe("arrangeWorkspaces", () => {
     };
     const groups = arrangeWorkspaces("by-status", repos, listed, digests);
     expect(
-      groups.map((group) => [group.key, group.workspaces.map((item) => item.id)]),
+      groups.map((group) => [
+        group.key,
+        group.workspaces.map((item) => item.id),
+      ]),
     ).toEqual([
       ["needs_you", ["ws-app-old"]],
       ["running", ["ws-lib"]],
@@ -169,7 +173,12 @@ describe("arrangeWorkspaces", () => {
     const rows = [
       ...listed,
       {
-        ...workspace("ws-archived-late", "lib", "archived", "2026-08-10T00:00:00.000Z"),
+        ...workspace(
+          "ws-archived-late",
+          "lib",
+          "archived",
+          "2026-08-10T00:00:00.000Z",
+        ),
         archived_at: "2026-08-18T00:00:00.000Z",
       },
     ];
@@ -211,9 +220,13 @@ describe("arrangeWorkspaces", () => {
       "ws-b": digest("ws-b", { turn_count: 9, title: "renamed" }),
     };
     expect(
-      idsOf(arrangeWorkspaces("by-created", [repo("app")], original, digestAfter)),
+      idsOf(
+        arrangeWorkspaces("by-created", [repo("app")], original, digestAfter),
+      ),
     ).toEqual(
-      idsOf(arrangeWorkspaces("by-created", [repo("app")], original, digestBefore)),
+      idsOf(
+        arrangeWorkspaces("by-created", [repo("app")], original, digestBefore),
+      ),
     );
   });
 
@@ -239,10 +252,9 @@ describe("arrangeWorkspaces", () => {
         },
       }),
     };
-    expect(idsOf(arrangeWorkspaces("by-status", [repo("app")], rows, idle))).toEqual([
-      "ws-b",
-      "ws-a",
-    ]);
+    expect(
+      idsOf(arrangeWorkspaces("by-status", [repo("app")], rows, idle)),
+    ).toEqual(["ws-b", "ws-a"]);
     expect(
       idsOf(arrangeWorkspaces("by-status", [repo("app")], rows, bNeedsYou)),
     ).toEqual(["ws-b", "ws-a"]);
@@ -305,9 +317,7 @@ describe("sessionActivityLabel", () => {
     ["tool", "Tool running"],
   ] as const)("labels %s activity precisely", (activity, label) => {
     expect(
-      sessionActivityLabel(
-        digest("ws-a", { lifecycle: "running", activity }),
-      ),
+      sessionActivityLabel(digest("ws-a", { lifecycle: "running", activity })),
     ).toBe(label);
   });
 
@@ -328,9 +338,9 @@ describe("sessionActivityLabel", () => {
   });
 
   it("keeps the generic fallback for older running digests", () => {
-    expect(
-      sessionActivityLabel(digest("ws-a", { lifecycle: "running" })),
-    ).toBe("Agent working");
+    expect(sessionActivityLabel(digest("ws-a", { lifecycle: "running" }))).toBe(
+      "Agent working",
+    );
   });
 });
 

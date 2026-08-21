@@ -1,4 +1,8 @@
-import type { ExecResultPreview, NetworkPolicy, ToolActionPreview } from "./api";
+import type {
+  ExecResultPreview,
+  NetworkPolicy,
+  ToolActionPreview,
+} from "./api";
 import { networkPolicyLabel } from "./NetworkPolicyDialog";
 
 /**
@@ -39,7 +43,8 @@ export function toolPreviewPresentation(
     const headline = preview.query;
     const detail = [
       headline,
-      preview.domains.length > 0 && `# limited to ${preview.domains.join(", ")}`,
+      preview.domains.length > 0 &&
+        `# limited to ${preview.domains.join(", ")}`,
       publishedWindow(preview),
       "# sent to the configured web search provider",
     ]
@@ -88,7 +93,10 @@ export function toolPreviewPresentation(
     // asks for consent says which files it can read.
     preview.files.length > 0 && `# staged files: ${preview.files.join(", ")}`,
     result?.timedOut && "# stopped at the time limit",
-    result && !result.timedOut && result.exitCode === null && "# killed by a signal",
+    result &&
+      !result.timedOut &&
+      result.exitCode === null &&
+      "# killed by a signal",
     result?.exitCode !== null &&
       result?.exitCode !== undefined &&
       `# exit code: ${result.exitCode}`,

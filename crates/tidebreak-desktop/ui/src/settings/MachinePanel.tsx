@@ -51,7 +51,10 @@ export function MachinePanel() {
         const current = await remoteMachineState();
         if (!cancelled) setState(current);
       } catch (failure) {
-        if (!cancelled) setError(friendlyErrorMessage(failure, "Could not read the connection."));
+        if (!cancelled)
+          setError(
+            friendlyErrorMessage(failure, "Could not read the connection."),
+          );
       }
     })();
     return () => {
@@ -98,7 +101,10 @@ export function MachinePanel() {
       setError(
         refused
           ? connectFailureMessage(refused)
-          : friendlyErrorMessage(failure, "Could not connect through Model Gateway."),
+          : friendlyErrorMessage(
+              failure,
+              "Could not connect through Model Gateway.",
+            ),
       );
       setBusy(false);
     }
@@ -161,7 +167,11 @@ export function MachinePanel() {
             </p>
           </SettingsField>
           <div>
-            <Button variant="outline" onClick={() => void disconnect()} disabled={busy}>
+            <Button
+              variant="outline"
+              onClick={() => void disconnect()}
+              disabled={busy}
+            >
               <Laptop size={16} aria-hidden />
               Work on this computer
             </Button>
@@ -173,7 +183,10 @@ export function MachinePanel() {
           title="Connect to a machine"
           description="Enter the hosted Tidebreak address. If it uses the same Model Gateway as this app, your existing sign-in supplies access automatically."
         >
-          <SettingsField label="Address" hint="For example, https://tidebreak.example.com.">
+          <SettingsField
+            label="Address"
+            hint="For example, https://tidebreak.example.com."
+          >
             <Input
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
@@ -234,7 +247,11 @@ export function MachinePanel() {
                 aria-hidden
                 className={remote ? "text-muted-foreground" : "text-icon-green"}
               />
-              <span className={remote ? "text-muted-foreground line-through" : undefined}>
+              <span
+                className={
+                  remote ? "text-muted-foreground line-through" : undefined
+                }
+              >
                 {hostAuthorityLabel(authority)}
               </span>
             </li>

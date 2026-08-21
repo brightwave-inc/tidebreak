@@ -29,8 +29,12 @@ export type AttachedFiles = {
 };
 
 /** Attach any files through one native picker. `null` if the reader dismissed it. */
-export async function attachChatFiles(chatId: string): Promise<AttachedFiles | null> {
-  return parseAttachedFiles(await invoke("attach_chat_files", { request: { chatId } }));
+export async function attachChatFiles(
+  chatId: string,
+): Promise<AttachedFiles | null> {
+  return parseAttachedFiles(
+    await invoke("attach_chat_files", { request: { chatId } }),
+  );
 }
 
 /** Claim one just-dropped native path set and attach it to the composer. */
@@ -68,7 +72,9 @@ export async function publishCodeImage(
 ): Promise<PublishedImage> {
   const contentBase64 = encodeBase64(await file.arrayBuffer());
   return parseHostPublishedImage(
-    await invoke("publish_code_image", { request: { sessionId, contentBase64 } }),
+    await invoke("publish_code_image", {
+      request: { sessionId, contentBase64 },
+    }),
   );
 }
 
@@ -81,7 +87,9 @@ function encodeBase64(buffer: ArrayBuffer): string {
   const chunkSize = 0x8000;
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + chunkSize),
+    );
   }
   return btoa(binary);
 }

@@ -81,7 +81,8 @@ function TabStrip({
         region={region}
         browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
       />
-    </DndContext>  );
+    </DndContext>
+  );
 }
 
 const meta = {

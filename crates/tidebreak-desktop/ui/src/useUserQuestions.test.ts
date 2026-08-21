@@ -22,7 +22,6 @@ function seedQuestions(chatId: string, requests: ReturnType<typeof pending>[]) {
   });
 }
 
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -44,7 +43,11 @@ function stubClient(overrides: Record<string, unknown> = {}) {
 afterEach(() => {
   cleanup();
   useChatListStore.getState().setDeletingChatId(null);
-  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  usePendingPrompts.setState({
+    chatId: null,
+    userQuestions: [],
+    folderAccess: [],
+  });
 });
 
 describe("useUserQuestions", () => {
@@ -129,7 +132,9 @@ describe("useUserQuestions", () => {
 
   it("drops a failed answer once its chat is being deleted", async () => {
     const answer = deferred<void>();
-    const client = stubClient({ answerUserQuestions: vi.fn(() => answer.promise) });
+    const client = stubClient({
+      answerUserQuestions: vi.fn(() => answer.promise),
+    });
     seedQuestions("chat-1", [pending("call-1")]);
     const { result } = renderHook(() => useUserQuestions(client, "chat-1"));
     await waitFor(() => expect(result.current.requests).toHaveLength(1));
@@ -148,7 +153,9 @@ describe("useUserQuestions", () => {
 
   it("does not carry an answer error into the next conversation", async () => {
     const answer = deferred<void>();
-    const client = stubClient({ answerUserQuestions: vi.fn(() => answer.promise) });
+    const client = stubClient({
+      answerUserQuestions: vi.fn(() => answer.promise),
+    });
     seedQuestions("chat-1", [pending("call-1")]);
     const { result, rerender } = renderHook(
       ({ chatId }) => useUserQuestions(client, chatId),

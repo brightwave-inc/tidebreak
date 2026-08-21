@@ -1,10 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 
-import {
-  createComposerDraftStore,
-  useComposerDrafts,
-} from "./ComposerDrafts";
+import { createComposerDraftStore, useComposerDrafts } from "./ComposerDrafts";
 import type { ImageAttachment } from "./ImageAttachments";
 
 const READY_IMAGE: ImageAttachment = {
@@ -48,7 +45,8 @@ describe("composer draft attachments", () => {
     store.setFolders("chat-1", ["root-1"]);
 
     // A fresh store is what the next load of the page gets.
-    const restored = createComposerDraftStore().getState().attachments["chat-1"];
+    const restored =
+      createComposerDraftStore().getState().attachments["chat-1"];
     expect(restored.files).toEqual([IMPORTED_FILE]);
     expect(restored.folders).toEqual(["root-1"]);
     // The published image re-sends as-is; the queued one was a promise to
@@ -68,7 +66,8 @@ describe("composer draft attachments", () => {
     const store = useComposerDrafts.getState();
     store.setFolders("chat-1", ["root-1", "root-2"]);
 
-    const restored = createComposerDraftStore().getState().attachments["chat-1"];
+    const restored =
+      createComposerDraftStore().getState().attachments["chat-1"];
     expect(restored.folders).toEqual(["root-1", "root-2"]);
     // A connected folder that was never put on this draft does not come back
     // as a chip — send already consumed the strip.

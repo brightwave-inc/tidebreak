@@ -656,7 +656,8 @@ describe("AppDetailView", () => {
     const apis = apisWith(GATEWAY_BOUND);
     apis.gatewayPage = vi.fn().mockResolvedValue({
       outcome: "refused",
-      message: "this bundle calls fs/read, which only the Tidebreak host serves",
+      message:
+        "this bundle calls fs/read, which only the Tidebreak host serves",
     });
     const opened = vi.spyOn(window, "open").mockReturnValue(null);
     renderPaired(apis);

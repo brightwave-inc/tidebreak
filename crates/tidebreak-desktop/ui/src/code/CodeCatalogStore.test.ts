@@ -51,12 +51,8 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
       })),
     };
 
-    await useCodeCatalogStore
-      .getState()
-      .ensureHarnessModels(client, "codex");
-    await useCodeCatalogStore
-      .getState()
-      .ensureHarnessModels(client, "codex");
+    await useCodeCatalogStore.getState().ensureHarnessModels(client, "codex");
+    await useCodeCatalogStore.getState().ensureHarnessModels(client, "codex");
 
     expect(client.listCodeHarnessModels).toHaveBeenCalledOnce();
     expect(useCodeCatalogStore.getState().modelsByHarness.codex).toEqual([]);
@@ -102,9 +98,7 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
       listCodeWorkspaces: vi.fn(async () => []),
       getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
       listCodeHarnessModels: vi.fn((kind: string) =>
-        kind === "codex"
-          ? codex
-          : Promise.resolve({ kind, models: [] }),
+        kind === "codex" ? codex : Promise.resolve({ kind, models: [] }),
       ),
     };
 

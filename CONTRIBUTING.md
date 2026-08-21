@@ -35,6 +35,10 @@ scripts/clean-worktree-artifacts.sh --worktree ../finished-task --yes
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Without --write, biome format checks and does not rewrite.
+pnpm --dir crates/tidebreak-desktop/ui exec biome format src
+pnpm --dir crates/tidebreak-desktop/ui lint
+pnpm --dir crates/tidebreak-desktop/ui test
 
 # Optional fast checks for staged files
 git config core.hooksPath .githooks

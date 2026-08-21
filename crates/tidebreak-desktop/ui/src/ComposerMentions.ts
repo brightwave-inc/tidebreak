@@ -27,7 +27,7 @@ export type MentionCandidate =
       label: string;
       mediaType: string;
     }
-  | { kind: "folder"; /** The broker's root id. */ id: string; label: string }
+  | { kind: "folder" /** The broker's root id. */; id: string; label: string }
   | {
       kind: "path";
       /** Workspace-relative path the engine sees as plain text. */

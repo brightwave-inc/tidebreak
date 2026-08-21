@@ -9,9 +9,21 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { memo, useEffect, useId, useRef, useState, type RefCallback } from "react";
+import {
+  memo,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type RefCallback,
+} from "react";
 
-import type { CodeApprovalSnapshot, Diffstat, FileChangeKind, ToolDetail } from "../api/types";
+import type {
+  CodeApprovalSnapshot,
+  Diffstat,
+  FileChangeKind,
+  ToolDetail,
+} from "../api/types";
 import { CodeApprovalCard } from "./CodeApprovalCard";
 import { AssistantMessageBody } from "@/AssistantMessageBody";
 import { AssistantWorkingIndicator } from "@/AssistantWorkingIndicator";
@@ -146,7 +158,9 @@ export function CodeTranscript({
               item={item}
               animateStreaming={animateStreaming}
               approval={
-                item.kind === "approval" ? approvals[item.approvalId] : undefined
+                item.kind === "approval"
+                  ? approvals[item.approvalId]
+                  : undefined
               }
               attached={parksTheCallAbove(items, index)}
               deciding={
@@ -346,7 +360,10 @@ const TranscriptItem = memo(function TranscriptItem({
           anchorId={item.id}
           leading={
             sessionId && item.attachments && item.attachments.length > 0 ? (
-              <CodeTurnImages sessionId={sessionId} attachments={item.attachments} />
+              <CodeTurnImages
+                sessionId={sessionId}
+                attachments={item.attachments}
+              />
             ) : undefined
           }
         />
@@ -605,7 +622,10 @@ function StreamingTail({ text }: { text: string }) {
   );
 }
 
-function useElapsedLabel(startedAt: string | null, active: boolean): string | null {
+function useElapsedLabel(
+  startedAt: string | null,
+  active: boolean,
+): string | null {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active || !startedAt) return;
@@ -620,7 +640,9 @@ function useElapsedLabel(startedAt: string | null, active: boolean): string | nu
 }
 
 function parseExitCode(preview: string): number | null {
-  const match = preview.match(/(?:^|\n)\s*exit(?:ed)?(?:\s+code)?[:\s]+(-?\d+)\s*$/im);
+  const match = preview.match(
+    /(?:^|\n)\s*exit(?:ed)?(?:\s+code)?[:\s]+(-?\d+)\s*$/im,
+  );
   if (!match) return null;
   const code = Number(match[1]);
   return Number.isFinite(code) ? code : null;
@@ -707,7 +729,10 @@ function StatusGlyph({
       );
     case "succeeded":
       return (
-        <Check className="text-success-foreground size-3.5" aria-hidden="true" />
+        <Check
+          className="text-success-foreground size-3.5"
+          aria-hidden="true"
+        />
       );
     case "failed":
       return (

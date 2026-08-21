@@ -17,7 +17,11 @@ vi.mock("./host", () => ({
   resolveFolderAccessRequest: vi.fn(),
 }));
 
-const chat = { id: "chat-1", title: "Roadmap", project_id: null } as unknown as Chat;
+const chat = {
+  id: "chat-1",
+  title: "Roadmap",
+  project_id: null,
+} as unknown as Chat;
 
 // The chat pane owns its conversation's request state, so it polls through the
 // client rather than being handed the results.
@@ -115,7 +119,11 @@ async function renderChatView(overrides: Partial<ChatViewProps> = {}) {
 beforeEach(() => {
   useChatSessionStore.getState().reset();
   useComposerDrafts.getState().clearDraft(chat.id);
-  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  usePendingPrompts.setState({
+    chatId: null,
+    userQuestions: [],
+    folderAccess: [],
+  });
 });
 afterEach(cleanup);
 
@@ -340,7 +348,9 @@ describe("ChatView", () => {
       useChatSessionStore.getState().update((session) => ({
         ...session,
         messages: session.messages.map((message) =>
-          message.id === "m1" ? { ...message, text: "streamed answer" } : message,
+          message.id === "m1"
+            ? { ...message, text: "streamed answer" }
+            : message,
         ),
       }));
     });

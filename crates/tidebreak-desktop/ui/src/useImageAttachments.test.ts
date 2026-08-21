@@ -52,7 +52,10 @@ class FakeUpload {
   }
 
   progress(loaded: number) {
-    this.upload.onprogress?.({ lengthComputable: true, loaded } as ProgressEvent);
+    this.upload.onprogress?.({
+      lengthComputable: true,
+      loaded,
+    } as ProgressEvent);
   }
 
   finish(status: number, responseText: string) {

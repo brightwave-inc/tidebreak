@@ -53,12 +53,15 @@ export function useConfirm(): {
     setPending(next);
   }, []);
 
-  const confirm = useCallback((options: ConfirmOptions) => {
-    return new Promise<boolean>((resolve) => {
-      queueRef.current.push({ ...options, id: ++nextIdRef.current, resolve });
-      if (phaseRef.current === "idle") activateNext();
-    });
-  }, [activateNext]);
+  const confirm = useCallback(
+    (options: ConfirmOptions) => {
+      return new Promise<boolean>((resolve) => {
+        queueRef.current.push({ ...options, id: ++nextIdRef.current, resolve });
+        if (phaseRef.current === "idle") activateNext();
+      });
+    },
+    [activateNext],
+  );
 
   const settle = useCallback((result: boolean) => {
     const current = pendingRef.current;

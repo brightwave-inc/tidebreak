@@ -51,7 +51,11 @@ import {
   shellShortcutMode,
 } from "./code/routes";
 import type { WorkflowShortcut } from "./code/workspaceWorkflow";
-import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panel/panelUrl";
+import {
+  layoutFromSearch,
+  searchFromLayout,
+  type PanelSearch,
+} from "./panel/panelUrl";
 import type { LayoutState } from "./panel/panelTypes";
 import { connectOutputs } from "./deliverables";
 import { useProjectListStore } from "./ProjectListStore";
@@ -82,9 +86,7 @@ import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
 
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
-  document
-    .querySelector<HTMLTextAreaElement>("[data-composer-input]")
-    ?.focus();
+  document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus();
 }
 
 /**
@@ -288,9 +290,7 @@ export function AppShell() {
     "new-chat": () => void onNewChat(),
     "code-new-workspace": () => {
       const { pathname } = router.state.location;
-      useCodeUiStore
-        .getState()
-        .startNewWorkspace(codeRepoIdFromPath(pathname));
+      useCodeUiStore.getState().startNewWorkspace(codeRepoIdFromPath(pathname));
     },
     "toggle-code-review": () => {
       useCodeUiStore.getState().toggleReviewSidebar();
@@ -320,7 +320,8 @@ export function AppShell() {
     "code-view-pr": () => askWorkspace("view_pr"),
     "code-source-control": () => askWorkspace("source_control"),
     "code-archive-workspace": () => {
-      if (!codeWorkspaceIdFromPath(router.state.location.pathname)) return false;
+      if (!codeWorkspaceIdFromPath(router.state.location.pathname))
+        return false;
       useCodeUiStore.getState().requestArchiveWorkspace();
     },
     "code-prev-tab": () => applyCodeLayout((l) => stepCenterTab(l, -1)),
@@ -410,7 +411,8 @@ export function AppShell() {
         client.setAccessToken(token);
         connectOutputs(client.baseUrl, token);
       } catch (error) {
-        if (!cancelled) console.warn("could not refresh hosted Tidebreak access", error);
+        if (!cancelled)
+          console.warn("could not refresh hosted Tidebreak access", error);
       }
     };
     const timer = window.setInterval(() => void refresh(), 30_000);
@@ -677,7 +679,8 @@ export function AppShell() {
   }
 
   async function onNewChat() {
-    if (!client || creationInFlightRef.current || deletionInFlightRef.current) return;
+    if (!client || creationInFlightRef.current || deletionInFlightRef.current)
+      return;
     creationInFlightRef.current = true;
     chatListActions.setCreatingChat(true);
     try {
@@ -694,7 +697,8 @@ export function AppShell() {
   }
 
   async function onDeleteChat(target: Chat) {
-    if (!client || deletionInFlightRef.current || creationInFlightRef.current) return;
+    if (!client || deletionInFlightRef.current || creationInFlightRef.current)
+      return;
     const label = target.title?.trim() || "this work";
     // The listed chat carries the folders it had at the last refresh, which
     // predates anything connected since. The server refuses the delete on its
@@ -932,7 +936,10 @@ export function AppShell() {
           }
         >
           {confirmDialog}
-          <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+          <ShortcutsDialog
+            open={shortcutsOpen}
+            onOpenChange={setShortcutsOpen}
+          />
           {nativeTitlebar && !sidebarCollapsed && (
             <Titlebar
               macOverlay={macOverlayTitlebar}

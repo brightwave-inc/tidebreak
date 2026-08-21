@@ -10,22 +10,31 @@ import { usePanelNav } from "./usePanelNav";
 afterEach(cleanup);
 
 function Harness() {
-  const { layout, openPanel, closeTab, closeAllPanels, toggleFullscreen } = usePanelNav();
+  const { layout, openPanel, closeTab, closeAllPanels, toggleFullscreen } =
+    usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   return (
     <div>
-      <button onClick={() => openPanel({ type: "folders" })}>open folders</button>
-      <button onClick={() => openPanel({ type: "outputs" })}>open outputs</button>
+      <button onClick={() => openPanel({ type: "folders" })}>
+        open folders
+      </button>
+      <button onClick={() => openPanel({ type: "outputs" })}>
+        open outputs
+      </button>
       <button onClick={() => openPanel({ type: "outputs", outputId: "out-1" })}>
         open one output
       </button>
       <button
-        onClick={() => sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })}
+        onClick={() =>
+          sourceNav.openCitation({ documentId: "doc-2", citationId: "cite-1" })
+        }
       >
         open citation
       </button>
       <button onClick={() => closeTab()}>close active</button>
-      <button onClick={() => closeTab({ type: "folders" })}>close folders</button>
+      <button onClick={() => closeTab({ type: "folders" })}>
+        close folders
+      </button>
       <button onClick={() => closeAllPanels()}>close all</button>
       <button onClick={() => toggleFullscreen()}>fullscreen</button>
       <output>{`${layout.tabs.length}:${layout.activeIndex}`}</output>
@@ -43,7 +52,9 @@ describe("usePanelNav", () => {
     const { router } = await mount("/c/chat-1");
 
     await user.click(screen.getByText("open folders"));
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders" }),
+    );
 
     await user.click(screen.getByText("open outputs"));
     await waitFor(() =>
@@ -56,7 +67,9 @@ describe("usePanelNav", () => {
 
   it("brings an open panel forward rather than opening it twice", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
+    const { router } = await mount(
+      "/c/chat-1?tabs=folders,outputs&active=outputs",
+    );
 
     await user.click(screen.getByText("open folders"));
 
@@ -94,20 +107,28 @@ describe("usePanelNav", () => {
 
   it("hands focus to the neighbour on the left when the open tab closes", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
+    const { router } = await mount(
+      "/c/chat-1?tabs=folders,outputs&active=outputs",
+    );
 
     await user.click(screen.getByText("close active"));
 
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders" }),
+    );
   });
 
   it("keeps showing the same panel when a tab beside it closes", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?tabs=folders,outputs&active=outputs");
+    const { router } = await mount(
+      "/c/chat-1?tabs=folders,outputs&active=outputs",
+    );
 
     await user.click(screen.getByText("close folders"));
 
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "outputs" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "outputs" }),
+    );
   });
 
   it("returns to the conversation alone when the last tab closes", async () => {
@@ -121,7 +142,9 @@ describe("usePanelNav", () => {
 
   it("closes every panel at once", async () => {
     const user = userEvent.setup();
-    const { router } = await mount("/c/chat-1?tabs=folders,outputs&fullscreen=1");
+    const { router } = await mount(
+      "/c/chat-1?tabs=folders,outputs&fullscreen=1",
+    );
 
     await user.click(screen.getByText("close all"));
 
@@ -136,7 +159,9 @@ describe("usePanelNav", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/code/w/ws-1"),
     );
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders" }),
+    );
   });
 
   it("preserves a filtered subagent while the workspace layout changes", async () => {
@@ -165,11 +190,16 @@ describe("usePanelNav", () => {
 
     await user.click(screen.getByText("fullscreen"));
     await waitFor(() =>
-      expect(router.state.location.search).toEqual({ tabs: "folders", fullscreen: "1" }),
+      expect(router.state.location.search).toEqual({
+        tabs: "folders",
+        fullscreen: "1",
+      }),
     );
 
     await user.click(screen.getByText("fullscreen"));
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders" }),
+    );
 
     await user.click(screen.getByText("close active"));
     await waitFor(() => expect(router.state.location.search).toEqual({}));

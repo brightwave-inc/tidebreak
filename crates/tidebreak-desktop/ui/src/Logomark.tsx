@@ -34,10 +34,7 @@ export function Logomark(props: ComponentPropsWithoutRef<"svg">) {
       aria-hidden
       {...props}
     >
-      <path
-        d={LOGOMARK_PATH}
-        transform="translate(0 640) scale(.1 -.1)"
-      />
+      <path d={LOGOMARK_PATH} transform="translate(0 640) scale(.1 -.1)" />
     </svg>
   );
 }

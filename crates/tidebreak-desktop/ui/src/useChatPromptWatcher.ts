@@ -24,7 +24,10 @@ const inboxActions = useInbox.getState();
  * chat's established recovery routes, which keeps prompt content scoped to the
  * conversation that can render it.
  */
-export function useChatPromptWatcher(client: ApiClient | null, chatId: string | null): void {
+export function useChatPromptWatcher(
+  client: ApiClient | null,
+  chatId: string | null,
+): void {
   // Which questions the shell has already announced. It spans chat switches
   // and screens, then is pruned to the current server summary after each read.
   const announcedCallIdsRef = useRef<Set<string>>(new Set());
@@ -145,7 +148,8 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       const seq = ++folderSeq;
       try {
         const pending = await client.listPendingFolderAccessRequests(chatId);
-        if (!cancelled && seq === folderSeq) promptActions.setFolderAccess(chatId, pending);
+        if (!cancelled && seq === folderSeq)
+          promptActions.setFolderAccess(chatId, pending);
       } catch (err) {
         if (!cancelled && seq === folderSeq) {
           console.error("failed to refresh pending folder access", err);
@@ -206,7 +210,8 @@ export function useChatPromptWatcher(client: ApiClient | null, chatId: string | 
       last.plans === plansSignal &&
       last.folder === folderSignal &&
       last.writeback === writebackSignal
-    ) return;
+    )
+      return;
     lastSignalsRef.current = {
       questions: questionsSignal,
       plans: plansSignal,

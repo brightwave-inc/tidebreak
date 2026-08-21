@@ -62,7 +62,11 @@ describe("createMcpAppBridge", () => {
           protocolVersion: MCP_APPS_PROTOCOL_VERSION,
           hostInfo: { name: "Tidebreak", version: "1.0.0" },
           hostCapabilities: {},
-          hostContext: { theme: "dark", displayMode: "inline", platform: "desktop" },
+          hostContext: {
+            theme: "dark",
+            displayMode: "inline",
+            platform: "desktop",
+          },
         },
       },
     ]);
@@ -76,7 +80,9 @@ describe("createMcpAppBridge", () => {
     const { fromView, sent, setTheme } = harness("light");
     setTheme("dark");
     fromView({ jsonrpc: "2.0", id: 0, method: "ui/initialize", params: {} });
-    const [reply] = sent() as Array<{ result: { hostContext: { theme: string } } }>;
+    const [reply] = sent() as Array<{
+      result: { hostContext: { theme: string } };
+    }>;
     expect(reply.result.hostContext.theme).toBe("dark");
   });
 
@@ -86,11 +92,12 @@ describe("createMcpAppBridge", () => {
     expect(sent()).toEqual([]);
 
     fromView({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
-    expect(sent().map((message) => (message as { method?: string }).method)).toEqual([
-      "ui/notifications/tool-input",
-      "ui/notifications/tool-result",
-    ]);
-    const [input, result] = sent() as Array<{ params: Record<string, unknown> }>;
+    expect(
+      sent().map((message) => (message as { method?: string }).method),
+    ).toEqual(["ui/notifications/tool-input", "ui/notifications/tool-result"]);
+    const [input, result] = sent() as Array<{
+      params: Record<string, unknown>;
+    }>;
     expect(input.params).toEqual({ arguments: { operation: "list" } });
     expect(result.params).toEqual({
       content: [{ type: "text", text: '{"status":200}' }],
@@ -109,7 +116,9 @@ describe("createMcpAppBridge", () => {
     fromView({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
     expect(sent()).toEqual([]);
     bridge.deliverPayload({ content: "text only", is_error: true });
-    const [input, result] = sent() as Array<{ params: Record<string, unknown> }>;
+    const [input, result] = sent() as Array<{
+      params: Record<string, unknown>;
+    }>;
     expect(input.params).toEqual({ arguments: {} });
     // No structuredContent key at all when the tool produced none.
     expect(result.params).toEqual({
@@ -120,11 +129,24 @@ describe("createMcpAppBridge", () => {
 
   it("rejects unknown requests with method-not-found and ignores unknown notifications", () => {
     const { fromView, sent } = harness();
-    fromView({ jsonrpc: "2.0", id: 7, method: "ui/open-link", params: { url: "https://x" } });
+    fromView({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "ui/open-link",
+      params: { url: "https://x" },
+    });
     expect(sent()).toEqual([
-      { jsonrpc: "2.0", id: 7, error: { code: -32601, message: "Method not found" } },
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        error: { code: -32601, message: "Method not found" },
+      },
     ]);
-    fromView({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info" } });
+    fromView({
+      jsonrpc: "2.0",
+      method: "notifications/message",
+      params: { level: "info" },
+    });
     fromView({ jsonrpc: "2.0", method: "ui/notifications/request-teardown" });
     expect(sent()).toHaveLength(1);
   });
@@ -140,7 +162,11 @@ describe("createMcpAppBridge", () => {
       params: { operation_id: "listIssues" },
     });
     expect(bare.sent()).toEqual([
-      { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32601, message: "Method not found" },
+      },
     ]);
 
     // Wiring the invoker declares operations/call and nothing else: any
@@ -148,7 +174,12 @@ describe("createMcpAppBridge", () => {
     // closed rather than acquiring a handler by accident.
     const invokeOperation = vi.fn();
     const wired = harness("dark", invokeOperation);
-    wired.fromView({ jsonrpc: "2.0", id: 2, method: "resources/read", params: {} });
+    wired.fromView({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "resources/read",
+      params: {},
+    });
     wired.fromView({
       jsonrpc: "2.0",
       id: 3,
@@ -156,8 +187,16 @@ describe("createMcpAppBridge", () => {
       params: { name: "mcp__cmd__doit", arguments: {} },
     });
     expect(wired.sent()).toEqual([
-      { jsonrpc: "2.0", id: 2, error: { code: -32601, message: "Method not found" } },
-      { jsonrpc: "2.0", id: 3, error: { code: -32601, message: "Method not found" } },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32601, message: "Method not found" },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        error: { code: -32601, message: "Method not found" },
+      },
     ]);
     expect(invokeOperation).not.toHaveBeenCalled();
   });
@@ -211,7 +250,8 @@ describe("createMcpAppBridge", () => {
           id: 1,
           error: {
             code: -32000,
-            message: "connect Issues (gateway) at your model gateway to continue",
+            message:
+              "connect Issues (gateway) at your model gateway to continue",
             data: { kind: "gateway_authorization_required" },
           },
         },
@@ -238,19 +278,38 @@ describe("createMcpAppBridge", () => {
     fromView({ jsonrpc: "2.0", id: 1, method: "ping", params: {} });
     expect(sent()).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
 
-    fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 512.4 } });
+    fromView({
+      jsonrpc: "2.0",
+      method: "ui/notifications/size-changed",
+      params: { height: 512.4 },
+    });
     expect(onHeight).toHaveBeenLastCalledWith(513);
-    fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 20 } });
+    fromView({
+      jsonrpc: "2.0",
+      method: "ui/notifications/size-changed",
+      params: { height: 20 },
+    });
     expect(onHeight).toHaveBeenLastCalledWith(40);
-    fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: 99999 } });
+    fromView({
+      jsonrpc: "2.0",
+      method: "ui/notifications/size-changed",
+      params: { height: 99999 },
+    });
     expect(onHeight).toHaveBeenLastCalledWith(800);
-    fromView({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: {} });
+    fromView({
+      jsonrpc: "2.0",
+      method: "ui/notifications/size-changed",
+      params: {},
+    });
     expect(onHeight).toHaveBeenCalledTimes(3);
   });
 
   it("ignores messages from other sources and non-JSON-RPC traffic", () => {
     const { fromView, sent } = harness();
-    fromView({ jsonrpc: "2.0", id: 0, method: "ui/initialize" }, { not: "the frame" });
+    fromView(
+      { jsonrpc: "2.0", id: 0, method: "ui/initialize" },
+      { not: "the frame" },
+    );
     fromView("just a string");
     fromView({ some: "other postMessage traffic" });
     fromView(null);

@@ -48,7 +48,11 @@ export function PanelPrimaryHeader({
   const fullscreenButton = onToggleFullscreen ? (
     <WithTooltip label={fullscreenLabel}>
       <Button variant="ghost" size="icon-sm" onClick={onToggleFullscreen}>
-        {isFullscreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+        {isFullscreen ? (
+          <Minimize2 className="size-4" />
+        ) : (
+          <Maximize2 className="size-4" />
+        )}
         <span className="sr-only">{fullscreenLabel}</span>
       </Button>
     </WithTooltip>
@@ -65,7 +69,9 @@ export function PanelPrimaryHeader({
       {...props}
     >
       {spaceBetween && fullscreenButton}
-      {breadcrumb && <div className="flex min-w-0 items-center pl-2">{breadcrumb}</div>}
+      {breadcrumb && (
+        <div className="flex min-w-0 items-center pl-2">{breadcrumb}</div>
+      )}
       {leftSlot}
       <div className="flex-1" />
       {rightSlot}
@@ -117,11 +123,15 @@ export function PanelBreadcrumb({
 }) {
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <div className="shrink-0 text-sm font-medium text-muted-foreground">{firstPart}</div>
+      <div className="shrink-0 text-sm font-medium text-muted-foreground">
+        {firstPart}
+      </div>
       {currentItem && (
         <>
           <span className="shrink-0 text-muted-foreground">/</span>
-          <div className="min-w-0 truncate text-sm font-medium">{currentItem}</div>
+          <div className="min-w-0 truncate text-sm font-medium">
+            {currentItem}
+          </div>
         </>
       )}
     </div>

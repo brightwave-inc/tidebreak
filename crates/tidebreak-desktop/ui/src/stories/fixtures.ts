@@ -59,7 +59,8 @@ export const userQuestions: PendingUserQuestions = {
         {
           id: "conversation",
           label: "Conversation states",
-          description: "Approvals, plans, questions, messages, and tool activity.",
+          description:
+            "Approvals, plans, questions, messages, and tool activity.",
         },
         {
           id: "code",
@@ -69,7 +70,8 @@ export const userQuestions: PendingUserQuestions = {
         {
           id: "documents",
           label: "Document viewers",
-          description: "Heavier browser surfaces that can follow in a later slice.",
+          description:
+            "Heavier browser surfaces that can follow in a later slice.",
         },
       ],
       questionType: "multi_select",
@@ -83,7 +85,8 @@ export const userQuestions: PendingUserQuestions = {
         {
           id: "no",
           label: "No, keep it exploratory",
-          description: "Build the habit before making screenshots a required check.",
+          description:
+            "Build the habit before making screenshots a required check.",
         },
         {
           id: "yes",
@@ -237,7 +240,8 @@ export const codeWorkspace: CodeWorkspaceSnapshot = {
   id: "ws-1",
   repo_id: "repo-1",
   title: "Scoped UI workshop",
-  worktree_path: "/Users/sam/tidebreak/code/worktrees/tidebreak/scoped-ui-workshop",
+  worktree_path:
+    "/Users/sam/tidebreak/code/worktrees/tidebreak/scoped-ui-workshop",
   branch_name: "tidebreak/scoped-ui-workshop",
   base_ref: "main",
   status: "active",
@@ -316,7 +320,11 @@ export const harnessDoctor: HarnessDoctorReport = {
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: true,
-      caps: { ...fullCaps, mid_turn_steering: "supported", image_input: "unknown" },
+      caps: {
+        ...fullCaps,
+        mid_turn_steering: "supported",
+        image_input: "unknown",
+      },
     }),
     doctorEntry({
       kind: "opencode",
@@ -794,7 +802,7 @@ const deliveryFiles: CodeDeliveryPullRequestFile[] = [
       "-      <span>Review</span>",
       "+      <span>Status</span>",
       "       <span>Checks</span>",
-      "       <span className=\"text-right\">Updated</span>",
+      '       <span className="text-right">Updated</span>',
     ].join("\n"),
   },
   {
@@ -805,9 +813,9 @@ const deliveryFiles: CodeDeliveryPullRequestFile[] = [
     patch: [
       "@@ -0,0 +1,8 @@",
       "+export function pullRequestLifecycle(item) {",
-      "+  if (item.state === \"merged\" || item.merged_at) return \"merged\";",
-      "+  if (item.state === \"closed\") return \"closed\";",
-      "+  return item.draft ? \"draft\" : \"open\";",
+      '+  if (item.state === "merged" || item.merged_at) return "merged";',
+      '+  if (item.state === "closed") return "closed";',
+      '+  return item.draft ? "draft" : "open";',
       "+}",
     ].join("\n"),
   },
@@ -1103,7 +1111,8 @@ export const deliveryRunDetails: Record<number, CodeDeliveryRunDetail> = {
         state: "success",
         description: "Production deployment completed.",
         environment_url: "https://tidebreak.example.com",
-        log_url: "https://github.com/brightwave-inc/tidebreak/actions/runs/4388",
+        log_url:
+          "https://github.com/brightwave-inc/tidebreak/actions/runs/4388",
         created_at: "2026-08-20T13:29:00.000Z",
       },
     ],

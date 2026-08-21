@@ -48,23 +48,31 @@ describe("sessionLifecycleTooltip", () => {
 describe("create-time permission mode", () => {
   it("defaults to the most autonomous mode the engine honors", () => {
     expect(
-      defaultCreatePermissionMode(caps("supported", "supported", "supported", "supported")),
+      defaultCreatePermissionMode(
+        caps("supported", "supported", "supported", "supported"),
+      ),
     ).toBe("allow");
     expect(
-      createPermissionModes(caps("supported", "supported", "supported", "supported")),
+      createPermissionModes(
+        caps("supported", "supported", "supported", "supported"),
+      ),
     ).toEqual(["plan", "ask", "auto", "allow"]);
     // Down the scale one flag at a time: Allow, then Auto, then Ask.
     expect(
       defaultCreatePermissionMode(caps("supported", "supported", "supported")),
     ).toBe("auto");
     expect(
-      defaultCreatePermissionMode(caps("supported", "supported", "unsupported")),
+      defaultCreatePermissionMode(
+        caps("supported", "supported", "unsupported"),
+      ),
     ).toBe("ask");
   });
 
   it("falls back to Plan when no wider mode is supported", () => {
     expect(
-      defaultCreatePermissionMode(caps("supported", "unsupported", "unsupported")),
+      defaultCreatePermissionMode(
+        caps("supported", "unsupported", "unsupported"),
+      ),
     ).toBe("plan");
     expect(
       defaultCreatePermissionMode(caps("supported", "unknown", "unknown")),
@@ -77,15 +85,17 @@ describe("create-time permission mode", () => {
   it("offers only unsupervised Auto for a grok-shaped engine", () => {
     const grok = caps("unsupported", "unsupported", "supported");
     expect(createPermissionModes(grok)).toEqual(["auto"]);
-    expect(createPermissionModes(caps("unsupported", "unsupported", "supported", "supported"))).toEqual(
-      ["auto", "allow"],
-    );
+    expect(
+      createPermissionModes(
+        caps("unsupported", "unsupported", "supported", "supported"),
+      ),
+    ).toEqual(["auto", "allow"]);
     expect(defaultCreatePermissionMode(grok)).toBe("auto");
     expect(autoIsUnsupervised(grok)).toBe(true);
     // Supervised Auto rides the approval channel and needs no statement.
-    expect(autoIsUnsupervised(caps("supported", "supported", "supported"))).toBe(
-      false,
-    );
+    expect(
+      autoIsUnsupervised(caps("supported", "supported", "supported")),
+    ).toBe(false);
   });
 });
 
@@ -129,40 +139,41 @@ describe("harnessUnusableReason", () => {
 describe("gatewayCodeModels", () => {
   it("keeps only available model-gateway rows", () => {
     expect(
-      gatewayCodeModels([
-        {
-          key: "model_gateway::claude-opus-5",
-          id: "claude-opus-5",
-          display_name: "Claude Opus 5",
-          provider: "model_gateway",
-          vendor: null,
-          verification: "verified",
-          recommended: true,
-          available: true,
-          context_window: 1,
-          max_output_tokens: 1,
-          input_modalities: ["text"],
-          supports_reasoning: false,
-          supports_tools: true,
-          supports_structured_output: false,
-          reasoning_efforts: [],
-          supports_vision: false,
-        } as never,
-        {
-          key: "anthropic::claude-sonnet-4",
-          id: "claude-sonnet-4",
-          display_name: "Claude Sonnet 4",
-          provider: "anthropic",
-          available: true,
-        } as never,
-        {
-          key: "model_gateway::down",
-          id: "down",
-          display_name: "Down",
-          provider: "model_gateway",
-          available: false,
-        } as never,
-      ],
+      gatewayCodeModels(
+        [
+          {
+            key: "model_gateway::claude-opus-5",
+            id: "claude-opus-5",
+            display_name: "Claude Opus 5",
+            provider: "model_gateway",
+            vendor: null,
+            verification: "verified",
+            recommended: true,
+            available: true,
+            context_window: 1,
+            max_output_tokens: 1,
+            input_modalities: ["text"],
+            supports_reasoning: false,
+            supports_tools: true,
+            supports_structured_output: false,
+            reasoning_efforts: [],
+            supports_vision: false,
+          } as never,
+          {
+            key: "anthropic::claude-sonnet-4",
+            id: "claude-sonnet-4",
+            display_name: "Claude Sonnet 4",
+            provider: "anthropic",
+            available: true,
+          } as never,
+          {
+            key: "model_gateway::down",
+            id: "down",
+            display_name: "Down",
+            provider: "model_gateway",
+            available: false,
+          } as never,
+        ],
         "claude_code",
         "model_gateway::claude-opus-5",
       ),

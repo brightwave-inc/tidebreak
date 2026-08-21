@@ -35,9 +35,11 @@ describe("browser navigation", () => {
     });
     expect(browserTarget("file:///tmp/token")).toMatchObject({ ok: false });
     expect(browserTarget("javascript:alert(1)")).toMatchObject({ ok: false });
-    expect(validateBrowserUrl("https://user:secret@example.com")).toMatchObject({
-      ok: false,
-    });
+    expect(validateBrowserUrl("https://user:secret@example.com")).toMatchObject(
+      {
+        ok: false,
+      },
+    );
     expect(
       validateBrowserUrl(
         `https://example.com/${"a".repeat(MAX_BROWSER_URL_CHARS)}`,

@@ -1,8 +1,4 @@
-import {
-  useRef,
-  type KeyboardEvent,
-  type ReactNode,
-} from "react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -71,7 +67,9 @@ export function SegmentedControl<T extends string>({
         "grid w-full gap-0.5 rounded-md bg-muted/70 p-0.5",
         className,
       )}
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+      style={{
+        gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
+      }}
     >
       {options.map((option, index) => {
         const checked = option.value === value;

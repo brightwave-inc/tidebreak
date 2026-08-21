@@ -11,7 +11,8 @@ function Foundations() {
         <div>
           <h2 className="text-base font-medium">Actions</h2>
           <p className="text-sm text-muted-foreground">
-            The common hierarchy and destructive treatment used across Tidebreak.
+            The common hierarchy and destructive treatment used across
+            Tidebreak.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -31,7 +32,8 @@ function Foundations() {
         <div>
           <h2 className="text-base font-medium">Semantic status</h2>
           <p className="text-sm text-muted-foreground">
-            These tones should remain legible in both themes without changing meaning.
+            These tones should remain legible in both themes without changing
+            meaning.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

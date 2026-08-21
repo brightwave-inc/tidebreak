@@ -286,10 +286,7 @@ function InspectorTabTrigger({
     <TabsTrigger
       value={value}
       aria-label={label}
-      className={cn(
-        TAB_TRIGGER_CLASS,
-        selected && TAB_TRIGGER_SELECTED_CLASS,
-      )}
+      className={cn(TAB_TRIGGER_CLASS, selected && TAB_TRIGGER_SELECTED_CLASS)}
     >
       {children}
       <span>{displayLabel}</span>
@@ -358,9 +355,8 @@ export function PrTab({
   const merging = sharedMerging ?? localMerging;
   const refreshing = prResource?.busy === "refresh" || localRefreshing;
   const mutationBusy =
-    (prResource
-      ? prResource.busy !== null || prResource.refreshing
-      : false) || localMerging !== null;
+    (prResource ? prResource.busy !== null || prResource.refreshing : false) ||
+    localMerging !== null;
 
   const loadComments = useCallback(async () => {
     if (prNumber === undefined) return;
@@ -727,9 +723,7 @@ function CommentsSection({
     comment,
     key: reviewCommentKey(comment),
   }));
-  const visible = keyed.filter(
-    ({ key }) => !preferences.hidden.includes(key),
-  );
+  const visible = keyed.filter(({ key }) => !preferences.hidden.includes(key));
   const hiddenCount = keyed.length - visible.length;
 
   return (

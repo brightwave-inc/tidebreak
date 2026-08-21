@@ -22,7 +22,10 @@ export function HarnessInstallNote({
   if (install.error) {
     return (
       <p className="text-destructive flex items-start gap-1.5 text-xs">
-        <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+        <TriangleAlert
+          className="mt-0.5 size-3.5 shrink-0"
+          aria-hidden="true"
+        />
         <span>
           {label}
           {version} could not be installed. {install.error}

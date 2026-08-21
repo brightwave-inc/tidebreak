@@ -1,7 +1,11 @@
 import { useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
-import type { ApiClient, LocalVoiceModelInfo, VoiceTranscriptionInfo } from "../api";
+import type {
+  ApiClient,
+  LocalVoiceModelInfo,
+  VoiceTranscriptionInfo,
+} from "../api";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -33,7 +37,9 @@ import {
 const LOCAL_VALUE_PREFIX = "local:";
 
 /** What the closed picker says once a choice is made. */
-export function voiceSelectionLabel(info: VoiceTranscriptionInfo | null): string {
+export function voiceSelectionLabel(
+  info: VoiceTranscriptionInfo | null,
+): string {
   if (!info) return "Loading…";
   if (info.model === "gpt4o_transcribe") return "OpenAI · gpt-4o-transcribe";
   if (info.model === "gemini_flash") return "Google · Gemini 3.6 Flash";
@@ -41,7 +47,9 @@ export function voiceSelectionLabel(info: VoiceTranscriptionInfo | null): string
   return local ? `On this device · ${local.label}` : "On this device";
 }
 
-export function voiceSelectionValue(info: VoiceTranscriptionInfo | null): string {
+export function voiceSelectionValue(
+  info: VoiceTranscriptionInfo | null,
+): string {
   if (!info) return "";
   return info.model === "local"
     ? `${LOCAL_VALUE_PREFIX}${info.local_model}`
@@ -172,7 +180,8 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
         {selectedLocal?.state === "failed" && (
           <div className="flex flex-col items-start gap-2">
             <SettingsError>
-              {selectedLocal.error ?? `${selectedLocal.label} did not download.`}
+              {selectedLocal.error ??
+                `${selectedLocal.label} did not download.`}
             </SettingsError>
             <Button
               type="button"
@@ -195,7 +204,9 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
             className="w-fit"
             disabled={loading}
             onClick={() =>
-              void useVoiceInputStore.getState().install(client, selectedLocal.id)
+              void useVoiceInputStore
+                .getState()
+                .install(client, selectedLocal.id)
             }
           >
             {`Download ${selectedLocal.label}`}
@@ -258,11 +269,15 @@ function LocalModelItem({ model }: { model: LocalVoiceModelInfo }) {
           )}
           {!installed && (
             <span className="text-xs text-muted-foreground">
-              {model.state === "downloading" ? "Downloading…" : "Not downloaded"}
+              {model.state === "downloading"
+                ? "Downloading…"
+                : "Not downloaded"}
             </span>
           )}
         </span>
-        <span className="text-xs text-muted-foreground">{model.description}</span>
+        <span className="text-xs text-muted-foreground">
+          {model.description}
+        </span>
       </span>
     </SelectItem>
   );

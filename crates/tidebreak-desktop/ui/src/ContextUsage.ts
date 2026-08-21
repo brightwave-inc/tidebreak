@@ -78,7 +78,11 @@ export function contextTruncationNotice(
   originalTokens: number,
   fittedTokens: number,
 ): string {
-  if (originalTokens <= 0 || fittedTokens <= 0 || fittedTokens >= originalTokens) {
+  if (
+    originalTokens <= 0 ||
+    fittedTokens <= 0 ||
+    fittedTokens >= originalTokens
+  ) {
     return "Earlier conversation was trimmed to fit the model's context.";
   }
   return `Earlier conversation was trimmed to fit the model's context (~${formatTokenCount(originalTokens)} → ~${formatTokenCount(fittedTokens)} tokens).`;

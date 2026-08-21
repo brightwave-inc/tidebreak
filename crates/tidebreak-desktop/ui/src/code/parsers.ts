@@ -238,25 +238,23 @@ const DELIVERY_CHECK_BUCKETS = new Set<CodeDeliveryCheck["bucket"]>([
   "fail",
   "skipped",
 ]);
-const DELIVERY_PR_ATTENTION_REASONS =
-  new Set<CodeDeliveryPrAttentionReason>([
-    "changes_requested",
-    "checks_failed",
-    "conflicts",
-    "behind",
-    "blocked",
-  ]);
+const DELIVERY_PR_ATTENTION_REASONS = new Set<CodeDeliveryPrAttentionReason>([
+  "changes_requested",
+  "checks_failed",
+  "conflicts",
+  "behind",
+  "blocked",
+]);
 const DELIVERY_RUN_KINDS = new Set<CodeDeliveryRunKind>([
   "workflow_run",
   "deployment",
 ]);
-const DELIVERY_RUN_ATTENTION_REASONS =
-  new Set<CodeDeliveryRunAttentionReason>([
-    "failure",
-    "timed_out",
-    "action_required",
-    "startup_failure",
-  ]);
+const DELIVERY_RUN_ATTENTION_REASONS = new Set<CodeDeliveryRunAttentionReason>([
+  "failure",
+  "timed_out",
+  "action_required",
+  "startup_failure",
+]);
 
 function parseCodeGitHubRepositoryTarget(
   value: unknown,
@@ -316,7 +314,9 @@ function parseCodeGitHubRepositoryRef(
   };
 }
 
-function parseCodeGitHubCapability(value: unknown): CodeGitHubCapability | null {
+function parseCodeGitHubCapability(
+  value: unknown,
+): CodeGitHubCapability | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeGitHubCapability>(value, [
@@ -541,9 +541,7 @@ function parseCodeDeliveryPullRequestSummary(
     ...(value.review_decision !== undefined
       ? { review_decision: value.review_decision }
       : {}),
-    ...(value.mergeable !== undefined
-      ? { mergeable: value.mergeable }
-      : {}),
+    ...(value.mergeable !== undefined ? { mergeable: value.mergeable } : {}),
     ...(value.merge_state_status !== undefined
       ? { merge_state_status: value.merge_state_status }
       : {}),
@@ -820,9 +818,7 @@ function parseCodeDeliveryRunSummary(
     workspace_links,
     created_at: value.created_at,
     updated_at: value.updated_at,
-    ...(value.conclusion !== undefined
-      ? { conclusion: value.conclusion }
-      : {}),
+    ...(value.conclusion !== undefined ? { conclusion: value.conclusion } : {}),
     ...(value.workflow !== undefined ? { workflow: value.workflow } : {}),
     ...(value.environment !== undefined
       ? { environment: value.environment }
@@ -907,9 +903,7 @@ function parseCodeDeliveryWorkflowJob(
     started_at: value.started_at,
     completed_at: value.completed_at,
     failed_steps: [...value.failed_steps],
-    ...(value.conclusion !== undefined
-      ? { conclusion: value.conclusion }
-      : {}),
+    ...(value.conclusion !== undefined ? { conclusion: value.conclusion } : {}),
   };
 }
 
@@ -1197,9 +1191,7 @@ export function parseCodeForkTranscript(
   };
 }
 
-export function parseCodeWorktreeRoot(
-  value: unknown,
-): CodeWorktreeRoot | null {
+export function parseCodeWorktreeRoot(value: unknown): CodeWorktreeRoot | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeWorktreeRoot>(value, [
@@ -2174,9 +2166,7 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
   };
 }
 
-export function parseHarnessModelList(
-  value: unknown,
-): {
+export function parseHarnessModelList(value: unknown): {
   kind: HarnessKind;
   models: { id: string; label: string; default: boolean }[];
 } | null {

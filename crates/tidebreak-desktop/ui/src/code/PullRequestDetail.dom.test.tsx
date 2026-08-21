@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -114,7 +120,9 @@ describe("PullRequestDetailPanel", () => {
   it("lists every check, failures first", async () => {
     await renderPanel(2251);
     await userEvent.click(screen.getByRole("tab", { name: /Checks/ }));
-    expect(await screen.findByText("1 of 2 passed, 1 failed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("1 of 2 passed, 1 failed"),
+    ).toBeInTheDocument();
     const rows = screen.getAllByRole("button", { name: /desktop \// });
     expect(rows[0]).toHaveTextContent("desktop / storybook");
   });
@@ -126,7 +134,10 @@ describe("PullRequestDetailPanel", () => {
         message: "Posted.",
       }),
     );
-    await renderPanel(2251, client({ runCodeDeliveryPullRequestAction: runAction }));
+    await renderPanel(
+      2251,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
 
     const box = screen.getByLabelText("Comment on this pull request");
     await userEvent.type(box, "Looks good.");

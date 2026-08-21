@@ -59,7 +59,9 @@ export function TurnReviewCard({
         <p className="flex items-center gap-1.5 font-medium">
           <TriangleAlert size={14} aria-hidden="true" />
           Turn failed
-          {duration && <span className="font-normal tabular-nums">· {duration}</span>}
+          {duration && (
+            <span className="font-normal tabular-nums">· {duration}</span>
+          )}
         </p>
         <p>{turn.error ?? "The engine stopped without saying why."}</p>
         {narrative}
@@ -107,7 +109,9 @@ function SeamRow({
       aria-label={label}
       className={cn(
         "flex flex-wrap items-center gap-1.5 border-t pt-2 text-xs",
-        tone === "warning" ? "text-warning-foreground" : "text-muted-foreground",
+        tone === "warning"
+          ? "text-warning-foreground"
+          : "text-muted-foreground",
       )}
     >
       {children}

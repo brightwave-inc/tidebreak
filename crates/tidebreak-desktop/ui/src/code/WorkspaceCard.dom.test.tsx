@@ -72,7 +72,9 @@ describe("WorkspaceCard", () => {
     const { onOpen } = renderCard();
 
     await user.click(
-      screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
+      screen.getByRole("button", {
+        name: "Fix login · app · tidebreak/fix-login",
+      }),
     );
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
@@ -81,15 +83,11 @@ describe("WorkspaceCard", () => {
     const user = userEvent.setup();
     const { onCommand } = renderCard({ pr });
 
-    fireEvent.contextMenu(
-      screen.getByRole("button", { name: /^Fix login/ }),
-    );
+    fireEvent.contextMenu(screen.getByRole("button", { name: /^Fix login/ }));
     const menu = await screen.findByRole("menu");
     expect(menu).toHaveTextContent("Open pull request");
     expect(menu).toHaveTextContent("Archive");
-    await user.click(
-      screen.getByRole("menuitem", { name: "Toggle terminal" }),
-    );
+    await user.click(screen.getByRole("menuitem", { name: "Toggle terminal" }));
     expect(onCommand).toHaveBeenCalledWith("toggle-terminal");
   });
 
@@ -132,16 +130,17 @@ describe("WorkspaceCard", () => {
 
     // Same model, same label table as WorkspaceWorkflowControl: a
     // conflicting PR's one obvious action is resolving the conflicts.
-    await user.click(
-      screen.getByRole("button", { name: "Resolve conflicts" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Resolve conflicts" }));
     expect(onWorkflowAction).toHaveBeenCalledWith("resolve_conflicts");
   });
 
   it("leads an archived workspace's panel with Restore", async () => {
     const user = userEvent.setup();
     const { onCommand } = renderCard({
-      workspace: { status: "archived", archived_at: "2026-08-18T00:00:00.000Z" },
+      workspace: {
+        status: "archived",
+        archived_at: "2026-08-18T00:00:00.000Z",
+      },
     });
 
     expect(screen.getByText("Archived")).toBeInTheDocument();
@@ -160,11 +159,11 @@ describe("WorkspaceCard", () => {
     // Repo and branch stay in the accessible name even when nothing meta is
     // drawn on the row.
     expect(screen.queryByText("app")).not.toBeInTheDocument();
+    expect(screen.queryByText("tidebreak/fix-login")).not.toBeInTheDocument();
     expect(
-      screen.queryByText("tidebreak/fix-login"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
+      screen.getByRole("button", {
+        name: "Fix login · app · tidebreak/fix-login",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -205,43 +204,48 @@ describe("WorkspaceCard", () => {
 
     expect(screen.queryByText("app")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
+      screen.getByRole("button", {
+        name: "Fix login · app · tidebreak/fix-login",
+      }),
     ).toBeInTheDocument();
   });
 
   it.each([
     ["shell", "Shell running · 3 turns"],
     ["monitor", "Monitoring · 3 turns"],
-  ] as const)("renders %s activity as its own workspace state", (activity, label) => {
-    const digest: CodeSessionDigest = {
-      workspace: workspace.id,
-      session: "sess-1",
-      kind: "interactive",
-      lifecycle: "running",
-      attention: { state: { type: "working" }, source: "lifecycle" },
-      title: workspace.title,
-      turn_count: 3,
-      activity,
-    };
-    render(
-      <WorkspaceCard
-        workspace={workspace}
-        digest={digest}
-        session={undefined}
-        repoName="app"
-        active={false}
-        terminalOpen={false}
-        density="detailed"
-        visibleMeta={{ repoChip: true, branch: false }}
-        commands={workspaceCommands({ hasPr: false, archived: false })}
-        onOpen={vi.fn()}
-        onCommand={vi.fn()}
-      />,
-    );
+  ] as const)(
+    "renders %s activity as its own workspace state",
+    (activity, label) => {
+      const digest: CodeSessionDigest = {
+        workspace: workspace.id,
+        session: "sess-1",
+        kind: "interactive",
+        lifecycle: "running",
+        attention: { state: { type: "working" }, source: "lifecycle" },
+        title: workspace.title,
+        turn_count: 3,
+        activity,
+      };
+      render(
+        <WorkspaceCard
+          workspace={workspace}
+          digest={digest}
+          session={undefined}
+          repoName="app"
+          active={false}
+          terminalOpen={false}
+          density="detailed"
+          visibleMeta={{ repoChip: true, branch: false }}
+          commands={workspaceCommands({ hasPr: false, archived: false })}
+          onOpen={vi.fn()}
+          onCommand={vi.fn()}
+        />,
+      );
 
-    expect(screen.getByText(label)).toBeInTheDocument();
-    expect(screen.queryByText(/Agent working/)).not.toBeInTheDocument();
-  });
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.queryByText(/Agent working/)).not.toBeInTheDocument();
+    },
+  );
 
   it("detailed running cards lead with the harness mark and turn count", () => {
     const digest: CodeSessionDigest = {
@@ -321,7 +325,9 @@ describe("WorkspaceCard", () => {
     );
 
     await user.click(
-      screen.getByRole("button", { name: "Watch task for Fix login: Watching" }),
+      screen.getByRole("button", {
+        name: "Watch task for Fix login: Watching",
+      }),
     );
     expect(onOpenChildSession).toHaveBeenCalledWith("sess-watch");
     // The child row is a sibling of the row button; opening it must not
@@ -347,7 +353,11 @@ describe("WorkspaceCard", () => {
           name: "Find the config parser",
           status: "running",
         },
-        { call_id: "toolu_task_2", name: "Run the flaky suite", status: "failed" },
+        {
+          call_id: "toolu_task_2",
+          name: "Run the flaky suite",
+          status: "failed",
+        },
       ],
     };
     render(

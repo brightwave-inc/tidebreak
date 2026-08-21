@@ -130,7 +130,10 @@ export function ApprovalCard({
     rowRefs.current[wrapped]?.focus();
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+  const onKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       focusRow(index + (event.key === "ArrowDown" ? 1 : -1));
@@ -220,13 +223,10 @@ export function ApprovalCard({
       )}
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
-          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · click or Submit confirms
+          ↑↓ choose · 1–{Math.min(options.length, 9)} jump · click or Submit
+          confirms
         </span>
-        <Button
-          size="sm"
-          disabled={deciding}
-          onClick={submitSelected}
-        >
+        <Button size="sm" disabled={deciding} onClick={submitSelected}>
           Submit
         </Button>
       </div>

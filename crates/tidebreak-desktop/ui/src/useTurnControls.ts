@@ -162,10 +162,7 @@ export function useTurnControls(
     try {
       await client.cancel(startedChatId, turnId);
     } catch (err) {
-      if (
-        stillOpen(startedChatId) &&
-        cancelRequestTurnRef.current === turnId
-      ) {
+      if (stillOpen(startedChatId) && cancelRequestTurnRef.current === turnId) {
         cancelRequestTurnRef.current = null;
         setCancelPendingTurnId(null);
         setCancelError(String(err));

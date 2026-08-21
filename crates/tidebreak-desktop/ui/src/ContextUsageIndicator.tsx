@@ -89,8 +89,7 @@ export function ContextUsageIndicator({
             <div className="shrink-0 font-mono text-[11px] tabular-nums opacity-80">
               {metered ? (
                 <>
-                  {percent}%
-                  <span className="mx-1 opacity-50">·</span>
+                  {percent}%<span className="mx-1 opacity-50">·</span>
                   {formatTokenCount(resident)}
                   <span className="mx-0.5 opacity-50">/</span>
                   {formatTokenCount(contextWindow)}
@@ -144,7 +143,10 @@ export function ContextUsageIndicator({
               </p>
               <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-[11px] leading-relaxed">
                 {parts.map((part) => (
-                  <div key={part.label} className="col-span-2 grid grid-cols-subgrid">
+                  <div
+                    key={part.label}
+                    className="col-span-2 grid grid-cols-subgrid"
+                  >
                     <dt className="opacity-70">{part.label}</dt>
                     <dd className="font-mono tabular-nums">
                       {part.tokens.toLocaleString()}
@@ -162,7 +164,8 @@ export function ContextUsageIndicator({
         className={cn(
           "inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
           level === "critical" && "text-destructive hover:text-destructive",
-          level === "warning" && "text-warning-foreground hover:text-warning-foreground",
+          level === "warning" &&
+            "text-warning-foreground hover:text-warning-foreground",
         )}
         // A graphic with a text alternative rather than a live region: this
         // updates on every turn, and it is reference material, not an
@@ -194,11 +197,7 @@ function ContextUsageRing({ percent }: { percent: number | null }) {
       ? undefined
       : circumference * (1 - Math.min(100, Math.max(0, percent)) / 100);
   return (
-    <svg
-      viewBox="0 0 20 20"
-      className="size-5 -rotate-90"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 20 20" className="size-5 -rotate-90" aria-hidden="true">
       <circle
         cx="10"
         cy="10"

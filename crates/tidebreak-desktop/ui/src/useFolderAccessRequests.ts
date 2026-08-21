@@ -6,10 +6,7 @@ import {
   type FolderAccessDecision,
 } from "./host";
 import { hostErrorMessage } from "./remoteMachine";
-import {
-  PICKER_BUSY_MESSAGE,
-  useNativePickerLatch,
-} from "./NativePickerLatch";
+import { PICKER_BUSY_MESSAGE, useNativePickerLatch } from "./NativePickerLatch";
 import { useOpenConversation } from "./OpenConversation";
 import { usePendingPrompts } from "./PendingPrompts";
 

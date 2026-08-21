@@ -7,10 +7,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import ReactMarkdown, {
-  type Components,
-  type Options,
-} from "react-markdown";
+import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
@@ -198,7 +195,9 @@ function MarkdownTable({ children }: { children?: ReactNode }) {
   return (
     <div className="group/markdown-table relative my-5">
       <ClipboardCopyButton
-        copy={() => copyTable(container.current?.querySelector("table") ?? null)}
+        copy={() =>
+          copyTable(container.current?.querySelector("table") ?? null)
+        }
         label="Copy table"
         copiedAnnouncement="Table copied"
         failedAnnouncement="Copy failed"
@@ -290,7 +289,8 @@ const components: Components = {
 function parseCitationLocator(value: string): CitationLocator | null {
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object" || !("kind" in parsed)) return null;
+    if (!parsed || typeof parsed !== "object" || !("kind" in parsed))
+      return null;
     const kind = (parsed as { kind?: unknown }).kind;
     return ["document", "page", "pages", "lines", "sheet"].includes(
       String(kind),
@@ -479,7 +479,9 @@ function wrappingComponents(
 ): Components | undefined {
   if (!wrapBlock) return undefined;
   const wrap = (
-    node: { position?: { start: { offset?: number }; end: { offset?: number } } } | undefined,
+    node:
+      | { position?: { start: { offset?: number }; end: { offset?: number } } }
+      | undefined,
     element: ReactElement,
   ): ReactNode => {
     const start = node?.position?.start.offset;

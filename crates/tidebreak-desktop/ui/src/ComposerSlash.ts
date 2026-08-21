@@ -74,7 +74,6 @@ export function activeSlashQuery(
   return activeTokenQuery(draft, caret, "/");
 }
 
-
 /**
  * The options a query names, best match first.
  *
@@ -94,13 +93,14 @@ export function filterSlashOptions(
   for (const option of options) {
     const name = option.name.toLowerCase();
     const label = option.label.toLowerCase();
-    const rank = name.startsWith(needle) || label.startsWith(needle)
-      ? 0
-      : name.includes(needle) || label.includes(needle)
-        ? 1
-        : option.description.toLowerCase().includes(needle)
-          ? 2
-          : -1;
+    const rank =
+      name.startsWith(needle) || label.startsWith(needle)
+        ? 0
+        : name.includes(needle) || label.includes(needle)
+          ? 1
+          : option.description.toLowerCase().includes(needle)
+            ? 2
+            : -1;
     if (rank >= 0) ranked.push({ option, rank });
   }
   return ranked

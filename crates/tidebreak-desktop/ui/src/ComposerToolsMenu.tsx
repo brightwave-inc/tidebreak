@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { FolderPlus, LoaderCircle, Package, Paperclip, Plus } from "lucide-react";
+import {
+  FolderPlus,
+  LoaderCircle,
+  Package,
+  Paperclip,
+  Plus,
+} from "lucide-react";
 
 import type { NetworkPolicy, ReasoningEffort } from "./api";
 import { ReasoningEffortSubMenu } from "./ModelMenu";
@@ -188,7 +194,10 @@ export function ComposerToolsMenu({
                   window.requestAnimationFrame(plugins.onOpen);
                 }}
               >
-                <Package className="size-4 text-muted-foreground" aria-hidden="true" />
+                <Package
+                  className="size-4 text-muted-foreground"
+                  aria-hidden="true"
+                />
                 <span>Plugins</span>
               </DropdownMenuItem>
             </>

@@ -3,7 +3,10 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { setThemeMode } from "@/theme";
-import { clearFileDownloadCache, type FileBytesSource } from "./useFileDownload";
+import {
+  clearFileDownloadCache,
+  type FileBytesSource,
+} from "./useFileDownload";
 
 const docxMocks = vi.hoisted(() => ({
   props: null as Record<string, unknown> | null,
@@ -49,7 +52,9 @@ it("keeps the viewer read-only and follows live app theme changes", async () => 
   const { container, unmount } = render(<DocxViewer source={source()} />);
 
   await waitFor(() =>
-    expect(container.querySelector('[data-testid="extend-docx-viewer"]')).toBeTruthy(),
+    expect(
+      container.querySelector('[data-testid="extend-docx-viewer"]'),
+    ).toBeTruthy(),
   );
   expect(docxMocks.props).toMatchObject({
     isDark: false,
@@ -62,9 +67,7 @@ it("keeps the viewer read-only and follows live app theme changes", async () => 
   expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
 
   setThemeMode("dark");
-  await waitFor(() =>
-    expect(docxMocks.props).toMatchObject({ isDark: true }),
-  );
+  await waitFor(() => expect(docxMocks.props).toMatchObject({ isDark: true }));
   expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
 
   unmount();

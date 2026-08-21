@@ -152,12 +152,7 @@ function PlotlyFigure({
     // here and turned into state the fallback can render.
     const draw = async () => {
       try {
-        await Plotly.react(
-          element,
-          data as unknown as Data[],
-          layout,
-          config,
-        );
+        await Plotly.react(element, data as unknown as Data[], layout, config);
       } catch (error) {
         console.error("chart failed to render", error);
         if (!disposed) setFailed(true);

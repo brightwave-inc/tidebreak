@@ -14,12 +14,7 @@ export function DocumentDetailBreadcrumb({
 }: {
   documentName?: string;
 }) {
-  return (
-    <PanelBreadcrumb
-      firstPart="Document"
-      currentItem={documentName}
-    />
-  );
+  return <PanelBreadcrumb firstPart="Document" currentItem={documentName} />;
 }
 
 export function DocumentDetailActions({
@@ -44,9 +39,7 @@ export function DocumentDetailActions({
   return (
     <div className="flex items-center gap-2">
       {canAddToProject && (
-        <WithTooltip
-          label={shared ? "In the project" : "Add to project"}
-        >
+        <WithTooltip label={shared ? "In the project" : "Add to project"}>
           <Button
             variant="ghost"
             size="icon-sm"

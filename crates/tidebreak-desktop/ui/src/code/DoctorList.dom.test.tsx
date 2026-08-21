@@ -41,6 +41,8 @@ describe("DoctorList", () => {
     render(<DoctorList report={report} />);
 
     expect(screen.getByText("Protocol gaps (history):")).toBeInTheDocument();
-    expect(screen.getByText("6 events across saved sessions")).toBeInTheDocument();
+    expect(
+      screen.getByText("6 events across saved sessions"),
+    ).toBeInTheDocument();
   });
 });

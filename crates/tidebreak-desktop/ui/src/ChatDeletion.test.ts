@@ -66,10 +66,9 @@ describe("connected folders on delete", () => {
   it("disconnects every folder the chat holds", async () => {
     const target = withFolders(chat("chat-1", null), ["root-a", "root-b"]);
     await detachChatFolders(target);
-    expect(vi.mocked(disconnectFolder).mock.calls.map((call) => call[1])).toEqual([
-      "root-a",
-      "root-b",
-    ]);
+    expect(
+      vi.mocked(disconnectFolder).mock.calls.map((call) => call[1]),
+    ).toEqual(["root-a", "root-b"]);
   });
 
   it("has nothing to disconnect without a native host", async () => {

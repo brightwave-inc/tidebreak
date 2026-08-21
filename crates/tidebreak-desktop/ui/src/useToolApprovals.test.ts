@@ -6,7 +6,6 @@ import { useChatSessionStore } from "./ChatSessionStore";
 import { useChatListStore } from "./ChatListStore";
 import { useToolApprovals } from "./useToolApprovals";
 
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -56,7 +55,9 @@ describe("useToolApprovals", () => {
     const client = stubClient();
     const { result } = renderHook(() => useToolApprovals(client, "chat-1"));
 
-    await act(async () => result.current.decide("call-1", "approve", "whole_tool"));
+    await act(async () =>
+      result.current.decide("call-1", "approve", "whole_tool"),
+    );
 
     expect(client.decideApproval).toHaveBeenCalledWith(
       "chat-1",
@@ -94,7 +95,9 @@ describe("useToolApprovals", () => {
     const { result } = renderHook(() => useToolApprovals(client, "chat-1"));
 
     act(() => result.current.decide("call-1", "approve"));
-    await waitFor(() => expect(result.current.deciding.has("call-1")).toBe(true));
+    await waitFor(() =>
+      expect(result.current.deciding.has("call-1")).toBe(true),
+    );
     act(() => result.current.decide("call-1", "reject"));
 
     expect(client.decideApproval).toHaveBeenCalledTimes(1);
@@ -159,7 +162,9 @@ describe("useToolApprovals", () => {
     // Switching in place is what a caller without that key would do, and the
     // previous conversation's error must not follow the reader across.
     const decision = deferred<void>();
-    const client = stubClient({ decideApproval: vi.fn(() => decision.promise) });
+    const client = stubClient({
+      decideApproval: vi.fn(() => decision.promise),
+    });
     seedApprovalCard("call-1");
     const { result, rerender } = renderHook(
       ({ chatId }) => useToolApprovals(client, chatId),

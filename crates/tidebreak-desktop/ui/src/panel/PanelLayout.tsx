@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Panel, PanelGroup, type ImperativePanelGroupHandle } from "react-resizable-panels";
+import {
+  Panel,
+  PanelGroup,
+  type ImperativePanelGroupHandle,
+} from "react-resizable-panels";
 
 import { cn } from "@/lib/utils";
 import { PanelDragHandle } from "./PanelDragHandle";
@@ -124,7 +128,10 @@ export function PanelLayout({
         {renderChat(showChat)}
       </Panel>
 
-      <PanelDragHandle disabled={!hasTabs || Boolean(fullscreen)} onDragging={setDragging} />
+      <PanelDragHandle
+        disabled={!hasTabs || Boolean(fullscreen)}
+        onDragging={setDragging}
+      />
 
       <Panel
         order={2}
@@ -144,7 +151,9 @@ export function PanelLayout({
                 onClose={handleClose}
               />
             </div>
-            <div className="flex min-h-0 flex-1 flex-col">{renderPanel(panel)}</div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              {renderPanel(panel)}
+            </div>
           </div>
         )}
       </Panel>

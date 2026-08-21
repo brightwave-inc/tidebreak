@@ -108,7 +108,9 @@ export function BrowserViewportControl({
             type="button"
             variant="ghost"
             size={compact ? "icon-xs" : "xs"}
-            className={compact ? "size-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"}
+            className={
+              compact ? "size-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"
+            }
             disabled={disabled}
             aria-label={triggerAriaLabel}
           >
@@ -223,12 +225,11 @@ function ViewportPresetList({
             onKeyDown={(event) => onKeyDown(event, index)}
           >
             <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="flex-1 truncate">{VIEWPORT_PRESET_LABELS[preset]}</span>
+            <span className="flex-1 truncate">
+              {VIEWPORT_PRESET_LABELS[preset]}
+            </span>
             {active && (
-              <span
-                aria-hidden
-                className="size-1.5 rounded-full bg-primary"
-              />
+              <span aria-hidden className="size-1.5 rounded-full bg-primary" />
             )}
           </button>
         );

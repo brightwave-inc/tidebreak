@@ -758,9 +758,7 @@ describe("worktree root parser", () => {
       effective_root: "/Volumes/work/trees",
       default_root: "/Users/sam/Tidebreak/workspaces",
     });
-    expect(
-      parseCodeWorktreeRoot({ effective_root: "/tmp/trees" }),
-    ).toBeNull();
+    expect(parseCodeWorktreeRoot({ effective_root: "/tmp/trees" })).toBeNull();
     expect(
       parseCodeWorktreeRoot({
         root: 7,
@@ -973,7 +971,8 @@ describe("code delivery wire parsers", () => {
           state: "failure",
           description: "Production health check failed.",
           environment_url: "https://tidebreak.example.com",
-          log_url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
+          log_url:
+            "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
           created_at: "2026-08-20T12:04:00.000Z",
         },
       ],
@@ -1036,9 +1035,10 @@ describe("parseFenceReason", () => {
     expect(parseFenceReason({ type: "orphan_alive" })).toEqual({
       type: "orphan_alive",
     });
-    expect(
-      parseFenceReason({ type: "resume_lost", detail: "gone" }),
-    ).toEqual({ type: "resume_lost", detail: "gone" });
+    expect(parseFenceReason({ type: "resume_lost", detail: "gone" })).toEqual({
+      type: "resume_lost",
+      detail: "gone",
+    });
     // A session fenced for repeated failures used to fail this parse, and
     // a null here drops the whole session from the list rather than just
     // its badge.
@@ -1054,7 +1054,11 @@ describe("parseFenceReason", () => {
   it("rejects a malformed reason", () => {
     expect(parseFenceReason({ type: "repeated_turn_failures" })).toBeNull();
     expect(
-      parseFenceReason({ type: "repeated_turn_failures", count: "3", detail: "x" }),
+      parseFenceReason({
+        type: "repeated_turn_failures",
+        count: "3",
+        detail: "x",
+      }),
     ).toBeNull();
     expect(parseFenceReason({ type: "who_knows" })).toBeNull();
   });

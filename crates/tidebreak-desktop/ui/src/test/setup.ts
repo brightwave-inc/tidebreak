@@ -48,7 +48,16 @@ if (typeof globalThis.ResizeObserver === "undefined") {
     observe(target: Element) {
       const entry = {
         target,
-        contentRect: { width: 1024, height: 768, top: 0, left: 0, right: 1024, bottom: 768, x: 0, y: 0 },
+        contentRect: {
+          width: 1024,
+          height: 768,
+          top: 0,
+          left: 0,
+          right: 1024,
+          bottom: 768,
+          x: 0,
+          y: 0,
+        },
         borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
         contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
         devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],

@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  turnFailureCopy,
-  turnFailureOffersRetry,
-} from "./TurnFailureNotice";
+import { turnFailureCopy, turnFailureOffersRetry } from "./TurnFailureNotice";
 
 describe("TurnFailureNotice copy", () => {
   it("attributes a bare provider access denial without inventing one cause", () => {

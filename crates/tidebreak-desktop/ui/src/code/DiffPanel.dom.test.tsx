@@ -60,16 +60,18 @@ describe("DiffPanel", () => {
     expect(added).toHaveClass("bg-success-background/55");
 
     const removed = screen.getByText("-old").parentElement;
-    expect(removed?.querySelector('[data-diff-gutter="old"]')?.textContent).toBe(
-      "1",
-    );
-    expect(removed?.querySelector('[data-diff-gutter="new"]')?.textContent).toBe(
-      "",
-    );
+    expect(
+      removed?.querySelector('[data-diff-gutter="old"]')?.textContent,
+    ).toBe("1");
+    expect(
+      removed?.querySelector('[data-diff-gutter="new"]')?.textContent,
+    ).toBe("");
     expect(removed).toHaveClass("bg-critical-background/55");
 
     expect(
-      screen.getByText("This diff was truncated. Open a single file for the rest."),
+      screen.getByText(
+        "This diff was truncated. Open a single file for the rest.",
+      ),
     ).toBeInTheDocument();
     expect(client.getCodeWorkspaceDiff).toHaveBeenCalledWith("ws-1", {
       turn: "turn-1",
@@ -121,7 +123,9 @@ describe("DiffPanel", () => {
     );
 
     // A control nested inside another control is reachable by neither.
-    const disclosure = await screen.findByRole("button", { name: "src/lib.rs" });
+    const disclosure = await screen.findByRole("button", {
+      name: "src/lib.rs",
+    });
     const open = screen.getByRole("button", { name: "Open src/lib.rs" });
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
     expect(disclosure.contains(open)).toBe(false);
@@ -208,9 +212,9 @@ rename to new.txt
       "--- a/old.txt",
       "+++ b/new.txt",
     ]);
-    expect(meta.every((line) => line.oldNo === null && line.newNo === null)).toBe(
-      true,
-    );
+    expect(
+      meta.every((line) => line.oldNo === null && line.newNo === null),
+    ).toBe(true);
     expect(group?.lines.find((line) => line.kind === "del")).toEqual({
       kind: "del",
       oldNo: 1,

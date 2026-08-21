@@ -28,7 +28,10 @@ describe("McpAppCard", () => {
       .mockResolvedValue({ frame_path: "/mcp/view-frames/token-1" });
     render(
       withApp(
-        { createMcpViewFrame, baseUrl: "http://127.0.0.1:7777" } as Partial<ApiClient>,
+        {
+          createMcpViewFrame,
+          baseUrl: "http://127.0.0.1:7777",
+        } as Partial<ApiClient>,
         <McpAppCard server="gateway" resourceUri="ui://gateway/app.html" />,
       ),
     );
@@ -54,7 +57,10 @@ describe("McpAppCard", () => {
     const createMcpViewFrame = vi.fn().mockRejectedValue(new Error("404"));
     render(
       withApp(
-        { createMcpViewFrame, baseUrl: "http://127.0.0.1:7777" } as Partial<ApiClient>,
+        {
+          createMcpViewFrame,
+          baseUrl: "http://127.0.0.1:7777",
+        } as Partial<ApiClient>,
         <McpAppCard server="gateway" resourceUri="ui://gateway/app.html" />,
       ),
     );

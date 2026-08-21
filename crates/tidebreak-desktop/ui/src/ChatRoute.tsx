@@ -19,10 +19,7 @@ import {
   sessionFromOpenedChat,
 } from "./ChatApprovalHydration";
 import { useChatListStore } from "./ChatListStore";
-import {
-  useComposerAttachments,
-  useComposerDrafts,
-} from "./ComposerDrafts";
+import { useComposerAttachments, useComposerDrafts } from "./ComposerDrafts";
 import { ChatSessionController } from "./ChatSessionController";
 import {
   applyTerminalHydration,
@@ -86,7 +83,6 @@ import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
 
-
 const CodeBrowserTab = lazy(async () => {
   const module = await import("./code/browser/CodeBrowserTab");
   return { default: module.CodeBrowserTab };
@@ -128,8 +124,7 @@ const { signal: signalTurnLifecycle } = useTurnLifecycle.getState();
  */
 export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers, setStatus } =
-    useApp();
+  const { client, models, defaultModelKey, providers, setStatus } = useApp();
   const modelSettingsNav = useModelSettingsNav();
   const { layout, openPanel } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
@@ -182,8 +177,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   );
   const deliverables = useDeliverableCatalog(chatId);
   const overlayOpen = usePortalOverlayOpen();
-  const [browserTitles, setBrowserTitles] = useState<Record<string, string>>({});
-
+  const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
+    {},
+  );
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame. The
@@ -279,7 +275,10 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         void refreshTerminalTranscript(generation);
       },
       onConnectionState: (connectionState) =>
-        setStatus((current) => `${withoutConnectionState(current)} · ${connectionState}`),
+        setStatus(
+          (current) =>
+            `${withoutConnectionState(current)} · ${connectionState}`,
+        ),
     });
     controller.start();
     return () => {
@@ -290,12 +289,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     };
   }, [client, chatId, hydrated, setStatus]);
 
-  function updateSession(update: (state: ChatSessionState) => ChatSessionState) {
+  function updateSession(
+    update: (state: ChatSessionState) => ChatSessionState,
+  ) {
     useChatSessionStore.getState().update(update);
   }
 
   function handleEvent(framed: SequencedEvent) {
-    const effects = useChatSessionStore.getState().applyEvent(framed, sessionDeps);
+    const effects = useChatSessionStore
+      .getState()
+      .applyEvent(framed, sessionDeps);
     for (const effect of effects) applySessionEffect(effect);
   }
   handleEventRef.current = handleEvent;
@@ -321,7 +324,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         warmPresentationConverter();
         return;
       case "turn_began":
-        signalTurnLifecycle(effect.startsDifferentTurn ? "began" : "began_same_turn");
+        signalTurnLifecycle(
+          effect.startsDifferentTurn ? "began" : "began_same_turn",
+        );
         return;
       case "turn_resolved":
         signalTurnLifecycle("resolved");
@@ -359,7 +364,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   const voice = useVoiceComposer(
     (audio) => client.transcribeVoice(audio),
-    (transcript) => setComposerDraft(appendTranscript(draftRef.current, transcript)),
+    (transcript) =>
+      setComposerDraft(appendTranscript(draftRef.current, transcript)),
     undefined,
     async () => {
       const info = await useVoiceInputStore.getState().load(client);
@@ -676,7 +682,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       (result) => result.status === "failed",
     );
     if (failedDocument?.status === "failed") {
-      setAttachError(`${failedDocument.displayName}: ${failedDocument.message}`);
+      setAttachError(
+        `${failedDocument.displayName}: ${failedDocument.message}`,
+      );
     }
     const [failedImage] = attached.failedImages;
     if (failedImage) {
@@ -686,29 +694,41 @@ export function ChatRoute({ chatId }: { chatId: string }) {
 
   async function onModelChange(modelId: ModelSelectionKey | null) {
     if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatModel(chatId, modelId || null));
+    chatListActions.replaceChat(
+      await client.patchChatModel(chatId, modelId || null),
+    );
   }
 
   async function onReasoningEffortChange(effort: ReasoningEffort | null) {
     if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatReasoningEffort(chatId, effort));
+    chatListActions.replaceChat(
+      await client.patchChatReasoningEffort(chatId, effort),
+    );
   }
 
   async function onPermissionModeChange(mode: PermissionMode) {
     if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatPermissionMode(chatId, mode));
+    chatListActions.replaceChat(
+      await client.patchChatPermissionMode(chatId, mode),
+    );
   }
 
   async function onNetworkPolicyChange(policy: NetworkPolicy) {
     if (deletingChatId !== null) return;
-    chatListActions.replaceChat(await client.patchChatNetworkPolicy(chatId, policy));
+    chatListActions.replaceChat(
+      await client.patchChatNetworkPolicy(chatId, policy),
+    );
   }
 
   // Shown while the list fetch or the redirect above settles — a blank frame
   // still needs a name so it is not silent to a screen reader.
   if (!chat) {
     return (
-      <div className="routed-surface-loading" role="status" aria-label="Loading work" />
+      <div
+        className="routed-surface-loading"
+        role="status"
+        aria-label="Loading work"
+      />
     );
   }
 
@@ -747,14 +767,16 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onAttach: nativeHost
               ? () => {
                   void folders.attach().then((connected) => {
-                    if (connected) rememberComposerFolder(chatId, connected.rootId);
+                    if (connected)
+                      rememberComposerFolder(chatId, connected.rootId);
                   });
                 }
               : undefined,
             onConnect: nativeHost
               ? (rootId) => {
                   void folders.connectApproved(rootId).then((connected) => {
-                    if (connected) rememberComposerFolder(chatId, connected.rootId);
+                    if (connected)
+                      rememberComposerFolder(chatId, connected.rootId);
                   });
                 }
               : undefined,
@@ -979,7 +1001,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onOpenPermissions={() => openPanel({ type: "permissions" })}
               onOpenAgents={() => openPanel({ type: "agents" })}
               onOpenBrowser={nativeHost ? () => openBrowser() : undefined}
-
             />
           </div>
         </header>
@@ -1033,12 +1054,16 @@ export async function queueComposerMessage(
 }
 
 function friendlyAttachError(error: unknown): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
-  return message && message.length <= 240 ? message : "Could not attach that file.";
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
+  return message && message.length <= 240
+    ? message
+    : "Could not attach that file.";
 }
 
-function isImportedDocument(
-  result: { status: string },
-): result is LibraryImportSuccess {
+function isImportedDocument(result: {
+  status: string;
+}): result is LibraryImportSuccess {
   return result.status === "imported" || result.status === "already_present";
 }

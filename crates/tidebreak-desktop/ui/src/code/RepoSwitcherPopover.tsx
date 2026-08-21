@@ -119,7 +119,9 @@ export function RepoSwitcherPopover({
             HOVER_TINT,
           )}
           aria-label={
-            activeRepo ? `Switch repo (current: ${activeRepo.display_name})` : "Repos"
+            activeRepo
+              ? `Switch repo (current: ${activeRepo.display_name})`
+              : "Repos"
           }
         >
           <FolderGit2 className="size-3.5 shrink-0 text-muted-foreground" />

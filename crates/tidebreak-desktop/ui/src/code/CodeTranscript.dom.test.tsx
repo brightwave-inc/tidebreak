@@ -358,7 +358,9 @@ describe("CodeTranscript", () => {
       />,
     );
     expect(screen.getByText("Command denied")).toBeInTheDocument();
-    expect(screen.getByLabelText("Output")).toHaveTextContent("denied by policy");
+    expect(screen.getByLabelText("Output")).toHaveTextContent(
+      "denied by policy",
+    );
   });
 
   it("streams the tail of a running command without showing the head", () => {
@@ -432,7 +434,12 @@ describe("CodeTranscript", () => {
         startedAt: "2026-08-15T12:00:00.000Z",
         durationMs: null,
       },
-      { kind: "approval", id: "approval:a7", approvalId: "a7", state: "pending" },
+      {
+        kind: "approval",
+        id: "approval:a7",
+        approvalId: "a7",
+        state: "pending",
+      },
     ];
     const approval: CodeApprovalSnapshot = {
       id: "a7",

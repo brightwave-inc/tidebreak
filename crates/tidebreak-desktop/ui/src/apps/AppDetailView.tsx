@@ -1,4 +1,10 @@
-import { ChevronLeft, ExternalLink, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  ChevronLeft,
+  ExternalLink,
+  ShieldCheck,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -147,21 +153,15 @@ export function AppDetailView({
     setActionError(null);
     try {
       const nextGrant = await apis.consent(targetAppId);
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         setGrant(nextGrant);
       }
     } catch (caught) {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         setActionError(friendlyAppsError(caught, "Could not record consent."));
       }
     } finally {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         mutationInFlightRef.current = false;
         setBusy(false);
       }
@@ -179,21 +179,15 @@ export function AppDetailView({
     try {
       await apis.revoke(targetAppId);
       const nextGrant = await apis.grantState(targetAppId);
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         setGrant(nextGrant);
       }
     } catch (caught) {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         toast.error(friendlyAppsError(caught, "Could not revoke access."));
       }
     } finally {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         mutationInFlightRef.current = false;
         setBusy(false);
       }
@@ -294,21 +288,15 @@ export function AppDetailView({
     setBusy(true);
     try {
       await apis.deleteApp(targetAppId);
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         onBack();
       }
     } catch (caught) {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         toast.error(friendlyAppsError(caught, "Could not delete this app."));
       }
     } finally {
-      if (
-        mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)
-      ) {
+      if (mutationIsCurrent(targetAppId, scopeGeneration, mutationGeneration)) {
         mutationInFlightRef.current = false;
         setBusy(false);
       }

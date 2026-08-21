@@ -78,7 +78,8 @@ export const LongDetail: Story = {
   args: {
     attachment: {
       attachment: "remote",
-      baseUrl: "https://tidebreak.some-quite-long-internal-hostname.example.com",
+      baseUrl:
+        "https://tidebreak.some-quite-long-internal-hostname.example.com",
       gatewayAuth: true,
     },
     error: new Error(

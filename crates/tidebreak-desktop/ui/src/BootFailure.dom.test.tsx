@@ -3,7 +3,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BootFailure, bootDebugReport, type BootAttachment } from "./BootFailure";
+import {
+  BootFailure,
+  bootDebugReport,
+  type BootAttachment,
+} from "./BootFailure";
 
 vi.mock("./host", () => ({
   hasMacOverlayTitlebar: () => false,
@@ -21,7 +25,9 @@ const local: BootAttachment = {
   gatewayAuth: false,
 };
 
-function renderFailure(overrides: Partial<Parameters<typeof BootFailure>[0]> = {}) {
+function renderFailure(
+  overrides: Partial<Parameters<typeof BootFailure>[0]> = {},
+) {
   const props = {
     stage: "catalog" as const,
     error: new TypeError("Load failed"),
@@ -58,7 +64,9 @@ describe("BootFailure", () => {
     const user = userEvent.setup();
     const { onWorkLocally } = renderFailure();
 
-    await user.click(screen.getByRole("button", { name: /Work on this computer/ }));
+    await user.click(
+      screen.getByRole("button", { name: /Work on this computer/ }),
+    );
     await waitFor(() => expect(onWorkLocally).toHaveBeenCalledOnce());
 
     cleanup();
@@ -90,7 +98,9 @@ describe("BootFailure", () => {
     const copied = JSON.parse(writeClipboard.mock.calls[0][0]);
     expect(copied.remoteBaseUrl).toBe("https://tidebreak.example.com");
     expect(copied.stage).toBe("catalog");
-    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Copied" }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -138,10 +148,12 @@ describe("bootDebugReport", () => {
   });
 
   it("reports a thrown non-error without losing it", () => {
-    expect(JSON.parse(report({ error: "plain string failure" })).error).toEqual({
-      name: null,
-      message: "plain string failure",
-    });
+    expect(JSON.parse(report({ error: "plain string failure" })).error).toEqual(
+      {
+        name: null,
+        message: "plain string failure",
+      },
+    );
   });
 
   it("says nothing about an attachment it could not read", () => {

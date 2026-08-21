@@ -427,10 +427,8 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          assistantBuffer:
-            parentCallId === null ? "" : state.assistantBuffer,
-          reasoningBuffer:
-            parentCallId === null ? "" : state.reasoningBuffer,
+          assistantBuffer: parentCallId === null ? "" : state.assistantBuffer,
+          reasoningBuffer: parentCallId === null ? "" : state.reasoningBuffer,
           items: insertBeforeTurnBoundary(
             finalizeStreaming(state.items, "assistant", parentCallId),
             state.activeTurnId,
@@ -653,12 +651,7 @@ function upsertStreaming(
   ) {
     return [...items.slice(0, -1), { ...last, text }];
   }
-  const existing = lastIndexOfKindForTurn(
-    items,
-    kind,
-    turnId,
-    parentCallId,
-  );
+  const existing = lastIndexOfKindForTurn(items, kind, turnId, parentCallId);
   if (existing !== -1) {
     const prev = items[existing];
     if (prev.kind !== kind) {
@@ -806,7 +799,8 @@ function upsertTurnBoundary(
   };
   const index = items.findIndex(
     (candidate) =>
-      candidate.kind === "turn_boundary" && candidate.turnId === boundary.turnId,
+      candidate.kind === "turn_boundary" &&
+      candidate.turnId === boundary.turnId,
   );
   if (index === -1) return [...items, item];
   const existing = items[index];

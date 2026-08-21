@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -36,10 +42,7 @@ export function NewProjectDialog({
   creating: boolean;
 }) {
   const [title, setTitle] = useState("");
-  const command = useMemo(
-    () => usesCommandModifier(navigator.userAgent),
-    [],
-  );
+  const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
   const trimmed = title.trim();
   const canCreate = trimmed.length > 0 && !creating;
 

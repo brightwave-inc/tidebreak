@@ -29,9 +29,7 @@ import type { OptionRow } from "@/components/OptionListbox";
  * decides what picking does, which the row says on its right. A row that cannot
  * be picked right now says why there instead.
  */
-export function pluginOptionRows(
-  options: readonly SlashOption[],
-): OptionRow[] {
+export function pluginOptionRows(options: readonly SlashOption[]): OptionRow[] {
   return options.map((option) => ({
     key: `${option.kind}:${option.name}`,
     label: option.label,

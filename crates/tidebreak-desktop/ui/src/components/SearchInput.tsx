@@ -13,7 +13,8 @@ const variants = cva(
     variants: {
       size: {
         sm: "min-h-8 gap-1.5 pr-1 pl-2 text-xs [&_svg]:size-3.5 [&_svg]:shrink-0",
-        default: "min-h-control gap-2 pr-1.5 pl-2.5 text-sm [&_svg]:size-4 [&_svg]:shrink-0",
+        default:
+          "min-h-control gap-2 pr-1.5 pl-2.5 text-sm [&_svg]:size-4 [&_svg]:shrink-0",
       },
     },
     defaultVariants: { size: "default" },
@@ -62,7 +63,10 @@ export function SearchInput({
   return (
     <label className={cn(variants({ size, className }))} {...props}>
       <SearchIcon
-        className={cn("transition-colors", empty ? "text-muted-foreground" : "text-primary")}
+        className={cn(
+          "transition-colors",
+          empty ? "text-muted-foreground" : "text-primary",
+        )}
       />
       <Input
         ref={ref}

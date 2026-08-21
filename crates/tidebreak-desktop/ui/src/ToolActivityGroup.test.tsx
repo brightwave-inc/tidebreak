@@ -5,7 +5,9 @@ import {
   toolActivityGroupPresentation,
 } from "./ToolActivityGroup";
 
-function labelOf(activities: Parameters<typeof toolActivityGroupPresentation>[0]) {
+function labelOf(
+  activities: Parameters<typeof toolActivityGroupPresentation>[0],
+) {
   return toolActivityGroupPresentation(activities).label;
 }
 
@@ -132,9 +134,7 @@ describe("ToolActivityGroup", () => {
     const markup = renderToStaticMarkup(
       <ToolActivityGroup
         groupIndex={0}
-        activities={
-          [{ name: "web_search" }, null, "private"] as never
-        }
+        activities={[{ name: "web_search" }, null, "private"] as never}
       />,
     );
 

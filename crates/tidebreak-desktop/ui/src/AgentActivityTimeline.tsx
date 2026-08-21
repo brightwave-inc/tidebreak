@@ -41,7 +41,11 @@ export function useAgentRunActivity(
   useEffect(() => {
     if (!enabled || runId === null) return;
     let cancelled = false;
-    setActivity((state) => ({ ...state, loading: !state.loaded, error: false }));
+    setActivity((state) => ({
+      ...state,
+      loading: !state.loaded,
+      error: false,
+    }));
     loadActivity(runId)
       .then((items) => {
         if (!cancelled) {
@@ -200,7 +204,10 @@ export function AgentActivityTimeline({
                   </time>
                 </div>
                 {execDetail !== undefined && (
-                  <ExecActivityCard detail={execDetail} outcome={entry.outcome} />
+                  <ExecActivityCard
+                    detail={execDetail}
+                    outcome={entry.outcome}
+                  />
                 )}
               </li>
             );
@@ -268,7 +275,9 @@ function ExecActivityCard({
       icon={<Terminal className="size-3.5 shrink-0" aria-hidden="true" />}
       title={narrated ?? command}
       titleClassName={narrated === null ? "font-mono" : undefined}
-      badge={<ExecActivityBadge outcome={outcome} exitCode={detail.exit_code} />}
+      badge={
+        <ExecActivityBadge outcome={outcome} exitCode={detail.exit_code} />
+      }
       defaultExpanded={failed}
       className={cn(failed && "text-critical")}
       // The assistive label names the command, not the sentence about it: it
@@ -343,7 +352,10 @@ function ExecActivityBadge({
       );
     case "cancelled":
       return (
-        <Badge variant="outline" className="text-muted-foreground shrink-0 gap-1">
+        <Badge
+          variant="outline"
+          className="text-muted-foreground shrink-0 gap-1"
+        >
           <X className="size-3" aria-hidden="true" />
           Stopped
         </Badge>

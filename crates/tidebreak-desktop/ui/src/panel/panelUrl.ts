@@ -1,4 +1,9 @@
-import { EMPTY_LAYOUT, panelKey, type LayoutState, type PanelContent } from "./panelTypes";
+import {
+  EMPTY_LAYOUT,
+  panelKey,
+  type LayoutState,
+  type PanelContent,
+} from "./panelTypes";
 
 /**
  * Panels are addressed by the URL, so a layout can be restored, gone back to,
@@ -240,7 +245,9 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
       : // The old grammar named one panel per side; left came first on screen,
         // so it comes first in the strip. `chat` was a slot filler and parses
         // as nothing, which is what drops it here.
-        [search.left, search.right].filter((value): value is string => Boolean(value));
+        [search.left, search.right].filter((value): value is string =>
+          Boolean(value),
+        );
 
   const tabs: PanelContent[] = [];
   const seen = new Set<string>();
@@ -297,14 +304,21 @@ function namedIndex(segment: string | undefined, tabs: PanelContent[]): number {
   return index < 0 ? 0 : index;
 }
 
-function activeIndexFromSearch(search: PanelSearch, tabs: PanelContent[]): number {
+function activeIndexFromSearch(
+  search: PanelSearch,
+  tabs: PanelContent[],
+): number {
   const named = search.active ? parsePanelSegment(search.active) : null;
   if (named) {
     const index = tabs.findIndex((tab) => panelKey(tab) === panelKey(named));
     if (index !== -1) return index;
   }
   // In a legacy link the expanded side is the one the reader was looking at.
-  if (search.tabs === undefined && search.fullscreen === "right" && tabs.length > 1) {
+  if (
+    search.tabs === undefined &&
+    search.fullscreen === "right" &&
+    tabs.length > 1
+  ) {
     return tabs.length - 1;
   }
   return 0;
@@ -316,7 +330,8 @@ function isFullscreenParam(search: PanelSearch): boolean {
   // panel survives as fullscreen — an expanded conversation is now just the
   // conversation with nothing beside it.
   const expanded = search.fullscreen === "left" ? search.left : search.right;
-  if (search.fullscreen !== "left" && search.fullscreen !== "right") return false;
+  if (search.fullscreen !== "left" && search.fullscreen !== "right")
+    return false;
   return Boolean(expanded && parsePanelSegment(expanded));
 }
 

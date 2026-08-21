@@ -1,8 +1,4 @@
-import type {
-  ApiClient,
-  ChatTranscript,
-  PendingToolApproval,
-} from "./api";
+import type { ApiClient, ChatTranscript, PendingToolApproval } from "./api";
 import { reconcilePendingApprovalCards } from "./ApprovalHistory";
 import {
   applyTerminalHydration,

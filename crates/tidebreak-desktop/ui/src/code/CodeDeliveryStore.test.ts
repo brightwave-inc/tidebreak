@@ -98,7 +98,10 @@ describe("trackedCodeDeliveryRepositories", () => {
     const beta = repository("other-org", "beta");
     const store = useCodeDeliveryStore.getState();
 
-    store.rememberManualRepositories([beta, { ...alpha, tidebreak_repo_id: undefined }]);
+    store.rememberManualRepositories([
+      beta,
+      { ...alpha, tidebreak_repo_id: undefined },
+    ]);
     store.setRegisteredRepositoryExcluded("repo-zeta", true);
     store.setRepositoryPinned(codeDeliveryRepositoryKey(beta), true);
 
@@ -106,7 +109,8 @@ describe("trackedCodeDeliveryRepositories", () => {
       manualRepositories: useCodeDeliveryStore.getState().manualRepositories,
       excludedRegisteredRepoIds:
         useCodeDeliveryStore.getState().excludedRegisteredRepoIds,
-      pinnedRepositoryKeys: useCodeDeliveryStore.getState().pinnedRepositoryKeys,
+      pinnedRepositoryKeys:
+        useCodeDeliveryStore.getState().pinnedRepositoryKeys,
     });
 
     expect(tracked.map((item) => item.name_with_owner)).toEqual([
@@ -114,7 +118,9 @@ describe("trackedCodeDeliveryRepositories", () => {
       "brightwave-inc/alpha",
     ]);
     expect(
-      JSON.parse(window.localStorage.getItem("tidebreak.code-delivery") ?? "{}"),
+      JSON.parse(
+        window.localStorage.getItem("tidebreak.code-delivery") ?? "{}",
+      ),
     ).toMatchObject({
       version: 1,
       excludedRegisteredRepoIds: ["repo-zeta"],
@@ -130,9 +136,9 @@ describe("delivery notifications", () => {
     const item = pullRequest(2248, repo);
 
     expect(store.ingestDeliveryPoll([item], [], NOW)).toBe(1);
-    expect(useCodeDeliveryStore.getState().ingestDeliveryPoll([item], [], NOW)).toBe(
-      0,
-    );
+    expect(
+      useCodeDeliveryStore.getState().ingestDeliveryPoll([item], [], NOW),
+    ).toBe(0);
     expect(useCodeDeliveryStore.getState().notifications).toHaveLength(1);
     expect(
       unreadCodeDeliveryNotifications(useCodeDeliveryStore.getState()),
@@ -158,13 +164,12 @@ describe("delivery notifications", () => {
   it("applies repository and Tidebreak-link scopes before creating feed rows", () => {
     const alpha = repository("brightwave-inc", "alpha", "repo-alpha");
     const beta = repository("brightwave-inc", "beta", "repo-beta");
-    useCodeDeliveryStore.getState().updateNotificationRule(
-      "pull_request_attention",
-      {
+    useCodeDeliveryStore
+      .getState()
+      .updateNotificationRule("pull_request_attention", {
         repositoryKeys: [codeDeliveryRepositoryKey(alpha)],
         tidebreakLinkedOnly: true,
-      },
-    );
+      });
 
     expect(
       useCodeDeliveryStore

@@ -28,7 +28,9 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
   const navigate = useNavigate();
   const { refreshChats } = useApp();
   const chatsError = useChatListStore((state) => state.chatsError);
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const appsActive = pathname === "/apps" || pathname.startsWith("/apps/");
   const pluginsActive =
     pathname === "/plugins" || pathname.startsWith("/plugins/");

@@ -30,7 +30,9 @@ function openSources() {
 
 describe("AssistantSources", () => {
   it("renders nothing for an empty source set", () => {
-    expect(render(<AssistantSources sources={[]} />).container).toBeEmptyDOMElement();
+    expect(
+      render(<AssistantSources sources={[]} />).container,
+    ).toBeEmptyDOMElement();
   });
 
   it("orders and labels lightweight locators, and opens the selected document", () => {
@@ -44,10 +46,9 @@ describe("AssistantSources", () => {
     );
 
     openSources();
-    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      "1Page 4",
-      "2Lines 12–18",
-    ]);
+    expect(
+      screen.getAllByRole("listitem").map((item) => item.textContent),
+    ).toEqual(["1Page 4", "2Lines 12–18"]);
     fireEvent.click(screen.getByRole("button", { name: "Open source 2" }));
     expect(onOpenSource).toHaveBeenCalledWith(second);
   });

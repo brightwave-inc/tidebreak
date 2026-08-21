@@ -34,7 +34,9 @@ export function AppsPage({ appId }: { appId?: string }) {
         ) : (
           <AppsView
             apis={apis}
-            onOpen={(id) => void navigate({ to: "/apps/$appId", params: { appId: id } })}
+            onOpen={(id) =>
+              void navigate({ to: "/apps/$appId", params: { appId: id } })
+            }
           />
         )}
       </div>

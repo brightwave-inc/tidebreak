@@ -104,7 +104,9 @@ export function isPaginatedOriginalViewer(mediaType: string): boolean {
  */
 export function isGridOriginalViewer(mediaType: string): boolean {
   const type = normalizeMediaType(mediaType);
-  return SPREADSHEET_MEDIA_TYPES.has(type) || DELIMITED_TEXT_MEDIA_TYPES.has(type);
+  return (
+    SPREADSHEET_MEDIA_TYPES.has(type) || DELIMITED_TEXT_MEDIA_TYPES.has(type)
+  );
 }
 
 interface DocumentViewerProps {

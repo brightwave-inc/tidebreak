@@ -15,10 +15,7 @@ export type ChatSessionControllerOptions = {
    * Open the chat's event socket resuming after the given seq. The callback
    * carries parsed frames; the controller decides whether they are current.
    */
-  openSocket: (
-    after: number,
-    onFrame: (frame: ChatFrame) => void,
-  ) => WebSocket;
+  openSocket: (after: number, onFrame: (frame: ChatFrame) => void) => WebSocket;
   /** Read the resume cursor freshly on every (re)connect attempt. */
   getAfter: () => number;
   onEvent: (event: SequencedEvent) => void;

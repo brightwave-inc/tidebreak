@@ -82,12 +82,14 @@ export function effectiveNewChatSettings(state: NewChatSettings): {
 } {
   return {
     model:
-      state.model ?? (state.defaults?.model as ModelSelectionKey | null) ?? null,
+      state.model ??
+      (state.defaults?.model as ModelSelectionKey | null) ??
+      null,
     reasoningEffort:
       state.reasoningEffort ?? state.defaults?.reasoning_effort ?? null,
     permissionMode:
       state.permissionMode ?? state.defaults?.permission_mode ?? null,
-    networkPolicy:
-      state.networkPolicy ?? state.defaults?.network_policy ?? { mode: "open" },
+    networkPolicy: state.networkPolicy ??
+      state.defaults?.network_policy ?? { mode: "open" },
   };
 }

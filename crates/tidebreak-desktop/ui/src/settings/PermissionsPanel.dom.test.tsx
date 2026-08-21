@@ -36,7 +36,11 @@ const execStatement: ConsentStatementSnapshot = {
   },
   level: { level: "chat", chat_id: "22222222-2222-2222-2222-222222222222" },
   level_title: "Quarterly filings",
-  verb: { kind: "tool", action: "exec", approval: "exec_may_run_networked_command" },
+  verb: {
+    kind: "tool",
+    action: "exec",
+    approval: "exec_may_run_networked_command",
+  },
   resource: {
     kind: "action_scope",
     scope: { scope: "any_args_for", command: "cargo" },
@@ -184,9 +188,14 @@ describe("PermissionsPanel", () => {
       listConnectedFolders.mockResolvedValue([]);
       return Promise.resolve(true);
     });
-    const client = api({ listConsentStatements: vi.fn().mockResolvedValue([]) });
+    const client = api({
+      listConsentStatements: vi.fn().mockResolvedValue([]),
+    });
     render(
-      <PermissionsPanel client={client} chat={{ id: chatId, project_id: null }} />,
+      <PermissionsPanel
+        client={client}
+        chat={{ id: chatId, project_id: null }}
+      />,
     );
 
     await screen.findByText("Documents");
@@ -334,12 +343,11 @@ describe("PermissionsPanel", () => {
   });
 });
 
-
 describe("permissions labeling and chat filter", () => {
   it("names a missing chat subject as deleted", () => {
-    expect(
-      levelLabel(execStatement, { chatIds: new Set() }),
-    ).toBe("Deleted work 222222…2222");
+    expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
+      "Deleted work 222222…2222",
+    );
     // shortOpaqueId keeps first 6 and last 4 for long ids.
     expect(levelLabel(execStatement, { chatIds: new Set() })).toBe(
       "Deleted work 222222…2222",
@@ -349,7 +357,10 @@ describe("permissions labeling and chat filter", () => {
   it("keeps only statements that reach one chat", () => {
     const other = {
       ...execStatement,
-      handle: { kind: "tool_grant" as const, call_id: "99999999-9999-9999-9999-999999999999" },
+      handle: {
+        kind: "tool_grant" as const,
+        call_id: "99999999-9999-9999-9999-999999999999",
+      },
       level: {
         level: "chat" as const,
         chat_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -367,10 +378,11 @@ describe("permissions labeling and chat filter", () => {
       },
       level_title: "Filings",
     };
-    const filtered = statementsForChat(
-      [execStatement, other, project],
-      { id: execStatement.level.level === "chat" ? execStatement.level.chat_id : "", project_id: "cccccccc-cccc-cccc-cccc-cccccccccccc" },
-    );
+    const filtered = statementsForChat([execStatement, other, project], {
+      id:
+        execStatement.level.level === "chat" ? execStatement.level.chat_id : "",
+      project_id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    });
     expect(filtered.map((s) => s.handle)).toEqual([
       execStatement.handle,
       project.handle,

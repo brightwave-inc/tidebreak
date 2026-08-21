@@ -124,9 +124,17 @@ export function CitationLocatorLabel({
     case "page":
       return <span>Page {locator.page}</span>;
     case "pages":
-      return <span>Pages {locator.start}–{locator.end}</span>;
+      return (
+        <span>
+          Pages {locator.start}–{locator.end}
+        </span>
+      );
     case "lines":
-      return <span>Lines {locator.start}–{locator.end}</span>;
+      return (
+        <span>
+          Lines {locator.start}–{locator.end}
+        </span>
+      );
     case "sheet":
       return (
         <span>

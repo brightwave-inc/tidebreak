@@ -44,12 +44,12 @@ export async function evaluateUncachedFormulasWithDuke(
       if (!parsed) continue;
       try {
         const evaluated = readEvaluatedValue(
-          workbook.getSheet(cell.sheetIndex).getCalculatedValueAt(
-            parsed.row,
-            parsed.col,
-          ),
+          workbook
+            .getSheet(cell.sheetIndex)
+            .getCalculatedValueAt(parsed.row, parsed.col),
         );
-        if (evaluated) values[formulaValueKey(cell.sheetIndex, cell.address)] = evaluated;
+        if (evaluated)
+          values[formulaValueKey(cell.sheetIndex, cell.address)] = evaluated;
       } catch {
         // A missing or unreadable sheet must not abort the rest of the bake.
       }

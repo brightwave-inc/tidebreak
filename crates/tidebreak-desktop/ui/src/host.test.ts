@@ -9,16 +9,30 @@ import { hostAuthorityRefusal } from "./host";
  */
 describe("host authority refusals", () => {
   it("names the authority a remote-attached client lost", () => {
-    expect(hostAuthorityRefusal("folder_broker_authority_unavailable")).toBe("folder_broker");
-    expect(hostAuthorityRefusal("client_executor_authority_unavailable")).toBe("client_executor");
-    expect(hostAuthorityRefusal("native_export_authority_unavailable")).toBe("native_export");
-    expect(hostAuthorityRefusal("computer_use_authority_unavailable")).toBe("computer_use");
+    expect(hostAuthorityRefusal("folder_broker_authority_unavailable")).toBe(
+      "folder_broker",
+    );
+    expect(hostAuthorityRefusal("client_executor_authority_unavailable")).toBe(
+      "client_executor",
+    );
+    expect(hostAuthorityRefusal("native_export_authority_unavailable")).toBe(
+      "native_export",
+    );
+    expect(hostAuthorityRefusal("computer_use_authority_unavailable")).toBe(
+      "computer_use",
+    );
   });
 
   it("leaves every other failure alone", () => {
-    expect(hostAuthorityRefusal("host broker returned an unexpected response")).toBeNull();
-    expect(hostAuthorityRefusal("folder_broker_authority_unavailable extra")).toBeNull();
-    expect(hostAuthorityRefusal(new Error("folder_broker_authority_unavailable"))).toBeNull();
+    expect(
+      hostAuthorityRefusal("host broker returned an unexpected response"),
+    ).toBeNull();
+    expect(
+      hostAuthorityRefusal("folder_broker_authority_unavailable extra"),
+    ).toBeNull();
+    expect(
+      hostAuthorityRefusal(new Error("folder_broker_authority_unavailable")),
+    ).toBeNull();
     expect(hostAuthorityRefusal(undefined)).toBeNull();
   });
 });

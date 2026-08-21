@@ -6,7 +6,10 @@ import {
 } from "./host";
 
 /** Retain every refreshed chat when a new loose replacement is required. */
-export function prependReplacementChat(chats: Chat[], replacement: Chat): Chat[] {
+export function prependReplacementChat(
+  chats: Chat[],
+  replacement: Chat,
+): Chat[] {
   return [replacement, ...chats];
 }
 
@@ -35,7 +38,9 @@ export async function detachChatFolders(chat: Chat): Promise<void> {
  * first; this is the terminal cleanup so Permissions does not keep a deleted
  * chat's grants.
  */
-export async function purgeDeletedChatHostAuthority(chatId: string): Promise<void> {
+export async function purgeDeletedChatHostAuthority(
+  chatId: string,
+): Promise<void> {
   if (!hasNativeHost()) return;
   await purgeDeletedConversationSubject(chatId);
 }
@@ -44,6 +49,8 @@ export async function purgeDeletedChatHostAuthority(chatId: string): Promise<voi
 export function deletionDescription(folderCount: number): string {
   if (folderCount < 1) return "This cannot be undone.";
   const folders =
-    folderCount === 1 ? "1 connected folder" : `${folderCount} connected folders`;
+    folderCount === 1
+      ? "1 connected folder"
+      : `${folderCount} connected folders`;
   return `Disconnects ${folders} first. This cannot be undone.`;
 }

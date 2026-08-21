@@ -203,11 +203,7 @@ export function reduceChatSessionEvent(
           ...state,
           assistantBuffer,
           messages: paintTurnReasoning(
-            withTrailingAssistantText(
-              state.messages,
-              assistantBuffer,
-              deps,
-            ),
+            withTrailingAssistantText(state.messages, assistantBuffer, deps),
             state.reasoningBuffer,
             deps,
           ),
@@ -477,10 +473,7 @@ export function reduceChatSessionEvent(
           lastTurnUsage: event.usage,
           provisionalToolCallIds: new Set(),
           messages: [
-            ...discardToolCalls(
-              state.messages,
-              state.provisionalToolCallIds,
-            ),
+            ...discardToolCalls(state.messages, state.provisionalToolCallIds),
             {
               id: deps.nextId(),
               role: "refusal",

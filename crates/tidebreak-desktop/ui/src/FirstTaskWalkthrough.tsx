@@ -11,8 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
-export const FIRST_TASK_WALKTHROUGH_KEY =
-  "tidebreak.first-task-walkthrough.v2";
+export const FIRST_TASK_WALKTHROUGH_KEY = "tidebreak.first-task-walkthrough.v2";
 
 export type FirstTaskWalkthroughOutcome = "completed" | "skipped";
 
@@ -140,7 +139,10 @@ function resolveTarget(step: WalkthroughStep): HTMLElement | null {
   return null;
 }
 
-function isPreferredTarget(step: WalkthroughStep, element: HTMLElement): boolean {
+function isPreferredTarget(
+  step: WalkthroughStep,
+  element: HTMLElement,
+): boolean {
   const preferred = step.targets[0];
   return preferred != null && element.matches(targetSelector(preferred));
 }
@@ -278,9 +280,7 @@ export function FirstTaskWalkthrough({
   }
 
   const dialogWidth =
-    typeof window === "undefined"
-      ? 320
-      : Math.min(320, window.innerWidth - 24);
+    typeof window === "undefined" ? 320 : Math.min(320, window.innerWidth - 24);
   const above = rect !== null && rect.top >= 220;
   const dialogLeft =
     typeof window === "undefined"

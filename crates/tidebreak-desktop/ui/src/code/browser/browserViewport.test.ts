@@ -33,7 +33,9 @@ describe("browserViewport", () => {
 
   describe("viewportTargetWidth", () => {
     it("returns null for Fit and pixel widths for fixed presets", () => {
-      expect(viewportTargetWidth({ preset: "fit", customWidth: 800 })).toBeNull();
+      expect(
+        viewportTargetWidth({ preset: "fit", customWidth: 800 }),
+      ).toBeNull();
       expect(viewportTargetWidth({ preset: "desktop", customWidth: 800 })).toBe(
         VIEWPORT_PRESET_WIDTHS.desktop,
       );
@@ -43,7 +45,9 @@ describe("browserViewport", () => {
       expect(viewportTargetWidth({ preset: "mobile", customWidth: 800 })).toBe(
         VIEWPORT_PRESET_WIDTHS.mobile,
       );
-      expect(viewportTargetWidth({ preset: "custom", customWidth: 500 })).toBe(500);
+      expect(viewportTargetWidth({ preset: "custom", customWidth: 500 })).toBe(
+        500,
+      );
       expect(viewportTargetWidth({ preset: "custom", customWidth: 10 })).toBe(
         MIN_CUSTOM_WIDTH,
       );
@@ -65,10 +69,13 @@ describe("browserViewport", () => {
   describe("browserViewportBounds", () => {
     it("fills the surface for Fit", () => {
       expect(
-        browserViewportBounds({ width: 900, height: 600 }, {
-          preset: "fit",
-          customWidth: 800,
-        }),
+        browserViewportBounds(
+          { width: 900, height: 600 },
+          {
+            preset: "fit",
+            customWidth: 800,
+          },
+        ),
       ).toEqual({ x: 0, width: 900 });
     });
 
@@ -101,10 +108,13 @@ describe("browserViewport", () => {
 
     it("handles a zero-width surface gracefully", () => {
       expect(
-        browserViewportBounds({ width: 0, height: 400 }, {
-          preset: "desktop",
-          customWidth: 800,
-        }),
+        browserViewportBounds(
+          { width: 0, height: 400 },
+          {
+            preset: "desktop",
+            customWidth: 800,
+          },
+        ),
       ).toEqual({ x: 0, width: 0 });
     });
   });
@@ -115,10 +125,16 @@ describe("browserViewport", () => {
         viewportOverflows({ width: 600 }, { preset: "fit", customWidth: 800 }),
       ).toBe(false);
       expect(
-        viewportOverflows({ width: 600 }, { preset: "desktop", customWidth: 800 }),
+        viewportOverflows(
+          { width: 600 },
+          { preset: "desktop", customWidth: 800 },
+        ),
       ).toBe(true);
       expect(
-        viewportOverflows({ width: 1600 }, { preset: "desktop", customWidth: 800 }),
+        viewportOverflows(
+          { width: 1600 },
+          { preset: "desktop", customWidth: 800 },
+        ),
       ).toBe(false);
     });
   });

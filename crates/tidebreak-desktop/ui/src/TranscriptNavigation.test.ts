@@ -48,16 +48,16 @@ describe("transcriptNavigationEntries", () => {
 
 describe("layoutRailIndicatorTops", () => {
   it("stacks indicators that clamp to the same rail edge", () => {
-    expect(
-      [...layoutRailIndicatorTops(
+    expect([
+      ...layoutRailIndicatorTops(
         [
           { anchorId: "a", desiredTop: 0, distanceFromViewport: 80 },
           { anchorId: "b", desiredTop: 0, distanceFromViewport: 40 },
           { anchorId: "c", desiredTop: 0, distanceFromViewport: 10 },
         ],
         120,
-      ).entries()],
-    ).toEqual([
+      ).entries(),
+    ]).toEqual([
       ["c", 0],
       ["b", 24],
       ["a", 48],
@@ -65,28 +65,28 @@ describe("layoutRailIndicatorTops", () => {
   });
 
   it("pulls a bottom cluster upward without overlap", () => {
-    expect(
-      [...layoutRailIndicatorTops(
+    expect([
+      ...layoutRailIndicatorTops(
         [
           { anchorId: "a", desiredTop: 96, distanceFromViewport: 0 },
           { anchorId: "b", desiredTop: 96, distanceFromViewport: 0 },
           { anchorId: "c", desiredTop: 96, distanceFromViewport: 0 },
         ],
         120,
-      ).values()],
-    ).toEqual([48, 72, 96]);
+      ).values(),
+    ]).toEqual([48, 72, 96]);
   });
 
   it("hides the farthest indicators when the rail cannot fit them", () => {
-    expect(
-      [...layoutRailIndicatorTops(
+    expect([
+      ...layoutRailIndicatorTops(
         [
           { anchorId: "onscreen", desiredTop: 20, distanceFromViewport: 0 },
           { anchorId: "near", desiredTop: 0, distanceFromViewport: 10 },
           { anchorId: "far", desiredTop: 0, distanceFromViewport: 300 },
         ],
         48,
-      ).keys()],
-    ).toEqual(["near", "onscreen"]);
+      ).keys(),
+    ]).toEqual(["near", "onscreen"]);
   });
 });

@@ -1,5 +1,4 @@
-export const DEFAULT_BROWSER_SEARCH_URL =
-  "https://www.google.com/search?q=";
+export const DEFAULT_BROWSER_SEARCH_URL = "https://www.google.com/search?q=";
 export const MAX_BROWSER_URL_CHARS = 8_192;
 
 export type BrowserSecurity =
@@ -91,9 +90,11 @@ export function browserDisplayAddress(url: string): string {
 
 function isLikelyLocalTarget(value: string): boolean {
   const host = value.split(/[/?#]/, 1)[0]?.toLowerCase() ?? "";
-  const hostname = normalizeHostname(host.startsWith("[")
-    ? host.slice(0, host.indexOf("]") + 1)
-    : host.split(":", 1)[0] ?? host);
+  const hostname = normalizeHostname(
+    host.startsWith("[")
+      ? host.slice(0, host.indexOf("]") + 1)
+      : (host.split(":", 1)[0] ?? host),
+  );
   return (
     hostname === "localhost" ||
     hostname === "0.0.0.0" ||

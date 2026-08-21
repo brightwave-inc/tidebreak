@@ -33,11 +33,7 @@ export function FileViewer({
     () => client.getCodeWorkspaceBlob(workspaceId, path),
     [client, workspaceId, path],
   );
-  const {
-    data,
-    error,
-    refreshing,
-  } = useLiveResource({
+  const { data, error, refreshing } = useLiveResource({
     key: `${workspaceId}:${path}`,
     revision: contentRevision,
     load,
@@ -65,7 +61,9 @@ export function FileViewer({
           />
         </div>
         <span className="grid size-3.5 shrink-0 place-items-center">
-          {refreshing && <Spinner className="size-3.5" aria-label="Refreshing" />}
+          {refreshing && (
+            <Spinner className="size-3.5" aria-label="Refreshing" />
+          )}
         </span>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}

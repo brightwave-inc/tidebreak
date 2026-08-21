@@ -124,9 +124,8 @@ export function NewWorkspaceDialog({
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
   const [pickedHarness, setPickedHarness] = useState<HarnessKind | null>(null);
-  const [permissionMode, setPermissionMode] = useState<CodePermissionMode | null>(
-    null,
-  );
+  const [permissionMode, setPermissionMode] =
+    useState<CodePermissionMode | null>(null);
   const [creating, setCreating] = useState(false);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
@@ -209,7 +208,9 @@ export function NewWorkspaceDialog({
   }, [client, install, needsInstall, open, reloadDoctor]);
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
-  const selectedHarness = readyHarnesses.find((entry) => entry.kind === harness);
+  const selectedHarness = readyHarnesses.find(
+    (entry) => entry.kind === harness,
+  );
   const availableModes = selectedHarness
     ? createPermissionModes(selectedHarness.caps)
     : [];
@@ -330,7 +331,8 @@ export function NewWorkspaceDialog({
         onKeyDownCapture={(event) => {
           // Cmd+Enter (Ctrl+Enter off macOS) creates with what is on screen,
           // whichever field has focus. Plain Enter stays field-local.
-          if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+          if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey))
+            return;
           event.preventDefault();
           void create();
         }}

@@ -2,7 +2,11 @@ import { ListTreeIcon } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { MarkdownHeading } from "@/markdownHeadings";

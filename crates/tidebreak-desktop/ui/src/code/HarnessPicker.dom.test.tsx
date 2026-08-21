@@ -62,7 +62,9 @@ describe("HarnessPicker", () => {
     expect(trigger).toHaveTextContent("Claude Code");
     await user.click(trigger);
     // Ready rows carry the product name and nothing else: no vendor gloss.
-    expect(screen.getByRole("option", { name: "Codex CLI" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Codex CLI" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: /Not installed/ }),
     ).toHaveAttribute("aria-disabled", "true");

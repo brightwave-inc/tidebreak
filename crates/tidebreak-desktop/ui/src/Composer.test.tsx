@@ -180,15 +180,65 @@ describe("Composer", () => {
 
   it("keeps the mic active while requesting and disables it only while transcribing", () => {
     const requesting = renderToStaticMarkup(
-      <Composer activeTurnId={null} busy={false} cancelError={null} cancelPending={false} disabled={false} draft="" voice={{ available: true, state: "requesting", error: null, onStart: vi.fn(), onStop: vi.fn() }} onDraftChange={vi.fn()} onSend={noop} onSteer={noop} onStop={noop} resetKey="chat-1" steerError={null} steerPending={false} steerStatus={null} />,
+      <Composer
+        activeTurnId={null}
+        busy={false}
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft=""
+        voice={{
+          available: true,
+          state: "requesting",
+          error: null,
+          onStart: vi.fn(),
+          onStop: vi.fn(),
+        }}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
     );
     const transcribing = renderToStaticMarkup(
-      <Composer activeTurnId={null} busy={false} cancelError={null} cancelPending={false} disabled={false} draft="" voice={{ available: true, state: "transcribing", error: null, onStart: vi.fn(), onStop: vi.fn() }} onDraftChange={vi.fn()} onSend={noop} onSteer={noop} onStop={noop} resetKey="chat-1" steerError={null} steerPending={false} steerStatus={null} />,
+      <Composer
+        activeTurnId={null}
+        busy={false}
+        cancelError={null}
+        cancelPending={false}
+        disabled={false}
+        draft=""
+        voice={{
+          available: true,
+          state: "transcribing",
+          error: null,
+          onStart: vi.fn(),
+          onStop: vi.fn(),
+        }}
+        onDraftChange={vi.fn()}
+        onSend={noop}
+        onSteer={noop}
+        onStop={noop}
+        resetKey="chat-1"
+        steerError={null}
+        steerPending={false}
+        steerStatus={null}
+      />,
     );
-    expect(requesting).toContain('aria-label="Waiting for microphone permission"');
-    expect(requesting).not.toContain('aria-label="Waiting for microphone permission" disabled=""');
+    expect(requesting).toContain(
+      'aria-label="Waiting for microphone permission"',
+    );
+    expect(requesting).not.toContain(
+      'aria-label="Waiting for microphone permission" disabled=""',
+    );
     expect(requesting).toContain("lucide-mic");
-    expect(transcribing).toContain('aria-label="Transcribing voice recording" disabled=""');
+    expect(transcribing).toContain(
+      'aria-label="Transcribing voice recording" disabled=""',
+    );
     expect(transcribing).toContain("lucide-mic");
   });
 
@@ -388,12 +438,14 @@ describe("Composer", () => {
         disabled={false}
         draft="Summarize this"
         files={{
-          items: [{
-            documentId: "6c3df6af-bc62-4a66-a34e-29f327eaef41",
-            displayName: "brief.pdf",
-            mediaType: "application/pdf",
-            byteLen: 2048,
-          }],
+          items: [
+            {
+              documentId: "6c3df6af-bc62-4a66-a34e-29f327eaef41",
+              displayName: "brief.pdf",
+              mediaType: "application/pdf",
+              byteLen: 2048,
+            },
+          ],
           attaching: false,
           onRemove: vi.fn(),
         }}
@@ -521,7 +573,9 @@ describe("Composer", () => {
     ).toBe("Local Model cannot read images");
     expect(imageSendBlocker(images({ items: [ready] }))).toBeNull();
     // A text-only model is only a problem for a turn that carries an image.
-    expect(imageSendBlocker(images({ unsupportedModel: "Local Model" }))).toBeNull();
+    expect(
+      imageSendBlocker(images({ unsupportedModel: "Local Model" })),
+    ).toBeNull();
   });
 
   it("shows last-turn usage left of Send even when the window is unknown", () => {
@@ -607,8 +661,8 @@ describe("composerFolderChips", () => {
   });
 
   it("keeps a folder the draft is still holding", () => {
-    expect(
-      composerFolderChips({ ...folders, pendingIds: ["root-1"] }),
-    ).toEqual(folders.items);
+    expect(composerFolderChips({ ...folders, pendingIds: ["root-1"] })).toEqual(
+      folders.items,
+    );
   });
 });

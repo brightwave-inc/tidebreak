@@ -13,10 +13,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
 import type { DocumentDetail } from "@/api";
 import { useApp } from "@/AppContext";
-import {
-  DocumentViewer,
-  hasOriginalViewer,
-} from "@/document/DocumentViewer";
+import { DocumentViewer, hasOriginalViewer } from "@/document/DocumentViewer";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { documentFileSource } from "@/document/useFileDownload";
 import { cn } from "@/lib/utils";
@@ -70,7 +67,11 @@ export function isDocumentRenderable(mediaType: string): boolean {
  */
 export function structuredKind(type: string): "json" | "xml" | null {
   if (type === "application/json" || type.endsWith("+json")) return "json";
-  if (type === "application/xml" || type === "text/xml" || type.endsWith("+xml")) {
+  if (
+    type === "application/xml" ||
+    type === "text/xml" ||
+    type.endsWith("+xml")
+  ) {
     return "xml";
   }
   return null;
@@ -128,22 +129,13 @@ export function DocumentDetails({
               className="bg-page-background grow p-4 pt-2"
             />
           ) : type.startsWith("image/") ? (
-            <ImageViewer
-              source={source}
-              className="bg-page-background grow"
-            />
+            <ImageViewer source={source} className="bg-page-background grow" />
           ) : structured !== null ? (
             <Suspense fallback={<ViewerLoading />}>
               {structured === "json" ? (
-                <JsonViewer
-                  source={source}
-                  className="grow"
-                />
+                <JsonViewer source={source} className="grow" />
               ) : (
-                <XmlViewer
-                  source={source}
-                  className="grow"
-                />
+                <XmlViewer source={source} className="grow" />
               )}
             </Suspense>
           ) : (
@@ -189,7 +181,8 @@ function ExtractedText({
   targetLines?: Readonly<{ start: number; end: number }>;
 }) {
   const cited = useMemo(
-    () => (targetLines ? characterRangeForLines(info.content, targetLines) : null),
+    () =>
+      targetLines ? characterRangeForLines(info.content, targetLines) : null,
     [info.content, targetLines],
   );
 
@@ -200,7 +193,9 @@ function ExtractedText({
   }, [cited]);
 
   if (info.content.length === 0) {
-    return <DocumentError>No text could be read out of this document</DocumentError>;
+    return (
+      <DocumentError>No text could be read out of this document</DocumentError>
+    );
   }
 
   return (

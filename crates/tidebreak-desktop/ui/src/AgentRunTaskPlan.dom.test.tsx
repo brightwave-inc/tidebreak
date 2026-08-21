@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { AgentRun, AgentRunTaskPlan } from "./api";
@@ -74,7 +80,9 @@ describe("a background run's task plan", () => {
     // Named twice while live: once as the step in flight, once on the row.
     expect(screen.getAllByText("Write the summary")).toHaveLength(2);
     expect(live.container.querySelector(".animate-spin")).not.toBeNull();
-    expect(live.container.querySelector("[data-slot='progress']")).not.toBeNull();
+    expect(
+      live.container.querySelector("[data-slot='progress']"),
+    ).not.toBeNull();
 
     cleanup();
 
@@ -90,7 +98,9 @@ describe("a background run's task plan", () => {
     expect(screen.getAllByText("Write the summary")).toHaveLength(1);
     // ...without a spinner or a bar still tracking work that has stopped.
     expect(settled.container.querySelector(".animate-spin")).toBeNull();
-    expect(settled.container.querySelector("[data-slot='progress']")).toBeNull();
+    expect(
+      settled.container.querySelector("[data-slot='progress']"),
+    ).toBeNull();
   });
 });
 

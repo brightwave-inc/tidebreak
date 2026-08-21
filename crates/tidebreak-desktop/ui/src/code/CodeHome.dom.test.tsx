@@ -60,7 +60,9 @@ const READY_DOCTOR: HarnessDoctorReport = {
   ],
 };
 
-function app(overrides: Partial<AppContextValue["client"]> = {}): AppContextValue {
+function app(
+  overrides: Partial<AppContextValue["client"]> = {},
+): AppContextValue {
   return {
     client: {
       listCodeRepos: vi.fn(async () => []),
@@ -138,12 +140,16 @@ describe("CodeHome", () => {
       app({
         listCodeRepos: vi.fn(() => repos.promise),
         listCodeWorkspaces: vi.fn(async () => []),
-        getHarnessDoctor: vi.fn(() => new Promise<HarnessDoctorReport>(() => {})),
+        getHarnessDoctor: vi.fn(
+          () => new Promise<HarnessDoctorReport>(() => {}),
+        ),
       }),
     );
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading…");
-    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Start with a repository"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps loading after empty repos until the doctor arrives", async () => {
@@ -164,7 +170,9 @@ describe("CodeHome", () => {
     });
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading…");
-    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Start with a repository"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the empty state once repos are empty and a harness is ready", async () => {
@@ -193,7 +201,9 @@ describe("CodeHome", () => {
     expect(
       await screen.findByRole("heading", { name: "Install a coding harness" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Start with a repository"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
@@ -203,7 +213,9 @@ describe("CodeHome", () => {
       app({
         listCodeRepos: vi.fn(() => repos.promise),
         listCodeWorkspaces: vi.fn(async () => []),
-        getHarnessDoctor: vi.fn(() => new Promise<HarnessDoctorReport>(() => {})),
+        getHarnessDoctor: vi.fn(
+          () => new Promise<HarnessDoctorReport>(() => {}),
+        ),
       }),
     );
 
@@ -211,8 +223,12 @@ describe("CodeHome", () => {
       repos.resolve([REPO]);
     });
 
-    expect(await screen.findByRole("heading", { name: "Repos" })).toBeInTheDocument();
-    expect(screen.queryByText("Start with a repository")).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Repos" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start with a repository"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });

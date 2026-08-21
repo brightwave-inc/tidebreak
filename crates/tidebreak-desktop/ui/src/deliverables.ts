@@ -213,7 +213,9 @@ export async function readDeliverable(
   chatId: string,
   outputId: string,
 ): Promise<DeliverablePreview> {
-  return parseDeliverablePreview(await outputJson(outputPath(chatId, outputId)));
+  return parseDeliverablePreview(
+    await outputJson(outputPath(chatId, outputId)),
+  );
 }
 
 /**
@@ -238,7 +240,9 @@ export async function readDeliverableFile(
   return parseDeliverableFile({
     outputId,
     revisionId: response.headers.get("x-tidebreak-revision-id") ?? revisionId,
-    mediaType: (response.headers.get("content-type") ?? "").split(";")[0].trim(),
+    mediaType: (response.headers.get("content-type") ?? "")
+      .split(";")[0]
+      .trim(),
     bytes: new Uint8Array(await response.arrayBuffer()),
   });
 }
@@ -431,7 +435,9 @@ function isCitationLocator(value: unknown): value is CitationLocator {
     case "document":
       return isExactRecord(value, ["kind"]);
     case "page":
-      return isExactRecord(value, ["kind", "page"]) && positiveInteger(value.page);
+      return (
+        isExactRecord(value, ["kind", "page"]) && positiveInteger(value.page)
+      );
     case "pages":
     case "lines":
       return (
@@ -726,5 +732,7 @@ function isExactRecord(
     return false;
   }
   const actual = Object.keys(value);
-  return actual.length === keys.length && actual.every((key) => keys.includes(key));
+  return (
+    actual.length === keys.length && actual.every((key) => keys.includes(key))
+  );
 }

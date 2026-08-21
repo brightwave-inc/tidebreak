@@ -42,13 +42,15 @@ type CodeCatalogState = {
 };
 
 type CodeCatalogStore = CodeCatalogState & {
-  refresh: (client: Pick<
-    ApiClient,
-    | "listCodeRepos"
-    | "listCodeWorkspaces"
-    | "getHarnessDoctor"
-    | "listCodeHarnessModels"
-  >) => Promise<void>;
+  refresh: (
+    client: Pick<
+      ApiClient,
+      | "listCodeRepos"
+      | "listCodeWorkspaces"
+      | "getHarnessDoctor"
+      | "listCodeHarnessModels"
+    >,
+  ) => Promise<void>;
   refreshDoctor: (
     client: Pick<ApiClient, "refreshHarnessDoctor">,
   ) => Promise<void>;
@@ -57,10 +59,7 @@ type CodeCatalogStore = CodeCatalogState & {
     client: Pick<ApiClient, "listCodeHarnessModels">,
     kind: HarnessKind,
   ) => Promise<CodeModelOption[]>;
-  rememberHarnessModels: (
-    kind: HarnessKind,
-    models: CodeModelOption[],
-  ) => void;
+  rememberHarnessModels: (kind: HarnessKind, models: CodeModelOption[]) => void;
   rememberSession: (session: CodeSessionSnapshot) => void;
   forgetWorkspaceSession: (workspaceId: string) => void;
   upsertRepo: (repo: CodeRepoSnapshot) => void;
@@ -178,10 +177,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   },
   upsertRepo: (repo) => {
     set({
-      repos: [
-        repo,
-        ...get().repos.filter((item) => item.id !== repo.id),
-      ],
+      repos: [repo, ...get().repos.filter((item) => item.id !== repo.id)],
     });
   },
   upsertWorkspace: (workspace) => {

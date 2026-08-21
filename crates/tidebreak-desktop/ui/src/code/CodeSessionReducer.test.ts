@@ -45,7 +45,10 @@ function play(
   state: CodeSessionState = initialCodeSessionState(),
   clock: CodeSessionDeps = deps(),
 ) {
-  let current = { state, effects: [] as ReturnType<typeof reduceCodeSessionEvent>["effects"] };
+  let current = {
+    state,
+    effects: [] as ReturnType<typeof reduceCodeSessionEvent>["effects"],
+  };
   events.forEach((event, index) => {
     current = reduceCodeSessionEvent(
       current.state,
@@ -149,7 +152,11 @@ describe("turn lifecycle", () => {
     };
     const { state, effects } = play(
       [
-        { type: "session_started", harness_kind: "claude_code", harness_version: "1.0" },
+        {
+          type: "session_started",
+          harness_kind: "claude_code",
+          harness_version: "1.0",
+        },
         { type: "turn_started", turn_id: "t1" },
         { type: "assistant_delta", text: "Hello" },
         { type: "assistant_delta", text: " world" },
@@ -297,10 +304,9 @@ describe("subagent attribution", () => {
       preview: "parser source",
     });
 
-    expect(mainAgentTranscriptItems(state.items).map((item) => item.kind)).toEqual([
-      "user",
-      "tool",
-    ]);
+    expect(
+      mainAgentTranscriptItems(state.items).map((item) => item.kind),
+    ).toEqual(["user", "tool"]);
     expect(
       subagentTranscriptItems(state.items, "task-1").map((item) => item.kind),
     ).toEqual(["tool", "assistant"]);
@@ -401,7 +407,9 @@ const SNAPSHOT_TURN = {
 
 describe("hydrate then replay", () => {
   it("shows the user prompt after a disposed store reopens from after=0", () => {
-    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+    ]);
     expect(hydrated.items[0]).toEqual({
       kind: "user",
       id: userItemId("t1"),
@@ -426,9 +434,9 @@ describe("hydrate then replay", () => {
       ],
       hydrated,
     );
-    expect(replayed.state.items.filter((item) => item.kind === "user")).toHaveLength(
-      1,
-    );
+    expect(
+      replayed.state.items.filter((item) => item.kind === "user"),
+    ).toHaveLength(1);
     expect(replayed.state.items[0]).toMatchObject({
       kind: "user",
       turnId: "t1",
@@ -443,7 +451,9 @@ describe("hydrate then replay", () => {
       "assistant",
       "turn_boundary",
     ]);
-    expect(replayed.state.items.find((item) => item.kind === "assistant")).toMatchObject({
+    expect(
+      replayed.state.items.find((item) => item.kind === "assistant"),
+    ).toMatchObject({
       text: "README.md",
     });
     expect(replayed.state.lifecycle).toBe("idle");
@@ -465,7 +475,9 @@ describe("hydrate then replay", () => {
       },
       { type: "turn_completed", usage: NO_USAGE },
     ]);
-    expect(state.items.filter((item) => item.kind === "assistant")).toHaveLength(1);
+    expect(
+      state.items.filter((item) => item.kind === "assistant"),
+    ).toHaveLength(1);
     expect(state.items.map((item) => item.kind)).toEqual([
       "assistant",
       "tool",
@@ -617,20 +629,32 @@ describe("file_changed", () => {
         diffstat: { files: 1, insertions: 12, deletions: 3, truncated: false },
       },
     ]);
-    expect(state.items.filter((item) => item.kind === "file_activity")).toHaveLength(
-      1,
-    );
-    expect(state.items.find((item) => item.kind === "file_activity")).toMatchObject({
+    expect(
+      state.items.filter((item) => item.kind === "file_activity"),
+    ).toHaveLength(1);
+    expect(
+      state.items.find((item) => item.kind === "file_activity"),
+    ).toMatchObject({
       kind: "file_activity",
       turnId: "t1",
       files: {
         "a.ts": {
           kind: "modified",
-          diffstat: { files: 1, insertions: 12, deletions: 3, truncated: false },
+          diffstat: {
+            files: 1,
+            insertions: 12,
+            deletions: 3,
+            truncated: false,
+          },
         },
         "b.ts": {
           kind: "added",
-          diffstat: { files: 1, insertions: 32, deletions: 5, truncated: false },
+          diffstat: {
+            files: 1,
+            insertions: 32,
+            deletions: 5,
+            truncated: false,
+          },
         },
       },
     });
@@ -657,13 +681,18 @@ describe("attention_changed", () => {
 
 describe("user item createdAt", () => {
   it("carries the turn's started_at on accept and hydrate", () => {
-    const accepted = applyAcceptedTurn(initialCodeSessionState(), SNAPSHOT_TURN);
+    const accepted = applyAcceptedTurn(
+      initialCodeSessionState(),
+      SNAPSHOT_TURN,
+    );
     expect(accepted.items[0]).toMatchObject({
       kind: "user",
       createdAt: NOW,
     });
 
-    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [SNAPSHOT_TURN]);
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      SNAPSHOT_TURN,
+    ]);
     expect(hydrated.items[0]).toMatchObject({
       kind: "user",
       createdAt: NOW,

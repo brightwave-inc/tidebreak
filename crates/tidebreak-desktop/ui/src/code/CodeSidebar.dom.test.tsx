@@ -140,7 +140,9 @@ describe("CodeSidebar", () => {
       { initialUrl: "/code" },
     );
 
-    expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("radiogroup", { name: "App mode" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Work" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     // The repo list collapsed into the switcher; the by-repo group header is
@@ -154,10 +156,16 @@ describe("CodeSidebar", () => {
     ).toBeInTheDocument();
     // The card's name carries what the glyph rail shows, not just the title.
     expect(
-      screen.getByRole("button", { name: "Fix login · app · tidebreak/fix-login" }),
+      screen.getByRole("button", {
+        name: "Fix login · app · tidebreak/fix-login",
+      }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Delivery" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "New workspace" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Delivery" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Notifications" }),
@@ -186,14 +194,12 @@ describe("CodeSidebar", () => {
     expect(screen.getByText("Model Gateway")).toBeInTheDocument();
     expect(screen.getByText("Weekly (Fable)")).toBeInTheDocument();
     expect(screen.getByTitle("91% used")).toHaveTextContent("91%");
-    expect(screen.getByRole("progressbar", { name: "Weekly (Fable) usage" })).toHaveAttribute(
-      "aria-valuenow",
-      "91",
-    );
-    expect(screen.getByRole("progressbar", { name: "Weekly (Fable) usage" })).toHaveAttribute(
-      "aria-valuetext",
-      "91% used",
-    );
+    expect(
+      screen.getByRole("progressbar", { name: "Weekly (Fable) usage" }),
+    ).toHaveAttribute("aria-valuenow", "91");
+    expect(
+      screen.getByRole("progressbar", { name: "Weekly (Fable) usage" }),
+    ).toHaveAttribute("aria-valuetext", "91% used");
   });
 
   it("re-sorts and persists from the settings popover", async () => {
@@ -208,9 +214,7 @@ describe("CodeSidebar", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Workspace list settings" }),
     );
-    fireEvent.click(
-      await screen.findByRole("radio", { name: "By created" }),
-    );
+    fireEvent.click(await screen.findByRole("radio", { name: "By created" }));
 
     // By-created has no group headers, so the repo header link goes away and
     // the card grows its repo chip back.

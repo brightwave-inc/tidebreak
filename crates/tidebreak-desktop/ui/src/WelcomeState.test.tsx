@@ -8,10 +8,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  ApiClient,
-  ExecConfigInfo,
-} from "./api";
+import type { ApiClient, ExecConfigInfo } from "./api";
 import { WelcomeState } from "./WelcomeState";
 
 afterEach(cleanup);
@@ -40,7 +37,9 @@ describe("WelcomeState", () => {
       "Build a local planner",
       "Research in parallel",
     ]) {
-      expect(screen.getByRole("button", { name: new RegExp(label) })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: new RegExp(label) }),
+      ).toBeInTheDocument();
     }
 
     // A starter has to stand on its own: it names the work and starts, rather
@@ -118,9 +117,7 @@ describe("WelcomeState", () => {
     ]);
     render(<WelcomeState executionConfigClient={client} />);
 
-    await waitFor(() =>
-      expect(client.getExecConfig).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(client.getExecConfig).toHaveBeenCalled());
     expect(
       screen.queryByText(/Files staged for a run leave this machine/i),
     ).toBeNull();

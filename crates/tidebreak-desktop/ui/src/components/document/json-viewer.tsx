@@ -241,9 +241,7 @@ export function JsonViewer({
         <HighlightSignalContext.Provider value={highlightPath}>
           <HighlightRefSetterContext.Provider value={setHighlightEl}>
             <CollapseSignalContext.Provider value={collapseSignal}>
-              <NavigateSignalContext.Provider
-                value={navigateSignal}
-              >
+              <NavigateSignalContext.Provider value={navigateSignal}>
                 <JsonNode
                   value={parsed}
                   path=""
@@ -378,8 +376,8 @@ function BreadcrumbSegment({
       ? `[${selectedKey}]`
       : selectedKey
     : parentIsArray
-     ? "[ ]"
-     : "{ }";
+      ? "[ ]"
+      : "{ }";
 
   return (
     <>
@@ -419,9 +417,7 @@ function BreadcrumbSegment({
                   key === selectedKey && "bg-muted",
                 )}
               >
-                <span className="text-muted-foreground">
-                  {typeIndicator}
-                </span>
+                <span className="text-muted-foreground">{typeIndicator}</span>
                 <span className="truncate">{displayLabel}</span>
               </button>
             );
@@ -536,9 +532,7 @@ function JsonNode({
         isHighlighted={isHighlighted}
         navRef={nodeRefCallback}
       >
-        <span className="text-orange-600 dark:text-orange-400">
-          null
-        </span>
+        <span className="text-orange-600 dark:text-orange-400">null</span>
         {comma}
       </Line>
     );
@@ -644,11 +638,7 @@ function JsonNode({
   }
 
   return (
-    <Line
-      fieldName={fieldName}
-      isHighlighted={false}
-      navRef={nodeRefCallback}
-    >
+    <Line fieldName={fieldName} isHighlighted={false} navRef={nodeRefCallback}>
       <span>{String(value)}</span>
       {comma}
     </Line>
@@ -687,8 +677,7 @@ function Line({
       ref={refCallback}
       className={cn(
         "flex flex-wrap gap-x-1 py-px pl-6",
-        isHighlighted &&
-          "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
+        isHighlighted && "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
       )}
     >
       {fieldName !== undefined && (
@@ -758,8 +747,7 @@ function CollapsibleNode({
         ref={refCallback}
         className={cn(
           "hover:bg-muted/50 flex cursor-pointer items-center gap-x-1 py-px pl-1 select-none",
-          isHighlighted &&
-            "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
+          isHighlighted && "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
         )}
         onClick={onToggle}
       >
@@ -791,9 +779,7 @@ function CollapsibleNode({
       </div>
       {expanded && (
         <>
-          <div className="border-border/50 ml-3 border-l">
-            {children}
-          </div>
+          <div className="border-border/50 ml-3 border-l">{children}</div>
           <div className="text-foreground/60 py-px pl-4">
             {closeBracket}
             {comma}

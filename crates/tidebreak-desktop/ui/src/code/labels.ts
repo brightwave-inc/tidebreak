@@ -151,7 +151,9 @@ export function harnessUnusableReason(entry: {
  * it has an auto posture but no approval channel to escalate through.
  */
 export function autoIsUnsupervised(caps: ModeCaps): boolean {
-  return caps.auto_mode === "supported" && caps.structured_approvals !== "supported";
+  return (
+    caps.auto_mode === "supported" && caps.structured_approvals !== "supported"
+  );
 }
 
 /**
@@ -161,7 +163,9 @@ export function autoIsUnsupervised(caps: ModeCaps): boolean {
  * where the work runs. The mode is never silent: whichever surface offers it
  * states the posture next to the control (decisions 0033, 0038).
  */
-export function defaultCreatePermissionMode(caps: ModeCaps): CodePermissionMode {
+export function defaultCreatePermissionMode(
+  caps: ModeCaps,
+): CodePermissionMode {
   if (caps.allow_mode === "supported") return "allow";
   if (caps.auto_mode === "supported") return "auto";
   if (caps.structured_approvals === "supported") return "ask";
@@ -348,7 +352,11 @@ export function prettyCodeModelLabel(id: string): string {
   return leaf
     .split("-")
     .filter(Boolean)
-    .map((part) => (part.toLowerCase() === "gpt" ? "GPT" : part[0]?.toUpperCase() + part.slice(1)))
+    .map((part) =>
+      part.toLowerCase() === "gpt"
+        ? "GPT"
+        : part[0]?.toUpperCase() + part.slice(1),
+    )
     .join(" ");
 }
 

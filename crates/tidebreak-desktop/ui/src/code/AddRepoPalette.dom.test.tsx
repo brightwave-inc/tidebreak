@@ -12,7 +12,9 @@ afterEach(() => {
   useCodeUpdatesStore.getState().reset();
 });
 
-function app(overrides: Partial<AppContextValue["client"]> = {}): AppContextValue {
+function app(
+  overrides: Partial<AppContextValue["client"]> = {},
+): AppContextValue {
   return {
     client: {
       getCodeCloneDefaults: vi.fn(async () => ({
@@ -71,9 +73,13 @@ describe("AddRepoPalette", () => {
     const search = await screen.findByPlaceholderText("Filter sources");
     fireEvent.change(search, { target: { value: "git" } });
     expect(screen.getByRole("option", { name: /Git URL/ })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /Local folder/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /Local folder/ }),
+    ).not.toBeInTheDocument();
     fireEvent.keyDown(search, { key: "Enter" });
-    expect(await screen.findByText("Clone from a remote URL into a parent folder.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Clone from a remote URL into a parent folder."),
+    ).toBeInTheDocument();
   });
 
   it("goes back a stage on Backspace and closes on Escape", async () => {
@@ -84,17 +90,25 @@ describe("AddRepoPalette", () => {
       </AppContextProvider>,
       { initialUrl: "/code" },
     );
-    fireEvent.click(await screen.findByRole("option", { name: /GitHub repository/ }));
-    expect(await screen.findByText("Clone an owner/repo from GitHub.")).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    expect(
+      await screen.findByText("Clone an owner/repo from GitHub."),
+    ).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Backspace" });
-    expect(await screen.findByRole("option", { name: /Local folder/ })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: /Local folder/ }),
+    ).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("shows the gh-absent hint on the GitHub form", async () => {
     await renderPalette();
-    fireEvent.click(await screen.findByRole("option", { name: /GitHub repository/ }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
     expect(await screen.findByTestId("gh-absent-hint")).toHaveTextContent(
       "gh is not installed",
     );
@@ -122,18 +136,30 @@ describe("AddRepoPalette", () => {
       }),
     );
     fireEvent.click(await screen.findByRole("option", { name: /Git URL/ }));
-    fireEvent.change(screen.getByPlaceholderText("https://example.com/acme/app.git"), {
-      target: { value: "/tmp/origin.git" },
-    });
+    fireEvent.change(
+      screen.getByPlaceholderText("https://example.com/acme/app.git"),
+      {
+        target: { value: "/tmp/origin.git" },
+      },
+    );
     fireEvent.click(screen.getByRole("button", { name: "Clone" }));
     await waitFor(() => expect(started).toHaveBeenCalled());
-    expect(await screen.findByTestId("clone-phase")).toHaveTextContent("starting");
+    expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
+      "starting",
+    );
     useCodeUpdatesStore.getState().apply({
       type: "clone_progress",
-      job: { id: "job-1", phase: "receiving objects", percent: 40, done: false },
+      job: {
+        id: "job-1",
+        phase: "receiving objects",
+        percent: 40,
+        done: false,
+      },
     });
     await waitFor(() =>
-      expect(screen.getByTestId("clone-phase")).toHaveTextContent("receiving objects"),
+      expect(screen.getByTestId("clone-phase")).toHaveTextContent(
+        "receiving objects",
+      ),
     );
     useCodeUpdatesStore.getState().apply({
       type: "clone_progress",
@@ -144,8 +170,12 @@ describe("AddRepoPalette", () => {
         error: "fatal: repository not found",
       },
     });
-    expect(await screen.findByText("fatal: repository not found")).toBeInTheDocument();
+    expect(
+      await screen.findByText("fatal: repository not found"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(screen.getByPlaceholderText("https://example.com/acme/app.git")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("https://example.com/acme/app.git"),
+    ).toBeInTheDocument();
   });
 });

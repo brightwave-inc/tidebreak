@@ -13,7 +13,11 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -48,7 +52,10 @@ import { exportFailureMessage, friendlyOutputError } from "./OutputsView";
 export type OutputDetailApis = {
   read: (chatId: string, outputId: string) => Promise<DeliverablePreview>;
   export: (chatId: string, outputId: string) => Promise<OutputExportResult>;
-  listRevisions: (chatId: string, outputId: string) => Promise<OutputRevisionsCatalog>;
+  listRevisions: (
+    chatId: string,
+    outputId: string,
+  ) => Promise<OutputRevisionsCatalog>;
   readRevision: (
     chatId: string,
     outputId: string,
@@ -119,8 +126,10 @@ export function OutputDetailRoot({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [revisions, setRevisions] = useState<OutputRevisionInfo[] | null>(null);
   /** The non-current version being previewed, if any. */
-  const [previewRevision, setPreviewRevision] = useState<OutputRevisionInfo | null>(null);
-  const [revisionPreview, setRevisionPreview] = useState<DeliverablePreview | null>(null);
+  const [previewRevision, setPreviewRevision] =
+    useState<OutputRevisionInfo | null>(null);
+  const [revisionPreview, setRevisionPreview] =
+    useState<DeliverablePreview | null>(null);
   /** The open editor: the revision it started from, plus the working draft. */
   const [editor, setEditor] = useState<{
     baseRevisionId: string;
@@ -148,7 +157,9 @@ export function OutputDetailRoot({
       })
       .catch((caught) => {
         if (!cancelled) {
-          setLoadError(friendlyOutputError(caught, "Could not preview that output."));
+          setLoadError(
+            friendlyOutputError(caught, "Could not preview that output."),
+          );
         }
       });
     void apis
@@ -309,11 +320,17 @@ export function OutputDetailRoot({
     setPreviewRevision(revision);
     setRevisionPreview(null);
     try {
-      const content = await apis.readRevision(chatId, outputId, revision.revisionId);
+      const content = await apis.readRevision(
+        chatId,
+        outputId,
+        revision.revisionId,
+      );
       setRevisionPreview(content);
     } catch (caught) {
       setPreviewRevision(null);
-      toast.error(friendlyOutputError(caught, "Could not preview that version."));
+      toast.error(
+        friendlyOutputError(caught, "Could not preview that version."),
+      );
     }
   }
 
@@ -328,9 +345,13 @@ export function OutputDetailRoot({
       void refreshRevisions();
       const next = await apis.read(chatId, outputId);
       setPreview(next);
-      toast.success(`Restored version ${restoredOrdinal} as the latest version.`);
+      toast.success(
+        `Restored version ${restoredOrdinal} as the latest version.`,
+      );
     } catch (caught) {
-      toast.error(friendlyOutputError(caught, "Could not restore that version."));
+      toast.error(
+        friendlyOutputError(caught, "Could not restore that version."),
+      );
     } finally {
       setRestoring(false);
     }
@@ -338,7 +359,9 @@ export function OutputDetailRoot({
 
   const viewing = previewRevision ? revisionPreview : preview;
   const displayedRevision =
-    previewRevision ?? revisions?.find((revision) => revision.isCurrent) ?? null;
+    previewRevision ??
+    revisions?.find((revision) => revision.isCurrent) ??
+    null;
   const showHistory = (preview?.revisionCount ?? 0) > 1;
   // A truncated preview is not the whole file, so editing it would quietly drop
   // whatever the preview left out. Save As… still exports the complete file.
@@ -408,10 +431,7 @@ export function OutputDetailRoot({
               </WithTooltip>
             )}
             {showHistory && (
-              <Popover
-                open={historyOpen}
-                onOpenChange={onHistoryOpenChange}
-              >
+              <Popover open={historyOpen} onOpenChange={onHistoryOpenChange}>
                 <WithTooltip label="Version history">
                   <PopoverTrigger asChild>
                     <Button variant="ghost" size="icon-sm">
@@ -421,9 +441,14 @@ export function OutputDetailRoot({
                   </PopoverTrigger>
                 </WithTooltip>
                 <PopoverContent align="end" className="w-64 p-2">
-                  <p className="px-2 pt-1 pb-2 text-sm font-medium">Version history</p>
+                  <p className="px-2 pt-1 pb-2 text-sm font-medium">
+                    Version history
+                  </p>
                   {revisions === null ? (
-                    <p className="px-2 pb-2 text-sm text-muted-foreground" role="status">
+                    <p
+                      className="px-2 pb-2 text-sm text-muted-foreground"
+                      role="status"
+                    >
                       Loading versions…
                     </p>
                   ) : (
@@ -446,7 +471,10 @@ export function OutputDetailRoot({
                               </span>
                               <span className="block truncate text-xs text-muted-foreground">
                                 {producedByLabel(revision)} ·{" "}
-                                {formatDistanceToNow(new Date(revision.createdAt))} ago
+                                {formatDistanceToNow(
+                                  new Date(revision.createdAt),
+                                )}{" "}
+                                ago
                               </span>
                             </span>
                             {!revision.isCurrent && (

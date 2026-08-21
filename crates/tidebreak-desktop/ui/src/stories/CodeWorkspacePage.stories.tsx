@@ -315,8 +315,7 @@ function transcriptFrames(
       replayed: true,
       event: {
         type: "assistant_message",
-        text:
-          "I’m rebuilding this around one stable center: the agent conversation. Files, changes, review, browser, and terminal become working surfaces you bring in only when they help. The PR state stays visible in the header and rail so workflow never disappears behind a pane.",
+        text: "I’m rebuilding this around one stable center: the agent conversation. Files, changes, review, browser, and terminal become working surfaces you bring in only when they help. The PR state stays visible in the header and rail so workflow never disappears behind a pane.",
       },
     },
     {
@@ -334,8 +333,7 @@ function transcriptFrames(
       replayed: true,
       event: {
         type: "assistant_message",
-        text:
-          "Tabs now move on pointer events rather than native drag, so a drag starts every time in the desktop webview. Dropping one on another tab reorders the strip; dropping it on the right-hand target opens it beside the agent.",
+        text: "Tabs now move on pointer events rather than native drag, so a drag starts every time in the desktop webview. Dropping one on another tab reorders the strip; dropping it on the right-hand target opens it beside the agent.",
       },
     },
     {
@@ -522,7 +520,7 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
                 }
               : {}),
           })
-      : digestFor(workspace, { session: session.id, pr_state: pullRequest });
+        : digestFor(workspace, { session: session.id, pr_state: pullRequest });
   const needsYou = digestFor(otherWorkspaces[0], {
     attention: attentionNeedsYou,
     lifecycle: "idle",
@@ -575,7 +573,9 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     listCodeRepos: async () => [repo],
     listCodeWorkspaces: async () => [workspace, ...otherWorkspaces],
     getHarnessDoctor: async () => harnessDoctor,
-    listCodeHarnessModels: async (kind: CodeSessionSnapshot["harness_kind"]) => ({
+    listCodeHarnessModels: async (
+      kind: CodeSessionSnapshot["harness_kind"],
+    ) => ({
       kind,
       models: [],
     }),
@@ -605,7 +605,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       path,
       content: [
         "export function WorkspaceCard() {",
-        "  return <article className=\"rounded-xl\">…</article>;",
+        '  return <article className="rounded-xl">…</article>;',
         "}",
       ].join("\n"),
       truncated: false,
@@ -1012,7 +1012,9 @@ export const FailedSubagent: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent("Run the desktop integration suite");
+    await expect(context).toHaveTextContent(
+      "Run the desktop integration suite",
+    );
     await expect(context).toHaveTextContent("Failed");
     await expect(
       await canvas.findByText(

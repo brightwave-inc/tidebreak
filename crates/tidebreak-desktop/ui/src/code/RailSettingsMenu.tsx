@@ -29,19 +29,17 @@ import {
  * choice made here is the choice every window opens with.
  */
 
-const SORT_OPTIONS: readonly SegmentedOption<
-  CodeRailPrefs["sortMode"]
->[] = WORKSPACE_SORT_MODES.map((mode) => ({
-  value: mode,
-  label: WORKSPACE_SORT_MODE_LABELS[mode],
-}));
+const SORT_OPTIONS: readonly SegmentedOption<CodeRailPrefs["sortMode"]>[] =
+  WORKSPACE_SORT_MODES.map((mode) => ({
+    value: mode,
+    label: WORKSPACE_SORT_MODE_LABELS[mode],
+  }));
 
-const DENSITY_OPTIONS: readonly SegmentedOption<
-  CodeRailPrefs["density"]
->[] = CARD_DENSITIES.map((density) => ({
-  value: density,
-  label: CARD_DENSITY_LABELS[density],
-}));
+const DENSITY_OPTIONS: readonly SegmentedOption<CodeRailPrefs["density"]>[] =
+  CARD_DENSITIES.map((density) => ({
+    value: density,
+    label: CARD_DENSITY_LABELS[density],
+  }));
 
 export function RailSettingsMenu() {
   const prefs = useCodeUiStore((state) => state.railPrefs);

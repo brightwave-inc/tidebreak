@@ -88,9 +88,9 @@ describe("pullRequestReviewSummary", () => {
   });
 
   it("reports the review decision while the pull request is live", () => {
-    expect(pullRequestReviewSummary(pr({ review_decision: "approved" })).label).toBe(
-      "Approved",
-    );
+    expect(
+      pullRequestReviewSummary(pr({ review_decision: "approved" })).label,
+    ).toBe("Approved");
     expect(
       pullRequestReviewSummary(pr({ review_decision: "changes_requested" })),
     ).toEqual({ label: "Changes requested", tone: "critical" });

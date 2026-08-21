@@ -44,18 +44,18 @@ describe("parseSlashCommand", () => {
   it("gives a command that takes one the rest of the line", () => {
     // `/compact` is the shipped case: everything after the name is what the
     // summary should keep.
-    expect(
-      parseSlashCommand("/compact  keep the API design "),
-    ).toEqual({
+    expect(parseSlashCommand("/compact  keep the API design ")).toEqual({
       command: SLASH_COMMANDS.find((command) => command.name === "compact"),
       argument: "keep the API design",
     });
     const commands: readonly SlashCommand[] = [
       { name: "usage", description: "", takesArgument: true },
     ];
-    expect(parseSlashCommand("/usage  keep the API design ", commands)).toEqual({
-      command: commands[0],
-      argument: "keep the API design",
-    });
+    expect(parseSlashCommand("/usage  keep the API design ", commands)).toEqual(
+      {
+        command: commands[0],
+        argument: "keep the API design",
+      },
+    );
   });
 });

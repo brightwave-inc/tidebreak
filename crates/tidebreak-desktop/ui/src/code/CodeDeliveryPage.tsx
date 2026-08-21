@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -239,7 +233,11 @@ const RUN_BUILT_IN_VIEWS: readonly {
   },
 ];
 
-export function CodeDeliveryPage({ surface }: { surface: CodeDeliverySurface }) {
+export function CodeDeliveryPage({
+  surface,
+}: {
+  surface: CodeDeliverySurface;
+}) {
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
       <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
@@ -263,7 +261,9 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
   );
   const savedViews = useCodeDeliveryStore((state) => state.savedViews);
   const [discovered, setDiscovered] = useState<CodeGitHubRepositoryRef[]>([]);
-  const [capability, setCapability] = useState<CodeGitHubCapability | null>(null);
+  const [capability, setCapability] = useState<CodeGitHubCapability | null>(
+    null,
+  );
   const [repositoryErrors, setRepositoryErrors] = useState<
     CodeDeliverySourceError[]
   >([]);
@@ -386,7 +386,10 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
             </Button>
           </div>
         </div>
-        <nav className="mt-4 flex items-center gap-1" aria-label="Delivery views">
+        <nav
+          className="mt-4 flex items-center gap-1"
+          aria-label="Delivery views"
+        >
           <DeliveryTab
             active={surface === "pull_requests"}
             icon={<GitPullRequest />}
@@ -427,7 +430,11 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
 
         {customViews.length > 0 && (
           <Select
-            value={customViews.some((view) => view.id === activeViewId) ? activeViewId : ""}
+            value={
+              customViews.some((view) => view.id === activeViewId)
+                ? activeViewId
+                : ""
+            }
             onValueChange={(id) => {
               const view = customViews.find((candidate) => candidate.id === id);
               if (view) applySavedView(view);
@@ -632,7 +639,9 @@ function PullRequestsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
-      setItems((current) => (append ? dedupeRows([...current, ...page.items]) : page.items));
+      setItems((current) =>
+        append ? dedupeRows([...current, ...page.items]) : page.items,
+      );
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
       setFetchedAt(page.fetched_at);
@@ -667,7 +676,10 @@ function PullRequestsSurface({
     <DeliverySplit selected={Boolean(selected)}>
       <div
         ref={scrollRef}
-        className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}
+        className={cn(
+          "min-h-0 flex-1 overflow-auto",
+          selected && "max-lg:hidden",
+        )}
       >
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
@@ -816,7 +828,9 @@ function RunsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
-      setItems((current) => (append ? dedupeRows([...current, ...page.items]) : page.items));
+      setItems((current) =>
+        append ? dedupeRows([...current, ...page.items]) : page.items,
+      );
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
       setFetchedAt(page.fetched_at);
@@ -853,7 +867,10 @@ function RunsSurface({
     <DeliverySplit selected={Boolean(selected)}>
       <div
         ref={scrollRef}
-        className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}
+        className={cn(
+          "min-h-0 flex-1 overflow-auto",
+          selected && "max-lg:hidden",
+        )}
       >
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
@@ -1146,9 +1163,7 @@ function PullRequestRow({
         <span
           className={cn("text-xs", STATUS_TEXT[review.tone])}
           title={
-            settledAt
-              ? `${review.label} ${relativeTime(settledAt)}`
-              : undefined
+            settledAt ? `${review.label} ${relativeTime(settledAt)}` : undefined
           }
         >
           {review.label}
@@ -1178,7 +1193,11 @@ function RunList({
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <div role="list" aria-label="Runs and deployments" className="min-w-[780px]">
+    <div
+      role="list"
+      aria-label="Runs and deployments"
+      className="min-w-[780px]"
+    >
       <div
         className={cn(
           "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur",
@@ -1213,13 +1232,15 @@ function RunList({
                 ) : (
                   <Workflow className="size-4 shrink-0 text-muted-foreground" />
                 )}
-                <span className="truncate text-sm font-medium">{item.name}</span>
+                <span className="truncate text-sm font-medium">
+                  {item.name}
+                </span>
               </span>
               <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                 <span>
                   {item.kind === "deployment"
                     ? "Deployment"
-                    : item.workflow ?? "Workflow"}
+                    : (item.workflow ?? "Workflow")}
                 </span>
                 {item.environment && <span>{item.environment}</span>}
                 {item.branch && (
@@ -1228,7 +1249,9 @@ function RunList({
               </span>
             </span>
             <span className="flex min-w-0 items-center text-xs text-muted-foreground">
-              <span className="truncate">{item.repository.name_with_owner}</span>
+              <span className="truncate">
+                {item.repository.name_with_owner}
+              </span>
             </span>
             <span className="flex items-center">
               <RunStatusBadge item={item} />
@@ -1316,9 +1339,13 @@ function RunDetailPanel({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{summary.repository.name_with_owner}</span>
-            <span>{summary.kind === "deployment" ? "Deployment" : "Action"}</span>
+            <span>
+              {summary.kind === "deployment" ? "Deployment" : "Action"}
+            </span>
           </div>
-          <h2 className="mt-1 text-base font-semibold leading-snug">{summary.name}</h2>
+          <h2 className="mt-1 text-base font-semibold leading-snug">
+            {summary.name}
+          </h2>
         </div>
         <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
           <X />
@@ -1343,7 +1370,12 @@ function RunDetailPanel({
                 Open on GitHub
               </Button>
               {detail.can_rerun_failed && (
-                <Button type="button" size="sm" disabled={busy} onClick={() => void rerun()}>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void rerun()}
+                >
                   {busy ? (
                     <LoaderCircle className="animate-spin" />
                   ) : (
@@ -1395,7 +1427,9 @@ function RunDetailPanel({
               <DetailStat
                 label="Event"
                 value={
-                  detail.summary.event ? humanize(detail.summary.event) : "Unknown"
+                  detail.summary.event
+                    ? humanize(detail.summary.event)
+                    : "Unknown"
                 }
               />
             </dl>
@@ -1411,9 +1445,13 @@ function RunDetailPanel({
                       className="flex items-start gap-2 border-b border-border-subtle px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/30"
                       onClick={() => void openInBrowser(job.url)}
                     >
-                      <CheckTone bucket={runBucket(job.conclusion, job.status)} />
+                      <CheckTone
+                        bucket={runBucket(job.conclusion, job.status)}
+                      />
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-xs font-medium">{job.name}</span>
+                        <span className="block truncate text-xs font-medium">
+                          {job.name}
+                        </span>
                         {job.failed_steps.length > 0 && (
                           <span className="mt-1 block text-[11px] text-critical">
                             {job.failed_steps.join(", ")}
@@ -1453,7 +1491,9 @@ function RunDetailPanel({
                             type="button"
                             size="xs"
                             variant="outline"
-                            onClick={() => void openInBrowser(status.environment_url!)}
+                            onClick={() =>
+                              void openInBrowser(status.environment_url!)
+                            }
                           >
                             <ExternalLink />
                             Environment
@@ -1513,12 +1553,17 @@ function PullRequestFilters({
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[22rem] max-w-[calc(100vw-24px)] p-3">
+      <PopoverContent
+        align="end"
+        className="w-[22rem] max-w-[calc(100vw-24px)] p-3"
+      >
         <FilterSection title="Repositories">
           <RepositoryCheckboxes
             repositories={repositories}
             selected={filters.repositoryKeys}
-            onChange={(repositoryKeys) => onChange({ ...filters, repositoryKeys })}
+            onChange={(repositoryKeys) =>
+              onChange({ ...filters, repositoryKeys })
+            }
           />
         </FilterSection>
         <FilterSection title="State">
@@ -1618,7 +1663,9 @@ function RunFilters({
           <RepositoryCheckboxes
             repositories={repositories}
             selected={filters.repositoryKeys}
-            onChange={(repositoryKeys) => onChange({ ...filters, repositoryKeys })}
+            onChange={(repositoryKeys) =>
+              onChange({ ...filters, repositoryKeys })
+            }
           />
         </FilterSection>
         <FilterSection title="Kind">
@@ -1728,7 +1775,9 @@ function RepositoryCheckboxes({
   onChange: (selected: string[]) => void;
 }) {
   if (repositories.length === 0) {
-    return <p className="text-xs text-muted-foreground">No tracked repositories.</p>;
+    return (
+      <p className="text-xs text-muted-foreground">No tracked repositories.</p>
+    );
   }
   return (
     <div className="flex max-h-36 flex-col gap-1 overflow-auto pr-1">
@@ -1745,7 +1794,9 @@ function RepositoryCheckboxes({
                 onChange(toggleValue(selected, key, checked === true))
               }
             />
-            <span className="min-w-0 truncate">{repository.name_with_owner}</span>
+            <span className="min-w-0 truncate">
+              {repository.name_with_owner}
+            </span>
           </label>
         );
       })}
@@ -1794,7 +1845,11 @@ function FilterSwitch({
   return (
     <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
       <span>{label}</span>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} aria-label={label} />
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        aria-label={label}
+      />
     </label>
   );
 }
@@ -1888,14 +1943,17 @@ function DeliveryRepositoriesDialog({
     setResolving(true);
     setError(null);
     try {
-      const snapshot = await client.resolveCodeDeliveryRepositories(repositories);
+      const snapshot =
+        await client.resolveCodeDeliveryRepositories(repositories);
       onResolved(snapshot.repositories, snapshot.errors);
       if (snapshot.repositories.length > 0) setInput("");
       if (snapshot.errors.length > 0) {
         setError(snapshot.errors.map((item) => item.message).join(" "));
       }
     } catch (caught) {
-      setError(friendlyErrorMessage(caught, "Could not resolve those repositories."));
+      setError(
+        friendlyErrorMessage(caught, "Could not resolve those repositories."),
+      );
     } finally {
       setResolving(false);
     }
@@ -1917,7 +1975,12 @@ function DeliveryRepositoriesDialog({
                   want in Delivery.
                 </p>
               </div>
-              <Button type="button" size="icon-xs" variant="ghost" onClick={onRefresh}>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                onClick={onRefresh}
+              >
                 <RefreshCw />
                 <span className="sr-only">Refresh repositories</span>
               </Button>
@@ -1977,7 +2040,11 @@ function DeliveryRepositoriesDialog({
                   }
                 }}
               />
-              <Button type="button" disabled={resolving || !input.trim()} onClick={() => void add()}>
+              <Button
+                type="button"
+                disabled={resolving || !input.trim()}
+                onClick={() => void add()}
+              >
                 {resolving && <LoaderCircle className="animate-spin" />}
                 Add
               </Button>
@@ -2013,7 +2080,11 @@ function DeliveryRepositoriesDialog({
           </section>
         </div>
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+          >
             Done
           </Button>
         </DialogFooter>
@@ -2049,8 +2120,12 @@ function RepositorySettingRow({
         />
       )}
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{repository.name_with_owner}</p>
-        <p className="truncate text-[11px] text-muted-foreground">{repository.host}</p>
+        <p className="truncate text-sm font-medium">
+          {repository.name_with_owner}
+        </p>
+        <p className="truncate text-[11px] text-muted-foreground">
+          {repository.host}
+        </p>
       </div>
       <Button
         type="button"
@@ -2141,7 +2216,11 @@ function SaveViewDialog({
           </p>
         </div>
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
           </Button>
           <Button type="button" disabled={!name.trim()} onClick={save}>
@@ -2176,9 +2255,7 @@ function FreshnessBar({
   return (
     <div className="flex items-center justify-between gap-3 px-5 py-1.5 text-[11px] text-muted-foreground">
       <span>
-        {count === 0
-          ? ""
-          : `${count} ${noun}${count === 1 ? "" : "s"}`}
+        {count === 0 ? "" : `${count} ${noun}${count === 1 ? "" : "s"}`}
         {fetchedAt && count > 0 && ` · updated ${relativeTime(fetchedAt)}`}
       </span>
       <Button
@@ -2220,7 +2297,11 @@ function PartialErrorBanner({
   );
 }
 
-function GitHubUnavailable({ capability }: { capability: CodeGitHubCapability }) {
+function GitHubUnavailable({
+  capability,
+}: {
+  capability: CodeGitHubCapability;
+}) {
   return (
     <Empty className="min-h-80">
       <EmptyHeader>
@@ -2243,14 +2324,21 @@ function NoDeliveryRepositories() {
         </EmptyMedia>
         <EmptyTitle>No GitHub repositories tracked</EmptyTitle>
         <EmptyDescription>
-          Register a GitHub-backed repo in Tidebreak or add one from Repositories.
+          Register a GitHub-backed repo in Tidebreak or add one from
+          Repositories.
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
   );
 }
 
-function InlineLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+function InlineLoadError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
   return (
     <div className="m-4 flex items-center justify-between gap-3 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
       <span>{message}</span>
@@ -2307,9 +2395,12 @@ function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
     <span
       className={cn(
         "rounded-md px-2 py-1 text-[11px] font-medium",
-        tone === "success" && "bg-success-background text-success-foreground-muted",
-        tone === "critical" && "bg-critical-background text-critical-foreground-muted",
-        tone === "warning" && "bg-warning-background text-warning-foreground-muted",
+        tone === "success" &&
+          "bg-success-background text-success-foreground-muted",
+        tone === "critical" &&
+          "bg-critical-background text-critical-foreground-muted",
+        tone === "warning" &&
+          "bg-warning-background text-warning-foreground-muted",
         tone === "muted" && "bg-muted text-muted-foreground",
       )}
     >
@@ -2378,12 +2469,15 @@ function selectedRepositoryTargets(
   const keys = new Set(selected);
   return repositories
     .filter(
-      (repository) => keys.size === 0 || keys.has(codeDeliveryRepositoryKey(repository)),
+      (repository) =>
+        keys.size === 0 || keys.has(codeDeliveryRepositoryKey(repository)),
     )
     .map(codeDeliveryRepositoryTarget);
 }
 
-function clonePrFilters(filters: CodeDeliveryPrViewFilters): CodeDeliveryPrViewFilters {
+function clonePrFilters(
+  filters: CodeDeliveryPrViewFilters,
+): CodeDeliveryPrViewFilters {
   return {
     ...filters,
     repositoryKeys: [...filters.repositoryKeys],
@@ -2394,7 +2488,9 @@ function clonePrFilters(filters: CodeDeliveryPrViewFilters): CodeDeliveryPrViewF
   };
 }
 
-function cloneRunFilters(filters: CodeDeliveryRunViewFilters): CodeDeliveryRunViewFilters {
+function cloneRunFilters(
+  filters: CodeDeliveryRunViewFilters,
+): CodeDeliveryRunViewFilters {
   return {
     ...filters,
     repositoryKeys: [...filters.repositoryKeys],

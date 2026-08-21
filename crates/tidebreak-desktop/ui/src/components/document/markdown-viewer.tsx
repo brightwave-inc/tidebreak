@@ -122,7 +122,8 @@ export function MarkdownViewer({
 
   // In citation mode, skip the chunks before it rather than parsing megabytes
   // of text the reader has not asked to see yet.
-  const startChunkIndex = citationChunk != null ? Math.max(0, citationChunk - 1) : 0;
+  const startChunkIndex =
+    citationChunk != null ? Math.max(0, citationChunk - 1) : 0;
   const maxRenderableChunks = chunks.length - startChunkIndex;
   const initialCount = Math.min(INITIAL_CHUNK_COUNT, maxRenderableChunks);
 
@@ -182,7 +183,10 @@ export function MarkdownViewer({
 
   if (fileDownload.isLoading) {
     return (
-      <div className={cn("flex items-center justify-center", className)} {...props}>
+      <div
+        className={cn("flex items-center justify-center", className)}
+        {...props}
+      >
         {fileDownload.progress ? (
           <FileDownloadProgressIndicator progress={fileDownload.progress} />
         ) : (
@@ -195,7 +199,10 @@ export function MarkdownViewer({
   // Binary files sniffed as text-adjacent can't be rendered as text
   if (fileDownload.contentType === "application/octet-stream") {
     return (
-      <div className={cn("flex items-center justify-center", className)} {...props}>
+      <div
+        className={cn("flex items-center justify-center", className)}
+        {...props}
+      >
         <div className="flex flex-col items-center gap-2 text-muted-foreground">
           <FileIcon className="size-8" />
           <p>No preview available for this file type</p>
@@ -205,10 +212,16 @@ export function MarkdownViewer({
   }
 
   const hasMoreChunks = renderedCount < maxRenderableChunks;
-  const visibleChunks = chunks.slice(startChunkIndex, startChunkIndex + renderedCount);
+  const visibleChunks = chunks.slice(
+    startChunkIndex,
+    startChunkIndex + renderedCount,
+  );
 
   return (
-    <div className={cn("relative flex min-h-0 flex-1 flex-col", className)} {...props}>
+    <div
+      className={cn("relative flex min-h-0 flex-1 flex-col", className)}
+      {...props}
+    >
       {headings.length > 0 && (
         <div className="absolute top-2 right-2 z-10">
           <MarkdownOutline
@@ -222,7 +235,11 @@ export function MarkdownViewer({
         <div className="mx-auto max-w-4xl">
           {visibleChunks.map((chunk, i) => {
             const inChunk = cited
-              ? rangeWithinPiece(cited, chunkStarts[startChunkIndex + i]!, chunk.length)
+              ? rangeWithinPiece(
+                  cited,
+                  chunkStarts[startChunkIndex + i]!,
+                  chunk.length,
+                )
               : null;
             return markdown ? (
               <MessageMarkdown
@@ -255,7 +272,10 @@ export function MarkdownViewer({
             );
           })}
           {hasMoreChunks && (
-            <div ref={sentinelRef} className="flex items-center justify-center py-8">
+            <div
+              ref={sentinelRef}
+              className="flex items-center justify-center py-8"
+            >
               <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
             </div>
           )}

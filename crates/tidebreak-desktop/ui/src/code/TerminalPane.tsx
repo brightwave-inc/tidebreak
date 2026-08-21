@@ -6,10 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { ApiClient } from "../api/client";
 import { Button } from "@/components/ui/button";
 import { friendlyErrorMessage } from "@/lib/utils";
-import {
-  resolveShellShortcut,
-  usesCommandModifier,
-} from "../ShellShortcuts";
+import { resolveShellShortcut, usesCommandModifier } from "../ShellShortcuts";
 
 const POLL_MS = 200;
 const FRAME_BUDGET = 8 * 1024;
@@ -244,21 +241,27 @@ export function TerminalPane({
     const onResize = () => {
       fit.fit();
       const tid = tidRef.current;
-      const dims = term.cols && term.rows ? { cols: term.cols, rows: term.rows } : null;
+      const dims =
+        term.cols && term.rows ? { cols: term.cols, rows: term.rows } : null;
       if (tid && dims) {
         void client.resizeCodeTerminal(workspaceId, tid, dims.cols, dims.rows);
       }
     };
     window.addEventListener("resize", onResize);
     const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(onResize);
     observer?.observe(host);
 
     const root = document.documentElement;
     const themeObserver = new MutationObserver(() => {
       term.options.theme = readXtermTheme();
     });
-    themeObserver.observe(root, { attributes: true, attributeFilter: ["class"] });
+    themeObserver.observe(root, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
 
     return () => {
       themeObserver.disconnect();
@@ -388,12 +391,18 @@ export function TerminalPane({
         </header>
       )}
       {overflow && (
-        <p className="text-muted-foreground px-3 py-2 text-xs" data-testid="terminal-truncated">
+        <p
+          className="text-muted-foreground px-3 py-2 text-xs"
+          data-testid="terminal-truncated"
+        >
           Output was truncated.
         </p>
       )}
       {ended && (
-        <p className="text-muted-foreground px-3 py-2 text-xs" data-testid="terminal-ended">
+        <p
+          className="text-muted-foreground px-3 py-2 text-xs"
+          data-testid="terminal-ended"
+        >
           Shell ended.
         </p>
       )}

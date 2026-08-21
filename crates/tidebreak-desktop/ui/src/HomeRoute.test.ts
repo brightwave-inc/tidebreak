@@ -54,12 +54,20 @@ describe("home attachment settings", () => {
       "pending-chat",
       "anthropic::claude-opus-4",
     );
-    expect(patchChatReasoningEffort).toHaveBeenCalledWith("pending-chat", "high");
-    expect(patchChatPermissionMode).toHaveBeenCalledWith("pending-chat", "plan");
+    expect(patchChatReasoningEffort).toHaveBeenCalledWith(
+      "pending-chat",
+      "high",
+    );
+    expect(patchChatPermissionMode).toHaveBeenCalledWith(
+      "pending-chat",
+      "plan",
+    );
     expect(patchChatNetworkPolicy).toHaveBeenCalledWith("pending-chat", {
       mode: "off",
     });
-    expect(patchChatPermissionMode).toHaveBeenCalledBefore(patchChatNetworkPolicy);
+    expect(patchChatPermissionMode).toHaveBeenCalledBefore(
+      patchChatNetworkPolicy,
+    );
   });
 
   it("surfaces a rejected pending-chat update to the sender", async () => {
@@ -121,7 +129,10 @@ describe("home attachment settings", () => {
 
     expect(patchChatModel).not.toHaveBeenCalled();
     expect(patchChatReasoningEffort).not.toHaveBeenCalled();
-    expect(patchChatPermissionMode).toHaveBeenCalledWith("pending-chat", "plan");
+    expect(patchChatPermissionMode).toHaveBeenCalledWith(
+      "pending-chat",
+      "plan",
+    );
   });
 });
 

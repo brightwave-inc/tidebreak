@@ -51,15 +51,22 @@ export function PluginsView({
   const [query, setQuery] = useState("");
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
 
-  const filtered = useMemo(() => filterCatalog(catalog, query), [catalog, query]);
-  const yourPlugins = filtered?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
+  const filtered = useMemo(
+    () => filterCatalog(catalog, query),
+    [catalog, query],
+  );
+  const yourPlugins =
+    filtered?.plugins.filter((plugin) => plugin.origin === "user") ?? [];
   const otherPlugins =
     filtered?.plugins.filter((plugin) => plugin.origin !== "user") ?? [];
-  const yourSkills = filtered?.skills.filter((skill) => skill.origin === "user") ?? [];
+  const yourSkills =
+    filtered?.skills.filter((skill) => skill.origin === "user") ?? [];
   const otherSkills =
     filtered?.skills.filter((skill) => skill.origin !== "user") ?? [];
   const isEmpty =
-    catalog !== null && catalog.plugins.length === 0 && catalog.skills.length === 0;
+    catalog !== null &&
+    catalog.plugins.length === 0 &&
+    catalog.skills.length === 0;
   const noMatches =
     catalog !== null &&
     !isEmpty &&
@@ -70,7 +77,8 @@ export function PluginsView({
   // The dialog re-reads its skill from the fresh catalog, so its switch moves
   // with the toggle round trip instead of freezing at the row that opened it.
   const shownSkill = openSkill
-    ? (catalog?.skills.find((skill) => skill.name === openSkill.name) ?? openSkill)
+    ? (catalog?.skills.find((skill) => skill.name === openSkill.name) ??
+      openSkill)
     : null;
 
   return (
@@ -96,7 +104,10 @@ export function PluginsView({
           </header>
 
           {provisioning && (
-            <p className="text-muted-foreground -mt-4 text-center text-xs" role="status">
+            <p
+              className="text-muted-foreground -mt-4 text-center text-xs"
+              role="status"
+            >
               {hostToolProvisioningLabel(provisioning)}
             </p>
           )}
@@ -107,14 +118,22 @@ export function PluginsView({
               role="alert"
             >
               <span>{error}</span>
-              <Button variant="outline" size="xs" className="shrink-0" onClick={reload}>
+              <Button
+                variant="outline"
+                size="xs"
+                className="shrink-0"
+                onClick={reload}
+              >
                 Try again
               </Button>
             </div>
           )}
 
           {loading && !catalog && (
-            <p className="text-muted-foreground text-center text-sm" role="status">
+            <p
+              className="text-muted-foreground text-center text-sm"
+              role="status"
+            >
               Loading your plugins…
             </p>
           )}
@@ -136,7 +155,10 @@ export function PluginsView({
           )}
 
           {noMatches && (
-            <p className="text-muted-foreground text-center text-sm" role="status">
+            <p
+              className="text-muted-foreground text-center text-sm"
+              role="status"
+            >
               Nothing matches “{query.trim()}”.
             </p>
           )}
@@ -292,9 +314,15 @@ function PluginRow({
         className="flex min-w-0 flex-1 items-center gap-3 text-left"
         onClick={onOpen}
       >
-        <PluginGlyph pluginName={plugin.name} category={plugin.category} size="md" />
+        <PluginGlyph
+          pluginName={plugin.name}
+          category={plugin.category}
+          size="md"
+        />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-sm font-medium">{plugin.display_name}</span>
+          <span className="truncate text-sm font-medium">
+            {plugin.display_name}
+          </span>
           <span className="text-muted-foreground line-clamp-1 text-xs leading-snug">
             {plugin.description}
           </span>

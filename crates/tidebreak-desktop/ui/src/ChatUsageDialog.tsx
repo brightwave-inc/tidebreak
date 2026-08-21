@@ -11,7 +11,10 @@ import {
   formatTokenCount,
   summedTurnTokens,
 } from "./ContextUsage";
-import type { ChatTerminalTurnSnapshot, RendererTurnUsage } from "./generated/wire";
+import type {
+  ChatTerminalTurnSnapshot,
+  RendererTurnUsage,
+} from "./generated/wire";
 import { modelForChat } from "./ModelSelection";
 import {
   Dialog,
@@ -144,8 +147,7 @@ function ContextWindowPanel({
             <span
               className={cn(
                 "rounded-full px-2 py-0.5 text-2xs font-semibold tracking-wide uppercase",
-                level === "critical" &&
-                  "bg-destructive/15 text-destructive",
+                level === "critical" && "bg-destructive/15 text-destructive",
                 level === "warning" &&
                   "bg-warning-background text-warning-foreground",
               )}
@@ -444,7 +446,10 @@ function UsageBreakdown({
               <dt className="flex w-24 items-center gap-2 text-sm text-muted-foreground">
                 <span
                   aria-hidden="true"
-                  className={cn("size-1.5 shrink-0 rounded-full", part.swatchClass)}
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    part.swatchClass,
+                  )}
                 />
                 {part.label}
               </dt>

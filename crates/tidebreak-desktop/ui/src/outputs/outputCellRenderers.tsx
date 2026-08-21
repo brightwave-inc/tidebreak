@@ -134,7 +134,10 @@ export function ActionsCellRenderer(props: CellProps) {
             <span>Save as…</span>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onClick={() => context.onDelete(output)}>
+          <DropdownMenuItem
+            variant="destructive"
+            onClick={() => context.onDelete(output)}
+          >
             <Trash2Icon />
             <span>Delete</span>
           </DropdownMenuItem>

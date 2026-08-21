@@ -29,7 +29,9 @@ describe("RepoSwitcherPopover", () => {
   it("filters, navigates from the keyboard, and offers Add repo", async () => {
     const user = userEvent.setup();
     const { router } = await renderWithRouter(
-      <RepoSwitcherPopover repos={[repo("r-app", "app"), repo("r-lib", "lib")]} />,
+      <RepoSwitcherPopover
+        repos={[repo("r-app", "app"), repo("r-lib", "lib")]}
+      />,
       { initialUrl: "/code" },
     );
 
@@ -37,7 +39,9 @@ describe("RepoSwitcherPopover", () => {
     const input = await screen.findByPlaceholderText("Find a repo");
 
     await user.type(input, "li");
-    expect(screen.queryByRole("option", { name: /app/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /app/ }),
+    ).not.toBeInTheDocument();
     await user.keyboard("{Enter}");
     expect(router.state.location.pathname).toBe("/code/r/r-lib");
   });

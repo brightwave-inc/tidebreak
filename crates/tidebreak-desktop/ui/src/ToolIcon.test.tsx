@@ -25,9 +25,14 @@ describe("tool presentation coverage", () => {
     // `list_folder` and `import_connected_file` both reached the allowlist
     // without copy or an icon and silently read as "Use a tool".
     for (const name of TOOL_NAMES) {
-      const presentation = toolCallPresentation(name, "running" as ToolCallStatus);
+      const presentation = toolCallPresentation(
+        name,
+        "running" as ToolCallStatus,
+      );
       expect(presentation.label, `${name} has no label`).not.toBe("Use a tool");
-      expect(presentation.title, `${name} has no title`).not.toBe("Using a tool");
+      expect(presentation.title, `${name} has no title`).not.toBe(
+        "Using a tool",
+      );
     }
   });
 
@@ -39,12 +44,15 @@ describe("tool presentation coverage", () => {
   });
 
   it("folds an unrecognized name to the generic tool rather than guessing", () => {
-    const presentation = toolCallPresentation("mcp__evil__exfiltrate", "running");
+    const presentation = toolCallPresentation(
+      "mcp__evil__exfiltrate",
+      "running",
+    );
     expect(presentation.label).toBe("Use a tool");
     // `other` is the server's own fold, and shares that treatment.
     expect(toolCallPresentation("other", "running").label).toBe("Use a tool");
-    expect(renderToStaticMarkup(<ToolIcon name="mcp__evil__exfiltrate" />)).toContain(
-      "<svg",
-    );
+    expect(
+      renderToStaticMarkup(<ToolIcon name="mcp__evil__exfiltrate" />),
+    ).toContain("<svg");
   });
 });

@@ -9,6 +9,8 @@
     "storybook:build": "storybook build -o storybook-static",
     "build": "tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
     "test": "vitest run",
+    "format": "biome format --write src",
+    "lint": "biome lint src",
     "before-tauri-dev": "node ../scripts/prepare-sidecar.mjs && vite",
     "before-tauri-build": "node ../scripts/prepare-sidecar.mjs --release && tsc && node --max-old-space-size=6144 node_modules/vite/bin/vite.js build",
     "preview": "vite preview",
@@ -98,6 +100,7 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.10",
     "@storybook/addon-a11y": "10.5.9",
     "@storybook/react-vite": "10.5.9",
     "@tailwindcss/vite": "4.3.3",

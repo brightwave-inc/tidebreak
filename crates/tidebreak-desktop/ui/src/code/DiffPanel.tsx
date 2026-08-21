@@ -413,5 +413,7 @@ export function groupUnifiedDiff(diff: string): DiffFileGroup[] {
     group.lines.push({ kind: "meta", oldNo: null, newNo: null, text: line });
   }
 
-  return groups.filter((group) => group.lines.length > 0 || groups.length === 1);
+  return groups.filter(
+    (group) => group.lines.length > 0 || groups.length === 1,
+  );
 }

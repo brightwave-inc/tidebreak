@@ -1,13 +1,7 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import {
-  Atom,
-  Check,
-  ChevronDown,
-  Gauge,
-  Search,
-} from "lucide-react";
+import { Atom, Check, ChevronDown, Gauge, Search } from "lucide-react";
 import type {
   ModelInfo,
   ModelSelectionKey,
@@ -158,7 +152,12 @@ function groupCatalog(models: readonly ModelInfo[]): CatalogGroup[] {
     const badge = groupBadgeForModel(model);
     const existing = byId.get(badge.id);
     if (existing) existing.models.push(model);
-    else byId.set(badge.id, { ...badge, provider: model.provider, models: [model] });
+    else
+      byId.set(badge.id, {
+        ...badge,
+        provider: model.provider,
+        models: [model],
+      });
   }
 
   const groups: CatalogGroup[] = [];
@@ -454,8 +453,8 @@ export function ModelMenu({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
-  const [activeGroupId, setActiveGroupId] = useState<string | null>(
-    () => pickerGroupForSelection(rail, known ?? usableDefault),
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(() =>
+    pickerGroupForSelection(rail, known ?? usableDefault),
   );
   const activeRail =
     rail.find((entry) => entry.id === activeGroupId) ?? rail[0] ?? null;
@@ -469,9 +468,7 @@ export function ModelMenu({
     if (guided.guided && !next) return;
     if (next) {
       setQuery("");
-      setActiveGroupId(
-        pickerGroupForSelection(rail, known ?? usableDefault),
-      );
+      setActiveGroupId(pickerGroupForSelection(rail, known ?? usableDefault));
     }
     setOpen(next);
   }
@@ -484,9 +481,7 @@ export function ModelMenu({
     void onChange(model.key);
   }
 
-  const visibleModels = searching
-    ? searchResults
-    : (activeGroup?.models ?? []);
+  const visibleModels = searching ? searchResults : (activeGroup?.models ?? []);
   const spotlightKey =
     (known ?? usableDefault)?.key ??
     visibleModels.find((model) => model.available)?.key ??
@@ -634,74 +629,72 @@ export function ModelMenu({
             </label>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
-          {!anyAvailable && (
-            <p className="text-muted-foreground px-2 py-2 text-sm">
-              {managed
-                ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
-                : "Configure a provider in Settings to choose a model."}
-            </p>
-          )}
+            {!anyAvailable && (
+              <p className="text-muted-foreground px-2 py-2 text-sm">
+                {managed
+                  ? "Models are provided by your organization's gateway. None are available yet — contact your administrator."
+                  : "Configure a provider in Settings to choose a model."}
+              </p>
+            )}
 
-          {!searching && activeRail && !activeRail.connected && (
-            <div>
-              <div className="flex flex-col items-start gap-3 px-2 py-3">
-                <ProviderIcon
-                  provider={activeRail.iconProvider}
-                  modelId={activeRail.iconModelId}
-                  className="size-5"
-                />
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">
-                    Connect {activeRail.label}
-                  </p>
-                  <p className="text-muted-foreground text-xs leading-relaxed">
-                    {activeRail.modelCount}{" "}
-                    {activeRail.modelCount === 1 ? "model" : "models"} ready
-                    after you add a key.
-                  </p>
+            {!searching && activeRail && !activeRail.connected && (
+              <div>
+                <div className="flex flex-col items-start gap-3 px-2 py-3">
+                  <ProviderIcon
+                    provider={activeRail.iconProvider}
+                    modelId={activeRail.iconModelId}
+                    className="size-5"
+                  />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">
+                      Connect {activeRail.label}
+                    </p>
+                    <p className="text-muted-foreground text-xs leading-relaxed">
+                      {activeRail.modelCount}{" "}
+                      {activeRail.modelCount === 1 ? "model" : "models"} ready
+                      after you add a key.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={disabled}
+                    onClick={() => {
+                      onSetUpProvider(activeRail.provider);
+                      setOpen(false);
+                    }}
+                  >
+                    Set up
+                  </Button>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={disabled}
-                  onClick={() => {
-                    onSetUpProvider(activeRail.provider);
-                    setOpen(false);
-                  }}
-                >
-                  Set up
-                </Button>
               </div>
-            </div>
-          )}
+            )}
 
-          {!searching && activeGroup && (
-            <div>
-              {activeGroup.models.map((model) => modelRow(model))}
-            </div>
-          )}
+            {!searching && activeGroup && (
+              <div>{activeGroup.models.map((model) => modelRow(model))}</div>
+            )}
 
-          {searching && (
-            <div>
-              {searchResults.length > 0 ? (
-                searchResults.map((model) => modelRow(model, true))
-              ) : (
-                <p className="text-muted-foreground px-2 py-3 text-sm">
-                  No models match “{query}”.
-                </p>
-              )}
-            </div>
-          )}
+            {searching && (
+              <div>
+                {searchResults.length > 0 ? (
+                  searchResults.map((model) => modelRow(model, true))
+                ) : (
+                  <p className="text-muted-foreground px-2 py-3 text-sm">
+                    No models match “{query}”.
+                  </p>
+                )}
+              </div>
+            )}
 
-          {!searching && !isDefault && !known && (
-            <div>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled className="flex items-center gap-2">
-                <span className="text-sm">{value}</span>
-                <Check className="ml-auto size-4" />
-              </DropdownMenuItem>
-            </div>
-          )}
+            {!searching && !isDefault && !known && (
+              <div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem disabled className="flex items-center gap-2">
+                  <span className="text-sm">{value}</span>
+                  <Check className="ml-auto size-4" />
+                </DropdownMenuItem>
+              </div>
+            )}
           </div>
         </div>
       </DropdownMenuContent>
@@ -725,9 +718,10 @@ const REASONING_EFFORT_SCALE: { value: ReasoningEffort; label: string }[] = [
   { value: "max", label: "Max" },
 ];
 
-const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = Object.fromEntries(
-  REASONING_EFFORT_SCALE.map((option) => [option.value, option.label]),
-) as Record<ReasoningEffort, string>;
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> =
+  Object.fromEntries(
+    REASONING_EFFORT_SCALE.map((option) => [option.value, option.label]),
+  ) as Record<ReasoningEffort, string>;
 
 /**
  * The levels to offer for a model, ordered by the scale rather than by the
@@ -738,7 +732,9 @@ const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = Object.fromEntr
 export function reasoningEffortOptions(
   accepted: readonly ReasoningEffort[],
 ): { value: ReasoningEffort; label: string }[] {
-  return REASONING_EFFORT_SCALE.filter((option) => accepted.includes(option.value));
+  return REASONING_EFFORT_SCALE.filter((option) =>
+    accepted.includes(option.value),
+  );
 }
 
 /**

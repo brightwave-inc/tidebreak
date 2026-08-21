@@ -241,7 +241,10 @@ export function PullRequestDetailPanel({
         ) : error ? (
           <InlineDetailError message={error} onRetry={() => void load()} />
         ) : detail ? (
-          <Tabs value={tab} onValueChange={(value) => setTab(value as DetailTab)}>
+          <Tabs
+            value={tab}
+            onValueChange={(value) => setTab(value as DetailTab)}
+          >
             <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-4 backdrop-blur">
               <TabsTrigger value="conversation">
                 <MessageSquare />
@@ -336,7 +339,9 @@ function PrDetailHeader({
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-            <span className="truncate">{summary.repository.name_with_owner}</span>
+            <span className="truncate">
+              {summary.repository.name_with_owner}
+            </span>
             <span className="tabular-nums">#{summary.number}</span>
           </div>
           <h2 className="mt-1 text-base font-semibold leading-snug">
@@ -477,7 +482,9 @@ function PrActions({
           <>
             <Select
               value={mergeMethod}
-              onValueChange={(value) => onMergeMethodChange(value as MergeMethod)}
+              onValueChange={(value) =>
+                onMergeMethodChange(value as MergeMethod)
+              }
             >
               <SelectTrigger size="sm" className="w-28">
                 <SelectValue />
@@ -519,8 +526,12 @@ function PrActions({
                 })
               }
             >
-              {busy === "auto-merge" && <LoaderCircle className="animate-spin" />}
-              {summary.auto_merge_enabled ? "Auto-merge on" : "Enable auto-merge"}
+              {busy === "auto-merge" && (
+                <LoaderCircle className="animate-spin" />
+              )}
+              {summary.auto_merge_enabled
+                ? "Auto-merge on"
+                : "Enable auto-merge"}
             </Button>
           </>
         )}
@@ -609,7 +620,9 @@ function PrDescription({ body }: { body: string }) {
       <h3 className="text-sm font-medium">Description</h3>
       {trimmed ? (
         <div className="review-comment-markdown mt-2 text-[13px] leading-5">
-          <MessageMarkdown>{expandGithubEmojiShortcodes(trimmed)}</MessageMarkdown>
+          <MessageMarkdown>
+            {expandGithubEmojiShortcodes(trimmed)}
+          </MessageMarkdown>
         </div>
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">
@@ -642,7 +655,9 @@ function PrConversation({
         <div className="mt-2 flex flex-col gap-2.5">
           {detail.comments.map((comment, index) => (
             <PrCommentCard
-              key={comment.id ?? `${comment.created_at}:${comment.author}:${index}`}
+              key={
+                comment.id ?? `${comment.created_at}:${comment.author}:${index}`
+              }
               comment={comment}
               actions={
                 comment.url ? (
@@ -709,7 +724,8 @@ function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
         </span>
         {detail.commits > 0 && (
           <span className="ml-2">
-            across {detail.commits} {detail.commits === 1 ? "commit" : "commits"}
+            across {detail.commits}{" "}
+            {detail.commits === 1 ? "commit" : "commits"}
           </span>
         )}
       </p>
@@ -746,7 +762,11 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
         </span>
         <MiddleTruncate
           className="min-w-0 flex-1 font-mono text-xs"
-          text={file.previous_path ? `${file.previous_path} → ${file.path}` : file.path}
+          text={
+            file.previous_path
+              ? `${file.previous_path} → ${file.path}`
+              : file.path
+          }
         />
         <span className="shrink-0 font-mono text-[11px] tabular-nums">
           <span className={STATUS_TEXT.ready}>+{file.additions}</span>{" "}
@@ -854,7 +874,8 @@ export function PrLifecycleIcon({
 }) {
   const shared = cn("shrink-0", className);
   if (lifecycle === "merged") return <GitMerge className={shared} />;
-  if (lifecycle === "closed") return <GitPullRequestClosed className={shared} />;
+  if (lifecycle === "closed")
+    return <GitPullRequestClosed className={shared} />;
   if (lifecycle === "draft") return <GitPullRequestDraft className={shared} />;
   return <GitPullRequest className={shared} />;
 }

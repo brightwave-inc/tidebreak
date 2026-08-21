@@ -202,9 +202,11 @@ export function ChatView({
   );
   const composerHistory = useMemo(
     () =>
-      messages.flatMap((message) =>
-        message.role === "user" && message.text.trim() ? [message.text] : [],
-      ).reverse(),
+      messages
+        .flatMap((message) =>
+          message.role === "user" && message.text.trim() ? [message.text] : [],
+        )
+        .reverse(),
     [messages],
   );
 
@@ -223,7 +225,9 @@ export function ChatView({
   const runCompaction = useCallback(
     async (focus: string) => {
       if (busy) {
-        toast.error("Wait for the current response to finish before compacting.");
+        toast.error(
+          "Wait for the current response to finish before compacting.",
+        );
         return;
       }
       if (compactRequested) return;
@@ -233,7 +237,9 @@ export function ChatView({
         if (run.compacted) {
           toast.success("Summarized the earlier part of this conversation");
         } else {
-          toast.message("Nothing to compact yet — this conversation still fits.");
+          toast.message(
+            "Nothing to compact yet — this conversation still fits.",
+          );
         }
       } catch (caught) {
         toast.error(
@@ -396,9 +402,7 @@ export function ChatView({
     if (!anchoredMessageId || !transcriptVisible || !scrollElement) return;
     const frame = window.requestAnimationFrame(() => {
       const target = Array.from(
-        scrollElement.querySelectorAll<HTMLElement>(
-          "[data-transcript-anchor]",
-        ),
+        scrollElement.querySelectorAll<HTMLElement>("[data-transcript-anchor]"),
       ).find(
         (element) => element.dataset.transcriptAnchor === anchoredMessageId,
       );
@@ -557,7 +561,9 @@ export function ChatView({
             (scrolledAway || anchoredMessageId) &&
               "opacity-100 pointer-events-auto",
           )}
-          aria-label={anchoredMessageId ? "Return to latest" : "Scroll to latest"}
+          aria-label={
+            anchoredMessageId ? "Return to latest" : "Scroll to latest"
+          }
           aria-hidden={!scrolledAway && !anchoredMessageId}
           tabIndex={scrolledAway || anchoredMessageId ? 0 : -1}
           onClick={jumpToLatest}
@@ -593,61 +599,61 @@ export function ChatView({
               onStop={turnControls.cancel}
             />
             <Composer
-            activeTurnId={activeTurnId}
-            busy={busy}
-            cancelError={turnControls.cancelError}
-            cancelPending={
-              activeTurnId !== null &&
-              turnControls.cancelPendingTurnId === activeTurnId
-            }
-            disabled={deletingChat}
-            draft={draft}
-            history={composerHistory}
-            modelMenu={composerModelMenu}
-            permissionMenu={composerPermissionMenu}
-            contextUsage={contextUsage}
-            network={composerNetwork}
-            reasoning={composerReasoning}
-            plugins={composerPlugins.plugins}
-            slash={{
-              options: composerPlugins.slashOptions,
-              invoked: invokedSkills,
-              onInvoke: (names) =>
-                useComposerDrafts
-                  .getState()
-                  .setSkills(chat.id, [...invokedSkills, ...names]),
-              onRemove: (name) =>
-                useComposerDrafts.getState().setSkills(
-                  chat.id,
-                  invokedSkills.filter((skill) => skill !== name),
-                ),
-              loadPromptBody: composerPlugins.loadPromptBody,
-              onCommand: runSlashCommand,
-            }}
-            images={composerImages}
-            files={composerFiles}
-            folders={folders}
-            voice={voice}
-            nativeDropTarget={nativeDropTarget}
-            attachError={attachError}
-            // Typing retires the verdict on the last piece of guidance. Accepted
-            // guidance clears the draft through the raw callback instead, so
-            // "Guidance sent" survives the clearing it caused.
-            onDraftChange={(value) => {
-              turnControls.clearSteerFeedback();
-              onDraftChange(value);
-            }}
-            onSend={handleSend}
-            onQueue={onQueue}
-            onSteer={turnControls.steer}
-            onStop={turnControls.cancel}
-            resetKey={chat.id}
-            steerError={turnControls.steerError}
-            steerPending={
-              activeTurnId !== null &&
-              turnControls.steerPendingTurnId === activeTurnId
-            }
-            steerStatus={turnControls.steerStatus}
+              activeTurnId={activeTurnId}
+              busy={busy}
+              cancelError={turnControls.cancelError}
+              cancelPending={
+                activeTurnId !== null &&
+                turnControls.cancelPendingTurnId === activeTurnId
+              }
+              disabled={deletingChat}
+              draft={draft}
+              history={composerHistory}
+              modelMenu={composerModelMenu}
+              permissionMenu={composerPermissionMenu}
+              contextUsage={contextUsage}
+              network={composerNetwork}
+              reasoning={composerReasoning}
+              plugins={composerPlugins.plugins}
+              slash={{
+                options: composerPlugins.slashOptions,
+                invoked: invokedSkills,
+                onInvoke: (names) =>
+                  useComposerDrafts
+                    .getState()
+                    .setSkills(chat.id, [...invokedSkills, ...names]),
+                onRemove: (name) =>
+                  useComposerDrafts.getState().setSkills(
+                    chat.id,
+                    invokedSkills.filter((skill) => skill !== name),
+                  ),
+                loadPromptBody: composerPlugins.loadPromptBody,
+                onCommand: runSlashCommand,
+              }}
+              images={composerImages}
+              files={composerFiles}
+              folders={folders}
+              voice={voice}
+              nativeDropTarget={nativeDropTarget}
+              attachError={attachError}
+              // Typing retires the verdict on the last piece of guidance. Accepted
+              // guidance clears the draft through the raw callback instead, so
+              // "Guidance sent" survives the clearing it caused.
+              onDraftChange={(value) => {
+                turnControls.clearSteerFeedback();
+                onDraftChange(value);
+              }}
+              onSend={handleSend}
+              onQueue={onQueue}
+              onSteer={turnControls.steer}
+              onStop={turnControls.cancel}
+              resetKey={chat.id}
+              steerError={turnControls.steerError}
+              steerPending={
+                activeTurnId !== null &&
+                turnControls.steerPendingTurnId === activeTurnId
+              }
+              steerStatus={turnControls.steerStatus}
             />
           </>
         )}

@@ -131,8 +131,7 @@ export function hydrateTranscriptHistory(
         reasoning:
           message.role === "assistant" ? terminalTurn?.reasoning : undefined,
         interrupted:
-          message.role === "assistant" &&
-          terminalTurn?.status === "cancelled",
+          message.role === "assistant" && terminalTurn?.status === "cancelled",
       };
     }),
     ...toolActivity.map((activity) => ({

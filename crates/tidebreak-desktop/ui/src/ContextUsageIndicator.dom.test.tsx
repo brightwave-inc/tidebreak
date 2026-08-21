@@ -54,7 +54,9 @@ describe("readings the engine did not publish", () => {
       <ContextUsageIndicator {...SIX_CALL_TURN} contextTokens={null} />,
     );
 
-    expect(markup).toContain('aria-label="Context: no reading from this engine"');
+    expect(markup).toContain(
+      'aria-label="Context: no reading from this engine"',
+    );
     expect(markup).not.toContain("% of");
     expect(markup).not.toContain("text-destructive");
   });
@@ -64,7 +66,9 @@ describe("readings the engine did not publish", () => {
       <ContextUsageIndicator {...SIX_CALL_TURN} contextTokens={0} />,
     );
 
-    expect(markup).toContain('aria-label="Context: no reading from this engine"');
+    expect(markup).toContain(
+      'aria-label="Context: no reading from this engine"',
+    );
     expect(markup).not.toContain("0%");
   });
 

@@ -72,10 +72,14 @@ function CodeArchiveBody() {
     const cutoff = archiveCutoff(age);
     return listArchivedWorkspaces(workspaces).filter((workspace) => {
       if (repoId !== "all" && workspace.repo_id !== repoId) return false;
-      const archivedAt = Date.parse(workspace.archived_at ?? workspace.created_at);
+      const archivedAt = Date.parse(
+        workspace.archived_at ?? workspace.created_at,
+      );
       if (cutoff !== null && archivedAt < cutoff) return false;
       if (!query) return true;
-      const repo = repos.find((candidate) => candidate.id === workspace.repo_id);
+      const repo = repos.find(
+        (candidate) => candidate.id === workspace.repo_id,
+      );
       return [
         workspace.title,
         workspace.branch_name,
@@ -122,7 +126,8 @@ function CodeArchiveBody() {
               )}
             </div>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Search old work, inspect its pull request, or restore its worktree.
+              Search old work, inspect its pull request, or restore its
+              worktree.
             </p>
           </div>
           <Button
@@ -158,7 +163,10 @@ function CodeArchiveBody() {
             ))}
           </SelectContent>
         </Select>
-        <Select value={age} onValueChange={(value) => setAge(value as AgeFilter)}>
+        <Select
+          value={age}
+          onValueChange={(value) => setAge(value as AgeFilter)}
+        >
           <SelectTrigger size="sm" className="w-36">
             <SelectValue />
           </SelectTrigger>
@@ -200,7 +208,11 @@ function CodeArchiveBody() {
             </EmptyHeader>
           </Empty>
         ) : (
-          <div role="list" aria-label="Archived workspaces" className="min-w-[760px]">
+          <div
+            role="list"
+            aria-label="Archived workspaces"
+            className="min-w-[760px]"
+          >
             <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur">
               <span>Workspace</span>
               <span>Repository</span>
@@ -208,7 +220,9 @@ function CodeArchiveBody() {
               <span className="text-right">Actions</span>
             </div>
             {archived.map((workspace) => {
-              const repo = repos.find((candidate) => candidate.id === workspace.repo_id);
+              const repo = repos.find(
+                (candidate) => candidate.id === workspace.repo_id,
+              );
               return (
                 <div
                   key={workspace.id}
@@ -237,7 +251,9 @@ function CodeArchiveBody() {
                     {repo?.display_name ?? workspace.repo_id}
                   </span>
                   <span className="flex items-center text-xs text-muted-foreground">
-                    {relativeTime(workspace.archived_at ?? workspace.created_at)}
+                    {relativeTime(
+                      workspace.archived_at ?? workspace.created_at,
+                    )}
                   </span>
                   <span className="flex items-center justify-end gap-2">
                     {workspace.pr?.url && (

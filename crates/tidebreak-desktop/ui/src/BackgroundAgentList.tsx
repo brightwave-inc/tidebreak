@@ -15,7 +15,10 @@ import {
   AgentRunTaskPlanProgress,
   useAgentRunTaskPlan,
 } from "./AgentRunTaskPlan";
-import { AgentActivityTimeline, useAgentRunActivity } from "./AgentActivityTimeline";
+import {
+  AgentActivityTimeline,
+  useAgentRunActivity,
+} from "./AgentActivityTimeline";
 import {
   AGENT_RUN_STATUS_GROUPS,
   agentRunStatusDetail,
@@ -82,7 +85,9 @@ export function BackgroundAgentList({
   onOpen,
   onOpenOutput,
 }: BackgroundAgentListProps) {
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    new Set(),
+  );
   // Rows move between keyed status groups as polling advances. Keep both
   // disclosures here, keyed by run, so that remount does not erase a choice.
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
@@ -154,7 +159,10 @@ export function BackgroundAgentList({
         </span>
       </div>
       {error ? (
-        <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-sm" role="status">
+        <div
+          className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-sm"
+          role="status"
+        >
           <span>Background agent status is unavailable.</span>
           <button
             type="button"
@@ -167,7 +175,9 @@ export function BackgroundAgentList({
       ) : (
         <div aria-live="polite">
           {AGENT_RUN_STATUS_GROUPS.map((group) => {
-            const groupRuns = matchedRuns.filter((run) => group.statuses.includes(run.status));
+            const groupRuns = matchedRuns.filter((run) =>
+              group.statuses.includes(run.status),
+            );
             if (groupRuns.length === 0) return null;
             const collapsed = collapsedGroups.has(group.id);
             return (
@@ -178,13 +188,23 @@ export function BackgroundAgentList({
                   onClick={() => toggleGroup(group.id)}
                   aria-expanded={!collapsed}
                 >
-                  <ChevronRight className={cn("size-3 shrink-0 transition-transform", !collapsed && "rotate-90")} />
+                  <ChevronRight
+                    className={cn(
+                      "size-3 shrink-0 transition-transform",
+                      !collapsed && "rotate-90",
+                    )}
+                  />
                   <span
-                    className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass(group.statuses[0]!))}
+                    className={cn(
+                      "size-2 shrink-0 rounded-full",
+                      getAgentRunDotClass(group.statuses[0]!),
+                    )}
                     aria-hidden="true"
                   />
                   <span>{group.label}</span>
-                  <span className="text-muted-foreground">{groupRuns.length}</span>
+                  <span className="text-muted-foreground">
+                    {groupRuns.length}
+                  </span>
                 </button>
                 {!collapsed && (
                   <div className="divide-y divide-border/60">
@@ -225,20 +245,33 @@ export function BackgroundAgentList({
                 className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5"
               >
                 <span
-                  className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass("cancelled"))}
+                  className={cn(
+                    "size-2 shrink-0 rounded-full",
+                    getAgentRunDotClass("cancelled"),
+                  )}
                   aria-hidden="true"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm text-foreground">
                   Background agent
                 </span>
-                <span className="shrink-0 text-xs text-muted-foreground">Declined</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  Declined
+                </span>
               </div>
             ) : (
-              <div key={spawn.callId} className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5">
-                <Skeleton className="size-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
+              <div
+                key={spawn.callId}
+                className="flex min-w-0 items-center gap-2 border-t border-border px-3 py-2.5"
+              >
+                <Skeleton
+                  className="size-2 shrink-0 rounded-full bg-muted-foreground"
+                  aria-hidden="true"
+                />
                 <Skeleton className="h-4 w-28" aria-hidden="true" />
                 <span className="text-sm text-muted-foreground">
-                  {loading ? "Starting background agent" : "Waiting for background agent"}
+                  {loading
+                    ? "Starting background agent"
+                    : "Waiting for background agent"}
                 </span>
               </div>
             ),
@@ -372,7 +405,10 @@ function BackgroundAgentRow({
           }
         >
           <span
-            className={cn("size-2 shrink-0 rounded-full", getAgentRunDotClass(run.status))}
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              getAgentRunDotClass(run.status),
+            )}
             aria-hidden="true"
           />
           <span className="min-w-0 flex-1 truncate text-sm text-foreground">

@@ -51,10 +51,7 @@ function sameSkills(
   );
 }
 
-function sameTarget(
-  left: ActiveTurnTarget,
-  right: ActiveTurnTarget,
-): boolean {
+function sameTarget(left: ActiveTurnTarget, right: ActiveTurnTarget): boolean {
   return left.chatId === right.chatId && left.turnId === right.turnId;
 }
 

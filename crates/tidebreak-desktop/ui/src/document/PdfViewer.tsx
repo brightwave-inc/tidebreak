@@ -98,11 +98,7 @@ export function PdfViewer({
   }
 
   return (
-    <ViewerShell
-      ref={containerRef}
-      className={className}
-      {...restProps}
-    >
+    <ViewerShell ref={containerRef} className={className} {...restProps}>
       <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
         <ExtendPdfViewer
           ref={viewerRef}

@@ -26,7 +26,9 @@ function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
 }
 
 /** The default context: a mac-style keyboard in chat, nothing in the way. */
-function context(overrides: Partial<Parameters<typeof resolveShellShortcut>[1]> = {}) {
+function context(
+  overrides: Partial<Parameters<typeof resolveShellShortcut>[1]> = {},
+) {
   return {
     editable: true,
     modalOpen: false,
@@ -190,7 +192,12 @@ describe("shell shortcut resolution", () => {
     // text field and to nothing here.
     expect(
       resolveShellShortcut(
-        keyEvent({ key: "ArrowUp", code: "ArrowUp", altKey: true, metaKey: false }),
+        keyEvent({
+          key: "ArrowUp",
+          code: "ArrowUp",
+          altKey: true,
+          metaKey: false,
+        }),
         context({ mode: "code" }),
       ),
     ).toBeNull();
@@ -269,7 +276,9 @@ describe("shell shortcut resolution", () => {
         keyEvent({ key, shiftKey, code: "Equal" }),
         context(),
       );
-      expect(resolved?.id).toBe(key === "=" || key === "+" ? "zoom-in" : "zoom-out");
+      expect(resolved?.id).toBe(
+        key === "=" || key === "+" ? "zoom-in" : "zoom-out",
+      );
     }
   });
 
@@ -282,12 +291,15 @@ describe("shell shortcut resolution", () => {
   });
 
   it("suppresses every shortcut while a modal dialog is open", () => {
-    const resolved = resolveShellShortcut(keyEvent({ key: "n", code: "KeyN" }), {
-      editable: false,
-      modalOpen: true,
-      command: true,
-      mode: "chat",
-    });
+    const resolved = resolveShellShortcut(
+      keyEvent({ key: "n", code: "KeyN" }),
+      {
+        editable: false,
+        modalOpen: true,
+        command: true,
+        mode: "chat",
+      },
+    );
     expect(resolved).toBeNull();
   });
 });
@@ -300,7 +312,9 @@ describe("shortcut help", () => {
     expect(shortcutKeycaps(zoomIn, true)).toEqual(["⌘", "="]);
     expect(shortcutKeycaps(zoomIn, false)).toEqual(["Ctrl", "="]);
     // Named keys draw as the glyph on the keycap, not as their DOM name.
-    const next = SHELL_SHORTCUTS.find((def) => def.id === "code-workflow-next")!;
+    const next = SHELL_SHORTCUTS.find(
+      (def) => def.id === "code-workflow-next",
+    )!;
     expect(shortcutKeycaps(next, true)).toEqual(["⌘", "⇧", "↩"]);
     const nextWorkspace = SHELL_SHORTCUTS.find(
       (def) => def.id === "code-next-workspace",
@@ -363,7 +377,9 @@ describe("shortcut table", () => {
       for (const mode of modes) {
         for (const shift of shifts) {
           for (const key of keys) {
-            const chord = [mode, def.mod, def.alt ?? false, shift, key].join("|");
+            const chord = [mode, def.mod, def.alt ?? false, shift, key].join(
+              "|",
+            );
             const owner = owners.get(chord);
             expect(owner, `${chord} is bound twice`).toBeUndefined();
             owners.set(chord, def.id);

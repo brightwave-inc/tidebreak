@@ -21,11 +21,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
  * document-authored HTML or styles. Keep the surface in explicit read-only
  * mode and route every materialized hyperlink through Tidebreak's host gate.
  */
-export default function DocxViewer({
-  source,
-  className,
-  ...restProps
-}: Props) {
+export default function DocxViewer({ source, className, ...restProps }: Props) {
   const { resolved: resolvedTheme } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const file = useLocalDocumentUrl(source);

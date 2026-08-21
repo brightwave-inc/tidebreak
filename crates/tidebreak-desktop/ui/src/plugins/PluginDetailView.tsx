@@ -40,12 +40,14 @@ export function PluginDetailView({
   onBack: () => void;
 }) {
   const { catalog, loading, error, setEnabled } = state;
-  const plugin = catalog?.plugins.find((entry) => entry.name === pluginId) ?? null;
+  const plugin =
+    catalog?.plugins.find((entry) => entry.name === pluginId) ?? null;
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
   // The dialog re-reads its skill from the fresh catalog, so its switch moves
   // with the toggle round trip instead of freezing at the row that opened it.
   const shownSkill = openSkill
-    ? (plugin?.skills.find((skill) => skill.name === openSkill.name) ?? openSkill)
+    ? (plugin?.skills.find((skill) => skill.name === openSkill.name) ??
+      openSkill)
     : null;
 
   return (
@@ -96,7 +98,10 @@ export function PluginDetailView({
                     aria-label={`Enable ${plugin.display_name}`}
                     checked={plugin.enabled}
                     onCheckedChange={(enabled) =>
-                      setEnabled({ plugins: { [plugin.name]: enabled }, skills: {} })
+                      setEnabled({
+                        plugins: { [plugin.name]: enabled },
+                        skills: {},
+                      })
                     }
                     className="mt-1"
                   />
@@ -150,7 +155,10 @@ export function PluginDetailView({
                         checked={skill.enabled}
                         disabled={!plugin.enabled}
                         onCheckedChange={(enabled) =>
-                          setEnabled({ plugins: {}, skills: { [skill.name]: enabled } })
+                          setEnabled({
+                            plugins: {},
+                            skills: { [skill.name]: enabled },
+                          })
                         }
                       />
                     </li>
@@ -164,12 +172,18 @@ export function PluginDetailView({
               </section>
 
               <section className="flex flex-col gap-1" aria-label="Information">
-                <h2 className="border-b pb-2 text-sm font-semibold">Information</h2>
+                <h2 className="border-b pb-2 text-sm font-semibold">
+                  Information
+                </h2>
                 <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 pt-2 text-sm">
-                  <InfoRow label="Category">{categoryLabel(plugin.category)}</InfoRow>
+                  <InfoRow label="Category">
+                    {categoryLabel(plugin.category)}
+                  </InfoRow>
                   <InfoRow label="Capabilities">
                     {plugin.capabilities.length === 0 ? (
-                      <span className="text-muted-foreground">None derived</span>
+                      <span className="text-muted-foreground">
+                        None derived
+                      </span>
                     ) : (
                       <span className="flex flex-wrap gap-1.5">
                         {plugin.capabilities.map((capability) => (
@@ -180,7 +194,9 @@ export function PluginDetailView({
                       </span>
                     )}
                   </InfoRow>
-                  <InfoRow label="Skills">{String(plugin.skills.length)}</InfoRow>
+                  <InfoRow label="Skills">
+                    {String(plugin.skills.length)}
+                  </InfoRow>
                 </dl>
               </section>
             </>

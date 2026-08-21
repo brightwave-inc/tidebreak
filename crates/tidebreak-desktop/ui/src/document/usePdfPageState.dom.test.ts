@@ -21,7 +21,9 @@ describe("usePdfPageState", () => {
     other.unmount();
 
     // Reopening the first one lands where it was closed.
-    const reopened = renderHook(() => usePdfPageState("doc-a", { numPages: 20 }));
+    const reopened = renderHook(() =>
+      usePdfPageState("doc-a", { numPages: 20 }),
+    );
     expect(reopened.result.current.currentPage).toBe(7);
   });
 
@@ -29,10 +31,14 @@ describe("usePdfPageState", () => {
     // A remembered page can outlive the document it was recorded against — a
     // shorter re-import, say — and must not leave the viewer on a page that is
     // not there.
-    const { result } = renderHook(() => usePdfPageState("doc-a", { numPages: 20 }));
+    const { result } = renderHook(() =>
+      usePdfPageState("doc-a", { numPages: 20 }),
+    );
     act(() => result.current.setCurrentPage(15));
 
-    const reopened = renderHook(() => usePdfPageState("doc-a", { numPages: 4 }));
+    const reopened = renderHook(() =>
+      usePdfPageState("doc-a", { numPages: 4 }),
+    );
     expect(reopened.result.current.currentPage).toBe(4);
 
     act(() => reopened.result.current.setCurrentPage(99));

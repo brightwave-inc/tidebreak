@@ -64,7 +64,11 @@ export type LayoutState = {
   };
 };
 
-export const EMPTY_LAYOUT: LayoutState = { tabs: [], activeIndex: 0, fullscreen: false };
+export const EMPTY_LAYOUT: LayoutState = {
+  tabs: [],
+  activeIndex: 0,
+  fullscreen: false,
+};
 
 /**
  * What makes two panels the same tab.

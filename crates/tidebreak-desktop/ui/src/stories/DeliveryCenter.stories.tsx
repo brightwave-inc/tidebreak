@@ -89,7 +89,9 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
   };
   const workspaces =
     scenario === "archive-empty"
-      ? deliveryWorkspaces.filter((workspace) => workspace.status !== "archived")
+      ? deliveryWorkspaces.filter(
+          (workspace) => workspace.status !== "archived",
+        )
       : deliveryWorkspaces;
 
   return {
@@ -395,9 +397,9 @@ export const PullRequestLifecycles: Story = {
     await expect(await canvas.findAllByText("Closed")).toHaveLength(1);
     await expect(await canvas.findAllByText("Draft")).toHaveLength(1);
     await expect(await canvas.findAllByText("Approved")).toHaveLength(1);
-    await expect(
-      await canvas.findAllByText("Changes requested"),
-    ).toHaveLength(1);
+    await expect(await canvas.findAllByText("Changes requested")).toHaveLength(
+      1,
+    );
   },
 };
 
@@ -494,7 +496,9 @@ export const ClosedPullRequestDetail: Story = {
 export const DraftPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByText("Document managed deployments"));
+    await userEvent.click(
+      await canvas.findByText("Document managed deployments"),
+    );
     await expect(
       await canvas.findByRole("button", { name: "Mark ready" }),
     ).toBeVisible();
@@ -516,7 +520,9 @@ export const BlockedMergePullRequestDetail: Story = {
         "Resolve the conflicts with the base branch first.",
       ),
     ).toBeVisible();
-    await expect(await canvas.findByRole("button", { name: "Merge" })).toBeDisabled();
+    await expect(
+      await canvas.findByRole("button", { name: "Merge" }),
+    ).toBeDisabled();
   },
 };
 
@@ -554,7 +560,9 @@ export const RunDetail: Story = {
     await expect(
       await canvas.findByRole("heading", { name: "Desktop CI" }),
     ).toBeVisible();
-    await expect(await canvas.findByText("Build static Storybook")).toBeVisible();
+    await expect(
+      await canvas.findByText("Build static Storybook"),
+    ).toBeVisible();
   },
 };
 

@@ -24,7 +24,8 @@ export function DocumentIcon({
   const type = (mediaType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
   const size = cn("size-4 shrink-0", className);
 
-  if (type === "application/pdf") return <PDFIcon className={size} {...props} />;
+  if (type === "application/pdf")
+    return <PDFIcon className={size} {...props} />;
   if (type.includes("wordprocessingml") || type === "application/msword") {
     return <WordIcon className={size} {...props} />;
   }
@@ -35,7 +36,10 @@ export function DocumentIcon({
   ) {
     return <ExcelIcon className={size} {...props} />;
   }
-  if (type.includes("presentationml") || type === "application/vnd.ms-powerpoint") {
+  if (
+    type.includes("presentationml") ||
+    type === "application/vnd.ms-powerpoint"
+  ) {
     return <PowerpointIcon className={size} {...props} />;
   }
 

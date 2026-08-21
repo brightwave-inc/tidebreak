@@ -120,7 +120,8 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
   const collapsed = useChatsSectionState((state) => state.collapsed);
   const filtering = useChatsSectionState((state) => state.filtering);
   const query = useChatsSectionState((state) => state.query);
-  const { toggleCollapsed, setFiltering, setQuery } = useChatsSectionState.getState();
+  const { toggleCollapsed, setFiltering, setQuery } =
+    useChatsSectionState.getState();
 
   // The filter appears from a menu selection, so nothing natural has focus.
   const filterRef = useRef<HTMLDivElement | null>(null);
@@ -147,7 +148,10 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
           <span>Work</span>
           <ChevronRight
             aria-hidden="true"
-            className={cn("size-3.5 transition-transform", !collapsed && "rotate-90")}
+            className={cn(
+              "size-3.5 transition-transform",
+              !collapsed && "rotate-90",
+            )}
           />
           {hiddenAttention && (
             <span
@@ -216,11 +220,15 @@ export function ChatsSection({ activeChatId }: { activeChatId?: string }) {
               mutating={deletingChatId !== null || creatingChat}
               projects={projects}
               onRenameDraftChange={setRenameDraft}
-              onOpen={() => void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })}
+              onOpen={() =>
+                void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
+              }
               onStartRename={() => startRename(chat)}
               onCommitRename={() => commitRename(chat)}
               onCancelRename={cancelRename}
-              onMoveToProject={(projectId) => moveChatToProject(chat, projectId)}
+              onMoveToProject={(projectId) =>
+                moveChatToProject(chat, projectId)
+              }
               onDelete={() => deleteChat(chat)}
             />
           ))}

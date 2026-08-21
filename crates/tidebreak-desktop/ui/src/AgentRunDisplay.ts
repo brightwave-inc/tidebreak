@@ -59,9 +59,18 @@ export function getAgentRunDotClass(status: AgentRunStatus): string {
 export function agentRunStatusDetail(run: AgentRun): string {
   if (run.activity) {
     const activity = {
-      exec: { running: "Running a command", waiting: "Waiting to run a command" },
-      web_search: { running: "Searching the web", waiting: "Waiting to search" },
-      update_task_plan: { running: "Updating its plan", waiting: "Waiting to update its plan" },
+      exec: {
+        running: "Running a command",
+        waiting: "Waiting to run a command",
+      },
+      web_search: {
+        running: "Searching the web",
+        waiting: "Waiting to search",
+      },
+      update_task_plan: {
+        running: "Updating its plan",
+        waiting: "Waiting to update its plan",
+      },
       read_delegated_file: {
         running: "Reading a delegated file",
         waiting: "Waiting to read a delegated file",
@@ -70,9 +79,18 @@ export function agentRunStatusDetail(run: AgentRun): string {
         running: "Checking connected folders",
         waiting: "Waiting to check connected folders",
       },
-      list_folder: { running: "Listing a folder", waiting: "Waiting to list a folder" },
-      read_connected_file: { running: "Reading a file", waiting: "Waiting to read a file" },
-      import_connected_file: { running: "Adding a source", waiting: "Waiting to add a source" },
+      list_folder: {
+        running: "Listing a folder",
+        waiting: "Waiting to list a folder",
+      },
+      read_connected_file: {
+        running: "Reading a file",
+        waiting: "Waiting to read a file",
+      },
+      import_connected_file: {
+        running: "Adding a source",
+        waiting: "Waiting to add a source",
+      },
     } as const;
     const presentation = activity[run.activity.kind];
     if (presentation) return presentation[run.activity.status];

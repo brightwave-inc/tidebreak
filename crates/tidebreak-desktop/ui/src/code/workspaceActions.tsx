@@ -267,7 +267,10 @@ export async function archiveWorkspaceWithConfirm(options: {
   });
   if (!ok) return null;
   try {
-    return await options.client.archiveCodeWorkspace(options.workspaceId, false);
+    return await options.client.archiveCodeWorkspace(
+      options.workspaceId,
+      false,
+    );
   } catch (error) {
     if (!archiveForceKind(error)) throw error;
     const forced = await options.confirm({
@@ -282,10 +285,7 @@ export async function archiveWorkspaceWithConfirm(options: {
 }
 
 export function useWorkspaceCardCommands(): {
-  run: (
-    command: WorkspaceCommandId,
-    context: WorkspaceCommandContext,
-  ) => void;
+  run: (command: WorkspaceCommandId, context: WorkspaceCommandContext) => void;
   dialogs: ReactElement;
 } {
   const { client } = useApp();
@@ -419,10 +419,7 @@ export function useWorkspaceCardCommands(): {
       }
       if (error instanceof HttpError && error.kind === "setup_failed") {
         toast.error(
-          friendlyErrorMessage(
-            error,
-            "Restored, but the setup script failed",
-          ),
+          friendlyErrorMessage(error, "Restored, but the setup script failed"),
         );
         const refreshed = await client
           .getCodeWorkspace(workspace.id)
@@ -462,9 +459,7 @@ export function useWorkspaceCardCommands(): {
         if (!context.session) return;
         void client
           .getCodeSessionDebug(context.session.id)
-          .then((bundle) =>
-            copyPlainText(JSON.stringify(bundle, null, 2)),
-          )
+          .then((bundle) => copyPlainText(JSON.stringify(bundle, null, 2)))
           .then(() =>
             toast.success("Debug JSON copied", {
               description:
@@ -472,7 +467,9 @@ export function useWorkspaceCardCommands(): {
             }),
           )
           .catch((error) =>
-            toast.error(friendlyErrorMessage(error, "Could not copy debug JSON")),
+            toast.error(
+              friendlyErrorMessage(error, "Could not copy debug JSON"),
+            ),
           );
         return;
       }
@@ -532,7 +529,8 @@ export function useWorkspaceCardCommands(): {
           .runCodeWorkspaceAction(context.workspace.id, name)
           .then((result) => {
             const detail = quickActionToast(result);
-            const show = result.success && !result.timed_out ? toast.success : toast.error;
+            const show =
+              result.success && !result.timed_out ? toast.success : toast.error;
             show(detail, {
               action: {
                 label: "View output",
@@ -541,7 +539,9 @@ export function useWorkspaceCardCommands(): {
             });
           })
           .catch((error) =>
-            toast.error(friendlyErrorMessage(error, "Could not run that action")),
+            toast.error(
+              friendlyErrorMessage(error, "Could not run that action"),
+            ),
           );
         return;
       }

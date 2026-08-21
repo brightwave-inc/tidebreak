@@ -112,7 +112,8 @@ function pending<T>(): Promise<T> {
 }
 
 function inspectorClient(scenario: InspectorScenario): ApiClient {
-  const fail = () => Promise.reject(new Error("The workspace reader is offline."));
+  const fail = () =>
+    Promise.reject(new Error("The workspace reader is offline."));
   const loadTree =
     scenario === "loading"
       ? () => pending<{ paths: string[]; truncated: boolean }>()
@@ -181,8 +182,7 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
           avatar_url: avatar("MA", "#635bff"),
           url: "https://github.com/example/tidebreak/pull/2248#pullrequestreview-1",
           review_state: "approved",
-          body:
-            "The conversation-first hierarchy feels much calmer :sparkles:\n\n- The pane rhythm reads clearly\n- **Keep** the quick PR status visible",
+          body: "The conversation-first hierarchy feels much calmer :sparkles:\n\n- The pane rhythm reads clearly\n- **Keep** the quick PR status visible",
           created_at: "2026-08-20T14:04:00.000Z",
         },
         {
@@ -191,8 +191,7 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
           author: "devon",
           avatar_url: avatar("DE", "#0f766e"),
           url: "https://github.com/example/tidebreak/pull/2248#discussion_r1",
-          body:
-            "Keep this drop target large enough to acquire while dragging. :eyes:\n\n`min-height: 48px` felt right in testing.",
+          body: "Keep this drop target large enough to acquire while dragging. :eyes:\n\n`min-height: 48px` felt right in testing.",
           path: "src/code/CodeWorkspacePage.tsx",
           line: 839,
           created_at: "2026-08-20T14:12:00.000Z",
@@ -202,7 +201,9 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
   } as unknown as ApiClient;
 }
 
-function resourceFor(snapshot: CodeWorkspacePrSnapshot): CodeWorkspacePrResource {
+function resourceFor(
+  snapshot: CodeWorkspacePrSnapshot,
+): CodeWorkspacePrResource {
   return {
     data: snapshot,
     error: null,

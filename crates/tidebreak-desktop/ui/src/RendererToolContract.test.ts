@@ -23,9 +23,10 @@ describe("renderer tool vocabulary", () => {
 
   it("accepts every name the server can send", () => {
     for (const name of RENDERER_TOOL_NAMES) {
-      expect(isRendererToolName(name), `${name} is missing from the union`).toBe(
-        true,
-      );
+      expect(
+        isRendererToolName(name),
+        `${name} is missing from the union`,
+      ).toBe(true);
     }
   });
 
@@ -51,5 +52,4 @@ describe("renderer tool vocabulary", () => {
       expect(isRendererToolName(value)).toBe(false);
     }
   });
-
 });

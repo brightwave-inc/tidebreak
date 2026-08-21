@@ -99,7 +99,9 @@ function storableDraft(
 ): ComposerAttachmentDraft {
   return {
     images: draft.images
-      .filter((image) => image.status === "ready" && image.attachmentId !== null)
+      .filter(
+        (image) => image.status === "ready" && image.attachmentId !== null,
+      )
       .map((image) => ({ ...image, previewUrl: null })),
     files: draft.files,
     skills: draft.skills,
@@ -108,7 +110,9 @@ function storableDraft(
   };
 }
 
-function parseStoredAttachmentDraft(value: string): ComposerAttachmentDraft | null {
+function parseStoredAttachmentDraft(
+  value: string,
+): ComposerAttachmentDraft | null {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!isRecord(parsed)) return null;
@@ -217,9 +221,7 @@ export function createComposerDraftStore() {
       key: string,
       change: (current: ComposerAttachmentDraft) => ComposerAttachmentDraft,
     ): void {
-      const next = change(
-        get().attachments[key] ?? EMPTY_ATTACHMENT_DRAFT,
-      );
+      const next = change(get().attachments[key] ?? EMPTY_ATTACHMENT_DRAFT);
       writeStoredAttachmentDraft(key, next);
       set((state) => {
         const attachments = { ...state.attachments };

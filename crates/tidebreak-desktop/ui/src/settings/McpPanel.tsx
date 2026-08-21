@@ -593,8 +593,7 @@ export function McpPanel({
                   )}
                   {revoked && (
                     <span className="text-xs text-muted-foreground">
-                      No longer granted to your teams. Switch off to unmount
-                      it.
+                      No longer granted to your teams. Switch off to unmount it.
                     </span>
                   )}
                   {mounted &&
@@ -623,9 +622,7 @@ export function McpPanel({
     >
       {endpointsSection}
       {loading ? (
-        <p className="text-sm text-muted-foreground">
-          Loading MCP servers…
-        </p>
+        <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
       ) : (
         <>
           {servers.length === 0 && (
@@ -641,267 +638,267 @@ export function McpPanel({
             server.plugin !== null ? (
               <PluginServerSection key={index} server={server} />
             ) : (
-            <SettingsSection
-              key={index}
-              title={server.name || `Server ${index + 1}`}
-            >
-              <SettingsStatus
-                tone={healthTone(server.health)}
-                label={healthLabel(server.health)}
-                description={
-                  server.health === "healthy"
-                    ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
-                    : server.diagnostic ??
-                      "Save the configuration to verify this server."
-                }
-              />
-
-              <McpTierChip curated={server.curated} />
-
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex-1">
-                  <p className="text-sm font-bold">Enabled</p>
-                  <p className="text-xs text-muted-foreground">
-                    Off keeps the server configured but out of new turns.
-                  </p>
-                </div>
-                <Switch
-                  aria-label="Enabled"
-                  checked={server.enabled}
-                  disabled={working}
-                  onCheckedChange={(checked) =>
-                    update(index, { enabled: checked })
-                  }
-                />
-              </div>
-
-              <SettingsField
-                label="Namespace"
-                hint="ASCII letters, numbers, underscores, and hyphens only."
+              <SettingsSection
+                key={index}
+                title={server.name || `Server ${index + 1}`}
               >
-                <Input
-                  value={server.name}
-                  disabled={working}
-                  autoComplete="off"
-                  spellCheck={false}
-                  onChange={(event) =>
-                    update(index, { name: event.target.value })
+                <SettingsStatus
+                  tone={healthTone(server.health)}
+                  label={healthLabel(server.health)}
+                  description={
+                    server.health === "healthy"
+                      ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
+                      : (server.diagnostic ??
+                        "Save the configuration to verify this server.")
                   }
                 />
-              </SettingsField>
 
-              {transportOf(server) === "gateway" && (
-                <p className="text-sm text-muted-foreground">
-                  Managed by the Model Gateway (endpoint{" "}
-                  <code>{server.gateway_endpoint}</code>). Its URL and
-                  short-lived credentials come from the signed-in gateway
-                  session; mount or unmount it under Gateway endpoints above.
-                </p>
-              )}
+                <McpTierChip curated={server.curated} />
 
-              {transportOf(server) !== "gateway" && (
-              <FieldGroup label="Transport">
-                <RadioGroup
-                  className="flex flex-row flex-wrap gap-4"
-                  value={transportOf(server)}
-                  aria-label="Transport"
-                  disabled={working}
-                  onValueChange={(transport) =>
-                    update(
-                      index,
-                      transportFields(transport as "stdio" | "http"),
-                    )
-                  }
-                >
-                  {(["stdio", "http"] as const).map((transport) => (
-                    <Label
-                      key={transport}
-                      className="flex items-center gap-2 text-sm font-normal"
-                    >
-                      <RadioGroupItem value={transport} />
-                      {transport === "stdio"
-                        ? "Local process (stdio)"
-                        : "Remote endpoint (HTTP)"}
-                    </Label>
-                  ))}
-                </RadioGroup>
-              </FieldGroup>
-              )}
-
-              {transportOf(server) === "stdio" && (
-                <>
-                  <SettingsField
-                    label="Executable"
-                    hint="An executable path or command name. Tidebreak never invokes a shell."
-                  >
-                    <Input
-                      value={server.command ?? ""}
-                      disabled={working}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="/absolute/path/to/server"
-                      onChange={(event) =>
-                        update(index, { command: event.target.value })
-                      }
-                    />
-                  </SettingsField>
-
-                  <StringListEditor
-                    label="Arguments"
-                    values={server.args}
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1">
+                    <p className="text-sm font-bold">Enabled</p>
+                    <p className="text-xs text-muted-foreground">
+                      Off keeps the server configured but out of new turns.
+                    </p>
+                  </div>
+                  <Switch
+                    aria-label="Enabled"
+                    checked={server.enabled}
                     disabled={working}
-                    addLabel="Add argument"
-                    onChange={(args) => update(index, { args })}
-                  />
-
-                  <SettingsField
-                    label="Working directory"
-                    hint="Optional. It does not grant the server any Tidebreak folder capability."
-                  >
-                    <Input
-                      value={server.cwd ?? ""}
-                      disabled={working}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="Optional"
-                      onChange={(event) =>
-                        update(index, { cwd: event.target.value || null })
-                      }
-                    />
-                  </SettingsField>
-                </>
-              )}
-
-              {transportOf(server) === "http" && (
-                <>
-                  <SettingsField
-                    label="Server URL"
-                    hint="An http or https MCP endpoint. Credentials never go in the URL."
-                  >
-                    <Input
-                      value={server.url ?? ""}
-                      disabled={working}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="https://gateway.example/mcp/tools"
-                      onChange={(event) =>
-                        update(index, { url: event.target.value })
-                      }
-                    />
-                  </SettingsField>
-
-                  <SettingsField
-                    label="Bearer token variable"
-                    hint="Optional. Only the name is saved; the token is read from the host environment when connecting and never displayed."
-                  >
-                    <Input
-                      value={server.bearer_token_env ?? ""}
-                      disabled={working}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="GATEWAY_TOKEN"
-                      onChange={(event) =>
-                        update(index, {
-                          bearer_token_env: event.target.value || null,
-                        })
-                      }
-                    />
-                  </SettingsField>
-                </>
-              )}
-
-              <SettingsField
-                label="Request timeout (ms)"
-                hint={`A whole number from 1 to ${MAX_TIMEOUT_MS.toLocaleString()}.`}
-              >
-                <Input
-                  type="number"
-                  inputMode="numeric"
-                  min={1}
-                  max={MAX_TIMEOUT_MS}
-                  value={server.request_timeout_ms}
-                  disabled={working}
-                  onChange={(event) =>
-                    update(index, {
-                      request_timeout_ms: Number(event.target.value),
-                    })
-                  }
-                />
-              </SettingsField>
-
-              {transportOf(server) === "stdio" && (
-                <>
-                  <EnvironmentEditor
-                    names={server.env}
-                    values={server.env_values ?? {}}
-                    disabled={working}
-                    onChange={(env, env_values) =>
-                      update(index, { env, env_values })
+                    onCheckedChange={(checked) =>
+                      update(index, { enabled: checked })
                     }
                   />
+                </div>
 
-                  <StringListEditor
-                    label="Forward environment names"
-                    hint="Only names are saved or displayed. Their values are resolved in the host process and never returned to the app."
-                    values={server.env_from}
+                <SettingsField
+                  label="Namespace"
+                  hint="ASCII letters, numbers, underscores, and hyphens only."
+                >
+                  <Input
+                    value={server.name}
                     disabled={working}
-                    addLabel="Add variable name"
-                    onChange={(env_from) => update(index, { env_from })}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      update(index, { name: event.target.value })
+                    }
                   />
-                </>
-              )}
+                </SettingsField>
 
-              <div className="flex flex-wrap gap-2">
-                {server.enabled &&
-                  server.health !== "initializing" &&
-                  !dirty && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={working}
-                    onClick={() => void reconnect(server.name)}
-                  >
-                    <RefreshCw size={14} />
-                    {reconnecting === server.name
-                      ? "Reconnecting…"
-                      : "Reconnect and refresh tools"}
-                  </Button>
+                {transportOf(server) === "gateway" && (
+                  <p className="text-sm text-muted-foreground">
+                    Managed by the Model Gateway (endpoint{" "}
+                    <code>{server.gateway_endpoint}</code>). Its URL and
+                    short-lived credentials come from the signed-in gateway
+                    session; mount or unmount it under Gateway endpoints above.
+                  </p>
                 )}
-                {/* Mounts are owned by the mount write, not the draft: a
+
+                {transportOf(server) !== "gateway" && (
+                  <FieldGroup label="Transport">
+                    <RadioGroup
+                      className="flex flex-row flex-wrap gap-4"
+                      value={transportOf(server)}
+                      aria-label="Transport"
+                      disabled={working}
+                      onValueChange={(transport) =>
+                        update(
+                          index,
+                          transportFields(transport as "stdio" | "http"),
+                        )
+                      }
+                    >
+                      {(["stdio", "http"] as const).map((transport) => (
+                        <Label
+                          key={transport}
+                          className="flex items-center gap-2 text-sm font-normal"
+                        >
+                          <RadioGroupItem value={transport} />
+                          {transport === "stdio"
+                            ? "Local process (stdio)"
+                            : "Remote endpoint (HTTP)"}
+                        </Label>
+                      ))}
+                    </RadioGroup>
+                  </FieldGroup>
+                )}
+
+                {transportOf(server) === "stdio" && (
+                  <>
+                    <SettingsField
+                      label="Executable"
+                      hint="An executable path or command name. Tidebreak never invokes a shell."
+                    >
+                      <Input
+                        value={server.command ?? ""}
+                        disabled={working}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="/absolute/path/to/server"
+                        onChange={(event) =>
+                          update(index, { command: event.target.value })
+                        }
+                      />
+                    </SettingsField>
+
+                    <StringListEditor
+                      label="Arguments"
+                      values={server.args}
+                      disabled={working}
+                      addLabel="Add argument"
+                      onChange={(args) => update(index, { args })}
+                    />
+
+                    <SettingsField
+                      label="Working directory"
+                      hint="Optional. It does not grant the server any Tidebreak folder capability."
+                    >
+                      <Input
+                        value={server.cwd ?? ""}
+                        disabled={working}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="Optional"
+                        onChange={(event) =>
+                          update(index, { cwd: event.target.value || null })
+                        }
+                      />
+                    </SettingsField>
+                  </>
+                )}
+
+                {transportOf(server) === "http" && (
+                  <>
+                    <SettingsField
+                      label="Server URL"
+                      hint="An http or https MCP endpoint. Credentials never go in the URL."
+                    >
+                      <Input
+                        value={server.url ?? ""}
+                        disabled={working}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="https://gateway.example/mcp/tools"
+                        onChange={(event) =>
+                          update(index, { url: event.target.value })
+                        }
+                      />
+                    </SettingsField>
+
+                    <SettingsField
+                      label="Bearer token variable"
+                      hint="Optional. Only the name is saved; the token is read from the host environment when connecting and never displayed."
+                    >
+                      <Input
+                        value={server.bearer_token_env ?? ""}
+                        disabled={working}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="GATEWAY_TOKEN"
+                        onChange={(event) =>
+                          update(index, {
+                            bearer_token_env: event.target.value || null,
+                          })
+                        }
+                      />
+                    </SettingsField>
+                  </>
+                )}
+
+                <SettingsField
+                  label="Request timeout (ms)"
+                  hint={`A whole number from 1 to ${MAX_TIMEOUT_MS.toLocaleString()}.`}
+                >
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={MAX_TIMEOUT_MS}
+                    value={server.request_timeout_ms}
+                    disabled={working}
+                    onChange={(event) =>
+                      update(index, {
+                        request_timeout_ms: Number(event.target.value),
+                      })
+                    }
+                  />
+                </SettingsField>
+
+                {transportOf(server) === "stdio" && (
+                  <>
+                    <EnvironmentEditor
+                      names={server.env}
+                      values={server.env_values ?? {}}
+                      disabled={working}
+                      onChange={(env, env_values) =>
+                        update(index, { env, env_values })
+                      }
+                    />
+
+                    <StringListEditor
+                      label="Forward environment names"
+                      hint="Only names are saved or displayed. Their values are resolved in the host process and never returned to the app."
+                      values={server.env_from}
+                      disabled={working}
+                      addLabel="Add variable name"
+                      onChange={(env_from) => update(index, { env_from })}
+                    />
+                  </>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  {server.enabled &&
+                    server.health !== "initializing" &&
+                    !dirty && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={working}
+                        onClick={() => void reconnect(server.name)}
+                      >
+                        <RefreshCw size={14} />
+                        {reconnecting === server.name
+                          ? "Reconnecting…"
+                          : "Reconnect and refresh tools"}
+                      </Button>
+                    )}
+                  {/* Mounts are owned by the mount write, not the draft: a
                     draft deletion would be undone by the next reconcile,
                     which re-adds every configured mount. Unmounting writes
                     immediately, like the section's toggle. */}
-                {transportOf(server) === "gateway" ? (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => {
-                      const slug = server.gateway_endpoint;
-                      if (slug !== null) void setMounted(slug, false);
-                    }}
-                  >
-                    <Trash2 size={14} />
-                    Unmount
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={working}
-                    onClick={() => {
-                      markDirty(true);
-                      setServers((current) =>
-                        current.filter((_, itemIndex) => itemIndex !== index),
-                      );
-                    }}
-                  >
-                    <Trash2 size={14} />
-                    Remove
-                  </Button>
-                )}
-              </div>
-            </SettingsSection>
+                  {transportOf(server) === "gateway" ? (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={working}
+                      onClick={() => {
+                        const slug = server.gateway_endpoint;
+                        if (slug !== null) void setMounted(slug, false);
+                      }}
+                    >
+                      <Trash2 size={14} />
+                      Unmount
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={working}
+                      onClick={() => {
+                        markDirty(true);
+                        setServers((current) =>
+                          current.filter((_, itemIndex) => itemIndex !== index),
+                        );
+                      }}
+                    >
+                      <Trash2 size={14} />
+                      Remove
+                    </Button>
+                  )}
+                </div>
+              </SettingsSection>
             ),
           )}
 
@@ -921,7 +918,11 @@ export function McpPanel({
               <Plus size={14} />
               Add server
             </Button>
-            <Button type="button" disabled={working} onClick={() => void save()}>
+            <Button
+              type="button"
+              disabled={working}
+              onClick={() => void save()}
+            >
               {saving ? "Verifying…" : "Save and verify"}
             </Button>
           </div>
@@ -934,9 +935,9 @@ export function McpPanel({
 
           <p className="text-sm leading-relaxed text-muted-foreground">
             Child environments start empty. Environment values are held in the
-            OS credential store and never come back to this window; do not
-            enter secrets in the executable, arguments, working directory, or
-            a server URL, which are ordinary settings.
+            OS credential store and never come back to this window; do not enter
+            secrets in the executable, arguments, working directory, or a server
+            URL, which are ordinary settings.
           </p>
         </>
       )}
@@ -1246,7 +1247,10 @@ function EnvironmentEditor({
     >
       <div className="flex flex-col gap-2">
         {names.map((name, index) => (
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2" key={index}>
+          <div
+            className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2"
+            key={index}
+          >
             <Input
               aria-label={`Environment name ${index + 1}`}
               placeholder="NAME"
@@ -1264,9 +1268,7 @@ function EnvironmentEditor({
               disabled={disabled}
               autoComplete="off"
               spellCheck={false}
-              onChange={(event) =>
-                replaceRow(index, name, event.target.value)
-              }
+              onChange={(event) => replaceRow(index, name, event.target.value)}
             />
             <Button
               type="button"

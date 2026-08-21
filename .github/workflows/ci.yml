@@ -775,6 +775,10 @@ jobs:
           cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
       - name: Install UI dependencies
         run: pnpm install --frozen-lockfile
+      - name: Format
+        run: pnpm exec biome format src
+      - name: Lint
+        run: pnpm lint
       - name: Test
         run: pnpm test
       - name: Build

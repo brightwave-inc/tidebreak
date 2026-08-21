@@ -198,7 +198,11 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             onChange={(event) => setErrorCheckin(event.target.value)}
           />
         </SettingsField>
-        <Button type="button" disabled={loading || saving} onClick={() => void save()}>
+        <Button
+          type="button"
+          disabled={loading || saving}
+          onClick={() => void save()}
+        >
           {saving ? "Saving…" : "Save settings"}
         </Button>
       </SettingsSection>

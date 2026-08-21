@@ -45,13 +45,15 @@ export function compactionUpdateFrom(
   const threshold = Number(form.thresholdPercent);
   const target = Number(form.targetPercent);
   const protectRecent = Number(form.protectRecent);
-  const percent = (value: number) => Number.isInteger(value) && value >= 1 && value <= 100;
+  const percent = (value: number) =>
+    Number.isInteger(value) && value >= 1 && value <= 100;
   if (!percent(threshold) || !percent(target)) {
     return { error: "Enter whole percentages from 1 to 100." };
   }
   if (threshold <= target) {
     return {
-      error: "The compaction point must be above what compaction leaves behind.",
+      error:
+        "The compaction point must be above what compaction leaves behind.",
     };
   }
   if (
@@ -96,7 +98,8 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
         if (!cancelled) setForm(toCompactionForm(settings.compaction));
       })
       .catch((caught) => {
-        if (!cancelled) setError(friendlyErrorMessage(caught, "Could not read settings."));
+        if (!cancelled)
+          setError(friendlyErrorMessage(caught, "Could not read settings."));
       });
     return () => {
       cancelled = true;
@@ -117,7 +120,9 @@ export function CompactionPanel({ client }: { client: ApiClient }) {
       setForm(toCompactionForm(settings.compaction));
       toast.success("Saved compaction settings");
     } catch (caught) {
-      setError(friendlyErrorMessage(caught, "Could not save compaction settings."));
+      setError(
+        friendlyErrorMessage(caught, "Could not save compaction settings."),
+      );
     } finally {
       setSaving(false);
     }

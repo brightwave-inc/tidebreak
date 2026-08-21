@@ -26,12 +26,18 @@ it("applies the chosen mode and closes", async () => {
     <PermissionModeMenu scopeKey="chat-1" value={null} onChange={onChange} />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Permissions: Ask" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: /Allow all/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
+  await userEvent.click(
+    await screen.findByRole("menuitem", { name: /Allow all/ }),
+  );
 
   expect(onChange).toHaveBeenCalledWith("allow");
   await waitFor(() =>
-    expect(screen.queryByRole("menuitem", { name: /Allow all/ })).not.toBeInTheDocument(),
+    expect(
+      screen.queryByRole("menuitem", { name: /Allow all/ }),
+    ).not.toBeInTheDocument(),
   );
 });
 
@@ -51,22 +57,21 @@ it("locks modes above a managed ceiling", async () => {
   const onChange = vi.fn();
   render(
     <ManagedPolicyContext.Provider value={capped}>
-      <PermissionModeMenu
-        scopeKey="chat-1"
-        value="allow"
-        onChange={onChange}
-      />
+      <PermissionModeMenu scopeKey="chat-1" value="allow" onChange={onChange} />
     </ManagedPolicyContext.Provider>,
   );
 
   // The over-ceiling stored mode reads as its clamped effective mode.
-  await userEvent.click(screen.getByRole("button", { name: "Permissions: Ask" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  );
   const locked = await screen.findByRole("menuitem", { name: /Allow all/ });
   expect(locked).toHaveAttribute("aria-disabled", "true");
   expect(locked).toHaveTextContent("Locked by your organization's policy.");
-  expect(
-    screen.getByRole("menuitem", { name: /Plan/ }),
-  ).not.toHaveAttribute("aria-disabled", "true");
+  expect(screen.getByRole("menuitem", { name: /Plan/ })).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
 
   await userEvent.click(locked);
   expect(onChange).not.toHaveBeenCalled();
@@ -82,11 +87,7 @@ it("lets a new chat save while an old chat write is still settling", async () =>
     .mockImplementationOnce(() => oldWrite)
     .mockResolvedValueOnce(undefined);
   const { rerender } = render(
-    <PermissionModeMenu
-      scopeKey="chat-1"
-      value="ask"
-      onChange={onChange}
-    />,
+    <PermissionModeMenu scopeKey="chat-1" value="ask" onChange={onChange} />,
   );
 
   await userEvent.click(
@@ -95,14 +96,12 @@ it("lets a new chat save while an old chat write is still settling", async () =>
   await userEvent.click(
     await screen.findByRole("menuitem", { name: /Allow all/ }),
   );
-  expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "Permissions: Ask" }),
+  ).toBeDisabled();
 
   rerender(
-    <PermissionModeMenu
-      scopeKey="chat-2"
-      value="ask"
-      onChange={onChange}
-    />,
+    <PermissionModeMenu scopeKey="chat-2" value="ask" onChange={onChange} />,
   );
   await waitFor(() =>
     expect(
@@ -113,9 +112,7 @@ it("lets a new chat save while an old chat write is still settling", async () =>
   await userEvent.click(
     screen.getByRole("button", { name: "Permissions: Ask" }),
   );
-  await userEvent.click(
-    await screen.findByRole("menuitem", { name: /Plan/ }),
-  );
+  await userEvent.click(await screen.findByRole("menuitem", { name: /Plan/ }));
   expect(onChange).toHaveBeenLastCalledWith("plan");
 
   resolveOld();
@@ -129,11 +126,7 @@ it("does not toast a failed write after keyed chat navigation unmounts it", asyn
   });
   const onChange = vi.fn().mockReturnValue(oldWrite);
   const oldChat = render(
-    <PermissionModeMenu
-      scopeKey="chat-1"
-      value="ask"
-      onChange={onChange}
-    />,
+    <PermissionModeMenu scopeKey="chat-1" value="ask" onChange={onChange} />,
   );
 
   await userEvent.click(
@@ -144,11 +137,7 @@ it("does not toast a failed write after keyed chat navigation unmounts it", asyn
   );
   oldChat.unmount();
   render(
-    <PermissionModeMenu
-      scopeKey="chat-2"
-      value="ask"
-      onChange={vi.fn()}
-    />,
+    <PermissionModeMenu scopeKey="chat-2" value="ask" onChange={vi.fn()} />,
   );
 
   await act(async () => rejectOld(new Error("old chat write failed")));

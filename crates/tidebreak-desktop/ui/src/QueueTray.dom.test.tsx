@@ -26,7 +26,9 @@ describe("QueueTray", () => {
   it("moves a queued row first, stops the active turn, and releases the queue", async () => {
     const calls: string[] = [];
     const client = {
-      listQueuedTurns: vi.fn().mockResolvedValue({ queued: [first], paused: false }),
+      listQueuedTurns: vi
+        .fn()
+        .mockResolvedValue({ queued: [first], paused: false }),
       putQueuePaused: vi.fn(async (_chatId: string, paused: boolean) => {
         calls.push(paused ? "pause" : "resume");
       }),
@@ -50,9 +52,15 @@ describe("QueueTray", () => {
       screen.getByRole("button", { name: "Send queued message 1 now" }),
     );
 
-    await waitFor(() => expect(calls).toEqual(["pause", "move-first", "stop", "release"]));
-    expect(client.patchQueuedTurn).toHaveBeenCalledWith("chat-1", "turn-queued", {
-      position: 0,
-    });
+    await waitFor(() =>
+      expect(calls).toEqual(["pause", "move-first", "stop", "release"]),
+    );
+    expect(client.patchQueuedTurn).toHaveBeenCalledWith(
+      "chat-1",
+      "turn-queued",
+      {
+        position: 0,
+      },
+    );
   });
 });

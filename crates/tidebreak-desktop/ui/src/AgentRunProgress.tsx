@@ -134,7 +134,10 @@ export function useAgentRunProgress(
         cancelled = true;
       };
     }
-    const interval = window.setInterval(() => void read(), PROGRESS_POLL_INTERVAL_MS);
+    const interval = window.setInterval(
+      () => void read(),
+      PROGRESS_POLL_INTERVAL_MS,
+    );
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -195,7 +198,10 @@ export function AgentRunProgressStream({
   }
 
   return (
-    <section className={cn("flex flex-col gap-1.5", className)} aria-label="Progress">
+    <section
+      className={cn("flex flex-col gap-1.5", className)}
+      aria-label="Progress"
+    >
       <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
         Progress
       </p>

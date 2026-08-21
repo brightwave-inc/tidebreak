@@ -55,16 +55,17 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
   const listed = workspaces.filter((workspace) => workspace.repo_id === repoId);
 
   if (!repo) {
-    return (
-      <p className="text-muted-foreground p-6 text-sm">Loading repo…</p>
-    );
+    return <p className="text-muted-foreground p-6 text-sm">Loading repo…</p>;
   }
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-8">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="truncate text-2xl font-medium tracking-tight" title={repo.display_name}>
+          <h1
+            className="truncate text-2xl font-medium tracking-tight"
+            title={repo.display_name}
+          >
             {repo.display_name}
           </h1>
           <p
@@ -152,7 +153,9 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
                   size="sm"
                   className="shrink-0"
                   aria-label={`Restore ${workspace.title}`}
-                  onClick={() => run("restore", { workspace, title: workspace.title })}
+                  onClick={() =>
+                    run("restore", { workspace, title: workspace.title })
+                  }
                 >
                   Restore
                 </Button>

@@ -77,7 +77,11 @@ export function FolderAccessCard({
         </p>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={!actionable} onClick={() => onDecision("allow")}>
+          <Button
+            size="sm"
+            disabled={!actionable}
+            onClick={() => onDecision("allow")}
+          >
             Allow
           </Button>
           <Button

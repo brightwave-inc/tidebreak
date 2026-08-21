@@ -130,7 +130,11 @@ async function openPanel(
     </AppContextProvider>,
     { initialUrl: "/c/chat-1?left=sources.doc-1&right=chat" },
   );
-  return { ...rendered, client: client as unknown as ApiClient & typeof client, download };
+  return {
+    ...rendered,
+    client: client as unknown as ApiClient & typeof client,
+    download,
+  };
 }
 
 async function openFailingPanel(rejection: unknown) {
@@ -151,7 +155,9 @@ async function openFailingPanel(rejection: unknown) {
  * The transcript beside the panel, holding the citation the panel is opened
  * from. This is where the panel resolves it: no request is made for it.
  */
-function seedTranscript(...sources: (Partial<AssistantSource> & { id: string })[]) {
+function seedTranscript(
+  ...sources: (Partial<AssistantSource> & { id: string })[]
+) {
   useChatSessionStore.getState().update((session) => ({
     ...session,
     messages: [
@@ -249,10 +255,14 @@ describe("DocumentDetailRoot", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Download" }));
-    await waitFor(() => expect(download).toHaveBeenCalledWith("chat-1", "doc-1"));
+    await waitFor(() =>
+      expect(download).toHaveBeenCalledWith("chat-1", "doc-1"),
+    );
 
     expect(screen.getByText("Document")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sources" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sources" }),
+    ).not.toBeInTheDocument();
   });
 
   it("opens a format it cannot draw on the extracted text alone", async () => {
@@ -305,9 +315,15 @@ describe("DocumentDetailRoot", () => {
     ["application/xml", XML_BODY],
     ["text/xml", XML_BODY],
   ])("draws %s as a tree rather than as raw text", async (mediaType, body) => {
-    await openPanel(detail({ media_type: mediaType, title: "Data" }), vi.fn(), body);
+    await openPanel(
+      detail({ media_type: mediaType, title: "Data" }),
+      vi.fn(),
+      body,
+    );
 
-    expect(await screen.findByRole("button", { name: "Collapse all" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Collapse all" }),
+    ).toBeVisible();
     // Decomposed into nodes, so the file's own text never appears as one run.
     expect(screen.queryByText(body)).toBeNull();
   });
@@ -335,9 +351,7 @@ describe("DocumentDetailRoot", () => {
       "cite-cells",
     );
 
-    expect(
-      await screen.findByText("Sheet Q4 Results B2:D10"),
-    ).toBeVisible();
+    expect(await screen.findByText("Sheet Q4 Results B2:D10")).toBeVisible();
   });
 
   it("falls back to the extracted text for a workbook it cannot draw", async () => {
@@ -355,7 +369,9 @@ describe("DocumentDetailRoot", () => {
     );
 
     await waitFor(() =>
-      expect(document.querySelector("pre")?.textContent).toContain("Q4 Results"),
+      expect(document.querySelector("pre")?.textContent).toContain(
+        "Q4 Results",
+      ),
     );
     expect(screen.queryByText(/^Sheet /)).toBeNull();
   });
@@ -367,7 +383,9 @@ describe("DocumentDetailRoot", () => {
       INVOICES_JSON,
     );
 
-    expect(await screen.findByRole("button", { name: "Collapse all" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Collapse all" }),
+    ).toBeVisible();
     expect(screen.queryByText(/B-2/)).toBeNull();
   });
 
@@ -382,8 +400,12 @@ describe("DocumentDetailRoot", () => {
       "# Quarterly report\n\nBody.\n\n## Revenue by **segment**\n\nMore.\n",
     );
 
-    await user.click(await screen.findByRole("button", { name: "Document outline" }));
-    const entry = await screen.findByRole("button", { name: "Revenue by segment" });
+    await user.click(
+      await screen.findByRole("button", { name: "Document outline" }),
+    );
+    const entry = await screen.findByRole("button", {
+      name: "Revenue by segment",
+    });
 
     const scrollIntoView = vi.fn();
     const heading = document.querySelector("#revenue-by-segment");
@@ -402,12 +424,17 @@ describe("DocumentDetailRoot", () => {
     );
 
     expect(
-      await screen.findByText(/Not a heading, just a line that starts with a hash/),
+      await screen.findByText(
+        /Not a heading, just a line that starts with a hash/,
+      ),
     ).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Document outline" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Document outline" }),
+    ).toBeNull();
   });
 
-  const CITED_CONTENT = "Café notes\n\nRevenue rose 12% in the second quarter.\n";
+  const CITED_CONTENT =
+    "Café notes\n\nRevenue rose 12% in the second quarter.\n";
   const CITED_PASSAGE = "Revenue rose 12%";
 
   it("opens a citation on the line the model named", async () => {
@@ -416,7 +443,11 @@ describe("DocumentDetailRoot", () => {
       locator: { kind: "lines", start: 3, end: 3 },
     });
     await openCitation(
-      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      detail({
+        media_type: "text/plain",
+        title: "Notes.txt",
+        content: CITED_CONTENT,
+      }),
       "cite-1",
       CITED_CONTENT,
     );
@@ -432,7 +463,11 @@ describe("DocumentDetailRoot", () => {
 
   it("opens the same source at the top when no citation led there", async () => {
     await openPanel(
-      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      detail({
+        media_type: "text/plain",
+        title: "Notes.txt",
+        content: CITED_CONTENT,
+      }),
       vi.fn(),
       CITED_CONTENT,
     );
@@ -466,7 +501,9 @@ describe("DocumentDetailRoot", () => {
     // The passage spans an emphasized word, which is three places in the
     // rendered tree rather than one run: the words between them are not
     // adjacent there, so each is marked where it stands.
-    await waitFor(() => expect(document.querySelectorAll("mark").length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(document.querySelectorAll("mark").length).toBeGreaterThan(0),
+    );
     const marks = Array.from(document.querySelectorAll("mark"));
     expect(marks.map((mark) => mark.textContent).join("")).toContain(
       "Revenue rose 12% in the second",
@@ -481,14 +518,20 @@ describe("DocumentDetailRoot", () => {
       locator: { kind: "lines", start: 3, end: 3 },
     });
     await openCitation(
-      detail({ media_type: "text/plain", title: "Notes.txt", content: CITED_CONTENT }),
+      detail({
+        media_type: "text/plain",
+        title: "Notes.txt",
+        content: CITED_CONTENT,
+      }),
       "cite-4",
       CITED_CONTENT,
     );
 
     await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
     const marks = Array.from(document.querySelectorAll("mark"));
-    expect(marks.every((mark) => mark.textContent?.includes(CITED_PASSAGE))).toBe(true);
+    expect(
+      marks.every((mark) => mark.textContent?.includes(CITED_PASSAGE)),
+    ).toBe(true);
     // Drawn as written, the file still reads as one run around the mark.
     expect(document.querySelector("pre")?.textContent).toBe(CITED_CONTENT);
   });
@@ -500,7 +543,11 @@ describe("DocumentDetailRoot", () => {
       locator: { kind: "pages", start: 4, end: 5 },
     });
     await openCitation(
-      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
+      detail({
+        media_type: "application/pdf",
+        title: "Report.pdf",
+        content: "text",
+      }),
       "cite-2",
     );
 
@@ -529,7 +576,11 @@ describe("DocumentDetailRoot", () => {
       { id: "cite-7", locator: { kind: "page", page: 7 } },
     );
     await openCitationThenAnother(
-      detail({ media_type: "application/pdf", title: "Report.pdf", content: "text" }),
+      detail({
+        media_type: "application/pdf",
+        title: "Report.pdf",
+        content: "text",
+      }),
       "cite-6",
       "cite-7",
     );
@@ -538,7 +589,9 @@ describe("DocumentDetailRoot", () => {
     await user.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByText("Page 3")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Click the second citation" }));
+    await user.click(
+      screen.getByRole("button", { name: "Click the second citation" }),
+    );
 
     expect(await screen.findByText("Page 7")).toBeVisible();
   });
@@ -568,12 +621,16 @@ describe("DocumentDetailRoot load failures", () => {
   });
 
   it("reports a server failure as a failure, and asks again on request", async () => {
-    const { client } = await openFailingPanel(new HttpError(500, "500: internal error"));
+    const { client } = await openFailingPanel(
+      new HttpError(500, "500: internal error"),
+    );
 
     expect(
       await screen.findByText("The document could not be loaded (500)."),
     ).toBeVisible();
-    expect(screen.queryByText("The document is no longer available.")).toBeNull();
+    expect(
+      screen.queryByText("The document is no longer available."),
+    ).toBeNull();
 
     // A retry that succeeds leaves the reader on the document. A format with no
     // viewer opens on its extracted text, so no byte fetch is needed to see it.
@@ -592,7 +649,9 @@ describe("DocumentDetailRoot load failures", () => {
   it("reports a dropped connection as a failure rather than a deletion", async () => {
     await openFailingPanel(new TypeError("Load failed"));
 
-    expect(await screen.findByText("The document could not be loaded.")).toBeVisible();
+    expect(
+      await screen.findByText("The document could not be loaded."),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 });
@@ -610,7 +669,9 @@ describe("sharing an attachment with the project", () => {
         bytes: new TextEncoder().encode("bytes"),
         contentType: "image/png",
       }),
-      promoteDocumentToProject: vi.fn().mockResolvedValue({ document_id: "doc-2" }),
+      promoteDocumentToProject: vi
+        .fn()
+        .mockResolvedValue({ document_id: "doc-2" }),
     };
     await renderWithRouter(
       <AppContextProvider value={{ client } as unknown as AppContextValue}>
@@ -638,7 +699,9 @@ describe("sharing an attachment with the project", () => {
     );
     // The click is spent: a second one would only make the same project file
     // again, so the control reports the state it reached instead.
-    expect(await screen.findByRole("button", { name: "In the project" })).toBeDisabled();
+    expect(
+      await screen.findByRole("button", { name: "In the project" }),
+    ).toBeDisabled();
   });
 
   it("offers nothing to a loose conversation, which has no project to share with", async () => {

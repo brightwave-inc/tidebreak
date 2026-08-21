@@ -24,7 +24,8 @@ const BASE: CodeWorkspacePrSnapshot = {
   unpushed: false,
   ahead: 0,
   has_upstream: false,
-  suggested_commit_message: "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
+  suggested_commit_message:
+    "first change\n\n1 file changed, 1 insertion(+), 0 deletions(-)",
   gh_found: true,
   gh_authenticated: true,
   remediation: "",
@@ -159,9 +160,7 @@ describe("PrCard", () => {
     expect(screen.getByText("open")).toBeInTheDocument();
     expect(screen.getByText("Unpushed")).toBeInTheDocument();
     expect(screen.getByText(/update #12/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Push branch" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Push branch" })).toBeEnabled();
   });
 
   it("shows copyable gh-absent remediation for a pushed branch", () => {
@@ -174,7 +173,9 @@ describe("PrCard", () => {
       remediation:
         "gh is not installed.\n\n  git push -u origin tidebreak/first-change\n  gh pr create --title 'first change' --body '...'\n",
     });
-    expect(screen.getAllByText(/gh is not installed/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/gh is not installed/).length).toBeGreaterThan(
+      0,
+    );
     expect(
       screen.getByRole("button", { name: "Create pull request" }),
     ).toBeDisabled();
@@ -290,9 +291,7 @@ describe("PrCard", () => {
       expect(message).toHaveValue(first.suggested_commit_message),
     );
 
-    rerender(
-      <PrCard client={client} workspaceId="ws-1" contentRevision={1} />,
-    );
+    rerender(<PrCard client={client} workspaceId="ws-1" contentRevision={1} />);
     await waitFor(() =>
       expect(message).toHaveValue(second.suggested_commit_message),
     );
@@ -324,9 +323,7 @@ describe("PrCard", () => {
     await userEvent.setup().clear(message);
     await userEvent.setup().type(message, "Keep my message");
 
-    rerender(
-      <PrCard client={client} workspaceId="ws-1" contentRevision={1} />,
-    );
+    rerender(<PrCard client={client} workspaceId="ws-1" contentRevision={1} />);
     await waitFor(() =>
       expect(client.getCodeWorkspacePr).toHaveBeenCalledTimes(2),
     );

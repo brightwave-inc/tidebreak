@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  compactionUpdateFrom,
-  toCompactionForm,
-} from "./CompactionPanel";
+import { compactionUpdateFrom, toCompactionForm } from "./CompactionPanel";
 
 const SETTINGS = {
   threshold_fraction: 0.75,
@@ -38,7 +35,8 @@ describe("compaction settings form", () => {
       protectRecent: "5",
     });
     expect(inverted).toEqual({
-      error: "The compaction point must be above what compaction leaves behind.",
+      error:
+        "The compaction point must be above what compaction leaves behind.",
     });
     expect(
       compactionUpdateFrom({

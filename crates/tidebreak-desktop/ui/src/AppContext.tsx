@@ -1,12 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type {
-  ApiClient,
-  Chat,
-  ModelInfo,
-  Project,
-  ProviderInfo,
-} from "./api";
+import type { ApiClient, Chat, ModelInfo, Project, ProviderInfo } from "./api";
 import type { DesktopUpdateState } from "./updates";
 
 /**

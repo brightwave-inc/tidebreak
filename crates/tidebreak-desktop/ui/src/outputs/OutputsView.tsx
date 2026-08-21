@@ -86,7 +86,12 @@ export function OutputsView({
       setCatalog(next);
     } catch (caught) {
       if (generation !== generationRef.current) return;
-      setError(friendlyOutputError(caught, "Could not load this conversation's outputs."));
+      setError(
+        friendlyOutputError(
+          caught,
+          "Could not load this conversation's outputs.",
+        ),
+      );
     } finally {
       if (generation === generationRef.current) setLoading(false);
     }
@@ -141,7 +146,9 @@ export function OutputsView({
         toast.success(`${output.filename} was restored.`);
         void refresh();
       } catch (caught) {
-        toast.error(friendlyOutputError(caught, "Could not restore that output."));
+        toast.error(
+          friendlyOutputError(caught, "Could not restore that output."),
+        );
       }
     },
     [apis, chatId],
@@ -153,13 +160,18 @@ export function OutputsView({
       setBusyOutputId(output.outputId);
       try {
         await apis.delete(chatId, output.outputId);
-        toast.success(`${output.filename} was deleted from this conversation.`, {
-          // A delete stays reversible for as long as the toast is up.
-          action: { label: "Undo", onClick: () => void onRestore(output) },
-        });
+        toast.success(
+          `${output.filename} was deleted from this conversation.`,
+          {
+            // A delete stays reversible for as long as the toast is up.
+            action: { label: "Undo", onClick: () => void onRestore(output) },
+          },
+        );
         void refresh();
       } catch (caught) {
-        toast.error(friendlyOutputError(caught, "Could not delete that output."));
+        toast.error(
+          friendlyOutputError(caught, "Could not delete that output."),
+        );
       } finally {
         setBusyOutputId(null);
       }
@@ -175,7 +187,9 @@ export function OutputsView({
         <div className="flex items-baseline gap-3">
           <h1 className="text-lg font-medium">Outputs</h1>
           {hasOutputs && (
-            <span className="text-lg font-medium text-muted-foreground">{countSuffix}</span>
+            <span className="text-lg font-medium text-muted-foreground">
+              {countSuffix}
+            </span>
           )}
         </div>
         <span className="grow" />
@@ -229,8 +243,9 @@ export function OutputsView({
               </EmptyMedia>
               <EmptyTitle>No outputs yet</EmptyTitle>
               <EmptyDescription>
-                Ask Tidebreak to write a report, a plan, a CSV, a JSON file or a web
-                page. What it creates stays here until you choose where to save it.
+                Ask Tidebreak to write a report, a plan, a CSV, a JSON file or a
+                web page. What it creates stays here until you choose where to
+                save it.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

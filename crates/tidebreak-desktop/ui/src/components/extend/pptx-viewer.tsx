@@ -1,6 +1,6 @@
-"use client"
+"use client";
 
-import * as React from "react"
+import * as React from "react";
 import {
   ReactPptxViewer,
   setWasmSource,
@@ -11,10 +11,10 @@ import {
   type PptxSlideThumbnailRenderWindow,
   type PptxViewerError,
   type PresentationSource,
-} from "@extend-ai/react-pptx"
-import pptxWasmUrl from "@extend-ai/react-pptx/pptx_wasm_bg.wasm?url"
+} from "@extend-ai/react-pptx";
+import pptxWasmUrl from "@extend-ai/react-pptx/pptx_wasm_bg.wasm?url";
 
-import "@extend-ai/react-pptx/styles.css"
+import "@extend-ai/react-pptx/styles.css";
 
 import {
   ArrowLeft01Icon,
@@ -25,109 +25,109 @@ import {
   PlusSignCircleIcon,
   SidebarLeftIcon,
   Upload01Icon,
-} from "@hugeicons/core-free-icons"
-import { HugeiconsIcon } from "@hugeicons/react"
-import { useVirtualizer } from "@tanstack/react-virtual"
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { Separator } from "@/components/ui/separator"
-import { Spinner } from "@/components/ui/spinner"
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip"
+} from "@/components/ui/tooltip";
 import {
   DocumentViewerThumbnailSidebar,
   useElementWidth,
   useInlineThumbnailSidebar,
-} from "@/components/extend/document-viewer-sidebar"
-import { FileThumbnail } from "@/components/extend/file-thumbnail"
+} from "@/components/extend/document-viewer-sidebar";
+import { FileThumbnail } from "@/components/extend/file-thumbnail";
 
-setWasmSource(pptxWasmUrl)
+setWasmSource(pptxWasmUrl);
 
 const PPTX_MIME_TYPE =
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-const PPT_MIME_TYPE = "application/vnd.ms-powerpoint"
-const DEFAULT_ZOOM = 100
-const PPTX_LOADING_INDICATOR_DELAY_MS = 300
-const PPTX_THUMBNAIL_WIDTH = 112
-const PPTX_THUMBNAIL_LIST_PADDING = 12
-const PPTX_THUMBNAIL_ROW_ESTIMATE = 112
-const PPTX_THUMBNAIL_PREFETCH_ROWS = 0
-const PPTX_THUMBNAIL_FOLLOW_DELAY_MS = 250
-const PPTX_SCROLL_TOP_EPSILON_PX = 24
-const PPTX_INSTANT_NAVIGATION_TIMEOUT_MS = 250
-const PPTX_SMOOTH_NAVIGATION_TIMEOUT_MS = 1_000
-const ZOOM_OPTIONS = [25, 50, 75, 100, 125, 150, 175, 200, 300, 400] as const
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const PPT_MIME_TYPE = "application/vnd.ms-powerpoint";
+const DEFAULT_ZOOM = 100;
+const PPTX_LOADING_INDICATOR_DELAY_MS = 300;
+const PPTX_THUMBNAIL_WIDTH = 112;
+const PPTX_THUMBNAIL_LIST_PADDING = 12;
+const PPTX_THUMBNAIL_ROW_ESTIMATE = 112;
+const PPTX_THUMBNAIL_PREFETCH_ROWS = 0;
+const PPTX_THUMBNAIL_FOLLOW_DELAY_MS = 250;
+const PPTX_SCROLL_TOP_EPSILON_PX = 24;
+const PPTX_INSTANT_NAVIGATION_TIMEOUT_MS = 250;
+const PPTX_SMOOTH_NAVIGATION_TIMEOUT_MS = 1_000;
+const ZOOM_OPTIONS = [25, 50, 75, 100, 125, 150, 175, 200, 300, 400] as const;
 const PPTX_THUMBNAIL_FOCUS_RING_CLASS =
-  "group-focus-visible/pptx-thumbnail-sidebar:ring-2 group-focus-visible/pptx-thumbnail-sidebar:ring-ring group-focus-visible/pptx-thumbnail-sidebar:ring-offset-1 group-focus-visible/pptx-thumbnail-sidebar:ring-offset-background"
+  "group-focus-visible/pptx-thumbnail-sidebar:ring-2 group-focus-visible/pptx-thumbnail-sidebar:ring-ring group-focus-visible/pptx-thumbnail-sidebar:ring-offset-1 group-focus-visible/pptx-thumbnail-sidebar:ring-offset-background";
 
 type UploadedPresentation = {
-  file: File
-  identity: string
-  sourceUrl: string | undefined
-}
+  file: File;
+  identity: string;
+  sourceUrl: string | undefined;
+};
 
 function areNumberArraysEqual(
   left: readonly number[],
-  right: readonly number[]
+  right: readonly number[],
 ) {
   return (
     left.length === right.length &&
     left.every((value, index) => value === right[index])
-  )
+  );
 }
 
 function formatPresentationName(fileName: string | undefined, url: string) {
-  if (fileName?.trim()) return fileName
+  if (fileName?.trim()) return fileName;
 
-  const pathname = url.split("?")[0] ?? ""
-  const rawName = pathname.split("/").pop() ?? "presentation.pptx"
+  const pathname = url.split("?")[0] ?? "";
+  const rawName = pathname.split("/").pop() ?? "presentation.pptx";
 
   try {
-    return decodeURIComponent(rawName)
+    return decodeURIComponent(rawName);
   } catch {
-    return rawName
+    return rawName;
   }
 }
 
 function ensurePresentationExtension(fileName: string) {
-  const lowerFileName = fileName.toLowerCase()
+  const lowerFileName = fileName.toLowerCase();
 
   return lowerFileName.endsWith(".pptx") || lowerFileName.endsWith(".ppt")
     ? fileName
-    : `${fileName}.pptx`
+    : `${fileName}.pptx`;
 }
 
 function downloadBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement("a")
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
 
-  anchor.href = url
-  anchor.download = fileName
-  anchor.rel = "noopener"
-  document.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.rel = "noopener";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 async function downloadPresentation({
@@ -135,84 +135,87 @@ async function downloadPresentation({
   fileName,
   url,
 }: {
-  file?: File
-  fileName: string
-  url?: string
+  file?: File;
+  fileName: string;
+  url?: string;
 }) {
   if (file) {
-    downloadBlob(file, ensurePresentationExtension(fileName))
-    return
+    downloadBlob(file, ensurePresentationExtension(fileName));
+    return;
   }
 
-  if (!url) return
+  if (!url) return;
 
-  const response = await fetch(url)
+  const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to download presentation (${response.status})`)
+    throw new Error(`Failed to download presentation (${response.status})`);
   }
 
-  downloadBlob(await response.blob(), ensurePresentationExtension(fileName))
+  downloadBlob(await response.blob(), ensurePresentationExtension(fileName));
 }
 
 function getNextZoom(currentZoom: number, direction: 1 | -1) {
   if (direction > 0) {
-    return ZOOM_OPTIONS.find((value) => value > currentZoom) ?? currentZoom
+    return ZOOM_OPTIONS.find((value) => value > currentZoom) ?? currentZoom;
   }
 
   for (let index = ZOOM_OPTIONS.length - 1; index >= 0; index -= 1) {
-    const value = ZOOM_OPTIONS[index]
-    if (value < currentZoom) return value
+    const value = ZOOM_OPTIONS[index];
+    if (value < currentZoom) return value;
   }
 
-  return currentZoom
+  return currentZoom;
 }
 
 function useDelayedLoadingIndicator(isLoading: boolean, delayMs: number) {
-  const [visible, setVisible] = React.useState(false)
+  const [visible, setVisible] = React.useState(false);
 
   React.useEffect(() => {
     if (!isLoading) {
-      setVisible(false)
-      return
+      setVisible(false);
+      return;
     }
 
-    const timeoutId = window.setTimeout(() => setVisible(true), delayMs)
-    return () => window.clearTimeout(timeoutId)
-  }, [delayMs, isLoading])
+    const timeoutId = window.setTimeout(() => setVisible(true), delayMs);
+    return () => window.clearTimeout(timeoutId);
+  }, [delayMs, isLoading]);
 
-  return visible
+  return visible;
 }
 
 function useDebouncedValue<TValue>(value: TValue, delayMs: number) {
-  const [debouncedValue, setDebouncedValue] = React.useState(value)
+  const [debouncedValue, setDebouncedValue] = React.useState(value);
 
   React.useEffect(() => {
-    const timeoutId = window.setTimeout(() => setDebouncedValue(value), delayMs)
+    const timeoutId = window.setTimeout(
+      () => setDebouncedValue(value),
+      delayMs,
+    );
 
-    return () => window.clearTimeout(timeoutId)
-  }, [delayMs, value])
+    return () => window.clearTimeout(timeoutId);
+  }, [delayMs, value]);
 
-  return debouncedValue
+  return debouncedValue;
 }
 
 function ViewerLoadingSurface({
   showSpinner = true,
 }: {
-  showSpinner?: boolean
+  showSpinner?: boolean;
 }) {
   return (
     <div className="grid h-full min-h-96 w-full place-items-center bg-background">
       {showSpinner ? <Spinner className="size-4" /> : null}
     </div>
-  )
+  );
 }
 
 function ToolbarTooltip({
   children,
   label,
 }: {
-  children: React.ReactNode
-  label: string
+  children: React.ReactNode;
+  label: string;
 }) {
   return (
     <Tooltip>
@@ -221,7 +224,7 @@ function ToolbarTooltip({
       </TooltipTrigger>
       <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
-  )
+  );
 }
 
 function PptxFileActionsMenu({
@@ -233,15 +236,15 @@ function PptxFileActionsMenu({
   showDownloadButton,
   showUploadButton,
 }: {
-  controlsDisabled: boolean
-  downloadDisabled: boolean
-  isPreparingDownload: boolean
-  onDownload: () => void
-  onUploadClick: () => void
-  showDownloadButton: boolean
-  showUploadButton: boolean
+  controlsDisabled: boolean;
+  downloadDisabled: boolean;
+  isPreparingDownload: boolean;
+  onDownload: () => void;
+  onUploadClick: () => void;
+  showDownloadButton: boolean;
+  showUploadButton: boolean;
 }) {
-  if (!showDownloadButton && !showUploadButton) return null
+  if (!showDownloadButton && !showUploadButton) return null;
 
   return (
     <DropdownMenu>
@@ -274,7 +277,7 @@ function PptxFileActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
-  )
+  );
 }
 
 function PptxSlideNumberControl({
@@ -283,40 +286,42 @@ function PptxSlideNumberControl({
   onSlideChange,
   slideCount,
 }: {
-  activeSlideIndex: number
-  controlsDisabled: boolean
-  onSlideChange: (slideIndex: number) => void
-  slideCount: number
+  activeSlideIndex: number;
+  controlsDisabled: boolean;
+  onSlideChange: (slideIndex: number) => void;
+  slideCount: number;
 }) {
-  const inputRef = React.useRef<HTMLInputElement>(null)
-  const displaySlide = slideCount ? activeSlideIndex + 1 : 1
-  const [isEditing, setIsEditing] = React.useState(false)
-  const [draftSlide, setDraftSlide] = React.useState(() => String(displaySlide))
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const displaySlide = slideCount ? activeSlideIndex + 1 : 1;
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [draftSlide, setDraftSlide] = React.useState(() =>
+    String(displaySlide),
+  );
 
   React.useEffect(() => {
-    if (!isEditing) setDraftSlide(String(displaySlide))
-  }, [displaySlide, isEditing])
+    if (!isEditing) setDraftSlide(String(displaySlide));
+  }, [displaySlide, isEditing]);
 
   React.useEffect(() => {
-    if (!isEditing) return
+    if (!isEditing) return;
 
-    inputRef.current?.focus()
-    inputRef.current?.select()
-  }, [isEditing])
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [isEditing]);
 
   const applySlideDraft = React.useCallback(
     (value: string) => {
-      const parsedSlide = Number(value.trim())
-      if (!Number.isInteger(parsedSlide)) return
+      const parsedSlide = Number(value.trim());
+      if (!Number.isInteger(parsedSlide)) return;
 
       const nextSlide = Math.min(
         Math.max(parsedSlide, 1),
-        Math.max(slideCount, 1)
-      )
-      onSlideChange(nextSlide - 1)
+        Math.max(slideCount, 1),
+      );
+      onSlideChange(nextSlide - 1);
     },
-    [onSlideChange, slideCount]
-  )
+    [onSlideChange, slideCount],
+  );
 
   return (
     <div className="flex items-center text-sm whitespace-nowrap text-primary">
@@ -332,12 +337,12 @@ function PptxSlideNumberControl({
           className="mx-1 w-14 min-w-14 rounded-md text-center"
           onBlur={() => setIsEditing(false)}
           onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
-            setDraftSlide(event.target.value)
-            applySlideDraft(event.target.value)
+            setDraftSlide(event.target.value);
+            applySlideDraft(event.target.value);
           }}
           onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => {
             if (event.key === "Enter" || event.key === "Escape") {
-              event.currentTarget.blur()
+              event.currentTarget.blur();
             }
           }}
         />
@@ -350,8 +355,8 @@ function PptxSlideNumberControl({
           aria-label={`Current slide ${displaySlide}. Edit slide number`}
           disabled={controlsDisabled || !slideCount}
           onClick={() => {
-            setDraftSlide(String(displaySlide))
-            setIsEditing(true)
+            setDraftSlide(String(displaySlide));
+            setIsEditing(true);
           }}
         >
           {displaySlide}
@@ -359,7 +364,7 @@ function PptxSlideNumberControl({
       )}
       <span>of {slideCount || "-"}</span>
     </div>
-  )
+  );
 }
 
 function PptxToolbar({
@@ -377,26 +382,26 @@ function PptxToolbar({
   toolbarActions,
   zoom,
 }: {
-  activeSlideIndex: number
-  controlsDisabled: boolean
-  isPreparingDownload: boolean
-  onDownload: () => void
-  onSlideChange: (slideIndex: number) => void
-  onToggleSidebar: () => void
-  onUploadClick: () => void
-  setZoom: React.Dispatch<React.SetStateAction<number>>
-  showDownloadButton: boolean
-  showUploadButton: boolean
-  slideCount: number
-  toolbarActions?: React.ReactNode
-  zoom: number
+  activeSlideIndex: number;
+  controlsDisabled: boolean;
+  isPreparingDownload: boolean;
+  onDownload: () => void;
+  onSlideChange: (slideIndex: number) => void;
+  onToggleSidebar: () => void;
+  onUploadClick: () => void;
+  setZoom: React.Dispatch<React.SetStateAction<number>>;
+  showDownloadButton: boolean;
+  showUploadButton: boolean;
+  slideCount: number;
+  toolbarActions?: React.ReactNode;
+  zoom: number;
 }) {
-  const canGoPrevious = !controlsDisabled && activeSlideIndex > 0
+  const canGoPrevious = !controlsDisabled && activeSlideIndex > 0;
   const canGoNext =
-    !controlsDisabled && slideCount > 0 && activeSlideIndex < slideCount - 1
-  const canZoomOut = !controlsDisabled && zoom > ZOOM_OPTIONS[0]
+    !controlsDisabled && slideCount > 0 && activeSlideIndex < slideCount - 1;
+  const canZoomOut = !controlsDisabled && zoom > ZOOM_OPTIONS[0];
   const canZoomIn =
-    !controlsDisabled && zoom < ZOOM_OPTIONS[ZOOM_OPTIONS.length - 1]
+    !controlsDisabled && zoom < ZOOM_OPTIONS[ZOOM_OPTIONS.length - 1];
 
   return (
     <div className="flex min-h-12 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2">
@@ -525,7 +530,7 @@ function PptxToolbar({
         </div>
       </TooltipProvider>
     </div>
-  )
+  );
 }
 
 function PptxSidebarThumbnail({
@@ -536,12 +541,12 @@ function PptxSidebarThumbnail({
   slideNumber,
   status,
 }: {
-  aspectRatio: number
-  containerRef: PptxSlideThumbnailItem["containerRef"]
-  displayFileName: string
-  isActive: boolean
-  slideNumber: number
-  status: PptxSlideThumbnailItem["status"]
+  aspectRatio: number;
+  containerRef: PptxSlideThumbnailItem["containerRef"];
+  displayFileName: string;
+  isActive: boolean;
+  slideNumber: number;
+  status: PptxSlideThumbnailItem["status"];
 }) {
   return (
     <FileThumbnail
@@ -561,10 +566,10 @@ function PptxSidebarThumbnail({
       hasError={status === "error"}
       className={cn(
         "w-full rounded-sm border-0 shadow-xs ring-0 transition-shadow duration-150",
-        isActive && "shadow-sm"
+        isActive && "shadow-sm",
       )}
     />
-  )
+  );
 }
 
 function PptxThumbnailSidebarList({
@@ -577,66 +582,66 @@ function PptxThumbnailSidebarList({
   slideCount,
   thumbnails,
 }: {
-  activeSlideIndex: number
-  displayFileName: string
-  isLoading: boolean
-  onRenderWindowChange: (window: PptxSlideThumbnailRenderWindow) => void
-  onSelectSlide: (slideIndex: number) => void
-  sidebarOpen: boolean
-  slideCount: number
-  thumbnails: PptxSlideThumbnailItem[]
+  activeSlideIndex: number;
+  displayFileName: string;
+  isLoading: boolean;
+  onRenderWindowChange: (window: PptxSlideThumbnailRenderWindow) => void;
+  onSelectSlide: (slideIndex: number) => void;
+  sidebarOpen: boolean;
+  slideCount: number;
+  thumbnails: PptxSlideThumbnailItem[];
 }) {
-  const viewportRef = React.useRef<HTMLDivElement | null>(null)
-  const thumbnailListboxId = React.useId()
+  const viewportRef = React.useRef<HTMLDivElement | null>(null);
+  const thumbnailListboxId = React.useId();
   const visibleThumbnails = React.useMemo(
     () => thumbnails.slice(0, slideCount || 0),
-    [slideCount, thumbnails]
-  )
+    [slideCount, thumbnails],
+  );
   const activeDescendantId = visibleThumbnails.length
     ? `${thumbnailListboxId}-slide-${activeSlideIndex + 1}`
-    : undefined
+    : undefined;
   const virtualizer = useVirtualizer({
     count: visibleThumbnails.length,
     estimateSize: () => PPTX_THUMBNAIL_ROW_ESTIMATE,
     getItemKey: (index) => visibleThumbnails[index]?.slide.id ?? index,
     getScrollElement: () => viewportRef.current,
     overscan: 0,
-  })
-  const virtualItems = virtualizer.getVirtualItems()
+  });
+  const virtualItems = virtualizer.getVirtualItems();
   const renderWindowSignature = virtualItems
     .map((virtualRow) => virtualRow.index)
-    .join(",")
+    .join(",");
   const virtualSlideIndexes = React.useMemo(
     () =>
       renderWindowSignature
         ? renderWindowSignature.split(",").map((index) => Number(index))
         : [],
-    [renderWindowSignature]
-  )
+    [renderWindowSignature],
+  );
 
   React.useEffect(() => {
     if (!sidebarOpen || isLoading || !visibleThumbnails.length) {
       onRenderWindowChange({
         prefetchSlideIndexes: [],
         visibleSlideIndexes: [],
-      })
-      return
+      });
+      return;
     }
 
-    const visibleSlideIndexes = virtualSlideIndexes
-    const firstVirtualIndex = virtualSlideIndexes[0] ?? 0
+    const visibleSlideIndexes = virtualSlideIndexes;
+    const firstVirtualIndex = virtualSlideIndexes[0] ?? 0;
     const lastVirtualIndex =
-      virtualSlideIndexes[virtualSlideIndexes.length - 1] ?? firstVirtualIndex
+      virtualSlideIndexes[virtualSlideIndexes.length - 1] ?? firstVirtualIndex;
     const firstPrefetchIndex = Math.max(
       0,
-      firstVirtualIndex - PPTX_THUMBNAIL_PREFETCH_ROWS
-    )
+      firstVirtualIndex - PPTX_THUMBNAIL_PREFETCH_ROWS,
+    );
     const lastPrefetchIndex = Math.min(
       visibleThumbnails.length - 1,
-      lastVirtualIndex + PPTX_THUMBNAIL_PREFETCH_ROWS
-    )
-    const visibleSlideIndexSet = new Set(visibleSlideIndexes)
-    const prefetchSlideIndexes: number[] = []
+      lastVirtualIndex + PPTX_THUMBNAIL_PREFETCH_ROWS,
+    );
+    const visibleSlideIndexSet = new Set(visibleSlideIndexes);
+    const prefetchSlideIndexes: number[] = [];
 
     for (
       let index = firstPrefetchIndex;
@@ -644,58 +649,58 @@ function PptxThumbnailSidebarList({
       index += 1
     ) {
       if (!visibleSlideIndexSet.has(index)) {
-        prefetchSlideIndexes.push(index)
+        prefetchSlideIndexes.push(index);
       }
     }
 
     onRenderWindowChange({
       prefetchSlideIndexes,
       visibleSlideIndexes,
-    })
+    });
   }, [
     isLoading,
     onRenderWindowChange,
     sidebarOpen,
     virtualSlideIndexes,
     visibleThumbnails.length,
-  ])
+  ]);
 
   React.useEffect(() => {
-    if (!sidebarOpen || !visibleThumbnails.length) return
+    if (!sidebarOpen || !visibleThumbnails.length) return;
 
     const frameId = window.requestAnimationFrame(() => {
       virtualizer.scrollToIndex(
         Math.min(activeSlideIndex, visibleThumbnails.length - 1),
-        { align: "auto" }
-      )
-    })
+        { align: "auto" },
+      );
+    });
 
-    return () => window.cancelAnimationFrame(frameId)
-  }, [activeSlideIndex, sidebarOpen, virtualizer, visibleThumbnails.length])
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeSlideIndex, sidebarOpen, virtualizer, visibleThumbnails.length]);
 
   const handleKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (slideCount < 1) return
+      if (slideCount < 1) return;
 
-      let nextSlideIndex: number | null = null
+      let nextSlideIndex: number | null = null;
 
       if (event.key === "ArrowDown") {
-        nextSlideIndex = Math.min(slideCount - 1, activeSlideIndex + 1)
+        nextSlideIndex = Math.min(slideCount - 1, activeSlideIndex + 1);
       } else if (event.key === "ArrowUp") {
-        nextSlideIndex = Math.max(0, activeSlideIndex - 1)
+        nextSlideIndex = Math.max(0, activeSlideIndex - 1);
       } else if (event.key === "Home") {
-        nextSlideIndex = 0
+        nextSlideIndex = 0;
       } else if (event.key === "End") {
-        nextSlideIndex = slideCount - 1
+        nextSlideIndex = slideCount - 1;
       }
 
-      if (nextSlideIndex === null) return
+      if (nextSlideIndex === null) return;
 
-      event.preventDefault()
-      onSelectSlide(nextSlideIndex)
+      event.preventDefault();
+      onSelectSlide(nextSlideIndex);
     },
-    [activeSlideIndex, onSelectSlide, slideCount]
-  )
+    [activeSlideIndex, onSelectSlide, slideCount],
+  );
 
   return (
     <ScrollArea
@@ -708,7 +713,7 @@ function PptxThumbnailSidebarList({
         "aria-label": "PowerPoint slides",
         onKeyDown: handleKeyDown,
         onMouseDown: (event) => {
-          event.currentTarget.focus({ preventScroll: true })
+          event.currentTarget.focus({ preventScroll: true });
         },
         role: "listbox",
         tabIndex: 0,
@@ -731,10 +736,10 @@ function PptxThumbnailSidebarList({
           }}
         >
           {virtualItems.map((virtualRow) => {
-            const thumbnail = visibleThumbnails[virtualRow.index]
-            if (!thumbnail) return null
+            const thumbnail = visibleThumbnails[virtualRow.index];
+            if (!thumbnail) return null;
 
-            const isActive = thumbnail.slideIndex === activeSlideIndex
+            const isActive = thumbnail.slideIndex === activeSlideIndex;
 
             return (
               <div
@@ -743,7 +748,7 @@ function PptxThumbnailSidebarList({
                 data-index={virtualRow.index}
                 className={cn(
                   "absolute top-0 right-2 left-2 pb-2 [contain:layout_paint_style]",
-                  isActive && "z-10"
+                  isActive && "z-10",
                 )}
                 style={{
                   transform: `translateY(${
@@ -764,7 +769,7 @@ function PptxThumbnailSidebarList({
                     isActive
                       ? "bg-sidebar-accent text-foreground"
                       : "text-muted-foreground",
-                    isActive && PPTX_THUMBNAIL_FOCUS_RING_CLASS
+                    isActive && PPTX_THUMBNAIL_FOCUS_RING_CLASS,
                   )}
                   onClick={() => onSelectSlide(thumbnail.slideIndex)}
                 >
@@ -779,12 +784,12 @@ function PptxThumbnailSidebarList({
                   {thumbnail.slideNumber}
                 </div>
               </div>
-            )
+            );
           })}
         </div>
       ) : null}
     </ScrollArea>
-  )
+  );
 }
 
 function PptxThumbnailSidebarContent({
@@ -796,19 +801,19 @@ function PptxThumbnailSidebarContent({
   sidebarOpen,
   slideCount,
 }: {
-  activeSlideIndex: number
-  controller: ReturnType<typeof usePptxViewer>["controller"]
-  displayFileName: string
-  isLoading: boolean
-  onSelectSlide: (slideIndex: number) => void
-  sidebarOpen: boolean
-  slideCount: number
+  activeSlideIndex: number;
+  controller: ReturnType<typeof usePptxViewer>["controller"];
+  displayFileName: string;
+  isLoading: boolean;
+  onSelectSlide: (slideIndex: number) => void;
+  sidebarOpen: boolean;
+  slideCount: number;
 }) {
   const [renderWindow, setRenderWindow] =
     React.useState<PptxSlideThumbnailRenderWindow>({
       prefetchSlideIndexes: [],
       visibleSlideIndexes: [],
-    })
+    });
   const thumbnailOptions = React.useMemo(
     () => ({
       renderWindow,
@@ -817,29 +822,29 @@ function PptxThumbnailSidebarContent({
         maxWidth: PPTX_THUMBNAIL_WIDTH,
       },
     }),
-    [renderWindow]
-  )
-  const { thumbnails } = usePptxViewerThumbnails(controller, thumbnailOptions)
+    [renderWindow],
+  );
+  const { thumbnails } = usePptxViewerThumbnails(controller, thumbnailOptions);
   const handleRenderWindowChange = React.useCallback(
     (nextWindow: PptxSlideThumbnailRenderWindow) => {
       setRenderWindow((currentWindow) => {
-        const currentVisible = currentWindow.visibleSlideIndexes ?? []
-        const nextVisible = nextWindow.visibleSlideIndexes ?? []
-        const currentPrefetch = currentWindow.prefetchSlideIndexes ?? []
-        const nextPrefetch = nextWindow.prefetchSlideIndexes ?? []
+        const currentVisible = currentWindow.visibleSlideIndexes ?? [];
+        const nextVisible = nextWindow.visibleSlideIndexes ?? [];
+        const currentPrefetch = currentWindow.prefetchSlideIndexes ?? [];
+        const nextPrefetch = nextWindow.prefetchSlideIndexes ?? [];
 
         if (
           areNumberArraysEqual(currentVisible, nextVisible) &&
           areNumberArraysEqual(currentPrefetch, nextPrefetch)
         ) {
-          return currentWindow
+          return currentWindow;
         }
 
-        return nextWindow
-      })
+        return nextWindow;
+      });
     },
-    []
-  )
+    [],
+  );
 
   return (
     <PptxThumbnailSidebarList
@@ -852,22 +857,22 @@ function PptxThumbnailSidebarContent({
       slideCount={slideCount}
       thumbnails={thumbnails}
     />
-  )
+  );
 }
 
 export type PptxViewerPreviewProps = {
-  className?: string
-  defaultThumbnailSidebarOpen?: boolean
-  defaultZoom?: number
-  fileName?: string
-  initialSlide?: number
-  showDownload?: boolean
-  showToolbar?: boolean
-  showUpload?: boolean
-  src?: string
-  toolbarActions?: React.ReactNode
-  onError?: (error: PptxViewerError) => void
-}
+  className?: string;
+  defaultThumbnailSidebarOpen?: boolean;
+  defaultZoom?: number;
+  fileName?: string;
+  initialSlide?: number;
+  showDownload?: boolean;
+  showToolbar?: boolean;
+  showUpload?: boolean;
+  src?: string;
+  toolbarActions?: React.ReactNode;
+  onError?: (error: PptxViewerError) => void;
+};
 
 export function PptxViewerPreview({
   className,
@@ -882,208 +887,208 @@ export function PptxViewerPreview({
   toolbarActions,
   onError,
 }: PptxViewerPreviewProps) {
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
-  const [viewerShellRef, viewerShellWidth] = useElementWidth<HTMLDivElement>()
-  const requestedInitialSlideIndex = Math.max(0, Math.round(initialSlide) - 1)
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [viewerShellRef, viewerShellWidth] = useElementWidth<HTMLDivElement>();
+  const requestedInitialSlideIndex = Math.max(0, Math.round(initialSlide) - 1);
   const [viewportElement, setViewportElement] =
-    React.useState<HTMLDivElement | null>(null)
+    React.useState<HTMLDivElement | null>(null);
   const [uploadedPresentation, setUploadedPresentation] =
-    React.useState<UploadedPresentation | null>(null)
+    React.useState<UploadedPresentation | null>(null);
   const [sidebarOpen, setSidebarOpen] = React.useState(
-    defaultThumbnailSidebarOpen
-  )
+    defaultThumbnailSidebarOpen,
+  );
   const [thumbnailSidebarMounted, setThumbnailSidebarMounted] = React.useState(
-    defaultThumbnailSidebarOpen
-  )
+    defaultThumbnailSidebarOpen,
+  );
   const [activeSlideIndex, setActiveSlideIndex] = React.useState(
-    requestedInitialSlideIndex
-  )
+    requestedInitialSlideIndex,
+  );
   const [zoom, setZoom] = React.useState(() =>
-    Math.min(400, Math.max(10, Math.round(defaultZoom)))
-  )
-  const [slideCount, setSlideCount] = React.useState(0)
-  const [isLoading, setIsLoading] = React.useState(Boolean(src))
-  const [loadError, setLoadError] = React.useState<string>()
-  const [isPreparingDownload, setIsPreparingDownload] = React.useState(false)
-  const viewer = usePptxViewer()
-  const sidebarInline = useInlineThumbnailSidebar(viewerShellWidth)
+    Math.min(400, Math.max(10, Math.round(defaultZoom))),
+  );
+  const [slideCount, setSlideCount] = React.useState(0);
+  const [isLoading, setIsLoading] = React.useState(Boolean(src));
+  const [loadError, setLoadError] = React.useState<string>();
+  const [isPreparingDownload, setIsPreparingDownload] = React.useState(false);
+  const viewer = usePptxViewer();
+  const sidebarInline = useInlineThumbnailSidebar(viewerShellWidth);
   const activeUploadedPresentation =
-    uploadedPresentation?.sourceUrl === src ? uploadedPresentation : null
+    uploadedPresentation?.sourceUrl === src ? uploadedPresentation : null;
   const source: PresentationSource | undefined =
-    activeUploadedPresentation?.file ?? src
-  const sourceIdentity = activeUploadedPresentation?.identity ?? src ?? ""
-  const hasPresentation = Boolean(source)
+    activeUploadedPresentation?.file ?? src;
+  const sourceIdentity = activeUploadedPresentation?.identity ?? src ?? "";
+  const hasPresentation = Boolean(source);
   const displayFileName = React.useMemo(
     () =>
       activeUploadedPresentation?.file.name ??
       (src
         ? formatPresentationName(fileName, src)
         : (fileName ?? "presentation.pptx")),
-    [activeUploadedPresentation?.file.name, fileName, src]
-  )
-  const thumbnailSidebarVisible = Boolean(sidebarOpen && hasPresentation)
+    [activeUploadedPresentation?.file.name, fileName, src],
+  );
+  const thumbnailSidebarVisible = Boolean(sidebarOpen && hasPresentation);
   const sidebarActiveSlideIndex = useDebouncedValue(
     activeSlideIndex,
-    PPTX_THUMBNAIL_FOLLOW_DELAY_MS
-  )
-  const controlsDisabled = !hasPresentation || isLoading || Boolean(loadError)
+    PPTX_THUMBNAIL_FOLLOW_DELAY_MS,
+  );
+  const controlsDisabled = !hasPresentation || isLoading || Boolean(loadError);
   const shouldShowLoadingSpinner = useDelayedLoadingIndicator(
     isLoading,
-    PPTX_LOADING_INDICATOR_DELAY_MS
-  )
+    PPTX_LOADING_INDICATOR_DELAY_MS,
+  );
   const virtualization = React.useMemo(
     () => ({
       enabled: true,
       overscanViewport: 0.75,
       scrollElement: viewportElement,
     }),
-    [viewportElement]
-  )
+    [viewportElement],
+  );
   const pendingSlideNavigationRef = React.useRef<{
-    hasObservedIntermediateSlide: boolean
-    targetIndex: number
-    timeoutId: number
-  } | null>(null)
+    hasObservedIntermediateSlide: boolean;
+    targetIndex: number;
+    timeoutId: number;
+  } | null>(null);
   const cancelPendingSlideNavigation = React.useCallback(() => {
-    const pendingNavigation = pendingSlideNavigationRef.current
+    const pendingNavigation = pendingSlideNavigationRef.current;
 
     if (pendingNavigation) {
-      window.clearTimeout(pendingNavigation.timeoutId)
-      pendingSlideNavigationRef.current = null
+      window.clearTimeout(pendingNavigation.timeoutId);
+      pendingSlideNavigationRef.current = null;
     }
-  }, [])
+  }, []);
 
   React.useEffect(() => {
-    if (thumbnailSidebarVisible) setThumbnailSidebarMounted(true)
-  }, [thumbnailSidebarVisible])
+    if (thumbnailSidebarVisible) setThumbnailSidebarMounted(true);
+  }, [thumbnailSidebarVisible]);
 
   React.useEffect(() => {
-    cancelPendingSlideNavigation()
-    setSlideCount(0)
-    setZoom(Math.min(400, Math.max(10, Math.round(defaultZoom))))
-    setLoadError(undefined)
-    setIsLoading(Boolean(sourceIdentity))
-    viewportElement?.scrollTo({ top: 0, left: 0 })
+    cancelPendingSlideNavigation();
+    setSlideCount(0);
+    setZoom(Math.min(400, Math.max(10, Math.round(defaultZoom))));
+    setLoadError(undefined);
+    setIsLoading(Boolean(sourceIdentity));
+    viewportElement?.scrollTo({ top: 0, left: 0 });
   }, [
     cancelPendingSlideNavigation,
     defaultZoom,
     sourceIdentity,
     viewportElement,
-  ])
+  ]);
 
   React.useEffect(
     () => cancelPendingSlideNavigation,
-    [cancelPendingSlideNavigation]
-  )
+    [cancelPendingSlideNavigation],
+  );
 
   React.useEffect(() => {
-    setActiveSlideIndex(requestedInitialSlideIndex)
+    setActiveSlideIndex(requestedInitialSlideIndex);
     if (viewer.controller?.isReady()) {
       void viewer.controller.goToSlide(requestedInitialSlideIndex, {
         behavior: "instant",
         block: "center",
-      })
+      });
     }
-  }, [requestedInitialSlideIndex, sourceIdentity, viewer.controller])
+  }, [requestedInitialSlideIndex, sourceIdentity, viewer.controller]);
 
   const navigateToSlide = React.useCallback(
     (nextSlideIndex: number, behavior: ScrollBehavior) => {
       const normalizedSlideIndex = Math.min(
         Math.max(0, Math.round(nextSlideIndex)),
-        Math.max(0, slideCount - 1)
-      )
+        Math.max(0, slideCount - 1),
+      );
       const resolvedBehavior =
         behavior === "smooth" &&
         window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? "instant"
-          : behavior
+          : behavior;
 
-      cancelPendingSlideNavigation()
+      cancelPendingSlideNavigation();
       const timeoutId = window.setTimeout(
         () => {
-          const pendingNavigation = pendingSlideNavigationRef.current
+          const pendingNavigation = pendingSlideNavigationRef.current;
 
-          if (pendingNavigation?.targetIndex !== normalizedSlideIndex) return
+          if (pendingNavigation?.targetIndex !== normalizedSlideIndex) return;
 
-          pendingSlideNavigationRef.current = null
-          setActiveSlideIndex(normalizedSlideIndex)
+          pendingSlideNavigationRef.current = null;
+          setActiveSlideIndex(normalizedSlideIndex);
         },
         resolvedBehavior === "smooth"
           ? PPTX_SMOOTH_NAVIGATION_TIMEOUT_MS
-          : PPTX_INSTANT_NAVIGATION_TIMEOUT_MS
-      )
+          : PPTX_INSTANT_NAVIGATION_TIMEOUT_MS,
+      );
       pendingSlideNavigationRef.current = {
         hasObservedIntermediateSlide: false,
         targetIndex: normalizedSlideIndex,
         timeoutId,
-      }
+      };
 
-      setActiveSlideIndex(normalizedSlideIndex)
+      setActiveSlideIndex(normalizedSlideIndex);
       void viewer.controller?.goToSlide(normalizedSlideIndex, {
         behavior: resolvedBehavior,
         block: "center",
-      })
+      });
     },
-    [cancelPendingSlideNavigation, slideCount, viewer.controller]
-  )
+    [cancelPendingSlideNavigation, slideCount, viewer.controller],
+  );
   const handleSlideChange = React.useCallback(
     (nextSlideIndex: number) => navigateToSlide(nextSlideIndex, "smooth"),
-    [navigateToSlide]
-  )
+    [navigateToSlide],
+  );
   const handleThumbnailSlideChange = React.useCallback(
     (nextSlideIndex: number) => navigateToSlide(nextSlideIndex, "instant"),
-    [navigateToSlide]
-  )
+    [navigateToSlide],
+  );
   const handleViewerSlideChange = React.useCallback(
     (nextSlideIndex: number) => {
-      const pendingNavigation = pendingSlideNavigationRef.current
+      const pendingNavigation = pendingSlideNavigationRef.current;
 
       if (pendingNavigation) {
         if (nextSlideIndex !== pendingNavigation.targetIndex) {
-          pendingNavigation.hasObservedIntermediateSlide = true
-          return
+          pendingNavigation.hasObservedIntermediateSlide = true;
+          return;
         }
 
         // The controller reports the destination immediately, before the smooth
         // scroll starts. Keep the destination authoritative until the scroll
         // observer has crossed an intermediate slide and reports it again.
-        if (!pendingNavigation.hasObservedIntermediateSlide) return
+        if (!pendingNavigation.hasObservedIntermediateSlide) return;
 
-        window.clearTimeout(pendingNavigation.timeoutId)
-        pendingSlideNavigationRef.current = null
+        window.clearTimeout(pendingNavigation.timeoutId);
+        pendingSlideNavigationRef.current = null;
       }
 
       React.startTransition(() => {
         setActiveSlideIndex((currentSlideIndex) =>
           currentSlideIndex === nextSlideIndex
             ? currentSlideIndex
-            : nextSlideIndex
-        )
-      })
+            : nextSlideIndex,
+        );
+      });
     },
-    []
-  )
+    [],
+  );
   const syncFirstSlideAtViewportTop = React.useCallback(
     (viewport: HTMLDivElement) => {
-      if (viewport.scrollTop > PPTX_SCROLL_TOP_EPSILON_PX) return
+      if (viewport.scrollTop > PPTX_SCROLL_TOP_EPSILON_PX) return;
 
       setActiveSlideIndex((currentSlideIndex) =>
-        currentSlideIndex === 0 ? currentSlideIndex : 0
-      )
+        currentSlideIndex === 0 ? currentSlideIndex : 0,
+      );
 
-      const controller = viewer.controller
+      const controller = viewer.controller;
       if (!isLoading && controller && controller.getSlideIndex() !== 0) {
         void controller.goToSlide(0, {
           behavior: "instant",
           block: "start",
-        })
+        });
       }
     },
-    [isLoading, viewer.controller]
-  )
+    [isLoading, viewer.controller],
+  );
   const handleViewerUserScrollIntent = React.useCallback(
     (event: React.SyntheticEvent<HTMLDivElement>) => {
-      const viewport = event.currentTarget
+      const viewport = event.currentTarget;
 
       // Stop an in-flight native smooth scroll before manual wheel, touch,
       // pointer, or keyboard input takes ownership of the viewport.
@@ -1091,19 +1096,19 @@ export function PptxViewerPreview({
         behavior: "instant",
         left: viewport.scrollLeft,
         top: viewport.scrollTop,
-      })
-      cancelPendingSlideNavigation()
-      syncFirstSlideAtViewportTop(viewport)
+      });
+      cancelPendingSlideNavigation();
+      syncFirstSlideAtViewportTop(viewport);
     },
-    [cancelPendingSlideNavigation, syncFirstSlideAtViewportTop]
-  )
+    [cancelPendingSlideNavigation, syncFirstSlideAtViewportTop],
+  );
   const handleViewerScroll = React.useCallback(
     (event: React.UIEvent<HTMLDivElement>) => {
-      if (pendingSlideNavigationRef.current) return
-      syncFirstSlideAtViewportTop(event.currentTarget)
+      if (pendingSlideNavigationRef.current) return;
+      syncFirstSlideAtViewportTop(event.currentTarget);
     },
-    [syncFirstSlideAtViewportTop]
-  )
+    [syncFirstSlideAtViewportTop],
+  );
   const handleViewerKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (
@@ -1116,50 +1121,50 @@ export function PptxViewerPreview({
         event.key === " " ||
         event.key === "Spacebar"
       ) {
-        handleViewerUserScrollIntent(event)
+        handleViewerUserScrollIntent(event);
       }
     },
-    [handleViewerUserScrollIntent]
-  )
+    [handleViewerUserScrollIntent],
+  );
 
   const handleLoad = React.useCallback((presentation: ParsedPresentation) => {
-    const nextSlideCount = presentation.document.slides.length
+    const nextSlideCount = presentation.document.slides.length;
 
-    setSlideCount(nextSlideCount)
+    setSlideCount(nextSlideCount);
     setActiveSlideIndex((currentSlideIndex) =>
-      Math.min(currentSlideIndex, Math.max(0, nextSlideCount - 1))
-    )
-    setLoadError(undefined)
-  }, [])
+      Math.min(currentSlideIndex, Math.max(0, nextSlideCount - 1)),
+    );
+    setLoadError(undefined);
+  }, []);
 
   const handleReady = React.useCallback(() => {
-    setIsLoading(false)
-  }, [])
+    setIsLoading(false);
+  }, []);
 
   const handleError = React.useCallback(
     (error: PptxViewerError) => {
-      setLoadError(error.message)
-      setIsLoading(false)
-      onError?.(error)
+      setLoadError(error.message);
+      setIsLoading(false);
+      onError?.(error);
     },
-    [onError]
-  )
+    [onError],
+  );
 
   const handleDownload = React.useCallback(async () => {
-    if (isPreparingDownload || !source) return
+    if (isPreparingDownload || !source) return;
 
-    setIsPreparingDownload(true)
+    setIsPreparingDownload(true);
 
     try {
       await downloadPresentation({
         file: activeUploadedPresentation?.file,
         fileName: displayFileName,
         url: activeUploadedPresentation ? undefined : src,
-      })
+      });
     } catch (error) {
-      console.error(error)
+      console.error(error);
     } finally {
-      setIsPreparingDownload(false)
+      setIsPreparingDownload(false);
     }
   }, [
     activeUploadedPresentation,
@@ -1167,26 +1172,26 @@ export function PptxViewerPreview({
     isPreparingDownload,
     source,
     src,
-  ])
+  ]);
 
   async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-    event.target.value = ""
+    const file = event.target.files?.[0];
+    event.target.value = "";
 
-    if (!file) return
+    if (!file) return;
 
     setUploadedPresentation({
       file,
       identity: `${file.name}-${file.size}-${file.lastModified}`,
       sourceUrl: src,
-    })
+    });
   }
 
   return (
     <div
       className={cn(
         "flex h-[640px] min-h-0 flex-col overflow-hidden bg-background",
-        className
+        className,
       )}
     >
       <input
@@ -1313,5 +1318,5 @@ export function PptxViewerPreview({
         </ScrollArea>
       </div>
     </div>
-  )
+  );
 }

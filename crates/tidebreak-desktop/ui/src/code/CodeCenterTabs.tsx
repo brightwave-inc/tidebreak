@@ -194,7 +194,10 @@ export function CodeCenterTabs({
     tabRefs.current[wrapped]?.focus();
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, position: number) {
+  function onKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    position: number,
+  ) {
     if (event.key === "ArrowRight") {
       event.preventDefault();
       select(position + 1);
@@ -338,7 +341,8 @@ export function CodeCenterTabs({
             onCloseAll={onCloseAllEditors}
             onCopyPath={onCopyPath}
             onMoveToOtherGroup={
-              onMoveEditorToOtherGroup && (() => onMoveEditorToOtherGroup(index))
+              onMoveEditorToOtherGroup &&
+              (() => onMoveEditorToOtherGroup(index))
             }
             onMove={onMoveEditor && ((to: number) => onMoveEditor(index, to))}
           />
@@ -564,7 +568,10 @@ function EditorTab({
       <TabContextMenuContent label={label}>
         {path && (
           <>
-            <ContextMenuItem className="gap-3 py-2" onSelect={() => onCopyPath(path)}>
+            <ContextMenuItem
+              className="gap-3 py-2"
+              onSelect={() => onCopyPath(path)}
+            >
               <Copy />
               Copy path
             </ContextMenuItem>
@@ -594,9 +601,14 @@ function EditorTab({
         )}
         {onMoveToOtherGroup && (
           <>
-            <ContextMenuItem className="gap-3 py-2" onSelect={onMoveToOtherGroup}>
+            <ContextMenuItem
+              className="gap-3 py-2"
+              onSelect={onMoveToOtherGroup}
+            >
               {region === "primary" ? <MoveRight /> : <MoveLeft />}
-              {region === "primary" ? "Move to split right" : "Move to main group"}
+              {region === "primary"
+                ? "Move to split right"
+                : "Move to main group"}
             </ContextMenuItem>
             <ContextMenuSeparator />
           </>

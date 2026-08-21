@@ -203,7 +203,10 @@ function throttle(
   let last = 0;
   return (progress) => {
     const now = Date.now();
-    if (progress.loaded >= progress.total || now - last >= PROGRESS_THROTTLE_MS) {
+    if (
+      progress.loaded >= progress.total ||
+      now - last >= PROGRESS_THROTTLE_MS
+    ) {
       last = now;
       report(progress);
     }
@@ -605,11 +608,14 @@ export class ApiClient {
 
   /** Trade the bearer for a single-use iframe address for one view. */
   createMcpViewFrame(server: string, uri: string): Promise<McpViewSession> {
-    return this.json(`/mcp/servers/${encodeURIComponent(server)}/view-session`, {
-      method: "POST",
-      headers: this.headers(true),
-      body: JSON.stringify({ uri }),
-    });
+    return this.json(
+      `/mcp/servers/${encodeURIComponent(server)}/view-session`,
+      {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({ uri }),
+      },
+    );
   }
 
   getPolicy(): Promise<ManagedPolicy> {
@@ -670,9 +676,12 @@ export class ApiClient {
 
   /** One skill's full instruction body — what the model is taught by it. */
   getSkillInstructions(name: string): Promise<SkillInstructions> {
-    return this.json(`/plugins/skills/${encodeURIComponent(name)}/instructions`, {
-      headers: this.headers(),
-    });
+    return this.json(
+      `/plugins/skills/${encodeURIComponent(name)}/instructions`,
+      {
+        headers: this.headers(),
+      },
+    );
   }
 
   /**
@@ -836,7 +845,10 @@ export class ApiClient {
   }
 
   /** The shared invoke POST: one route, typed refusals surfaced as errors. */
-  private async postAppInvoke(appId: string, request: unknown): Promise<unknown> {
+  private async postAppInvoke(
+    appId: string,
+    request: unknown,
+  ): Promise<unknown> {
     const response = await fetch(
       `${this.baseUrl}/apps/${encodeURIComponent(appId)}/invoke`,
       {
@@ -861,7 +873,10 @@ export class ApiClient {
           (refusal as { kind: AppInvokeRefusalKind }).kind,
         )
       ) {
-        const typed = refusal as { kind: AppInvokeRefusalKind; message: string };
+        const typed = refusal as {
+          kind: AppInvokeRefusalKind;
+          message: string;
+        };
         throw new AppInvokeRefusalError(typed.kind, String(typed.message));
       }
       await throwIfNotOk(response);
@@ -977,7 +992,9 @@ export class ApiClient {
    * turn would make that cost grow with the profile.
    */
   async listInbox(): Promise<InboxItem[]> {
-    const body = await this.json<unknown>("/inbox", { headers: this.headers() });
+    const body = await this.json<unknown>("/inbox", {
+      headers: this.headers(),
+    });
     if (!Array.isArray(body)) {
       throw new Error("inbox response is not an array");
     }
@@ -1043,7 +1060,11 @@ export class ApiClient {
   undoTurnFileChanges(
     chatId: string,
     turnId: string,
-  ): Promise<{ chat_id: string; turn_id: string; files: ExecFileUndoOutcome[] }> {
+  ): Promise<{
+    chat_id: string;
+    turn_id: string;
+    files: ExecFileUndoOutcome[];
+  }> {
     return this.json(
       `/chats/${encodeURIComponent(chatId)}/turns/${encodeURIComponent(turnId)}/file-changes/undo`,
       { method: "POST", headers: this.headers() },
@@ -1586,7 +1607,9 @@ export class ApiClient {
     for (const item of body) {
       const request = parseOutputWritebackRequest(item);
       if (!request || requests.has(request.callId)) {
-        throw new Error("pending output write-back response contains invalid data");
+        throw new Error(
+          "pending output write-back response contains invalid data",
+        );
       }
       requests.set(request.callId, request);
     }
@@ -1596,9 +1619,12 @@ export class ApiClient {
   async listPendingUserQuestions(
     chatId: string,
   ): Promise<PendingUserQuestions[]> {
-    const body = await this.json<unknown>(`/chats/${chatId}/questions/pending`, {
-      headers: this.headers(),
-    });
+    const body = await this.json<unknown>(
+      `/chats/${chatId}/questions/pending`,
+      {
+        headers: this.headers(),
+      },
+    );
     if (!Array.isArray(body)) {
       throw new Error("pending question response is not an array");
     }
@@ -1674,7 +1700,11 @@ export class ApiClient {
   }
 
   /** Open the chat event stream; auth via Sec-WebSocket-Protocol. */
-  openEvents(chatId: string, after: number, onFrame: (frame: ChatFrame) => void): WebSocket {
+  openEvents(
+    chatId: string,
+    after: number,
+    onFrame: (frame: ChatFrame) => void,
+  ): WebSocket {
     const url = `${this.baseUrl.replace(/^http/, "ws")}/chats/${chatId}/events?after=${after}`;
     const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
     const socket = new WebSocket(url, protocols);
@@ -1955,15 +1985,15 @@ export class ApiClient {
     );
   }
 
-  async listCodeHarnessModels(
-    kind: HarnessKind,
-  ): Promise<{ kind: HarnessKind; models: { id: string; label: string; default: boolean }[] }> {
+  async listCodeHarnessModels(kind: HarnessKind): Promise<{
+    kind: HarnessKind;
+    models: { id: string; label: string; default: boolean }[];
+  }> {
     return requireParsed(
       parseHarnessModelList(
-        await this.json(
-          `/code/harnesses/${encodeURIComponent(kind)}/models`,
-          { headers: this.headers() },
-        ),
+        await this.json(`/code/harnesses/${encodeURIComponent(kind)}/models`, {
+          headers: this.headers(),
+        }),
       ),
       "harness models",
     );
@@ -1981,10 +2011,10 @@ export class ApiClient {
   ): Promise<CodeHarnessInstallSnapshot> {
     return requireParsed(
       parseCodeHarnessInstall(
-        await this.json(
-          `/code/harnesses/${encodeURIComponent(kind)}/install`,
-          { method: "POST", headers: this.headers() },
-        ),
+        await this.json(`/code/harnesses/${encodeURIComponent(kind)}/install`, {
+          method: "POST",
+          headers: this.headers(),
+        }),
       ),
       "harness install",
     );
@@ -2078,7 +2108,9 @@ export class ApiClient {
    * branch. 409 kinds `branch_missing` and `worktree_path_occupied` mean a
    * true restore is impossible; the caller offers the new-workspace fallback.
    */
-  async restoreCodeWorkspace(workspaceId: string): Promise<CodeWorkspaceSnapshot> {
+  async restoreCodeWorkspace(
+    workspaceId: string,
+  ): Promise<CodeWorkspaceSnapshot> {
     return requireParsed(
       parseCodeWorkspace(
         await this.json(
@@ -2100,10 +2132,7 @@ export class ApiClient {
       `/code/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
       { headers: this.headers() },
     );
-    return requireParsed(
-      parseCodeSessionList(body),
-      "code workspace sessions",
-    );
+    return requireParsed(parseCodeSessionList(body), "code workspace sessions");
   }
 
   async createCodeSession(
@@ -2130,10 +2159,9 @@ export class ApiClient {
   }
 
   async getCodeSessionDebug(sessionId: string): Promise<unknown> {
-    return this.json(
-      `/code/sessions/${encodeURIComponent(sessionId)}/debug`,
-      { headers: this.headers() },
-    );
+    return this.json(`/code/sessions/${encodeURIComponent(sessionId)}/debug`, {
+      headers: this.headers(),
+    });
   }
 
   async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
@@ -2208,10 +2236,13 @@ export class ApiClient {
   }
 
   interruptCodeSession(sessionId: string): Promise<void> {
-    return this.json(`/code/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
-      method: "POST",
-      headers: this.headers(),
-    });
+    return this.json(
+      `/code/sessions/${encodeURIComponent(sessionId)}/interrupt`,
+      {
+        method: "POST",
+        headers: this.headers(),
+      },
+    );
   }
 
   async listCodeWorkspaceTree(
@@ -2344,9 +2375,12 @@ export class ApiClient {
   ): Promise<CodeWorkspacePrSnapshot> {
     return requireParsed(
       parseCodeWorkspacePr(
-        await this.json(`/code/workspaces/${encodeURIComponent(workspaceId)}/pr`, {
-          headers: this.headers(),
-        }),
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr`,
+          {
+            headers: this.headers(),
+          },
+        ),
       ),
       "code pull request",
     );
@@ -2439,7 +2473,10 @@ export class ApiClient {
           {
             method: "POST",
             headers: this.headers(true),
-            body: JSON.stringify({ method: body.method, auto: body.auto ?? false }),
+            body: JSON.stringify({
+              method: body.method,
+              auto: body.auto ?? false,
+            }),
           },
         ),
       ),
@@ -2491,10 +2528,13 @@ export class ApiClient {
   async forkCodeSession(sessionId: string): Promise<CodeForkTranscript> {
     return requireParsed(
       parseCodeForkTranscript(
-        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/fork`, {
-          method: "POST",
-          headers: this.headers(),
-        }),
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/fork`,
+          {
+            method: "POST",
+            headers: this.headers(),
+          },
+        ),
       ),
       "code fork transcript",
     );
@@ -2503,10 +2543,13 @@ export class ApiClient {
   async reapCodeSession(sessionId: string): Promise<CodeSessionSnapshot> {
     return requireParsed(
       parseCodeSession(
-        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/reap`, {
-          method: "POST",
-          headers: this.headers(),
-        }),
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/reap`,
+          {
+            method: "POST",
+            headers: this.headers(),
+          },
+        ),
       ),
       "code session",
     );
@@ -2644,11 +2687,14 @@ export class ApiClient {
   ): Promise<CodeSessionSnapshot> {
     return requireParsed(
       parseCodeSession(
-        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/attention`, {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(body),
-        }),
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/attention`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+        ),
       ),
       "code attention",
     );

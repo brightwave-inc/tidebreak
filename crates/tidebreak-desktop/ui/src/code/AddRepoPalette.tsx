@@ -124,7 +124,9 @@ export function AddRepoPalette({
             params: { repoId: repo.id },
           });
         } catch (err) {
-          setError(friendlyErrorMessage(err, "Cloned, but could not open the repo"));
+          setError(
+            friendlyErrorMessage(err, "Cloned, but could not open the repo"),
+          );
         }
       })();
     }
@@ -200,7 +202,9 @@ export function AddRepoPalette({
   }
 
   function selectSource(key: string) {
-    const row = rows.find((entry) => entry.key === key) ?? SOURCES.find((entry) => entry.key === key);
+    const row =
+      rows.find((entry) => entry.key === key) ??
+      SOURCES.find((entry) => entry.key === key);
     if (!row) return;
     if (row.key === "local") {
       setStage("local");
@@ -220,7 +224,8 @@ export function AddRepoPalette({
     if (event.key === "Backspace") {
       const target = event.target as HTMLElement | null;
       const typing =
-        target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement;
       if (typing && target.value.length > 0) return;
       event.preventDefault();
       goBack();
@@ -423,7 +428,12 @@ function LocalStage({
             autoFocus
           />
           {hasNativeHost() && (
-            <Button type="button" variant="outline" onClick={onBrowse} disabled={busy}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onBrowse}
+              disabled={busy}
+            >
               Browse
             </Button>
           )}
@@ -438,7 +448,11 @@ function LocalStage({
         />
       </label>
       {error && <p className="text-sm text-critical">{error}</p>}
-      <Button type="submit" disabled={busy || !path.trim()} className="self-start">
+      <Button
+        type="submit"
+        disabled={busy || !path.trim()}
+        className="self-start"
+      >
         {busy ? "Registering…" : "Register"}
       </Button>
     </form>
@@ -561,7 +575,10 @@ function GithubStage({
         />
       </label>
       {ghHint && (
-        <p className="text-muted-foreground text-xs" data-testid="gh-absent-hint">
+        <p
+          className="text-muted-foreground text-xs"
+          data-testid="gh-absent-hint"
+        >
           {ghHint} You can still clone over HTTPS.
         </p>
       )}
@@ -614,7 +631,12 @@ function ParentDirField({
           disabled={busy}
         />
         {hasNativeHost() && (
-          <Button type="button" variant="outline" onClick={onBrowse} disabled={busy}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onBrowse}
+            disabled={busy}
+          >
             Browse
           </Button>
         )}
@@ -632,7 +654,7 @@ function ProgressStage({
   error: string | null | undefined;
   onRetry: () => void;
 }) {
-  const failed = Boolean(error) || job?.done === true && Boolean(job.error);
+  const failed = Boolean(error) || (job?.done === true && Boolean(job.error));
   const percent = job?.percent ?? (job?.done && !job.error ? 100 : 0);
   return (
     <div className="flex flex-col gap-3">
@@ -645,7 +667,12 @@ function ProgressStage({
           <pre className="bg-muted max-h-32 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap">
             {error ?? job?.error}
           </pre>
-          <Button type="button" variant="outline" className="self-start" onClick={onRetry}>
+          <Button
+            type="button"
+            variant="outline"
+            className="self-start"
+            onClick={onRetry}
+          >
             Retry
           </Button>
         </>

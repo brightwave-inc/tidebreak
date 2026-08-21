@@ -138,8 +138,6 @@ describe("AgentActivityTimeline", () => {
     // The sentence is prose, so it does not wear the command's monospace.
     expect(card.querySelector(".font-mono")).toBeNull();
     // The literal action is not lost: the open body still carries it.
-    expect(
-      within(commandRow).getByText("pip install matplotlib"),
-    ).toBeTruthy();
+    expect(within(commandRow).getByText("pip install matplotlib")).toBeTruthy();
   });
 });

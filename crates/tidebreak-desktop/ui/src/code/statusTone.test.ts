@@ -32,9 +32,9 @@ describe("attentionStatusTone", () => {
   it("separates the two warnings from the one critical", () => {
     const tone = (state: Attention["state"]) =>
       attentionStatusTone({ state, source: "lifecycle" });
-    expect(
-      tone({ type: "needs_you", prompt: "", source: "structured" }),
-    ).toBe("critical");
+    expect(tone({ type: "needs_you", prompt: "", source: "structured" })).toBe(
+      "critical",
+    );
     expect(tone({ type: "stalled", idle_secs: 90 })).toBe("warning");
     expect(tone({ type: "fenced", reason: { type: "orphan_alive" } })).toBe(
       "warning",

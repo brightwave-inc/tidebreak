@@ -42,65 +42,64 @@ export function upsertPendingApprovalCard(
     },
   moveToEnd = false,
 ): ChatMessage[] {
-    let next = moveToEnd
-      ? messages.filter(
-          (message) =>
-            !(
-              (message.role === "tool" || message.role === "approval") &&
-              message.callId === approval.callId
-            ),
-        )
-      : messages;
-    const presentation = toolApprovalPresentation(approval.approval);
-    const preview = approval.preview ?? null;
-    const toolIndex = next.findIndex(
-      (message) =>
-        message.role === "tool" && message.callId === approval.callId,
+  let next = moveToEnd
+    ? messages.filter(
+        (message) =>
+          !(
+            (message.role === "tool" || message.role === "approval") &&
+            message.callId === approval.callId
+          ),
+      )
+    : messages;
+  const presentation = toolApprovalPresentation(approval.approval);
+  const preview = approval.preview ?? null;
+  const toolIndex = next.findIndex(
+    (message) => message.role === "tool" && message.callId === approval.callId,
+  );
+  if (toolIndex >= 0) {
+    next = next.map((message, index) =>
+      index === toolIndex && message.role === "tool"
+        ? {
+            ...message,
+            name: approval.action,
+            status: "waiting_approval",
+            preview,
+          }
+        : message,
     );
-    if (toolIndex >= 0) {
-      next = next.map((message, index) =>
-        index === toolIndex && message.role === "tool"
-          ? {
-              ...message,
-              name: approval.action,
-              status: "waiting_approval",
-              preview,
-            }
-          : message,
-      );
-    } else {
-      next = [
-        ...next,
-        {
-          id: `tool-${approval.callId}`,
-          role: "tool",
-          callId: approval.callId,
-          name: approval.action,
-          status: "waiting_approval",
-          preview,
-        },
-      ];
-    }
+  } else {
+    next = [
+      ...next,
+      {
+        id: `tool-${approval.callId}`,
+        role: "tool",
+        callId: approval.callId,
+        name: approval.action,
+        status: "waiting_approval",
+        preview,
+      },
+    ];
+  }
 
-    const cardIndex = next.findIndex(
-      (message) =>
-        message.role === "approval" && message.callId === approval.callId,
-    );
-    const card: ChatMessage = {
-      id: `approval-${approval.callId}`,
-      role: "approval",
-      callId: approval.callId,
-      summary: presentation.summary,
-      preview,
-      canApprove: approval.canApprove && presentation.canApprove,
-      canRemember: approval.canRemember && presentation.canRemember,
-      autoJudging: approval.autoJudging ?? false,
-      grantRungs: approval.grantRungs ?? [],
-    };
-    if (cardIndex >= 0) {
-      next = next.map((message, index) => (index === cardIndex ? card : message));
-    } else {
-      next = [...next, card];
-    }
+  const cardIndex = next.findIndex(
+    (message) =>
+      message.role === "approval" && message.callId === approval.callId,
+  );
+  const card: ChatMessage = {
+    id: `approval-${approval.callId}`,
+    role: "approval",
+    callId: approval.callId,
+    summary: presentation.summary,
+    preview,
+    canApprove: approval.canApprove && presentation.canApprove,
+    canRemember: approval.canRemember && presentation.canRemember,
+    autoJudging: approval.autoJudging ?? false,
+    grantRungs: approval.grantRungs ?? [],
+  };
+  if (cardIndex >= 0) {
+    next = next.map((message, index) => (index === cardIndex ? card : message));
+  } else {
+    next = [...next, card];
+  }
   return next;
 }

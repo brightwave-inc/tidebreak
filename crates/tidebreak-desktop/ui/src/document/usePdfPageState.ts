@@ -3,14 +3,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const STORAGE_KEY_PREFIX = "pdf_page_";
 
 function getStoredPage(documentId: string): number | null {
-  const stored = window.sessionStorage.getItem(`${STORAGE_KEY_PREFIX}${documentId}`);
+  const stored = window.sessionStorage.getItem(
+    `${STORAGE_KEY_PREFIX}${documentId}`,
+  );
   if (!stored) return null;
   const page = parseInt(stored, 10);
   return Number.isFinite(page) ? page : null;
 }
 
 function setStoredPage(documentId: string, page: number): void {
-  window.sessionStorage.setItem(`${STORAGE_KEY_PREFIX}${documentId}`, String(page));
+  window.sessionStorage.setItem(
+    `${STORAGE_KEY_PREFIX}${documentId}`,
+    String(page),
+  );
 }
 
 function clampPage(page: number, numPages: number) {
@@ -76,7 +81,9 @@ export function usePdfPageState(
     (pageOrUpdater: number | ((prev: number) => number)) => {
       setCurrentPageInternal((prev) => {
         const raw =
-          typeof pageOrUpdater === "function" ? pageOrUpdater(prev) : pageOrUpdater;
+          typeof pageOrUpdater === "function"
+            ? pageOrUpdater(prev)
+            : pageOrUpdater;
 
         const next = clampPage(raw, numPages);
         setStoredPage(documentId, next);

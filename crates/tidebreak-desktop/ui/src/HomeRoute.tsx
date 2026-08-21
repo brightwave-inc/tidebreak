@@ -11,16 +11,16 @@ import {
   useComposerDraft,
   useComposerDrafts,
 } from "./ComposerDrafts";
-import {
-  type ImportedDocument,
-  type LibraryImportSuccess,
-} from "./documents";
+import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
 import { useFirstMessage } from "./FirstMessage";
 import { hasNativeHost } from "./host";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
-import { effectiveNewChatSettings, useNewChatSettings } from "./NewChatSettings";
+import {
+  effectiveNewChatSettings,
+  useNewChatSettings,
+} from "./NewChatSettings";
 import { PermissionModeMenu } from "./PermissionModeMenu";
 import { pluginsApisFromClient } from "./plugins/pluginsApis";
 import { useComposerPlugins } from "./plugins/useComposerPlugins";
@@ -110,16 +110,15 @@ export function singleFlight<T>(): (run: () => Promise<T>) => Promise<T> {
   };
 }
 
-function isImportedDocument(
-  result: { status: string },
-): result is LibraryImportSuccess {
+function isImportedDocument(result: {
+  status: string;
+}): result is LibraryImportSuccess {
   return result.status === "imported" || result.status === "already_present";
 }
 
 export function HomeRoute() {
   const navigate = useNavigate();
-  const { client, models, defaultModelKey, providers } =
-    useApp();
+  const { client, models, defaultModelKey, providers } = useApp();
   const modelSettingsNav = useModelSettingsNav();
   const creatingChat = useChatListStore((state) => state.creatingChat);
   const draft = useComposerDraft(HOME_DRAFT_KEY);
@@ -152,7 +151,8 @@ export function HomeRoute() {
   // over the server's sticky defaults. Only the explicit picks are sent; the
   // server seeds the rest from the same defaults being displayed.
   const effective = effectiveNewChatSettings(newChat);
-  const efforts = modelForSelection(models, effective.model)?.reasoning_efforts ?? [];
+  const efforts =
+    modelForSelection(models, effective.model)?.reasoning_efforts ?? [];
 
   // A choice made inside a chat is recorded server-side as the sticky
   // default; re-read it whenever the reader lands back here so the pickers
@@ -236,8 +236,9 @@ export function HomeRoute() {
       adoptAttached(attached);
     } catch (err) {
       setAttachError(
-        String(err).replace(/^Error:\s*/, "").trim() ||
-          "Could not attach that file.",
+        String(err)
+          .replace(/^Error:\s*/, "")
+          .trim() || "Could not attach that file.",
       );
     } finally {
       setAttaching(false);
@@ -282,7 +283,9 @@ export function HomeRoute() {
       (result) => result.status === "failed",
     );
     if (failedDocument?.status === "failed") {
-      setAttachError(`${failedDocument.displayName}: ${failedDocument.message}`);
+      setAttachError(
+        `${failedDocument.displayName}: ${failedDocument.message}`,
+      );
     }
     const [failedImage] = attached.failedImages;
     if (failedImage) {
@@ -374,136 +377,139 @@ export function HomeRoute() {
             stretches the column to the slot's height — it has to claim it
             itself, the same way .chat-pane does. */}
         <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden px-[clamp(0.5rem,4%,5rem)]">
-        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
-          {/* The same null state an empty conversation shows: home is where a
+          <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+            {/* The same null state an empty conversation shows: home is where a
               chat starts, so it greets the same way. Picking a starter prompt
               fills the composer rather than sending, the way it does in a chat.
               Web starters also turn internet access on so the turn can search
               without another click. Home's starters come from the installed
               prompt library when it has any; otherwise the built-in openers
               stand. */}
-          <WelcomeState
-            onSelectPrompt={(prompt, options) => {
-              setDraft(prompt);
-              if (options?.enableInternet) {
-                newChat.setNetworkPolicy({ mode: "open" });
-              }
-              voice.resetInputUsed();
-            }}
-            executionConfigClient={client}
-            promptLibrary={promptLibrary}
-            heading={walkthroughAvailable ? "Welcome to Tidebreak" : undefined}
-            description={
-              walkthroughAvailable
-                ? "Choose how the agent works, add what it needs, and start with a real task."
-                : undefined
-            }
-            onStartWalkthrough={
-              walkthroughAvailable && !walkthroughOpen
-                ? () => setWalkthroughOpen(true)
-                : undefined
-            }
-          />
-        </div>
-
-        <div className="z-10 mx-auto w-full max-w-3xl pb-2">
-          {error && <p className="pb-2 text-sm text-critical">{error}</p>}
-          <Composer
-            activeTurnId={null}
-            busy={false}
-            cancelError={null}
-            cancelPending={false}
-            disabled={creatingChat}
-            draft={draft}
-            plugins={composerPlugins.plugins}
-            slash={{
-              options: composerPlugins.slashOptions,
-              invoked: pendingSkills,
-              onInvoke: (names) =>
-                composerDraftActions.setSkills(HOME_DRAFT_KEY, [
-                  ...pendingSkills,
-                  ...names,
-                ]),
-              onRemove: (name) =>
-                composerDraftActions.setSkills(
-                  HOME_DRAFT_KEY,
-                  pendingSkills.filter((skill) => skill !== name),
-                ),
-              loadPromptBody: composerPlugins.loadPromptBody,
-            }}
-            images={composerImages}
-            voice={{
-              available: voice.available,
-              state: voice.state,
-              error: voice.error,
-              onStart: () => void voice.start(),
-              onStop: voice.stop,
-            }}
-            files={{
-              items: pendingFiles,
-              attaching,
-              onAttach: hasNativeHost() ? onAttach : undefined,
-              onRemove: (documentId) =>
-                setPendingFiles((current) =>
-                  current.filter((file) => file.documentId !== documentId),
-                ),
-            }}
-            nativeDropTarget={
-              <DocumentDropTarget
-                resolveChatId={ensurePendingChat}
-                onAttached={adoptAttached}
-                onError={(caught) =>
-                  setAttachError(
-                    String(caught).replace(/^Error:\s*/, "").trim() ||
-                      "Could not attach that file.",
-                  )
+            <WelcomeState
+              onSelectPrompt={(prompt, options) => {
+                setDraft(prompt);
+                if (options?.enableInternet) {
+                  newChat.setNetworkPolicy({ mode: "open" });
                 }
-              />
-            }
-            attachError={attachError}
-            resetKey="home"
-            steerError={null}
-            steerPending={false}
-            steerStatus={null}
-            modelMenu={
-              <ModelMenu
-                models={models}
-                value={effective.model}
-                defaultKey={defaultModelKey}
-                disabled={creatingChat}
-                providers={providers}
-                onSetUpProvider={modelSettingsNav.onSetUpProvider}
-                onChange={newChat.setModel}
-              />
-            }
-            permissionMenu={
-              <PermissionModeMenu
-                scopeKey="new-chat"
-                value={effective.permissionMode}
-                disabled={creatingChat}
-                onChange={newChat.setPermissionMode}
-              />
-            }
-            reasoning={{
-              levels: efforts,
-              value: effective.reasoningEffort,
-              disabled: creatingChat,
-              onChange: newChat.setReasoningEffort,
-            }}
-            network={{
-              value: effective.networkPolicy,
-              disabled: creatingChat,
-              onChange: newChat.setNetworkPolicy,
-            }}
-            onDraftChange={(next) => {
-              setDraft(next);
-              if (!next.trim()) voice.resetInputUsed();
-            }}
-            onSend={startChat}
-            onSteer={async () => {}}
-            onStop={async () => {}}
-          />
-        </div>
+                voice.resetInputUsed();
+              }}
+              executionConfigClient={client}
+              promptLibrary={promptLibrary}
+              heading={
+                walkthroughAvailable ? "Welcome to Tidebreak" : undefined
+              }
+              description={
+                walkthroughAvailable
+                  ? "Choose how the agent works, add what it needs, and start with a real task."
+                  : undefined
+              }
+              onStartWalkthrough={
+                walkthroughAvailable && !walkthroughOpen
+                  ? () => setWalkthroughOpen(true)
+                  : undefined
+              }
+            />
+          </div>
+
+          <div className="z-10 mx-auto w-full max-w-3xl pb-2">
+            {error && <p className="pb-2 text-sm text-critical">{error}</p>}
+            <Composer
+              activeTurnId={null}
+              busy={false}
+              cancelError={null}
+              cancelPending={false}
+              disabled={creatingChat}
+              draft={draft}
+              plugins={composerPlugins.plugins}
+              slash={{
+                options: composerPlugins.slashOptions,
+                invoked: pendingSkills,
+                onInvoke: (names) =>
+                  composerDraftActions.setSkills(HOME_DRAFT_KEY, [
+                    ...pendingSkills,
+                    ...names,
+                  ]),
+                onRemove: (name) =>
+                  composerDraftActions.setSkills(
+                    HOME_DRAFT_KEY,
+                    pendingSkills.filter((skill) => skill !== name),
+                  ),
+                loadPromptBody: composerPlugins.loadPromptBody,
+              }}
+              images={composerImages}
+              voice={{
+                available: voice.available,
+                state: voice.state,
+                error: voice.error,
+                onStart: () => void voice.start(),
+                onStop: voice.stop,
+              }}
+              files={{
+                items: pendingFiles,
+                attaching,
+                onAttach: hasNativeHost() ? onAttach : undefined,
+                onRemove: (documentId) =>
+                  setPendingFiles((current) =>
+                    current.filter((file) => file.documentId !== documentId),
+                  ),
+              }}
+              nativeDropTarget={
+                <DocumentDropTarget
+                  resolveChatId={ensurePendingChat}
+                  onAttached={adoptAttached}
+                  onError={(caught) =>
+                    setAttachError(
+                      String(caught)
+                        .replace(/^Error:\s*/, "")
+                        .trim() || "Could not attach that file.",
+                    )
+                  }
+                />
+              }
+              attachError={attachError}
+              resetKey="home"
+              steerError={null}
+              steerPending={false}
+              steerStatus={null}
+              modelMenu={
+                <ModelMenu
+                  models={models}
+                  value={effective.model}
+                  defaultKey={defaultModelKey}
+                  disabled={creatingChat}
+                  providers={providers}
+                  onSetUpProvider={modelSettingsNav.onSetUpProvider}
+                  onChange={newChat.setModel}
+                />
+              }
+              permissionMenu={
+                <PermissionModeMenu
+                  scopeKey="new-chat"
+                  value={effective.permissionMode}
+                  disabled={creatingChat}
+                  onChange={newChat.setPermissionMode}
+                />
+              }
+              reasoning={{
+                levels: efforts,
+                value: effective.reasoningEffort,
+                disabled: creatingChat,
+                onChange: newChat.setReasoningEffort,
+              }}
+              network={{
+                value: effective.networkPolicy,
+                disabled: creatingChat,
+                onChange: newChat.setNetworkPolicy,
+              }}
+              onDraftChange={(next) => {
+                setDraft(next);
+                if (!next.trim()) voice.resetInputUsed();
+              }}
+              onSend={startChat}
+              onSteer={async () => {}}
+              onStop={async () => {}}
+            />
+          </div>
         </div>
       </div>
       <FirstTaskWalkthrough

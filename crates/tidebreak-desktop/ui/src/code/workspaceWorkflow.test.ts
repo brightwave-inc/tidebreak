@@ -210,7 +210,9 @@ describe("resolveWorkflowShortcut", () => {
     // front of reviewers" at every stage, and the action that serves it changes
     // under them. Uncommitted work goes to the commit box rather than being
     // refused, because that is the actual next step towards a pull request.
-    expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe("open_source");
+    expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe(
+      "open_source",
+    );
     expect(chord("pull_request", { ...CLEAN, unpushed: true, ahead: 1 })).toBe(
       "push",
     );
@@ -243,7 +245,10 @@ describe("resolveWorkflowShortcut", () => {
 
   it("picks conflict resolution over a plain rebase, and refuses over dirt", () => {
     expect(
-      chord("update_branch", { ...CLEAN, pr: pr({ mergeable: "conflicting" }) }),
+      chord("update_branch", {
+        ...CLEAN,
+        pr: pr({ mergeable: "conflicting" }),
+      }),
     ).toBe("resolve_conflicts");
     expect(
       chord("update_branch", {
@@ -269,7 +274,8 @@ describe("resolveWorkflowShortcut", () => {
     // The header disables the same actions for the same reason: two agents in
     // one worktree is a corrupt checkout, not a race worth running.
     const withPr = { ...CLEAN, pr: pr({ url: "https://x/41" }) };
-    const busy = "blocked: A watch task is already working on this pull request";
+    const busy =
+      "blocked: A watch task is already working on this pull request";
     expect(chord("next", withPr, true)).toBe(busy);
     expect(chord("merge", withPr, true)).toBe(busy);
     expect(chord("update_branch", withPr, true)).toBe(busy);
@@ -304,10 +310,22 @@ describe("resolveWorkflowShortcut", () => {
     // Neither path is open in these states, so the chord says why. Conflicts
     // and drafts cannot even be queued, and the last two are already landing.
     for (const [snapshot, reason] of [
-      [pr({ draft: true }), "Mark the pull request ready for review on GitHub before merging it."],
-      [pr({ mergeable: "conflicting" }), "Resolve the merge conflicts before merging directly."],
-      [pr({ in_merge_queue: true }), "This pull request is already waiting in the merge queue."],
-      [pr({ auto_merge_enabled: true }), "Auto-merge is already enabled and will merge after the remaining requirements pass."],
+      [
+        pr({ draft: true }),
+        "Mark the pull request ready for review on GitHub before merging it.",
+      ],
+      [
+        pr({ mergeable: "conflicting" }),
+        "Resolve the merge conflicts before merging directly.",
+      ],
+      [
+        pr({ in_merge_queue: true }),
+        "This pull request is already waiting in the merge queue.",
+      ],
+      [
+        pr({ auto_merge_enabled: true }),
+        "Auto-merge is already enabled and will merge after the remaining requirements pass.",
+      ],
     ] as const) {
       expect(chord("merge", { ...CLEAN, pr: snapshot })).toBe(
         `blocked: ${reason}`,
@@ -332,7 +350,9 @@ describe("resolveWorkflowShortcut", () => {
     expect(chord("watch", { ...CLEAN, pr: pr({ state: "closed" }) })).toBe(
       "blocked: Pull request #41 is closed",
     );
-    expect(chord("view_pr", CLEAN)).toBe("blocked: No pull request to open yet");
+    expect(chord("view_pr", CLEAN)).toBe(
+      "blocked: No pull request to open yet",
+    );
   });
 
   it("opens source control before the status has loaded", () => {

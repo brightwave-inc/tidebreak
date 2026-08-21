@@ -728,8 +728,9 @@ describe("CodeWorkspacePage", () => {
     expect(utilities.firstElementChild).toBe(control);
     expect(control).toHaveTextContent("#41");
     expect(control).toHaveTextContent("Draft");
-    expect(within(control).getByRole("button", { name: "Mark ready" }))
-      .toBeInTheDocument();
+    expect(
+      within(control).getByRole("button", { name: "Mark ready" }),
+    ).toBeInTheDocument();
 
     await user.click(
       within(control).getByRole("button", {
@@ -792,7 +793,9 @@ describe("CodeWorkspacePage", () => {
     await mountWorkspace(client);
     await screen.findByTestId("workspace-workflow-control");
 
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "watch"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "watch"),
+    );
     await waitFor(() =>
       expect(client.startCodeWatch).toHaveBeenCalledWith("ws-1"),
     );
@@ -800,7 +803,9 @@ describe("CodeWorkspacePage", () => {
     // This one is a draft, so it is not green. The chord says so rather than
     // asking an agent to merge it — decision 42 keeps merging off the agent
     // path, so "not mergeable" has to be a refusal, not a prompt.
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"),
+    );
     await waitFor(() =>
       expect(toast.message).toHaveBeenCalledWith(
         "Mark the pull request ready for review on GitHub before merging it.",
@@ -841,7 +846,9 @@ describe("CodeWorkspacePage", () => {
     const control = await screen.findByTestId("workspace-workflow-control");
     await waitFor(() => expect(control).toHaveTextContent("Ready"));
 
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"),
+    );
 
     // Merging publishes to a shared branch, so the chord still stops at the
     // same confirmation the review sidebar's Merge button shows.
@@ -880,7 +887,9 @@ describe("CodeWorkspacePage", () => {
     const control = await screen.findByTestId("workspace-workflow-control");
     await waitFor(() => expect(control).toHaveTextContent("No changes"));
 
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"),
+    );
     await waitFor(() =>
       expect(toast.message).toHaveBeenCalledWith("No pull request yet"),
     );
@@ -919,7 +928,9 @@ describe("CodeWorkspacePage", () => {
     const control = await screen.findByTestId("workspace-workflow-control");
     await waitFor(() => expect(control).toHaveTextContent("Draft"));
 
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "next"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "next"),
+    );
 
     await waitFor(() =>
       expect(client.markCodePrReady).toHaveBeenCalledWith("ws-1"),
@@ -956,7 +967,9 @@ describe("CodeWorkspacePage", () => {
     await mountWorkspace(client);
     await screen.findByTestId("workspace-workflow-control");
 
-    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"),
+    );
 
     const confirmation = await screen.findByRole("alertdialog");
     expect(confirmation).toHaveTextContent("Auto-merge #41?");
@@ -1310,7 +1323,14 @@ describe("CodeWorkspacePage", () => {
     client.listCodeSessionTurns.mockImplementation(async (sessionId: string) =>
       sessionId === "sess-1"
         ? [TURN]
-        : [{ ...TURN, id: "turn-2", session_id: "sess-2", user_input: "run the tests" }],
+        : [
+            {
+              ...TURN,
+              id: "turn-2",
+              session_id: "sess-2",
+              user_input: "run the tests",
+            },
+          ],
     );
     const user = userEvent.setup();
     const { router } = await mountWorkspace(client);
@@ -1388,7 +1408,9 @@ describe("CodeWorkspacePage", () => {
 
     await screen.findByRole("tab", { name: "Main agent" });
     await user.click(screen.getByRole("button", { name: "New tab" }));
-    await user.click(await screen.findByRole("menuitem", { name: "New agent" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "New agent" }),
+    );
 
     const draft = await screen.findByRole("tab", { name: "New agent" });
     expect(draft).toHaveAttribute("aria-selected", "true");
@@ -1480,7 +1502,9 @@ describe("CodeWorkspacePage", () => {
 
     const bar = await screen.findByTestId("watch-task-bar");
     expect(bar).toHaveTextContent(`Watching PR #${PR.number}`);
-    expect(screen.queryByTestId("subagent-context-bar")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("subagent-context-bar"),
+    ).not.toBeInTheDocument();
     expect(router.state.location.search).not.toHaveProperty("subagent");
     // The watch bar replaces the composer: the sweep drives this session.
     expect(
@@ -1502,69 +1526,68 @@ describe("CodeWorkspacePage", () => {
     const callId = "toolu-task-audit";
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
-    client.openCodeEvents.mockImplementation(
-      (_sessionId, _after, onFrame) =>
-        codeEventSocket(onFrame, [
-          {
-            seq: 1,
-            replayed: true,
-            event: {
-              type: "assistant_message",
-              text: "I delegated the parser audit.",
-            },
+    client.openCodeEvents.mockImplementation((_sessionId, _after, onFrame) =>
+      codeEventSocket(onFrame, [
+        {
+          seq: 1,
+          replayed: true,
+          event: {
+            type: "assistant_message",
+            text: "I delegated the parser audit.",
           },
-          {
-            seq: 2,
-            replayed: true,
-            event: {
-              type: "tool_started",
-              call_id: callId,
-              name: "Task",
-              detail: { kind: "other", summary: "Audit the parser" },
-            },
+        },
+        {
+          seq: 2,
+          replayed: true,
+          event: {
+            type: "tool_started",
+            call_id: callId,
+            name: "Task",
+            detail: { kind: "other", summary: "Audit the parser" },
           },
-          {
-            seq: 3,
-            replayed: true,
-            event: {
-              type: "tool_started",
-              call_id: "child-read",
-              name: "Read",
-              detail: { kind: "file_read", path: "src/parser.rs" },
-              parent_call_id: callId,
-            },
+        },
+        {
+          seq: 3,
+          replayed: true,
+          event: {
+            type: "tool_started",
+            call_id: "child-read",
+            name: "Read",
+            detail: { kind: "file_read", path: "src/parser.rs" },
+            parent_call_id: callId,
           },
-          {
-            seq: 4,
-            replayed: true,
-            event: {
-              type: "tool_completed",
-              call_id: "child-read",
-              outcome: "succeeded",
-              preview: "parser source",
-              parent_call_id: callId,
-            },
+        },
+        {
+          seq: 4,
+          replayed: true,
+          event: {
+            type: "tool_completed",
+            call_id: "child-read",
+            outcome: "succeeded",
+            preview: "parser source",
+            parent_call_id: callId,
           },
-          {
-            seq: 5,
-            replayed: true,
-            event: {
-              type: "assistant_message",
-              text: "The parser contract is sound.",
-              parent_call_id: callId,
-            },
+        },
+        {
+          seq: 5,
+          replayed: true,
+          event: {
+            type: "assistant_message",
+            text: "The parser contract is sound.",
+            parent_call_id: callId,
           },
-          {
-            seq: 6,
-            replayed: true,
-            event: {
-              type: "tool_completed",
-              call_id: callId,
-              outcome: "succeeded",
-              preview: "Audit complete",
-            },
+        },
+        {
+          seq: 6,
+          replayed: true,
+          event: {
+            type: "tool_completed",
+            call_id: callId,
+            outcome: "succeeded",
+            preview: "Audit complete",
           },
-        ]),
+        },
+      ]),
     );
     useCodeUpdatesStore.getState().apply({
       type: "digest",
@@ -1597,9 +1620,15 @@ describe("CodeWorkspacePage", () => {
     });
     const context = screen.getByTestId("subagent-context-bar");
     expect(context).toHaveTextContent("Read-only subagent view");
-    expect(await screen.findByText("The parser contract is sound.")).toBeInTheDocument();
-    expect(screen.queryByText("I delegated the parser audit.")).not.toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Message" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("The parser contract is sound."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("I delegated the parser audit."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
+    ).not.toBeInTheDocument();
     expect(client.openCodeEvents).toHaveBeenCalledTimes(1);
     expect(client.openCodeEvents).toHaveBeenCalledWith(
       SESSION.id,
@@ -1623,39 +1652,44 @@ describe("CodeWorkspacePage", () => {
       expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
     });
     expect(client.openCodeEvents).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("I delegated the parser audit.")).toBeInTheDocument();
-    expect(screen.queryByText("The parser contract is sound.")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeInTheDocument();
+    expect(
+      await screen.findByText("I delegated the parser audit."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The parser contract is sound."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Message" }),
+    ).toBeInTheDocument();
   });
 
   it("recovers a stale digest row from the spanning Task in transcript history", async () => {
     const callId = "toolu-task-recovered";
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
-    client.openCodeEvents.mockImplementation(
-      (_sessionId, _after, onFrame) =>
-        codeEventSocket(onFrame, [
-          {
-            seq: 1,
-            replayed: true,
-            event: {
-              type: "tool_started",
-              call_id: callId,
-              name: "Task",
-              detail: { kind: "other", summary: "Recover the interrupted audit" },
-            },
+    client.openCodeEvents.mockImplementation((_sessionId, _after, onFrame) =>
+      codeEventSocket(onFrame, [
+        {
+          seq: 1,
+          replayed: true,
+          event: {
+            type: "tool_started",
+            call_id: callId,
+            name: "Task",
+            detail: { kind: "other", summary: "Recover the interrupted audit" },
           },
-          {
-            seq: 2,
-            replayed: true,
-            event: {
-              type: "tool_completed",
-              call_id: callId,
-              outcome: "failed",
-              preview: "Parent session recovered",
-            },
+        },
+        {
+          seq: 2,
+          replayed: true,
+          event: {
+            type: "tool_completed",
+            call_id: callId,
+            outcome: "failed",
+            preview: "Parent session recovered",
           },
-        ]),
+        },
+      ]),
     );
 
     await mountWorkspace(client, `/code/w/ws-1?subagent=${callId}`);
@@ -1671,7 +1705,9 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByText("No captured subagent output"),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Message" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps an invalid subagent link recoverable without swapping sessions", async () => {
@@ -1727,7 +1763,10 @@ describe("CodeWorkspacePage", () => {
       await screen.findByRole("menuitem", { name: "Pull request" }),
     );
     await waitFor(() =>
-      expect(centerTab("Pull request")).toHaveAttribute("aria-selected", "true"),
+      expect(centerTab("Pull request")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
     );
     expect(await screen.findByTestId("pr-details-panel")).toBeInTheDocument();
   });
@@ -1760,7 +1799,9 @@ describe("CodeWorkspacePage", () => {
     );
 
     await user.click(screen.getByTestId("browser-panel-browser-1"));
-    expect(screen.getByRole("tab", { name: "Tidebreak docs" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Tidebreak docs" }),
+    ).toBeInTheDocument();
   });
 
   it("restores a persisted browser title without polling storage", async () => {
@@ -1772,10 +1813,7 @@ describe("CodeWorkspacePage", () => {
     });
     writeStoredBrowserSession({ ...session, title: "Tidebreak handbook" });
 
-    await mountWorkspace(
-      client,
-      "/code/w/ws-1?tabs=browser.browser-restored",
-    );
+    await mountWorkspace(client, "/code/w/ws-1?tabs=browser.browser-restored");
 
     expect(
       await screen.findByRole("tab", { name: "Tidebreak handbook" }),
@@ -1797,7 +1835,9 @@ describe("CodeWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "New tab" }));
     await waitFor(() => expect(panel).toHaveAttribute("data-obscured", "true"));
     await user.keyboard("{Escape}");
-    await waitFor(() => expect(panel).toHaveAttribute("data-obscured", "false"));
+    await waitFor(() =>
+      expect(panel).toHaveAttribute("data-obscured", "false"),
+    );
 
     fireEvent.contextMenu(screen.getByRole("tab", { name: "Browser" }));
     await screen.findByRole("menu");
@@ -1903,7 +1943,9 @@ describe("CodeWorkspacePage", () => {
     // wrapper stays out of the tab order rather than becoming a second stop.
     const libTab = await screen.findByRole("tab", { name: "lib.rs" });
     fireEvent.contextMenu(libTab);
-    await user.click(await screen.findByRole("menuitem", { name: "Move right" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Move right" }),
+    );
 
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({

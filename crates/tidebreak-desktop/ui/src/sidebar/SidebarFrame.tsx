@@ -43,7 +43,9 @@ export function SidebarFrame({
   const { updateState, restartForUpdate } = useApp();
   const { mode: themeMode, cycle: cycleTheme } = useTheme();
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const [appName, setAppName] = useState("Tidebreak");
 
   // Keep dev and staging windows distinguishable, but put that identity in
@@ -51,9 +53,12 @@ export function SidebarFrame({
   useEffect(() => {
     if (!hasNativeHost()) return;
     let cancelled = false;
-    getName().then((name) => {
-      if (!cancelled) setAppName(name);
-    }, () => {});
+    getName().then(
+      (name) => {
+        if (!cancelled) setAppName(name);
+      },
+      () => {},
+    );
     return () => {
       cancelled = true;
     };

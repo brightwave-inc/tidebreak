@@ -31,12 +31,17 @@ describe("remote connect refusals", () => {
   });
 
   it("says why https is required, because that is the refusal a reader can act on", () => {
-    const refused = remoteConnectError({ reason: "remote_machine_requires_tls", detail: null });
+    const refused = remoteConnectError({
+      reason: "remote_machine_requires_tls",
+      detail: null,
+    });
     expect(connectFailureMessage(refused!)).toContain("https");
   });
 
   it("leaves anything that is not a worded refusal to the ordinary failure path", () => {
-    expect(remoteConnectError({ reason: "remote_machine_invented_reason" })).toBeNull();
+    expect(
+      remoteConnectError({ reason: "remote_machine_invented_reason" }),
+    ).toBeNull();
     expect(remoteConnectError("remote_machine_requires_tls")).toBeNull();
     expect(remoteConnectError(null)).toBeNull();
   });
@@ -44,7 +49,10 @@ describe("remote connect refusals", () => {
 
 describe("host authority refusals reaching a reader", () => {
   it("names the capability and the reason instead of the raw code", () => {
-    const message = hostErrorMessage("folder_broker_authority_unavailable", "fallback");
+    const message = hostErrorMessage(
+      "folder_broker_authority_unavailable",
+      "fallback",
+    );
     expect(message).toContain(hostAuthorityLabel("folder_broker"));
     expect(message).toContain("remote machine");
     expect(message).not.toContain("folder_broker_authority_unavailable");
@@ -58,8 +66,11 @@ describe("host authority refusals reaching a reader", () => {
   });
 
   it("falls through for an ordinary failure", () => {
-    expect(hostErrorMessage("host broker returned an unexpected response", "fallback")).toBe(
-      "host broker returned an unexpected response",
-    );
+    expect(
+      hostErrorMessage(
+        "host broker returned an unexpected response",
+        "fallback",
+      ),
+    ).toBe("host broker returned an unexpected response");
   });
 });

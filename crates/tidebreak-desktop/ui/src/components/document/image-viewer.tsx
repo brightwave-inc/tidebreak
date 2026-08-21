@@ -13,11 +13,7 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
   source: FileBytesSource;
 }
 
-export function ImageViewer({
-  source,
-  className,
-  ...restProps
-}: Props) {
+export function ImageViewer({ source, className, ...restProps }: Props) {
   const [imageError, setImageError] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const fileId = source.id;

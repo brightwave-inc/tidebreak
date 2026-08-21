@@ -10,10 +10,14 @@ describe("voice input settings routing", () => {
     const user = userEvent.setup();
     const { router } = await renderWithRouter(<VoiceInputRequiredButton />);
 
-    await user.click(screen.getByRole("button", { name: "Configure voice input" }));
+    await user.click(
+      screen.getByRole("button", { name: "Configure voice input" }),
+    );
 
     await waitFor(() => {
-      expect(router.state.location.pathname).toBe("/settings/voice-transcription");
+      expect(router.state.location.pathname).toBe(
+        "/settings/voice-transcription",
+      );
     });
   });
 });

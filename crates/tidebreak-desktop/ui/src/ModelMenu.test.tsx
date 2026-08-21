@@ -112,7 +112,9 @@ describe("ModelMenu", () => {
 
   it("labels the trigger with an unknown (custom) override verbatim", () => {
     const markup = triggerMarkup("local-model:latest");
-    expect(markup).toContain('aria-label="Model: local-model:latest (unavailable)"');
+    expect(markup).toContain(
+      'aria-label="Model: local-model:latest (unavailable)"',
+    );
     expect(markup).toContain(">local-model:latest (unavailable)<");
   });
 
@@ -174,7 +176,10 @@ describe("visibleModelGroups", () => {
       withAvailability({ anthropic: true, openai: false }),
       "openai::gpt-4o",
     );
-    expect(groups.map((group) => group.provider)).toEqual(["openai", "anthropic"]);
+    expect(groups.map((group) => group.provider)).toEqual([
+      "openai",
+      "anthropic",
+    ]);
     expect(groups[0].models.map((model) => model.key)).toEqual([
       "openai::gpt-4o",
     ]);
@@ -205,7 +210,11 @@ describe("visibleModelGroups", () => {
   });
 
   it("splits a gateway catalog into vendor groups", () => {
-    const viaGateway = (key: ModelInfo["key"], id: string, vendor: ModelInfo["vendor"]) => ({
+    const viaGateway = (
+      key: ModelInfo["key"],
+      id: string,
+      vendor: ModelInfo["vendor"],
+    ) => ({
       ...MODELS[0],
       key,
       id,
@@ -215,7 +224,11 @@ describe("visibleModelGroups", () => {
     const groups = visibleModelGroups(
       [
         viaGateway("model_gateway::deepseek-v4", "deepseek-v4", null),
-        viaGateway("model_gateway::claude-sonnet-4", "claude-sonnet-4", "anthropic"),
+        viaGateway(
+          "model_gateway::claude-sonnet-4",
+          "claude-sonnet-4",
+          "anthropic",
+        ),
         viaGateway("model_gateway::gpt-5", "gpt-5", "openai"),
         viaGateway("model_gateway::glm-5.2", "glm-5.2", null),
         viaGateway("model_gateway::mystery-model", "mystery-model", null),
@@ -254,12 +267,12 @@ describe("matchingModels", () => {
     expect(matchingModels(groups, "gpt").map((model) => model.key)).toEqual([
       "openai::gpt-4o",
     ]);
-    expect(matchingModels(groups, "gateway").map((model) => model.key)).toEqual([
-      gatewayClaude.key,
-    ]);
-    expect(matchingModels(groups, "anthropic").map((model) => model.key)).toEqual([
-      gatewayClaude.key,
-    ]);
+    expect(matchingModels(groups, "gateway").map((model) => model.key)).toEqual(
+      [gatewayClaude.key],
+    );
+    expect(
+      matchingModels(groups, "anthropic").map((model) => model.key),
+    ).toEqual([gatewayClaude.key]);
   });
 });
 
@@ -277,7 +290,10 @@ describe("notConnectedProviders", () => {
       { ...MODELS[0], key: "gemini::b", provider: "gemini", available: false },
     ];
     expect(
-      notConnectedProviders([...MODELS, ...gemini], [credentialed("anthropic")]),
+      notConnectedProviders(
+        [...MODELS, ...gemini],
+        [credentialed("anthropic")],
+      ),
     ).toEqual([{ provider: "gemini", modelCount: 2 }]);
   });
 
@@ -321,7 +337,10 @@ describe("pickerRailEntries", () => {
 
   it("omits unconfigured providers on a managed profile", () => {
     const rail = pickerRailEntries([...MODELS, gemini], [], null, true);
-    expect(rail.map((entry) => entry.provider)).toEqual(["openai", "anthropic"]);
+    expect(rail.map((entry) => entry.provider)).toEqual([
+      "openai",
+      "anthropic",
+    ]);
   });
 
   it("places OpenRouter on the rail after Together", () => {
@@ -339,11 +358,7 @@ describe("pickerRailEntries", () => {
       provider: "openrouter",
       available: false,
     };
-    const rail = pickerRailEntries(
-      [...MODELS, together, openrouter],
-      [],
-      null,
-    );
+    const rail = pickerRailEntries([...MODELS, together, openrouter], [], null);
     expect(rail.map((entry) => [entry.provider, entry.connected])).toEqual([
       ["openai", true],
       ["anthropic", true],
@@ -353,7 +368,11 @@ describe("pickerRailEntries", () => {
   });
 
   it("gives each gateway vendor group its own rail tab", () => {
-    const viaGateway = (key: ModelInfo["key"], id: string, vendor: ModelInfo["vendor"]) => ({
+    const viaGateway = (
+      key: ModelInfo["key"],
+      id: string,
+      vendor: ModelInfo["vendor"],
+    ) => ({
       ...MODELS[0],
       key,
       id,
@@ -362,7 +381,11 @@ describe("pickerRailEntries", () => {
     });
     const rail = pickerRailEntries(
       [
-        viaGateway("model_gateway::claude-sonnet-4", "claude-sonnet-4", "anthropic"),
+        viaGateway(
+          "model_gateway::claude-sonnet-4",
+          "claude-sonnet-4",
+          "anthropic",
+        ),
         viaGateway("model_gateway::gpt-5", "gpt-5", "openai"),
         viaGateway("model_gateway::deepseek-v4", "deepseek-v4", null),
       ],
@@ -432,7 +455,9 @@ describe("pickerGroupForSelection", () => {
 describe("firstAvailableModel", () => {
   it("lands in render order", () => {
     const [sonnet, gpt] = MODELS;
-    expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe("openai::gpt-4o");
+    expect(firstAvailableModel([gpt, sonnet], null)?.key).toBe(
+      "openai::gpt-4o",
+    );
   });
 
   it("is null when nothing can run", () => {
@@ -466,7 +491,10 @@ describe("ProviderIcon", () => {
       <ProviderIcon provider="model_gateway" modelId="kimi-k2.5" />,
     );
     const throughCompatible = renderToStaticMarkup(
-      <ProviderIcon provider="openai_compatible" modelId="accounts/x/models/kimi-k2" />,
+      <ProviderIcon
+        provider="openai_compatible"
+        modelId="accounts/x/models/kimi-k2"
+      />,
     );
     const unbranded = renderToStaticMarkup(
       <ProviderIcon provider="model_gateway" modelId="some-model" />,

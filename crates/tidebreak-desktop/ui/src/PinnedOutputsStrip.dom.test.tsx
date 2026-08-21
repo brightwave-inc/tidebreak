@@ -6,7 +6,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { DeliverableSummary } from "./deliverables";
 import { PinnedOutputsStrip, useOutputsStripStore } from "./PinnedOutputsStrip";
 
-function output(outputId: string, filename: string, updatedAt: string): DeliverableSummary {
+function output(
+  outputId: string,
+  filename: string,
+  updatedAt: string,
+): DeliverableSummary {
   return {
     outputId,
     filename,
@@ -53,7 +57,10 @@ it("names the outputs by default and opens the one clicked", async () => {
 
   // Newest first — the file the last turn wrote is the one being looked for.
   const chips = screen.getAllByRole("button", { name: /^Open output/ });
-  expect(chips.map((chip) => chip.textContent)).toEqual(["summary.md", "plan.md"]);
+  expect(chips.map((chip) => chip.textContent)).toEqual([
+    "summary.md",
+    "plan.md",
+  ]);
 
   await userEvent.click(chips[1]!);
   expect(onOpenOutput).toHaveBeenCalledWith("out-1");

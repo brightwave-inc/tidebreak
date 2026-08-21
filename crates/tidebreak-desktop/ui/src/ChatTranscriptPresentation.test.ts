@@ -45,7 +45,8 @@ describe("terminal transcript presentation", () => {
         {
           id: "host-note-1",
           role: "system",
-          content: "User restored output 'report.md' to the content of version 1.",
+          content:
+            "User restored output 'report.md' to the content of version 1.",
           created_at: "2026-07-30T12:00:00Z",
           citations: [],
         },
@@ -586,7 +587,9 @@ describe("terminal transcript presentation", () => {
     expect(presented.messages[2]).toMatchObject({
       text: TURN_CANCELLED_NOTICE,
     });
-    expect(presented.messageIds).toEqual(new Set(["question", "partial-answer"]));
+    expect(presented.messageIds).toEqual(
+      new Set(["question", "partial-answer"]),
+    );
   });
 
   it("uses renderer-owned copy that distinguishes an incomplete refusal", () => {

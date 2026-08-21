@@ -26,7 +26,9 @@ const IDLE_MS = 5_000;
  * which is every platform but macOS today.
  */
 export function useHostToolProvisioning(): ConverterInstallProgress | null {
-  const [progress, setProgress] = useState<ConverterInstallProgress | null>(null);
+  const [progress, setProgress] = useState<ConverterInstallProgress | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!isTauri()) return;

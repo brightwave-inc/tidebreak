@@ -47,7 +47,11 @@ const signedOut: GatewayStatus = {
   sign_in: { state: "idle" },
 };
 
-const signedIn: GatewayStatus = { ...signedOut, signed_in: true, model_count: 2 };
+const signedIn: GatewayStatus = {
+  ...signedOut,
+  signed_in: true,
+  model_count: 2,
+};
 
 /** A configured gateway mount as `listMcpServers` reports it. */
 function gatewayMount(
@@ -126,10 +130,14 @@ describe("McpPanel", () => {
     render(<McpPanel client={api()} />);
 
     expect(await screen.findByText("Healthy")).toBeInTheDocument();
-    expect(screen.getByText("2 tools available to new turns.")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 tools available to new turns."),
+    ).toBeInTheDocument();
     expect(screen.getByDisplayValue("PRIVATE_DOCS_TOKEN")).toBeInTheDocument();
     expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/values are resolved in the host process/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/values are resolved in the host process/i),
+    ).toBeInTheDocument();
   });
 
   it("sends argv and selected environment names as typed arrays", async () => {
@@ -149,9 +157,7 @@ describe("McpPanel", () => {
     );
     await user.click(screen.getByRole("button", { name: "Add argument" }));
     await user.type(screen.getByLabelText("Arguments 1"), "--stdio");
-    await user.click(
-      screen.getByRole("button", { name: "Add variable name" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Add variable name" }));
     await user.type(
       screen.getByLabelText("Forward environment names 1"),
       "DOCS_TOKEN",
@@ -335,13 +341,17 @@ describe("McpPanel", () => {
     );
 
     expect(await screen.findByText("Healthy")).toBeInTheDocument();
-    expect(screen.getByText("1 tool available to new turns.")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 tool available to new turns."),
+    ).toBeInTheDocument();
     expect(
       screen.getByDisplayValue("http://127.0.0.1:28081/mcp/tools"),
     ).toBeInTheDocument();
     // Only the variable name is ever displayed.
     expect(screen.getByDisplayValue("GATEWAY_TOKEN")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Remote endpoint (HTTP)" })).toBeChecked();
+    expect(
+      screen.getByRole("radio", { name: "Remote endpoint (HTTP)" }),
+    ).toBeChecked();
   });
 
   it("surfaces secret-free degraded diagnostics", async () => {
@@ -529,7 +539,9 @@ describe("McpPanel", () => {
       {
         getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
         // No entitled app references the mounted slug any more.
-        getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
+        getGatewayApps: vi
+          .fn()
+          .mockResolvedValue({ supported: true, apps: [] }),
         putMcpServers,
       },
     );
@@ -656,7 +668,9 @@ describe("McpPanel", () => {
       await screen.findByText(/Couldn't read your entitlements/),
     ).toBeInTheDocument();
     const row = mountRow("example-security-tools");
-    expect(within(row).queryByText(/No longer granted/)).not.toBeInTheDocument();
+    expect(
+      within(row).queryByText(/No longer granted/),
+    ).not.toBeInTheDocument();
     expect(within(row).getByRole("switch")).toBeChecked();
   });
 
@@ -730,9 +744,9 @@ describe("McpPanel", () => {
     const user = userEvent.setup();
     render(<McpPanel client={client} />);
     await act(async () => {});
-    expect(
-      screen.getByPlaceholderText("/absolute/path/to/server"),
-    ).toHaveValue("/opt/mcp/docs");
+    expect(screen.getByPlaceholderText("/absolute/path/to/server")).toHaveValue(
+      "/opt/mcp/docs",
+    );
 
     // The next cadence read hangs; the reader edits while it is in flight.
     let resolveRead!: (value: McpServersInfo) => void;
@@ -753,9 +767,9 @@ describe("McpPanel", () => {
     // The read's snapshot predates the edit; landing, it must not undo it.
     resolveRead(healthy);
     await act(async () => {});
-    expect(
-      screen.getByPlaceholderText("/absolute/path/to/server"),
-    ).toHaveValue("/opt/mcp/docs-edited");
+    expect(screen.getByPlaceholderText("/absolute/path/to/server")).toHaveValue(
+      "/opt/mcp/docs-edited",
+    );
   });
 
   it("keeps a mount made during unsaved edits through the next save", async () => {

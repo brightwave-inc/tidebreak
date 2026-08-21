@@ -64,13 +64,11 @@ export class CodeSessionController {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private replayFrames: SequencedCodeEventFrame[] = [];
-  private replayDelta:
-    | {
-        type: "assistant_delta" | "reasoning_delta";
-        seq: number;
-        chunks: string[];
-      }
-    | null = null;
+  private replayDelta: {
+    type: "assistant_delta" | "reasoning_delta";
+    seq: number;
+    chunks: string[];
+  } | null = null;
   private replayFlush: ReturnType<typeof setTimeout> | null = null;
   private initialViewSettled = false;
 
@@ -258,4 +256,8 @@ export class CodeSessionController {
   }
 }
 
-export { INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, nextReconnectDelay };
+export {
+  INITIAL_RECONNECT_DELAY_MS,
+  MAX_RECONNECT_DELAY_MS,
+  nextReconnectDelay,
+};

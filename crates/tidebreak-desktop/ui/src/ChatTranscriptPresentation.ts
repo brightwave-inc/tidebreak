@@ -37,139 +37,137 @@ export function presentChatTranscript(
       .filter((entry) => entry.kind === "message")
       .map((entry) => entry.id),
   );
-  const messages = hydrated.flatMap(
-    (entry): ChatMessage[] => {
-      if (entry.kind === "terminal_turn") {
-        if (entry.status === "completed") return [];
-        const partial =
-          entry.text || entry.reasoning
-            ? [
-                {
-                  id: `terminal:${entry.id}:assistant`,
-                  role: "assistant" as const,
-                  text: entry.text,
-                  sources: [],
-                  createdAt: entry.createdAt,
-                  reasoning: entry.reasoning,
-                } satisfies ChatMessage,
-              ]
-            : [];
-        const outcome =
-          entry.status === "failed"
-            ? ({
-                id: `failure:${entry.id}`,
-                role: "turn_failure",
-                category: entry.failureCategory ?? "unknown",
-                detail: entry.failureDetail,
-                model: entry.failureModel,
-                invokedSkills:
-                  entry.invokedSkills.length > 0
-                    ? entry.invokedSkills
-                    : undefined,
-                voiceInputUsed: entry.voiceInputUsed || undefined,
-              } satisfies ChatMessage)
-            : ({
-                id: `cancellation:${entry.id}`,
-                role: "system",
-                text: TURN_CANCELLED_NOTICE,
-              } satisfies ChatMessage);
-        return [...partial, outcome];
-      }
-      if (entry.kind === "change_summary") {
-        return [
-          {
-            id: entry.id,
-            role: "change_summary",
-            turnId: entry.turnId,
-            files: entry.files,
-            createdAt: entry.createdAt,
-          } satisfies ChatMessage,
-        ];
-      }
-      if (entry.kind === "tool") {
-        return [
-          {
-            id: entry.id,
-            role: "tool",
-            callId: entry.callId,
-            name: entry.name,
-            backgroundAgentRunId: entry.backgroundAgentRunId,
-            status: entry.status,
-            preview: entry.preview,
-            result: entry.result,
-            resultUnreadable: entry.resultUnreadable,
-          } satisfies ChatMessage,
-        ];
-      }
-      // A durable host-authored note — "User restored output 'report.md'…" —
-      // written for the model between turns. Shown as the same subtle inline
-      // notice a cancellation uses, never as a user or assistant bubble.
-      if (entry.role === "system") {
-        return [
-          {
-            id: entry.id,
-            role: "system",
-            text: entry.text,
-          } satisfies ChatMessage,
-        ];
-      }
-      if (entry.role === "compaction") {
-        return [
-          {
-            id: entry.id,
-            role: "compaction",
-          } satisfies ChatMessage,
-        ];
-      }
-      if (entry.role === "assistant") {
-        const assistant = {
-          id: entry.id,
-          role: "assistant",
-          text: entry.text,
-          sources: entry.sources,
-          createdAt: entry.createdAt,
-          reasoning: entry.reasoning,
-        } satisfies ChatMessage;
-        if (entry.refusal) {
-          return [
-            assistant,
-            {
-              id: `refusal:${entry.id}`,
-              role: "refusal",
-              category: entry.refusal.category,
-              partialOutput: entry.refusal.partial_output,
-            } satisfies ChatMessage,
-          ];
-        }
-        // A cancelled turn that committed its partial prose renders as an
-        // ordinary assistant message, but the stop the user asked for still
-        // gets the same notice a message-less cancellation shows.
-        if (entry.interrupted) {
-          return [
-            assistant,
-            {
+  const messages = hydrated.flatMap((entry): ChatMessage[] => {
+    if (entry.kind === "terminal_turn") {
+      if (entry.status === "completed") return [];
+      const partial =
+        entry.text || entry.reasoning
+          ? [
+              {
+                id: `terminal:${entry.id}:assistant`,
+                role: "assistant" as const,
+                text: entry.text,
+                sources: [],
+                createdAt: entry.createdAt,
+                reasoning: entry.reasoning,
+              } satisfies ChatMessage,
+            ]
+          : [];
+      const outcome =
+        entry.status === "failed"
+          ? ({
+              id: `failure:${entry.id}`,
+              role: "turn_failure",
+              category: entry.failureCategory ?? "unknown",
+              detail: entry.failureDetail,
+              model: entry.failureModel,
+              invokedSkills:
+                entry.invokedSkills.length > 0
+                  ? entry.invokedSkills
+                  : undefined,
+              voiceInputUsed: entry.voiceInputUsed || undefined,
+            } satisfies ChatMessage)
+          : ({
               id: `cancellation:${entry.id}`,
               role: "system",
               text: TURN_CANCELLED_NOTICE,
-            } satisfies ChatMessage,
-          ];
-        }
-        return [assistant];
-      }
+            } satisfies ChatMessage);
+      return [...partial, outcome];
+    }
+    if (entry.kind === "change_summary") {
       return [
         {
           id: entry.id,
-          role: "user",
-          text: entry.text,
-          images: entry.images,
+          role: "change_summary",
+          turnId: entry.turnId,
           files: entry.files,
-          invokedSkills:
-            entry.invokedSkills.length > 0 ? entry.invokedSkills : undefined,
           createdAt: entry.createdAt,
         } satisfies ChatMessage,
       ];
-    },
-  );
+    }
+    if (entry.kind === "tool") {
+      return [
+        {
+          id: entry.id,
+          role: "tool",
+          callId: entry.callId,
+          name: entry.name,
+          backgroundAgentRunId: entry.backgroundAgentRunId,
+          status: entry.status,
+          preview: entry.preview,
+          result: entry.result,
+          resultUnreadable: entry.resultUnreadable,
+        } satisfies ChatMessage,
+      ];
+    }
+    // A durable host-authored note — "User restored output 'report.md'…" —
+    // written for the model between turns. Shown as the same subtle inline
+    // notice a cancellation uses, never as a user or assistant bubble.
+    if (entry.role === "system") {
+      return [
+        {
+          id: entry.id,
+          role: "system",
+          text: entry.text,
+        } satisfies ChatMessage,
+      ];
+    }
+    if (entry.role === "compaction") {
+      return [
+        {
+          id: entry.id,
+          role: "compaction",
+        } satisfies ChatMessage,
+      ];
+    }
+    if (entry.role === "assistant") {
+      const assistant = {
+        id: entry.id,
+        role: "assistant",
+        text: entry.text,
+        sources: entry.sources,
+        createdAt: entry.createdAt,
+        reasoning: entry.reasoning,
+      } satisfies ChatMessage;
+      if (entry.refusal) {
+        return [
+          assistant,
+          {
+            id: `refusal:${entry.id}`,
+            role: "refusal",
+            category: entry.refusal.category,
+            partialOutput: entry.refusal.partial_output,
+          } satisfies ChatMessage,
+        ];
+      }
+      // A cancelled turn that committed its partial prose renders as an
+      // ordinary assistant message, but the stop the user asked for still
+      // gets the same notice a message-less cancellation shows.
+      if (entry.interrupted) {
+        return [
+          assistant,
+          {
+            id: `cancellation:${entry.id}`,
+            role: "system",
+            text: TURN_CANCELLED_NOTICE,
+          } satisfies ChatMessage,
+        ];
+      }
+      return [assistant];
+    }
+    return [
+      {
+        id: entry.id,
+        role: "user",
+        text: entry.text,
+        images: entry.images,
+        files: entry.files,
+        invokedSkills:
+          entry.invokedSkills.length > 0 ? entry.invokedSkills : undefined,
+        createdAt: entry.createdAt,
+      } satisfies ChatMessage,
+    ];
+  });
 
   return {
     lastEventSeq: transcript.last_event_seq,

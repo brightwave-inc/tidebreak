@@ -46,24 +46,27 @@ describe("hydrateTranscriptHistory", () => {
   });
 
   it("hydrates background delegation and wait activity with fixed tool kinds", () => {
-    const entries = hydrateTranscriptHistory([], [
-      {
-        call_id: "call-2",
-        tool: "spawn_sandbox_agent",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: "2026-07-16T10:00:00Z",
-      },
-      {
-        call_id: "call-3",
-        tool: "wait_for_agents",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:01Z",
-        finished_at: "2026-07-16T10:00:02Z",
-      },
-    ]);
+    const entries = hydrateTranscriptHistory(
+      [],
+      [
+        {
+          call_id: "call-2",
+          tool: "spawn_sandbox_agent",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:00Z",
+          finished_at: "2026-07-16T10:00:00Z",
+        },
+        {
+          call_id: "call-3",
+          tool: "wait_for_agents",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:01Z",
+          finished_at: "2026-07-16T10:00:02Z",
+        },
+      ],
+    );
 
     expect(entries).toEqual([
       expect.objectContaining({ name: "spawn_sandbox_agent" }),
@@ -73,16 +76,19 @@ describe("hydrateTranscriptHistory", () => {
   });
 
   it("hydrates answered questions with a fixed presentation kind", () => {
-    const entries = hydrateTranscriptHistory([], [
-      {
-        call_id: "call-4",
-        tool: "ask_user_questions",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: "2026-07-16T10:00:01Z",
-      },
-    ]);
+    const entries = hydrateTranscriptHistory(
+      [],
+      [
+        {
+          call_id: "call-4",
+          tool: "ask_user_questions",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:00Z",
+          finished_at: "2026-07-16T10:00:01Z",
+        },
+      ],
+    );
 
     expect(entries).toEqual([
       expect.objectContaining({ name: "ask_user_questions" }),
@@ -90,16 +96,19 @@ describe("hydrateTranscriptHistory", () => {
   });
 
   it("hydrates delegated file reads as their fixed presentation kind", () => {
-    const entries = hydrateTranscriptHistory([], [
-      {
-        call_id: "call-5",
-        tool: "read_delegated_file",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: "2026-07-16T10:00:01Z",
-      },
-    ]);
+    const entries = hydrateTranscriptHistory(
+      [],
+      [
+        {
+          call_id: "call-5",
+          tool: "read_delegated_file",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:00Z",
+          finished_at: "2026-07-16T10:00:01Z",
+        },
+      ],
+    );
 
     expect(entries).toEqual([
       expect.objectContaining({ name: "read_delegated_file" }),
@@ -108,32 +117,35 @@ describe("hydrateTranscriptHistory", () => {
   });
 
   it("hydrates source discovery, direct reads, and semantic search distinctly", () => {
-    const entries = hydrateTranscriptHistory([], [
-      {
-        call_id: "call-6",
-        tool: "list_documents",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: "2026-07-16T10:00:00Z",
-      },
-      {
-        call_id: "call-7",
-        tool: "read_document",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:01Z",
-        finished_at: "2026-07-16T10:00:01Z",
-      },
-      {
-        call_id: "call-8",
-        tool: "search",
-        result_unreadable: false,
-        status: "completed",
-        started_at: "2026-07-16T10:00:02Z",
-        finished_at: "2026-07-16T10:00:02Z",
-      },
-    ]);
+    const entries = hydrateTranscriptHistory(
+      [],
+      [
+        {
+          call_id: "call-6",
+          tool: "list_documents",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:00Z",
+          finished_at: "2026-07-16T10:00:00Z",
+        },
+        {
+          call_id: "call-7",
+          tool: "read_document",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:01Z",
+          finished_at: "2026-07-16T10:00:01Z",
+        },
+        {
+          call_id: "call-8",
+          tool: "search",
+          result_unreadable: false,
+          status: "completed",
+          started_at: "2026-07-16T10:00:02Z",
+          finished_at: "2026-07-16T10:00:02Z",
+        },
+      ],
+    );
 
     expect(entries).toEqual([
       expect.objectContaining({ name: "list_documents" }),
@@ -208,16 +220,19 @@ describe("hydrateTranscriptHistory", () => {
   });
 
   it("folds an unrecognized historical tool to the generic card", () => {
-    const [entry] = hydrateTranscriptHistory([], [
-      {
-        call_id: "call-10",
-        tool: "other",
-        result_unreadable: false,
-        status: "failed",
-        started_at: "2026-07-16T10:00:00Z",
-        finished_at: null,
-      },
-    ]);
+    const [entry] = hydrateTranscriptHistory(
+      [],
+      [
+        {
+          call_id: "call-10",
+          tool: "other",
+          result_unreadable: false,
+          status: "failed",
+          started_at: "2026-07-16T10:00:00Z",
+          finished_at: null,
+        },
+      ],
+    );
 
     // `other` is the server's own fold and a real member of the renderer's
     // tool vocabulary, so it resolves to the generic presentation. The previous

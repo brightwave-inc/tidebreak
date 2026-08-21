@@ -1,5 +1,10 @@
 import type { ReactNode } from "react";
-import { GitBranch, PanelRight, PanelRightClose, SquareTerminal } from "lucide-react";
+import {
+  GitBranch,
+  PanelRight,
+  PanelRightClose,
+  SquareTerminal,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";

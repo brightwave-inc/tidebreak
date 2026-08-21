@@ -268,14 +268,20 @@ describe("text_delta", () => {
       makeDeps(),
     );
     const lastDone = done.state.messages[done.state.messages.length - 1];
-    expect(lastDone).toMatchObject({ role: "assistant", text: "Answer the answer" });
+    expect(lastDone).toMatchObject({
+      role: "assistant",
+      text: "Answer the answer",
+    });
   });
 
   it("flushes a withheld incomplete directive at a terminal boundary", () => {
     const mid = play([TURN, { type: "text_delta", text: "Answer :cit[the" }]);
     const done = reduceChatSessionEvent(
       mid.state,
-      framed(mid.state.lastSeq + 1, { type: "turn_completed", usage: NO_USAGE }),
+      framed(mid.state.lastSeq + 1, {
+        type: "turn_completed",
+        usage: NO_USAGE,
+      }),
       makeDeps(),
     );
     const last = done.state.messages[done.state.messages.length - 1];
@@ -305,7 +311,11 @@ describe("tool call lifecycle", () => {
   it("requests a folder-access refresh for that specific tool", () => {
     const { effects } = play([
       TURN,
-      { type: "tool_call_started", call_id: "c", name: "request_folder_access" },
+      {
+        type: "tool_call_started",
+        call_id: "c",
+        name: "request_folder_access",
+      },
     ]);
     expect(effects).toContainEqual({ type: "refresh_folder_access" });
   });
@@ -341,8 +351,8 @@ describe("tool call lifecycle", () => {
       START_SEARCH,
       {
         type: "approval_required",
-      auto_judging: false,
-      grant_rungs: [],
+        auto_judging: false,
+        grant_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -360,17 +370,17 @@ describe("tool call lifecycle", () => {
       START_SEARCH,
       { type: "tool_call_completed", call_id: "call-1", status: "completed" },
     ]);
-    expect(completed.state.messages.find((m) => m.role === "tool")).toMatchObject(
-      { status: "completed" },
-    );
+    expect(
+      completed.state.messages.find((m) => m.role === "tool"),
+    ).toMatchObject({ status: "completed" });
     expect(completed.state.provisionalToolCallIds.size).toBe(0);
     const rejectedThenCompleted = play([
       TURN,
       START_SEARCH,
       {
         type: "approval_required",
-      auto_judging: false,
-      grant_rungs: [],
+        auto_judging: false,
+        grant_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -468,8 +478,8 @@ describe("published outputs", () => {
 describe("approvals", () => {
   const APPROVAL: AgentEvent = {
     type: "approval_required",
-      auto_judging: false,
-      grant_rungs: [],
+    auto_judging: false,
+    grant_rungs: [],
     call_id: "call-1",
     action: "search",
     approval: "search_may_share_query_and_excerpts",
@@ -494,12 +504,12 @@ describe("approvals", () => {
       APPROVAL,
       { type: "approval_decided", call_id: "call-1", approved: true },
     ]);
-    expect(approved.state.messages.find((m) => m.role === "approval")).toMatchObject(
-      { resolved: true },
-    );
-    expect(approved.state.messages.find((m) => m.role === "tool")).toMatchObject(
-      { status: "running" },
-    );
+    expect(
+      approved.state.messages.find((m) => m.role === "approval"),
+    ).toMatchObject({ resolved: true });
+    expect(
+      approved.state.messages.find((m) => m.role === "tool"),
+    ).toMatchObject({ status: "running" });
 
     const rejected = play([
       TURN,
@@ -507,9 +517,9 @@ describe("approvals", () => {
       APPROVAL,
       { type: "approval_decided", call_id: "call-1", approved: false },
     ]);
-    expect(rejected.state.messages.find((m) => m.role === "tool")).toMatchObject(
-      { status: "denied" },
-    );
+    expect(
+      rejected.state.messages.find((m) => m.role === "tool"),
+    ).toMatchObject({ status: "denied" });
   });
 });
 
@@ -586,7 +596,10 @@ describe("user_steered", () => {
 
 describe("terminal events", () => {
   it("turn_completed resolves the turn and requests hydration", () => {
-    const { state, effects } = play([TURN, { type: "turn_completed", usage: NO_USAGE }]);
+    const { state, effects } = play([
+      TURN,
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
     expect(state.busy).toBe(false);
     expect(state.compacting).toBe(false);
     expect(state.activeTurnId).toBeNull();
@@ -603,7 +616,10 @@ describe("terminal events", () => {
     expect(mid.state.compacting).toBe(true);
     expect(mid.state.busy).toBe(true);
 
-    const finished = play([{ type: "compaction_finished", compacted: true }], mid.state);
+    const finished = play(
+      [{ type: "compaction_finished", compacted: true }],
+      mid.state,
+    );
     expect(finished.state.compacting).toBe(false);
     expect(finished.state.busy).toBe(true);
 
@@ -688,8 +704,8 @@ describe("terminal events", () => {
       { type: "tool_call_started", call_id: "call-1", name: "search" },
       {
         type: "approval_required",
-      auto_judging: false,
-      grant_rungs: [],
+        auto_judging: false,
+        grant_rungs: [],
         call_id: "call-1",
         action: "search",
         approval: "search_may_share_query_and_excerpts",
@@ -910,10 +926,7 @@ describe("context truncation notice", () => {
   it("resets the once-per-turn dedup at the next turn", () => {
     const first = play([TURN, TRUNCATED]);
     const second = play(
-      [
-        { type: "turn_started", turn_id: "turn-2" },
-        TRUNCATED,
-      ],
+      [{ type: "turn_started", turn_id: "turn-2" }, TRUNCATED],
       first.state,
     );
     const notices = second.state.messages.filter(
@@ -1011,7 +1024,11 @@ describe("replaying an active turn over a hydrated transcript", () => {
         { type: "turn_started", turn_id: "t1" },
         { type: "text_delta", text: "Birds are great" },
         { type: "stream_interrupted" },
-        { type: "user_steered", message_id: "steer-1", text: "make it volcanos" },
+        {
+          type: "user_steered",
+          message_id: "steer-1",
+          text: "make it volcanos",
+        },
         { type: "text_delta", text: "Volcanoes erupt" },
       ],
       hydrated,

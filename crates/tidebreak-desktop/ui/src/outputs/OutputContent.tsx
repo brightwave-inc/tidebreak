@@ -9,10 +9,7 @@ import { lazy, Suspense } from "react";
 import { Loader2Icon } from "lucide-react";
 
 import { ImageViewer } from "@/components/document/image-viewer";
-import {
-  DocumentViewer,
-  hasOriginalViewer,
-} from "@/document/DocumentViewer";
+import { DocumentViewer, hasOriginalViewer } from "@/document/DocumentViewer";
 import { outputFileSource } from "@/document/useFileDownload";
 import {
   isTextDeliverableMediaType,

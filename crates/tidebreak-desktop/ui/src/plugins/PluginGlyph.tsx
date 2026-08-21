@@ -64,7 +64,8 @@ export function PluginGlyph({
   size?: GlyphSize;
   className?: string;
 }) {
-  const tone = (pluginName && BUNDLE_TONES[pluginName]) || CATEGORY_TONES[category];
+  const tone =
+    (pluginName && BUNDLE_TONES[pluginName]) || CATEGORY_TONES[category];
   const mark = pluginName ? bundleMark(pluginName) : null;
   const Fallback = CATEGORY_FALLBACK[category];
 

@@ -89,11 +89,7 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
     setWorking((current) => new Set(current).add(file.snapshot_id));
     try {
       applyOutcomes([
-        await client.undoFileChange(
-          chatId,
-          turnId,
-          file.snapshot_id,
-        ),
+        await client.undoFileChange(chatId, turnId, file.snapshot_id),
       ]);
     } catch {
       toast.error(`Could not undo ${file.relative_path}.`);
@@ -212,7 +208,11 @@ function FileChangeRow({
             disabled={file.undo !== "available" || working}
             onClick={onUndo}
           >
-            {working ? "Undoing…" : file.undo === "already_undone" ? "Undone" : "Undo"}
+            {working
+              ? "Undoing…"
+              : file.undo === "already_undone"
+                ? "Undone"
+                : "Undo"}
           </button>
         )}
       </div>
@@ -301,28 +301,28 @@ function BinaryPreview({
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-      <div className="mt-2 grid gap-2 md:grid-cols-2">
-        <RevisionPreview
-          client={client}
-          chatId={chatId}
-          turnId={turnId}
-          snapshotId={file.snapshot_id}
-          revision="before"
-          availability={preview.before}
-          active={open}
-          fileName={file.relative_path}
-        />
-        <RevisionPreview
-          client={client}
-          chatId={chatId}
-          turnId={turnId}
-          snapshotId={file.snapshot_id}
-          revision="after"
-          availability={preview.after}
-          active={open}
-          fileName={file.relative_path}
-        />
-      </div>
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          <RevisionPreview
+            client={client}
+            chatId={chatId}
+            turnId={turnId}
+            snapshotId={file.snapshot_id}
+            revision="before"
+            availability={preview.before}
+            active={open}
+            fileName={file.relative_path}
+          />
+          <RevisionPreview
+            client={client}
+            chatId={chatId}
+            turnId={turnId}
+            snapshotId={file.snapshot_id}
+            revision="after"
+            availability={preview.after}
+            active={open}
+            fileName={file.relative_path}
+          />
+        </div>
       </CollapsibleContent>
     </Collapsible>
   );
@@ -386,15 +386,7 @@ function RevisionPreview({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [
-    active,
-    availability,
-    chatId,
-    client,
-    revision,
-    snapshotId,
-    turnId,
-  ]);
+  }, [active, availability, chatId, client, revision, snapshotId, turnId]);
 
   const label = revision === "before" ? "Before" : "After";
   return (

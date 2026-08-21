@@ -162,11 +162,11 @@ describe("ModelsPanel", () => {
     );
     expect(putModelRole).not.toHaveBeenCalled();
     await user.click(utilityModel);
+    expect(screen.queryByRole("option", { name: /GPT No Schema/ })).toBeNull();
     expect(
-      screen.queryByRole("option", { name: /GPT No Schema/ }),
-    ).toBeNull();
-    expect(
-      screen.getByRole("option", { name: "Claude Opus 4.8 — 1M context — unavailable" }),
+      screen.getByRole("option", {
+        name: "Claude Opus 4.8 — 1M context — unavailable",
+      }),
     ).toHaveAttribute("aria-disabled", "true");
     await user.keyboard("{Escape}");
 
@@ -186,7 +186,9 @@ describe("ModelsPanel", () => {
     await user.click(utilityProvider);
     await user.click(screen.getByRole("option", { name: "OpenAI" }));
     await user.click(utilityModel);
-    await user.click(screen.getByRole("option", { name: "GPT-4o mini — 128k context" })) ;
+    await user.click(
+      screen.getByRole("option", { name: "GPT-4o mini — 128k context" }),
+    );
     await waitFor(() =>
       expect(putModelRole).toHaveBeenCalledWith(
         "utility",
