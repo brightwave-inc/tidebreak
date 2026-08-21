@@ -32,47 +32,65 @@ const targets =
   triple === "universal-apple-darwin"
     ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
     : [triple];
-const stagedSidecars = [];
 
-for (const target of targets) {
-  const extension = target.includes("windows") ? ".exe" : "";
-  const cargoArgs = [
-    "build",
-    "-p",
-    "tidebreak-host-broker",
-    "--bin",
-    "tidebreak-host-broker",
-    "--locked",
-  ];
-  if (release) cargoArgs.push("--release");
-  if (configuredTarget) cargoArgs.push("--target", target);
-  execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
+/**
+ * Build and stage one named Cargo binary into the Tauri sidecar directory.
+ *
+ */
+function stageBinary(binaryName, packageName) {
+  const stagedSidecars = [];
+  for (const target of targets) {
+    const extension = target.includes("windows") ? ".exe" : "";
+    const cargoArgs = [
+      "build",
+      "-p",
+      packageName,
+      "--bin",
+      binaryName,
+      "--locked",
+    ];
+    if (release) cargoArgs.push("--release");
+    if (configuredTarget) cargoArgs.push("--target", target);
+    execFileSync("cargo", cargoArgs, { cwd: workspaceDir, stdio: "inherit" });
 
-  const source = join(
-    targetRoot,
-    ...(configuredTarget ? [target] : []),
-    profile,
-    `tidebreak-host-broker${extension}`,
-  );
-  const destination = join(
-    destinationDir,
-    `tidebreak-host-broker-${target}${extension}`,
-  );
+    const source = join(
+      targetRoot,
+      ...(configuredTarget ? [target] : []),
+      profile,
+      `${binaryName}${extension}`,
+    );
+    const destination = join(
+      destinationDir,
+      `${binaryName}-${target}${extension}`,
+    );
 
-  copyFileSync(source, destination);
-  if (process.platform !== "win32") chmodSync(destination, 0o755);
-  stagedSidecars.push(destination);
+    copyFileSync(source, destination);
+    if (process.platform !== "win32") chmodSync(destination, 0o755);
+    stagedSidecars.push(destination);
+  }
+
+  if (triple === "universal-apple-darwin") {
+    const destination = join(
+      destinationDir,
+      `${binaryName}-universal-apple-darwin`,
+    );
+    execFileSync(
+      "lipo",
+      ["-create", ...stagedSidecars, "-output", destination],
+      { stdio: "inherit" },
+    );
+    chmodSync(destination, 0o755);
+  }
 }
 
-if (triple === "universal-apple-darwin") {
-  const destination = join(
-    destinationDir,
-    "tidebreak-host-broker-universal-apple-darwin",
-  );
-  execFileSync(
-    "lipo",
-    ["-create", ...stagedSidecars, "-output", destination],
-    { stdio: "inherit" },
-  );
-  chmodSync(destination, 0o755);
-}
+// The host broker is the desktop's existing sidecar: it owns the per-workspace
+// process tree for code executions.
+stageBinary("tidebreak-host-broker", "tidebreak-host-broker");
+
+// The CLI binary gives every Tidebreak desktop session a canonical `tidebreak`
+// command on PATH so provider harnesses (Claude, Codex, OpenCode) can invoke
+// `tidebreak browser-mcp` or other agent-side commands through a session-
+// scoped capfile without asking the user to install or find anything.
+// The later harness command-path PR resolves the absolute path at runtime;
+// this slice only packages the binary so it is available on disk.
+stageBinary("tidebreak", "tidebreak-cli");
