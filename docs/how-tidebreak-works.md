@@ -94,6 +94,7 @@ The main local data is easy to recognize:
 | --- | --- |
 | `tidebreak.db` | SQLite operational source of truth |
 | `tidebreak-schema.json` | pre-v1 local SQLite schema epoch |
+| `orphaned-code-worktrees.json` | code worktrees an epoch reset left on disk |
 | `blobs/` | retained immutable document bytes |
 | `tidebreak.lock` | proof that one process owns this data directory |
 | OS keychain | provider credentials, kept outside the database — one item per profile |
@@ -104,7 +105,10 @@ both the desktop app and a headless `tidebreak serve` using the desktop profile.
 Opening an older pre-v1 database rebuilds `tidebreak.db` and its SQLite journals
 so stale state cannot survive the reset. A current epoch preserves both stores.
 Startup also removes the retired `vectors/` directory when it is safe to open
-the current schema. Unknown, newer, or post-v1 lifecycle markers fail closed so
+the current schema. Code worktrees are the exception to "rebuilt": they live
+outside the data directory because they hold uncommitted user work, so a reset
+records them in `orphaned-code-worktrees.json` and leaves the trees, their
+`.git/worktrees` entries, and their branches alone. Unknown, newer, or post-v1 lifecycle markers fail closed so
 a prerelease binary cannot silently erase a future stable database, and the
 destructive path is disabled at runtime for package major version 1 and later.
 
