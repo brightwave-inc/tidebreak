@@ -119,6 +119,8 @@ pub async fn get_session_debug(
                 seq: item.seq,
                 event: item.event,
                 replayed: None,
+                transient: None,
+                truncated: None,
             })
             .collect(),
     }))

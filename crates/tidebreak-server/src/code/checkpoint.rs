@@ -942,7 +942,7 @@ mod tests {
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
     use tidebreak_core::db::code::{
-        insert_repo, insert_session, insert_turn, insert_workspace, list_events,
+        insert_repo, insert_session, insert_turn, insert_workspace, list_events, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSessionKind,
@@ -1543,9 +1543,10 @@ mod tests {
     }
 
     async fn recorded_events(db: &Arc<DbStore>, session: &CodeSession) -> Vec<CodeEvent> {
-        list_events(db, &session.owner, session.id, 0)
+        list_events(db, &session.owner, session.id, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap()
+            .events
             .into_iter()
             .map(|framed| framed.event)
             .collect()

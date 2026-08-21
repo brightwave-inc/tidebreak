@@ -349,6 +349,16 @@ impl HarnessEventSink for LiveSink {
         let Some(code_event) = map_event(event, turn_id) else {
             return;
         };
+        // Assistant deltas stream and are gone. The `assistant_message` that
+        // closes the run repeats them exactly, so a row here would store the
+        // same words a second time (record 57).
+        if matches!(code_event, CodeEvent::AssistantDelta { .. }) {
+            self.bus.publish_transient(self.session_id, code_event);
+            let _ =
+                super::attention::note_activity(&self.db, &self.bus, &self.owner, self.session_id)
+                    .await;
+            return;
+        }
         self.note_subagent_boundary(&code_event).await;
         // An approval is parked on the call this completion names. Reconcile
         // it after the completion lands, so the journal reads in the order it
@@ -1288,6 +1298,7 @@ async fn persist_and_publish(
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
+    settle_streamed_text(db, bus, owner, session_id, spawn_epoch, &event).await;
     let activity_boundary = matches!(
         &event,
         CodeEvent::ToolStarted {
@@ -1329,11 +1340,64 @@ async fn persist_and_publish(
     Ok(())
 }
 
+/// Write down assistant text the engine streamed but never stated.
+///
+/// Deltas are live-only, so the `assistant_message` closing a run is what the
+/// journal keeps. A turn that ends mid-sentence — interrupted, or failed —
+/// never produces that message, and the words the reader watched arrive would
+/// otherwise be gone on reload. Synthesizing the message the engine did not
+/// send is safe where replaying the deltas would not be: the renderer and the
+/// CLI both treat a message as a *replacement* for the text they streamed, so
+/// a client that already has it shows it once.
+///
+/// Everything else that ends a run — the engine's own message, a parent-level
+/// tool call, the next turn — already carries the text or discards it, and
+/// [`CodeEventBus::publish`] retires the buffer when it goes by.
+///
+/// Best-effort on purpose: a recovery write that fails must not stop the
+/// terminal event that follows it from being journaled.
+async fn settle_streamed_text(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    event: &CodeEvent,
+) {
+    if !matches!(
+        event,
+        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted
+    ) {
+        return;
+    }
+    let streamed = bus.take_assistant_tail(session_id);
+    if streamed.is_empty() {
+        return;
+    }
+    let recovered = CodeEvent::AssistantMessage {
+        text: streamed,
+        parent_call_id: None,
+    };
+    match append_event(db, owner, session_id, spawn_epoch, &recovered).await {
+        Ok(seq) => bus.publish(
+            session_id,
+            tidebreak_core::SequencedCodeEvent {
+                seq,
+                event: recovered,
+            },
+        ),
+        Err(err) => warn!(
+            session = %session_id,
+            error = %err,
+            "could not journal the text a turn streamed before it ended"
+        ),
+    }
+}
+
 fn is_activity(event: &CodeEvent) -> bool {
     matches!(
         event,
-        CodeEvent::AssistantDelta { .. }
-            | CodeEvent::AssistantMessage { .. }
+        CodeEvent::AssistantMessage { .. }
             | CodeEvent::ReasoningDelta { .. }
             | CodeEvent::ToolStarted { .. }
             | CodeEvent::ToolCompleted { .. }

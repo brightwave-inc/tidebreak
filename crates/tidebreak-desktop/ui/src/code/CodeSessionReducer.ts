@@ -321,11 +321,20 @@ export function reduceCodeSessionEvent(
   framed: SequencedCodeEventFrame,
   deps: CodeSessionDeps,
 ): CodeSessionTransition {
-  if (framed.seq <= state.lastSeq) return { state, effects: [] };
+  // A transient frame is live-only: no row holds it, so its `seq` is the
+  // cursor it streamed behind rather than a position of its own. Applying it
+  // must not move the cursor, and the duplicate check does not apply — the
+  // journal will never hand it back.
+  const transient = framed.transient === true;
+  if (!transient && framed.seq <= state.lastSeq) return { state, effects: [] };
   state = {
     ...state,
-    lastSeq: framed.seq,
+    lastSeq: transient ? state.lastSeq : framed.seq,
     animateStreaming: framed.replayed !== true,
+    items:
+      framed.truncated === true
+        ? withTruncationNotice(state.items)
+        : state.items,
   };
   const event = framed.event;
   const effects: CodeSessionEffect[] = [];
@@ -634,6 +643,31 @@ export function reduceCodeSessionEvent(
       return { state, effects };
   }
 }
+
+/**
+ * Say that the replay started partway through.
+ *
+ * The server caps how much journal one connect replays and flags the first
+ * frame of a capped window. Without a line saying so, a long session would
+ * quietly open on its middle and read as if that were the beginning.
+ */
+function withTruncationNotice(
+  items: CodeTranscriptItem[],
+): CodeTranscriptItem[] {
+  if (items.some((item) => item.id === TRUNCATED_NOTICE_ID)) return items;
+  return [
+    {
+      kind: "notice",
+      id: TRUNCATED_NOTICE_ID,
+      level: "info",
+      message: "Earlier history in this session is not shown.",
+    },
+    ...items,
+  ];
+}
+
+/** Fixed so a reconnect does not stack a second copy of the same line. */
+const TRUNCATED_NOTICE_ID = "notice:truncated-replay";
 
 function upsertStreaming(
   items: CodeTranscriptItem[],

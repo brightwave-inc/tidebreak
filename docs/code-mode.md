@@ -305,6 +305,9 @@ POST            /code/sessions/{id}/turns            {message}  (queued while ru
                                                      mid_turn_steering capability carries it)
 POST            /code/sessions/{id}/interrupt | /permission-mode | /attention | /reap
 WS              /code/sessions/{id}/events?after=    snapshot → replay → live
+                                                     (replay is capped and flags truncation;
+                                                     assistant deltas ride the same socket
+                                                     as live-only frames — record 0057)
 WS              /code/updates                        digests, restated on connect
 
 GET             /code/approvals?state=pending

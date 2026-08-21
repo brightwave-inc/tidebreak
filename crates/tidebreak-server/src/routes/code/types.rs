@@ -185,14 +185,30 @@ impl From<CodeTurn> for CodeTurnSnapshot {
     }
 }
 
-/// One journaled event on the per-session WebSocket.
+/// One event on the per-session WebSocket.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct SequencedCodeEventFrame {
+    /// Journal position. On a `transient` frame this is the cursor the event
+    /// streamed behind, not a position the frame occupies — resume from it
+    /// and you lose nothing, because no row holds this event.
     pub seq: i64,
     pub event: CodeEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub replayed: Option<bool>,
+    /// Set on a live-only event the journal does not hold: assistant deltas,
+    /// and the catch-up delta a mid-turn reader gets on connect. Apply it,
+    /// but do not advance the resume cursor past it and do not expect it
+    /// again on reconnect (record 57).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transient: Option<bool>,
+    /// Set on the first replayed frame of a capped window: older events above
+    /// the requested cursor were dropped, and the history in front of this
+    /// frame is not coming.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub truncated: Option<bool>,
 }
 
 /// `GET /code/sessions/{id}/debug` — journal plus turn rows for a bug report.

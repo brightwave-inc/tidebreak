@@ -14,7 +14,7 @@ use tidebreak_core::db::code::{
     get_workspace, insert_repo, insert_session, insert_workspace, list_approvals, list_events,
     list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_turns, list_workspaces, mark_repo_removed, save_approval,
-    save_repo, save_session, save_workspace,
+    save_repo, save_session, save_workspace, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -1955,8 +1955,8 @@ impl CodeRuntime {
     > {
         let session = self.get_session(owner, session_id).await?;
         let turns = list_turns(&self.db, owner, session_id).await?;
-        let events = list_events(&self.db, owner, session_id, 0).await?;
-        Ok((session, turns, events))
+        let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
+        Ok((session, turns, events.events))
     }
 
     /// Write this session's transcript into its worktree for a fork to read.
@@ -1975,12 +1975,12 @@ impl CodeRuntime {
             .require_live_workspace(owner, session.workspace_id)
             .await?;
         let turns = list_turns(&self.db, owner, session_id).await?;
-        let events = list_events(&self.db, owner, session_id, 0).await?;
+        let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
         fork::write_transcript(
             std::path::Path::new(&workspace.worktree_path),
             &session,
             &turns,
-            &events,
+            &events.events,
         )
         .await
         .map_err(|err| ServerError::internal(format!("could not write the fork transcript: {err}")))

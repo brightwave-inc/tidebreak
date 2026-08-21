@@ -87,21 +87,56 @@ pub async fn latest_event_created_at(
         .map(|model| model.created_at))
 }
 
+/// Default replay cap for [`list_events`].
+///
+/// A session journal grows for as long as the session lives, and a client
+/// that connects with `after = 0` asks for all of it. Two thousand events is
+/// more than any transcript a reader scrolls through, and it bounds what one
+/// reconnect can cost the server.
+pub const MAX_REPLAY_EVENTS: u64 = 2_000;
+
+/// One bounded window of a session journal.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CodeEventPage {
+    /// Events in ascending sequence order.
+    pub events: Vec<SequencedCodeEvent>,
+    /// True when older events above the cursor were dropped to honor the cap.
+    ///
+    /// The window keeps the newest events, so a truncated page leaves a hole
+    /// between the caller's cursor and the first event it carries. Say so
+    /// rather than let a reader believe it holds the whole history.
+    pub truncated: bool,
+}
+
 /// Events for one of the owner's sessions with `seq > after`, in order.
+///
+/// At most `limit` events come back, and the window keeps the *newest* ones:
+/// a client that fell far behind resumes at the live tail instead of paying
+/// for history it would scroll past. Pass [`MAX_REPLAY_EVENTS`] unless you
+/// have a reason to want a different bound.
 pub async fn list_events(
     store: &DbStore,
     owner: &OwnerId,
     session_id: CodeSessionId,
     after: i64,
-) -> Result<Vec<SequencedCodeEvent>> {
-    entities::code_event::Entity::find()
+    limit: u64,
+) -> Result<CodeEventPage> {
+    // Read one past the cap so a full window is distinguishable from a window
+    // that happens to end exactly on it.
+    let probe = limit.saturating_add(1);
+    let mut rows = entities::code_event::Entity::find()
         .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .filter(entities::code_event::Column::Seq.gt(after))
-        .order_by_asc(entities::code_event::Column::Seq)
+        .order_by_desc(entities::code_event::Column::Seq)
+        .limit(probe)
         .all(&store.conn)
         .await
-        .map_err(store_err)?
+        .map_err(store_err)?;
+    let truncated = rows.len() as u64 > limit;
+    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    rows.reverse();
+    let events = rows
         .into_iter()
         .map(|model| {
             Ok(SequencedCodeEvent {
@@ -109,7 +144,8 @@ pub async fn list_events(
                 event: serde_json::from_value(model.event)?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CodeEventPage { events, truncated })
 }
 
 /// Newest journal events for one session, newest first. Digests use this

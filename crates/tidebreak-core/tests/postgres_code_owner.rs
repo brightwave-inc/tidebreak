@@ -16,7 +16,7 @@ use tidebreak_core::db::code::{
     append_event, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
     get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
     list_approvals, list_events, list_repos, list_sessions, list_turns, mark_repo_removed,
-    set_workspace_title_if,
+    set_workspace_title_if, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
@@ -181,16 +181,20 @@ async fn postgres_code_queries_partition_by_owner() {
     .await
     .unwrap();
     assert_eq!(
-        list_events(&store, &alice, alice_session, 0)
+        list_events(&store, &alice, alice_session, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap()
+            .events
             .len(),
         1
     );
-    assert!(list_events(&store, &bob, alice_session, 0)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_events(&store, &bob, alice_session, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
 
     // Approvals.
     let approval_id = CodeApprovalId::new();

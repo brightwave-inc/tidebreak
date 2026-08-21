@@ -113,13 +113,24 @@ pub enum SubmitTurnResponse {
     Queued(QueuedCodeTurn),
 }
 
-/// One journaled event on the per-session WebSocket.
+/// One event on the per-session WebSocket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SequencedCodeEventFrame {
+    /// Journal position, or — on a `transient` frame — the cursor the event
+    /// streamed behind. Resuming from it is correct either way.
     pub seq: i64,
     pub event: CodeEvent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replayed: Option<bool>,
+    /// Set on a live-only event no journal row holds: assistant deltas, and
+    /// the catch-up delta a mid-turn reader gets on connect. Render it and
+    /// move on — it will not come back on reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient: Option<bool>,
+    /// Set on the first replayed frame of a capped window: history older than
+    /// this frame was dropped and is not coming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 /// Doctor report for every registered engine adapter.
@@ -690,6 +701,25 @@ mod tests {
         assert_eq!(encoded["event"]["type"], "assistant_delta");
         assert_eq!(encoded["event"]["text"], "hello");
         assert_eq!(encoded["replayed"], true);
+    }
+
+    #[test]
+    fn a_transient_delta_frame_keeps_the_cursor_it_streamed_behind() {
+        // Deltas are live-only (record 57). `code run --json` prints them the
+        // same as any other frame, and the `seq` they carry is the journal
+        // position to resume from — a reconnect using it loses nothing,
+        // because no row holds the delta.
+        let frame = decode_event_frame(
+            r#"{"seq":12,"event":{"type":"assistant_delta","text":"half"},"transient":true}"#,
+        )
+        .unwrap();
+        assert_eq!(frame.seq, 12);
+        assert_eq!(frame.transient, Some(true));
+        assert_eq!(frame.replayed, None);
+        assert!(matches!(
+            frame.event,
+            CodeEvent::AssistantDelta { ref text } if text == "half"
+        ));
     }
 
     #[test]
