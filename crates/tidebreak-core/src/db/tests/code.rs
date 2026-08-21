@@ -972,10 +972,7 @@ async fn a_removed_repo_path_can_be_registered_again() {
         .unwrap()
         .unwrap();
     assert_eq!(live.id, replacement.id);
-    assert_eq!(
-        list_repos(&store, &owner).await.unwrap(),
-        vec![replacement]
-    );
+    assert_eq!(list_repos(&store, &owner).await.unwrap(), vec![replacement]);
     assert!(get_repo(&store, &owner, removed.id)
         .await
         .unwrap()
