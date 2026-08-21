@@ -3074,7 +3074,9 @@ mod tests {
                 "browser-1",
                 "workspace-1",
                 &origin,
-                BrowserOriginScope::Origin { origin },
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
                 &[BrowserGrantCapability::BrowserControlOrigin],
             )
             .unwrap();
