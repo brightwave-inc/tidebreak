@@ -1208,6 +1208,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1222,6 +1223,7 @@ pub async fn bind_configured(config: Config) -> Result<Server> {
         config,
         None,
         mcp_servers,
+        None,
         None,
         None,
         None,
@@ -1253,6 +1255,7 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1271,6 +1274,7 @@ pub async fn bind_configured_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_servers,
+        None,
         None,
         None,
         None,
