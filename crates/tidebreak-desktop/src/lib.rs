@@ -1076,8 +1076,8 @@ mod resource_dir_tests {
     #[test]
     fn desktop_sibling_exe_rejects_path_traversal() {
         let dir = temp_dir("sibling-traversal");
-        let err = desktop_sibling_exe_from(&desktop_path(&dir), "../tidebreak")
-            .expect_err("should fail");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "../tidebreak").expect_err("should fail");
         assert!(err.contains("single file name"), "error: {err}");
         let _ = fs::remove_dir_all(dir);
     }
