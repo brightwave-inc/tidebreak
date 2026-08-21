@@ -541,6 +541,11 @@ pub fn app(state: AppState) -> Router {
             "/code/browser/snapshot",
             post(routes::code::browser_snapshot),
         )
+        .route("/code/browser/wait", post(routes::code::browser_wait))
+        .route(
+            "/code/browser/screenshot",
+            post(routes::code::browser_screenshot),
+        )
         .with_state(state.clone());
 
     let api = Router::new()

@@ -26,7 +26,9 @@ mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use approvals::{decide_approval, list_approvals};
-pub(crate) use browser::{browser_list, browser_navigate, browser_snapshot};
+pub(crate) use browser::{
+    browser_list, browser_navigate, browser_screenshot, browser_snapshot, browser_wait,
+};
 pub(crate) use delivery::{
     act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,
     discover_repositories as discover_delivery_repositories,

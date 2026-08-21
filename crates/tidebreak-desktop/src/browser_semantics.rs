@@ -558,7 +558,18 @@ pub(crate) async fn browser_wait(
     if !arguments.is_well_formed() {
         return Err("browser wait request is not valid".to_owned());
     }
-    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    // Observation chained from a prior snapshot: re-check live authorization
+    // without clearing the stored snapshot (begin_agent_observation does not
+    // acquire or mutate controller state), then validate the caller's
+    // snapshot_id and document_epoch against the stored snapshot before
+    // dispatching the poll.
+    let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    registry.validate_snapshot_id(
+        &arguments.browser_id,
+        &host_snapshot.workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+    )?;
     let origin = host_snapshot
         .url
         .as_deref()
@@ -613,13 +624,32 @@ async fn poll_wait_condition(
     // The fence pins the controlled instance this wait started against; the
     // halt receiver lets Stop abort an in-flight probe or sleep immediately.
     let start_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+    registry.validate_snapshot_id(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+    )?;
     let mut halt = registry.subscribe_halt(&arguments.browser_id, &workspace_id)?;
 
-    // Capture the starting URL for UrlChanged condition
+    // Capture the starting URL only after the caller's exact snapshot and
+    // document epoch have been revalidated inside the serialized dispatch.
     let start_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+    if start_snapshot.document_epoch != Some(arguments.document_epoch) {
+        return Err("browser document changed since the snapshot was taken".to_owned());
+    }
     let start_url = start_snapshot.url.clone();
 
     loop {
+        let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
+        if fence.instance_id != start_fence.instance_id {
+            return Err("browser session was replaced while waiting".to_owned());
+        }
+        if fence.document_epoch != arguments.document_epoch
+            && !matches!(arguments.condition, BrowserWaitCondition::UrlChanged)
+        {
+            return Err("browser document changed since the snapshot was taken".to_owned());
+        }
         let snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
         let Some(document_epoch) = snapshot.document_epoch else {
             return Ok(wait_result(
@@ -629,6 +659,11 @@ async fn poll_wait_condition(
                 "browser document epoch is unavailable".to_owned(),
             ));
         };
+        if document_epoch != arguments.document_epoch
+            && !matches!(arguments.condition, BrowserWaitCondition::UrlChanged)
+        {
+            return Err("browser document changed since the snapshot was taken".to_owned());
+        }
 
         if *halt.borrow_and_update()
             || snapshot
@@ -695,11 +730,10 @@ async fn poll_wait_condition(
                 return Err("browser session was replaced while waiting".to_owned());
             }
             // UrlChanged resolves across documents by design. Every other
-            // condition was probed against `document_epoch`; if the document
-            // changed while the probe was in flight, discard the stale
-            // result and re-evaluate against the new document.
-            if fence.document_epoch == document_epoch
-                || matches!(arguments.condition, BrowserWaitCondition::UrlChanged)
+            // condition remains pinned to the caller's document epoch.
+            if matches!(arguments.condition, BrowserWaitCondition::UrlChanged)
+                || (document_epoch == arguments.document_epoch
+                    && fence.document_epoch == arguments.document_epoch)
             {
                 return Ok(wait_result(
                     &arguments.browser_id,
@@ -708,7 +742,7 @@ async fn poll_wait_condition(
                     "Wait condition satisfied.".to_owned(),
                 ));
             }
-            continue;
+            return Err("browser document changed since the snapshot was taken".to_owned());
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
@@ -804,7 +838,9 @@ pub(crate) async fn browser_screenshot(
     if !arguments.is_well_formed() {
         return Err("browser screenshot request is not valid".to_owned());
     }
-    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    // Observation chained from a prior snapshot: use begin_agent_observation
+    // so the stored snapshot survives for validate_snapshot_id below.
+    let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
     let origin = host_snapshot
         .url
         .as_deref()
