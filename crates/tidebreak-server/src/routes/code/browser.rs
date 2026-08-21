@@ -142,6 +142,7 @@ fn map_runtime_error(error: BrowserRuntimeError) -> ServerError {
         BrowserRuntimeError::SessionEnded => {
             ServerError::forbidden("the browser session has ended")
         }
+        BrowserRuntimeError::NotAuthorized(message) => ServerError::forbidden(message),
         BrowserRuntimeError::Unsupported(operation) => ServerError::not_implemented(format!(
             "this browser engine does not support {operation}"
         )),
