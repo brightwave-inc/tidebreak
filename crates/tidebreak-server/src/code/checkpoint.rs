@@ -339,7 +339,8 @@ pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointE
     // and `add -A` re-hashes only what changed. A cold index re-hashes the
     // whole worktree every time: ~0.85s versus ~0.20s on a 20k-file tree.
     if let Some(index_path) = checkpoint_index_path(worktree).await {
-        match snapshot_tree_with_index(worktree, &index_path, false).await {
+        let reset_from_head = !index_path.exists();
+        match snapshot_tree_with_index(worktree, &index_path, reset_from_head).await {
             Ok(tree) => return Ok(tree),
             Err(err) => {
                 // A concurrent snapshot holding `<index>.lock`, or an index
@@ -380,7 +381,15 @@ async fn checkpoint_index_path(worktree: &Path) -> Option<PathBuf> {
     .await
     .ok()?;
     let trimmed = raw.trim();
-    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    })
 }
 
 /// Snapshot the worktree through `index_path`.
@@ -1189,6 +1198,12 @@ mod tests {
     #[tokio::test]
     async fn reused_index_matches_a_cold_snapshot_through_every_mutation() {
         let (_dir, repo) = init_repo();
+        std::fs::write(repo.join("tracked-then-ignored.txt"), "still tracked\n").unwrap();
+        run(&repo, &["git", "add", "tracked-then-ignored.txt"]);
+        run(&repo, &["git", "commit", "-m", "add tracked file"]);
+        std::fs::write(repo.join(".gitignore"), "tracked-then-ignored.txt\n").unwrap();
+        run(&repo, &["git", "add", ".gitignore"]);
+        run(&repo, &["git", "commit", "-m", "ignore tracked file"]);
         let tree = add_worktree(&repo, "reuse");
 
         async fn cold(worktree: &Path) -> String {
@@ -1237,6 +1252,7 @@ mod tests {
         // The reusable index lives in the worktree's git dir and is not the
         // user's index.
         let path = checkpoint_index_path(&tree).await.unwrap();
+        assert!(path.is_absolute(), "{path:?}");
         assert!(
             path.to_string_lossy()
                 .contains("tidebreak-checkpoint-index"),
