@@ -438,6 +438,7 @@ pub(crate) fn plain_text_script() -> Vec<HarnessEvent> {
                 output_tokens: 6,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                context_tokens: 4,
             },
         },
     ]

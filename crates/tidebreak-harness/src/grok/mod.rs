@@ -232,6 +232,46 @@ mod tests {
             .any(|event| matches!(event, HarnessEvent::ToolCompleted { .. })));
     }
 
+    /// Grok publishes both shapes: a per-call `usage` event and a cumulative
+    /// `end` payload. The spend counts take the cumulative one; occupancy
+    /// takes the last per-call event.
+    ///
+    /// `permission-denied` ran three calls. Its `end` payload sums to 54,748
+    /// prompt-side tokens while the prompt still resident was 18,311 — a 3x
+    /// over-read, and enough to clamp a ring that should read a third full.
+    #[test]
+    fn context_tokens_are_the_last_call_not_the_cumulative_end() {
+        let (events, _) = replay("permission-denied");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 18_311);
+        let spend =
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        assert_eq!(spend, 54_748);
+    }
+
+    /// A single-call turn has nothing to disagree about: the one `usage`
+    /// event and the `end` payload report the same prompt.
+    #[test]
+    fn a_single_call_turn_reads_the_same_prompt_either_way() {
+        let (events, _) = replay("plain-text");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 18_150);
+        assert_eq!(
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
+            18_150
+        );
+    }
+
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+        events
+            .iter()
+            .find_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("the fixture completes its turn")
+    }
+
     #[test]
     fn fixture_replay_permission_denied() {
         let (events, _) = replay("permission-denied");

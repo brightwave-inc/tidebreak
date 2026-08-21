@@ -1847,16 +1847,30 @@ function CodeSessionPane({
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
           }
-          contextUsage={{
-            usage: lastUsage,
-            contextWindow: catalogModels.find(
-              (entry) => entry.id === model || entry.key === model,
-            )?.context_window,
-            modelName:
-              modelOptions.find((option) => option.id === model)?.label ??
-              model ??
-              undefined,
-          }}
+          contextUsage={
+            lastUsage
+              ? {
+                  // The engine's own reading of the prompt still resident
+                  // after its last model call. The four counts below are the
+                  // turn's spend across every call, which on a long turn runs
+                  // to several times this.
+                  contextTokens: lastUsage.context_tokens,
+                  spend: {
+                    input: lastUsage.input_tokens,
+                    output: lastUsage.output_tokens,
+                    cacheRead: lastUsage.cache_read_input_tokens,
+                    cacheWrite: lastUsage.cache_creation_input_tokens,
+                  },
+                  contextWindow: catalogModels.find(
+                    (entry) => entry.id === model || entry.key === model,
+                  )?.context_window,
+                  modelName:
+                    modelOptions.find((option) => option.id === model)?.label ??
+                    model ??
+                    undefined,
+                }
+              : null
+          }
           onSend={send}
           onSteer={steeringSupported ? steer : undefined}
           onInterrupt={interrupt}

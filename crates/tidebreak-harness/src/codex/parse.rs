@@ -548,7 +548,25 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
         output_tokens: field("outputTokens"),
         cache_read_input_tokens,
         cache_creation_input_tokens,
+        context_tokens: context_tokens_from(value),
     }
+}
+
+/// The prompt resident on the turn's last model call.
+///
+/// `last` is that call. Its `inputTokens` is the whole prompt the call sent —
+/// `cachedInputTokens` is a subset already inside it — so the cached prefix
+/// needs no adding back. The written portion sits outside it and does.
+///
+/// Read from the raw payload on purpose. [`usage_from`] subtracts both cache
+/// figures back out of `input_tokens` so the four spend counts stay disjoint,
+/// which leaves that field a remainder rather than a prompt.
+///
+/// A payload with no `last` is itself one call.
+fn context_tokens_from(usage: &Value) -> u64 {
+    let last = usage.get("last").unwrap_or(usage);
+    let field = |name: &str| last.get(name).and_then(Value::as_u64).unwrap_or(0);
+    field("inputTokens").saturating_add(field("cacheWriteInputTokens"))
 }
 
 fn id_key(id: &Value) -> String {

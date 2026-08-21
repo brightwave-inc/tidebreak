@@ -17,6 +17,7 @@ function boundary(
       output_tokens: 2_931,
       cache_read_input_tokens: 31_002,
       cache_creation_input_tokens: 0,
+      context_tokens: 52_640,
     },
     error: null,
     diffstat: { files: 3, insertions: 96, deletions: 14, truncated: false },

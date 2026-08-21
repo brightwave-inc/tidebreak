@@ -144,6 +144,11 @@ pub struct Diffstat {
 /// the prompt an engine actually sent is the sum of all three. Missing fields
 /// stay zero, which is not the same as "the engine sent zero" — an engine that
 /// does not surface cache counts reports nothing rather than a real zero.
+///
+/// None of the four answers "how full is the window". Summing turn totals
+/// counts the same transcript once per model call, so a long turn reads as a
+/// multiple of the prompt that was actually resident. That reading has its own
+/// field: [`CodeUsage::context_tokens`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 pub struct CodeUsage {
     /// Fresh, uncached input tokens. Excludes both cache fields.
@@ -158,6 +163,18 @@ pub struct CodeUsage {
     /// Cache-write input tokens, when the engine reports them.
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// Prompt tokens resident on the turn's final model call — what actually
+    /// occupied the context window at the end of the turn.
+    ///
+    /// Distinct from the four counts above, which are the turn's *spend*
+    /// summed across every model call. On a six-call turn those sum to
+    /// roughly six prompts; this is the one prompt that was live when the
+    /// turn ended, and it is the only honest numerator for "how full is the
+    /// window".
+    ///
+    /// Zero when the engine does not publish enough to compute it.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 /// Hint that a turn recorded a checkpoint. The diff body is loaded separately.
@@ -469,6 +486,7 @@ mod tests {
                     output_tokens: 22,
                     cache_read_input_tokens: 33,
                     cache_creation_input_tokens: 44,
+                    context_tokens: 88,
                 },
                 checkpoint: Some(CheckpointHint {
                     checkpoint_ref: Some("refs/tidebreak/checkpoints/ws/1".into()),

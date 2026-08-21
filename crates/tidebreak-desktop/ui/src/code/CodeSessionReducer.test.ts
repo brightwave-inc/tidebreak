@@ -21,6 +21,7 @@ const NO_USAGE = {
   output_tokens: 4,
   cache_read_input_tokens: 0,
   cache_creation_input_tokens: 0,
+  context_tokens: 0,
 };
 
 function deps(): CodeSessionDeps {

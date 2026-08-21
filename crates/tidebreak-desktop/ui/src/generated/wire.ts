@@ -1532,6 +1532,11 @@ subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", works
  * the prompt an engine actually sent is the sum of all three. Missing fields
  * stay zero, which is not the same as "the engine sent zero" — an engine that
  * does not surface cache counts reports nothing rather than a real zero.
+ *
+ * None of the four answers "how full is the window". Summing turn totals
+ * counts the same transcript once per model call, so a long turn reads as a
+ * multiple of the prompt that was actually resident. That reading has its own
+ * field: [`CodeUsage::context_tokens`].
  */
 export type CodeUsage = { 
 /**
@@ -1549,7 +1554,20 @@ cache_read_input_tokens: number,
 /**
  * Cache-write input tokens, when the engine reports them.
  */
-cache_creation_input_tokens: number, };
+cache_creation_input_tokens: number, 
+/**
+ * Prompt tokens resident on the turn's final model call — what actually
+ * occupied the context window at the end of the turn.
+ *
+ * Distinct from the four counts above, which are the turn's *spend*
+ * summed across every model call. On a six-call turn those sum to
+ * roughly six prompts; this is the one prompt that was live when the
+ * turn ended, and it is the only honest numerator for "how full is the
+ * window".
+ *
+ * Zero when the engine does not publish enough to compute it.
+ */
+context_tokens: number, };
 
 /**
  * Identifies one durable watch task on a workspace's pull request.

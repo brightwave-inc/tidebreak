@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from "react";
 import type { ApiClient, Chat } from "./api";
-import type { RendererTurnUsage } from "./generated/wire";
+import type { ContextUsageReading } from "./ContextUsageIndicator";
 import { followScrollBehavior } from "./ChatScroll";
 import { useTranscriptFollow } from "./useTranscriptFollow";
 import { useChatSessionStore } from "./ChatSessionStore";
@@ -68,11 +68,7 @@ export type ChatViewProps = {
   composerModelMenu: ReactNode;
   composerPermissionMenu: ReactNode;
   /** Context-window reading the composer shows beside its own controls. */
-  contextUsage?: {
-    usage: RendererTurnUsage | null;
-    contextWindow: number | undefined;
-    modelName: string | undefined;
-  };
+  contextUsage?: ContextUsageReading | null;
   composerNetwork?: ComposerNetwork;
   composerReasoning?: ComposerReasoning;
   composerImages: ComposerImages;

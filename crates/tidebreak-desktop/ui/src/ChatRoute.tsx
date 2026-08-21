@@ -12,6 +12,7 @@ import type {
 import { useApp } from "./AppContext";
 import { AssistantSourceMarkerStreamScrubber } from "./AssistantSourceMarkerStream";
 import { ChatHeaderTitle } from "./ChatHeaderTitle";
+import { summedTurnTokens } from "./ContextUsage";
 import { ChatStatusChip } from "./ChatStatusChip";
 import {
   loadChatApprovalHydration,
@@ -765,11 +766,28 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onChange={onModelChange}
             />
           }
-          contextUsage={{
-            usage: lastTurnUsage,
-            contextWindow: activeModel?.context_window,
-            modelName: activeModel?.display_name,
-          }}
+          contextUsage={
+            lastTurnUsage
+              ? {
+                  // Chat has no per-call figure to read, so the ring keeps
+                  // the summed turn totals it always used. That carries the
+                  // same over-read code mode just fixed: a multi-call turn
+                  // re-sends its transcript, so this runs to several prompts
+                  // where the window only ever held one. Fixing it needs the
+                  // provider paths to publish the last call's prompt on
+                  // `RendererTurnUsage`, which is not in this change.
+                  contextTokens: summedTurnTokens(lastTurnUsage),
+                  spend: {
+                    input: lastTurnUsage.input_tokens,
+                    output: lastTurnUsage.output_tokens,
+                    cacheRead: lastTurnUsage.cache_read_input_tokens,
+                    cacheWrite: lastTurnUsage.cache_creation_input_tokens,
+                  },
+                  contextWindow: activeModel?.context_window,
+                  modelName: activeModel?.display_name,
+                }
+              : null
+          }
           composerPermissionMenu={
             <PermissionModeMenu
               scopeKey={chatId}

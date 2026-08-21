@@ -19,7 +19,8 @@
       "input_tokens": 2,
       "output_tokens": 574,
       "cache_read_input_tokens": 44122,
-      "cache_creation_input_tokens": 5211
+      "cache_creation_input_tokens": 5211,
+      "context_tokens": 49335
     }
   }
 ]

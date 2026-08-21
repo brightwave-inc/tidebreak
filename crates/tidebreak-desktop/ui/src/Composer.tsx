@@ -20,8 +20,10 @@ import {
   X,
 } from "lucide-react";
 import { MAX_STEER_CHARACTERS } from "./ActiveTurnSteer";
-import { ContextUsageIndicator } from "./ContextUsageIndicator";
-import type { RendererTurnUsage } from "./generated/wire";
+import {
+  ContextUsageIndicator,
+  type ContextUsageReading,
+} from "./ContextUsageIndicator";
 import {
   activeSlashQuery,
   availableSlashOptions,
@@ -314,12 +316,11 @@ export type ComposerProps = {
   /** Sits immediately to the right of `modelMenu` when the surface offers one. */
   effortMenu?: ReactNode;
   permissionMenu?: ReactNode;
-  /** Context-window reading, shown with the composer's own controls. */
-  contextUsage?: {
-    usage: RendererTurnUsage | null;
-    contextWindow: number | undefined;
-    modelName: string | undefined;
-  };
+  /**
+   * Context-window reading, shown with the composer's own controls. Null
+   * until a turn has finished; the surface maps its own usage shape in.
+   */
+  contextUsage?: ContextUsageReading | null;
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
   plugins?: ComposerPlugins;
@@ -1133,13 +1134,7 @@ export function Composer({
           {/* The ring reads as status, so it sits ahead of the two controls
               that act on the draft: it answers how much room is left for the
               next turn before you reach for the mic or send. */}
-          {contextUsage && (
-            <ContextUsageIndicator
-              usage={contextUsage.usage}
-              contextWindow={contextUsage.contextWindow}
-              modelName={contextUsage.modelName}
-            />
-          )}
+          {contextUsage && <ContextUsageIndicator {...contextUsage} />}
           {/* The mic sits immediately before send: both act on the draft, so
               they belong in the same cluster, apart from the tools and
               model controls that only set the turn up. */}

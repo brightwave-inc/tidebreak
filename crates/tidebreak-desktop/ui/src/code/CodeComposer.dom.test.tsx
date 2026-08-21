@@ -220,11 +220,12 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         contextUsage={{
-          usage: {
-            input_tokens: 11_000,
-            output_tokens: 12,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
+          contextTokens: 11_000,
+          spend: {
+            input: 11_000,
+            output: 12,
+            cacheRead: 0,
+            cacheWrite: 0,
           },
           contextWindow: 200_000,
           modelName: "Sonnet",

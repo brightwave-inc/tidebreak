@@ -1,16 +1,20 @@
 import type { RendererTurnUsage } from "./generated/wire";
 
 /**
- * How much of a model's context window the last turn accounted for.
+ * A turn's token spend, summed across every model call it made.
  *
- * The four counts on [`RendererTurnUsage`] are disjoint — `input_tokens` is the
- * fresh prompt only, and the two cache figures are the portions read from and
- * written to the provider's prompt cache — so the tokens that occupied the
- * window are their plain sum. See the generated type's own doc comment for why
- * that holds on every provider, and for the caveat that these are turn totals
- * summed across model calls rather than a snapshot of the final prompt.
+ * The four counts on [`RendererTurnUsage`] are disjoint — `input_tokens` is
+ * the fresh prompt only, and the two cache figures are the portions read from
+ * and written to the provider's prompt cache — so the turn's whole token spend
+ * is their plain sum. See the generated type's own doc comment for why that
+ * holds on every provider.
+ *
+ * This is spend, not occupancy. A turn that ran six model calls re-sent its
+ * transcript six times, so this runs to roughly six prompts while the window
+ * only ever held one. Use it for "what did this turn cost", never for "how
+ * full is the window" — that reading is `CodeUsage.context_tokens`.
  */
-export function contextTokens(usage: RendererTurnUsage): number {
+export function summedTurnTokens(usage: RendererTurnUsage): number {
   return (
     usage.input_tokens +
     usage.output_tokens +
@@ -22,20 +26,22 @@ export function contextTokens(usage: RendererTurnUsage): number {
 /**
  * Share of the window used, as a whole percent clamped to 0–100.
  *
+ * Takes the resident prompt, not a turn total: the caller decides which number
+ * is an honest numerator, because only some surfaces have a per-call reading.
+ *
  * Clamped rather than allowed to run over: a bar reading 130% tells a reader
- * nothing they can act on beyond what "full" already tells them, and the turn
- * totals can legitimately exceed the window on a long multi-step turn.
+ * nothing they can act on beyond what "full" already tells them.
  *
  * Returns null when the denominator is unusable. That is a missing percent,
  * not a missing reading — used tokens are still honest without a window.
+ * Whether the numerator is a reading at all is the caller's call.
  */
 export function contextUsagePercent(
-  usage: RendererTurnUsage,
+  tokens: number,
   contextWindow: number | undefined,
 ): number | null {
   if (!contextWindow || contextWindow <= 0) return null;
-  const used = contextTokens(usage);
-  return Math.min(100, Math.max(0, Math.round((used / contextWindow) * 100)));
+  return Math.min(100, Math.max(0, Math.round((tokens / contextWindow) * 100)));
 }
 
 /** How loudly the meter should read at a given fill. */
