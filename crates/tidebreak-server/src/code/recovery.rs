@@ -422,6 +422,9 @@ mod tests {
                 pr: None,
                 created_at: now(),
                 archived_at: None,
+                released_at: None,
+                released_tip: None,
+                bundle_bytes: None,
             },
         )
         .await

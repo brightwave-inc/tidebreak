@@ -5739,3 +5739,165 @@ async fn restore_refuses_a_missing_branch_and_an_occupied_path() {
     let missing_body: serde_json::Value = missing.json().await.unwrap();
     assert_eq!(missing_body["kind"], "branch_missing");
 }
+
+/// The reclaim ladder end to end over HTTP: archive frees the checkout,
+/// release frees the branch, restore rebuilds both from the bundle.
+///
+/// The assertion that matters is the last one — the file the workspace's
+/// commit added is back on disk after a round trip through a branch that no
+/// longer existed. Without that, release is deletion with extra steps.
+#[tokio::test]
+async fn release_frees_the_branch_and_restore_rebuilds_it_from_the_bundle() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "released later",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let workspace_id = json_id(&workspace);
+    let branch = workspace["branch_name"].as_str().unwrap().to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    let repo_root = std::path::PathBuf::from(&repo);
+
+    // Commit real work, so the bundle has something to carry.
+    std::fs::write(path.join("kept.txt"), "survives release\n").unwrap();
+    for args in [
+        vec!["add", "kept.txt"],
+        vec!["commit", "-m", "work worth keeping"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&path)
+            .status()
+            .unwrap();
+        assert!(ok.success(), "git {args:?} failed");
+    }
+
+    // Release requires an archived workspace.
+    let too_early = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/release"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_early.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = too_early.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_not_archived");
+
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/archive"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    assert!(!path.exists(), "archive removes the checkout");
+    assert!(
+        branch_exists_in(&repo_root, &branch),
+        "archive keeps the branch"
+    );
+
+    // Unmerged commits are the case release confirms rather than assumes.
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/release"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "branch_unmerged");
+    assert!(
+        branch_exists_in(&repo_root, &branch),
+        "a refused release must not drop the branch"
+    );
+
+    let released = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/release"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), reqwest::StatusCode::OK);
+    let released_body: serde_json::Value = released.json().await.unwrap();
+    assert_eq!(released_body["status"], "released");
+    assert!(released_body["bundle_bytes"].as_i64().unwrap() > 0);
+    assert!(released_body["released_tip"].as_str().is_some());
+    assert!(
+        !branch_exists_in(&repo_root, &branch),
+        "release drops the branch"
+    );
+
+    let restored = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/restore"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.status(),
+        reqwest::StatusCode::OK,
+        "restore from bundle failed: {}",
+        restored.text().await.unwrap()
+    );
+    let restored_body: serde_json::Value = restored.json().await.unwrap();
+    assert_eq!(restored_body["status"], "active");
+    assert!(restored_body["released_at"].is_null());
+    // Normalize: git checks out with CRLF under Windows' default
+    // `core.autocrlf`.
+    assert_eq!(
+        std::fs::read_to_string(path.join("kept.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "survives release\n",
+        "the released commit did not come back"
+    );
+}
+
+/// Whether a branch ref exists in a repository.
+fn branch_exists_in(repo_root: &std::path::Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}

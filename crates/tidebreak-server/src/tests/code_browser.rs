@@ -270,6 +270,9 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
         pr: None,
         created_at: chrono::Utc::now(),
         archived_at: None,
+        released_at: None,
+        released_tip: None,
+        bundle_bytes: None,
     };
     db::code::insert_workspace(db, &ws).await.unwrap();
     let s = CodeSession {

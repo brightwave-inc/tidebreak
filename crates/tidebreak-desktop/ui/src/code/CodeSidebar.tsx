@@ -32,7 +32,7 @@ import {
   workspaceCommands,
 } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
-import { arrangeWorkspaces } from "./workspaceCards";
+import { arrangeWorkspaces, isPutAway } from "./workspaceCards";
 import { prWorkflowPrompt } from "./prActions";
 import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
 
@@ -193,7 +193,7 @@ export function CodeSidebar() {
                   }}
                   commands={workspaceCommands({
                     hasPr: Boolean(pr),
-                    archived: workspace.status === "archived",
+                    archived: isPutAway(workspace),
                     hasSession: Boolean(sessions[workspace.id]),
                     attentionPinned:
                       (digest?.attention ?? sessions[workspace.id]?.attention)

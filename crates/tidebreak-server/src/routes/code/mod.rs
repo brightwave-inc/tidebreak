@@ -80,7 +80,7 @@ pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_workspace, get_workspace, get_workspace_blob, get_workspace_diff,
     get_worktree_root, list_workspace_files, list_workspace_tree, list_workspaces, patch_workspace,
-    restore_workspace, search_workspace, set_worktree_root,
+    release_workspace, restore_workspace, search_workspace, set_worktree_root,
 };
 
 // Nothing here reaches `AppState.code` directly. Every handler in this module

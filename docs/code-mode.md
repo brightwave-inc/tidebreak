@@ -111,9 +111,17 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
   which does. Reclaiming the checkout on disk is a separate, explicit act.
 - **`code_workspace`** — `id`, `repo_id`, `title`, `worktree_path`,
   `branch_name`, `base_ref`, `status`
-  (`Creating | SetupFailed | Active | Archived`), `pr` (JSON digest:
+  (`Creating | SetupFailed | Active | Archived | Released`), `pr` (JSON digest:
   number, url, state, checks summary; nullable), `created_at`,
-  `archived_at`.
+  `archived_at`, `released_at`, `released_tip`, `bundle_bytes`.
+
+  Archived and Released are reclaim tiers. Archive removes the worktree and
+  keeps the branch, so restore is `git worktree add`. Release bundles
+  `base..branch` into `<data_dir>/code/bundles/<id>.bundle` and drops the
+  branch, so restore fetches from the bundle first. A checkout is gigabytes of
+  build output; a branch's own commits are usually kilobytes, which is what
+  makes the deeper tier worth the step. Transcripts are untouched at every
+  tier — the row and its journal outlive the bytes.
 - **`code_session`** — `id`, `workspace_id`, `kind`
   (`Interactive | Watch`, per
   [`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)), `harness_kind`,
@@ -288,6 +296,7 @@ GET/PUT         /code/worktree-root        {root}    where new worktrees land (a
 POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
 GET/PATCH       /code/workspaces/{id}
 POST            /code/workspaces/{id}/archive        {force?}
+POST            /code/workspaces/{id}/release        {force?}
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode}
 POST            /code/sessions/{id}/turns            {message}  (queued while running —
                                                      the chat product's queue-default rule;

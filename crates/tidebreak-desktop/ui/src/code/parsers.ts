@@ -199,6 +199,7 @@ const WORKSPACE_STATUSES = new Set<CodeWorkspaceStatus>([
   "setup_failed",
   "active",
   "archived",
+  "released",
 ]);
 const TURN_STATUSES = new Set<CodeTurnStatus>([
   "running",

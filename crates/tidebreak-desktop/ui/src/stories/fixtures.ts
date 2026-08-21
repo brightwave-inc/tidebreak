@@ -468,6 +468,21 @@ export const archivedWorkspace: CodeWorkspaceSnapshot = {
   archived_at: "2026-08-18T17:00:00.000Z",
 };
 
+/**
+ * The deepest reclaim tier: worktree and branch both gone, the branch's own
+ * commits kept as a bundle so a restore still rebuilds the work exactly.
+ */
+export const releasedWorkspace: CodeWorkspaceSnapshot = {
+  ...codeWorkspace,
+  id: "ws-released",
+  title: "Reclaimed after review",
+  status: "released",
+  archived_at: "2026-08-18T17:00:00.000Z",
+  released_at: "2026-08-20T09:30:00.000Z",
+  released_tip: "9f3c1ab2d4e5f60718293a4b5c6d7e8f90a1b2c3",
+  bundle_bytes: 12_288,
+};
+
 // ---------------------------------------------------------------------------
 // Delivery center: cross-repository pull requests, runs, archive, notifications.
 // ---------------------------------------------------------------------------

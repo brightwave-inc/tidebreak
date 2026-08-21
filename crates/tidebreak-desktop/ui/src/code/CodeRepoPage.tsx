@@ -19,7 +19,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { WORKSPACE_STATUS_LABELS } from "./labels";
 import { useWorkspaceCardCommands } from "./workspaceActions";
-import { middleTruncate } from "./workspaceCards";
+import { middleTruncate, isPutAway } from "./workspaceCards";
 
 /**
  * One registered repo: its workspaces and the new-workspace flow.
@@ -107,7 +107,7 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
                 type="button"
                 className={cn(
                   "hover:bg-muted flex w-full cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm",
-                  workspace.status === "archived" && "opacity-70",
+                  isPutAway(workspace) && "opacity-70",
                   FOCUS_RING,
                   HOVER_TINT,
                 )}
@@ -143,7 +143,7 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
                   {WORKSPACE_STATUS_LABELS[workspace.status]}
                 </span>
               </button>
-              {workspace.status === "archived" && (
+              {isPutAway(workspace) && (
                 // A sibling, not a child, of the row button: buttons cannot
                 // nest, and restoring should not also open the workspace.
                 <Button

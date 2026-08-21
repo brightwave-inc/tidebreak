@@ -678,10 +678,12 @@ impl CodeRuntime {
     /// its own confirmation.
     pub(crate) async fn remove_repo(&self, owner: &OwnerId, id: RepoId) -> Result<(), ServerError> {
         let workspaces = list_workspaces(&self.db, owner, Some(id)).await?;
-        if workspaces
-            .iter()
-            .any(|workspace| workspace.status != CodeWorkspaceStatus::Archived)
-        {
+        if workspaces.iter().any(|workspace| {
+            !matches!(
+                workspace.status,
+                CodeWorkspaceStatus::Archived | CodeWorkspaceStatus::Released
+            )
+        }) {
             return Err(ServerError::conflict_kind(
                 "repo_has_workspaces",
                 "archive every workspace before removing the repository",
@@ -760,6 +762,9 @@ impl CodeRuntime {
             pr: None,
             created_at: Utc::now(),
             archived_at: None,
+            released_at: None,
+            released_tip: None,
+            bundle_bytes: None,
         };
         insert_workspace(&self.db, &workspace).await?;
         match create_worktree(std::path::Path::new(&repo.root_path), &path, &branch, &base).await {
@@ -920,6 +925,114 @@ impl CodeRuntime {
     /// `create_workspace`'s branch-collision check reads archived rows too,
     /// so this route is the sanctioned way to get an archived branch back
     /// into a workspace.
+    /// Release an archived workspace: drop its branch, keep its commits.
+    ///
+    /// The deepest reclaim tier. Archive already removed the checkout, which
+    /// is where the bytes are; what is left is the branch and the objects it
+    /// holds alive. Bundling `base..branch` captures the work this workspace
+    /// did — usually kilobytes against a checkout measured in gigabytes — so
+    /// dropping the ref frees nearly everything and a restore still rebuilds
+    /// exactly. The transcript is not touched at any tier.
+    /// Drop a restored workspace's release bookkeeping and its bundle.
+    ///
+    /// The branch is back in the repository, so the bundle is a second copy of
+    /// commits git already has. Removing it is best-effort: a bundle left
+    /// behind wastes space, while failing the restore over it would strand a
+    /// workspace whose checkout is already on disk.
+    fn clear_release(workspace: &mut CodeWorkspace, data_dir: &std::path::Path) {
+        if workspace.released_at.is_none() && workspace.bundle_bytes.is_none() {
+            return;
+        }
+        let bundle = worktree::bundle_path(data_dir, &workspace.id.0);
+        if let Err(error) = std::fs::remove_file(&bundle) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    "code-mode: could not remove restored bundle {}: {error}",
+                    bundle.display()
+                );
+            }
+        }
+        workspace.released_at = None;
+        workspace.released_tip = None;
+        workspace.bundle_bytes = None;
+    }
+
+    pub(crate) async fn release_workspace(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+        force: bool,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let mut workspace = self.get_workspace(owner, id).await?;
+        if workspace.status == CodeWorkspaceStatus::Released {
+            return Ok(workspace);
+        }
+        if workspace.status != CodeWorkspaceStatus::Archived {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_archived",
+                format!(
+                    "archive the workspace before releasing it; it is {}",
+                    workspace.status.as_str()
+                ),
+            ));
+        }
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let repo_root = std::path::Path::new(&repo.root_path);
+
+        // A branch that archive already lost is nothing to bundle. Record the
+        // release anyway: the tier describes what is on disk, and refusing
+        // here would strand the row in a state no action can leave.
+        if !worktree::branch_exists(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?
+        {
+            workspace.status = CodeWorkspaceStatus::Released;
+            workspace.released_at = Some(Utc::now());
+            save_workspace(&self.db, &workspace).await?;
+            return Ok(workspace);
+        }
+
+        if !force
+            && worktree::release_is_unmerged(repo_root, &workspace.base_ref, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?
+        {
+            return Err(ServerError::conflict_kind(
+                "branch_unmerged",
+                "this branch has commits the base does not; pass force to bundle and drop it",
+            ));
+        }
+
+        let tip = worktree::branch_tip(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?;
+        let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
+        let bytes = worktree::create_bundle(
+            repo_root,
+            &workspace.base_ref,
+            &workspace.branch_name,
+            &bundle,
+        )
+        .await
+        .map_err(map_worktree)?;
+
+        // Drop the ref only once the bundle is on disk and measured. The
+        // ordering is the whole safety property: a failure above leaves an
+        // archived workspace with its branch, which is exactly where it was.
+        worktree::delete_branch(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?;
+
+        workspace.status = CodeWorkspaceStatus::Released;
+        workspace.released_at = Some(Utc::now());
+        workspace.released_tip = Some(tip);
+        workspace.bundle_bytes = Some(i64::try_from(bytes).unwrap_or(i64::MAX));
+        save_workspace(&self.db, &workspace).await?;
+        super::attention::emit_workspace_digests(&self.db, &self.bus, owner, workspace.id).await;
+        Ok(workspace)
+    }
+
     pub(crate) async fn restore_workspace(
         &self,
         owner: &OwnerId,
@@ -929,7 +1042,8 @@ impl CodeRuntime {
         if workspace.status == CodeWorkspaceStatus::Active {
             return Ok(workspace);
         }
-        if workspace.status != CodeWorkspaceStatus::Archived {
+        let released = workspace.status == CodeWorkspaceStatus::Released;
+        if !released && workspace.status != CodeWorkspaceStatus::Archived {
             return Err(ServerError::conflict_kind(
                 "workspace_not_ready",
                 format!("workspace is {}", workspace.status.as_str()),
@@ -938,6 +1052,19 @@ impl CodeRuntime {
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
         let repo_root = std::path::Path::new(&repo.root_path);
+        // A released workspace has no branch: release bundled its commits and
+        // dropped the ref. Put the branch back from the bundle first, and the
+        // rest of restore is the archived path unchanged.
+        if released
+            && !worktree::branch_exists(repo_root, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?
+        {
+            let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
+            worktree::unbundle_branch(repo_root, &bundle, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?;
+        }
         if !worktree::branch_exists(repo_root, &workspace.branch_name)
             .await
             .map_err(map_worktree)?
@@ -969,12 +1096,14 @@ impl CodeRuntime {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
                 workspace.archived_at = None;
+                Self::clear_release(&mut workspace, &self.data_dir);
                 save_workspace(&self.db, &workspace).await?;
                 Ok(workspace)
             }
             Err(err) => {
                 workspace.status = CodeWorkspaceStatus::SetupFailed;
                 workspace.archived_at = None;
+                Self::clear_release(&mut workspace, &self.data_dir);
                 save_workspace(&self.db, &workspace).await?;
                 Err(ServerError::unprocessable_kind(
                     "setup_failed",

@@ -161,7 +161,7 @@ import {
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
 } from "./workspaceActions";
-import { sessionActivityLabel } from "./workspaceCards";
+import { sessionActivityLabel, isPutAway } from "./workspaceCards";
 import {
   createPermissionModes,
   fenceReasonText,
@@ -492,7 +492,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const pr = digest?.pr_state ?? workspace?.pr;
   const headerCommands = workspace
     ? workspaceHeaderCommands({
-        archived: workspace.status === "archived",
+        archived: isPutAway(workspace),
         hasSession: Boolean(session),
         attentionPinned:
           (digest?.attention ?? session?.attention)?.state.type === "manual",
@@ -572,7 +572,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!archivePending) return;
     if (!useCodeUiStore.getState().takeArchiveWorkspace()) return;
     if (!workspace) return;
-    if (workspace.status === "archived") {
+    if (isPutAway(workspace)) {
       toast.message("This workspace is already archived");
       return;
     }
@@ -1125,7 +1125,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         worktreePath={workspace?.worktree_path}
         loading={!title && !error}
         workflow={
-          workspace && workspace.status !== "archived" ? (
+          workspace && !isPutAway(workspace) ? (
             <WorkspaceWorkflowControl
               client={client}
               workspaceId={workspaceId}

@@ -253,8 +253,15 @@ pub enum CodeWorkspaceStatus {
     SetupFailed,
     /// Ready for sessions.
     Active,
-    /// Archived; worktree removed.
+    /// Archived; worktree removed, branch kept.
     Archived,
+    /// Released; worktree and branch both gone, commits kept as a bundle.
+    ///
+    /// The deepest reclaim tier. A worktree is gigabytes of checkout and build
+    /// output; the branch's own commits are usually kilobytes, so bundling
+    /// them and dropping the branch frees nearly everything and still restores
+    /// exactly. The transcript is untouched at every tier.
+    Released,
 }
 
 impl CodeWorkspaceStatus {
@@ -266,6 +273,7 @@ impl CodeWorkspaceStatus {
             Self::SetupFailed => "setup_failed",
             Self::Active => "active",
             Self::Archived => "archived",
+            Self::Released => "released",
         }
     }
 
@@ -278,6 +286,7 @@ impl CodeWorkspaceStatus {
             "setup_failed" => Some(Self::SetupFailed),
             "active" => Some(Self::Active),
             "archived" => Some(Self::Archived),
+            "released" => Some(Self::Released),
             _ => None,
         }
     }
@@ -619,6 +628,14 @@ pub struct CodeWorkspace {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Archive time, when archived.
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Release time, when released.
+    pub released_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Commit the released branch pointed at, so a restore can say what it
+    /// rebuilds and a reader can recognize the work without unbundling.
+    pub released_tip: Option<String>,
+    /// Size of the stored bundle. Kept for the reclaim surface, which has to
+    /// report what a release actually bought without stat-ing every file.
+    pub bundle_bytes: Option<i64>,
 }
 
 /// Most subagent rows kept on one session. Done entries fall off first.

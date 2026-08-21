@@ -1323,8 +1323,11 @@ CREATE TABLE "code_workspace" (
     "pr" jsonb_text,
     "created_at" timestamp_with_timezone_text NOT NULL,
     "archived_at" timestamp_with_timezone_text,
+    "released_at" timestamp_with_timezone_text,
+    "released_tip" text,
+    "bundle_bytes" integer,
     FOREIGN KEY ("repo_id") REFERENCES "code_repo" ("id"),
-    CHECK ("status" IN ('creating', 'setup_failed', 'active', 'archived'))
+    CHECK ("status" IN ('creating', 'setup_failed', 'active', 'archived', 'released'))
 );
 
 CREATE UNIQUE INDEX "idx_code_workspace_repo_branch" ON "code_workspace" ("repo_id", "branch_name");

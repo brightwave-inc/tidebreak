@@ -56,6 +56,7 @@ import {
   watchRowLabel,
   workspaceCardLabel,
   type CardDensity,
+  isPutAway,
 } from "./workspaceCards";
 
 /**
@@ -101,7 +102,7 @@ export function WorkspaceCard({
 }) {
   const title = digest?.title ?? workspace.title;
   const pr = digest?.pr_state ?? workspace.pr;
-  const archived = workspace.status === "archived";
+  const archived = isPutAway(workspace);
   const watchActive = childSessions.some(
     (child) =>
       child.watch_state === "watching" ||
