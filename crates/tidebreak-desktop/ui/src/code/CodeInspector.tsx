@@ -56,7 +56,7 @@ import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { prWorkflowStatus, type PrWorkflowState } from "./prActions";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
@@ -99,7 +99,7 @@ export function CodeInspector({
   onOpenDiff?: (path: string) => void;
   onClose?: () => void;
 }) {
-  const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
+  const digest = useWorkspaceDigest(workspaceId);
   const pr = prResource
     ? prResource.data === null
       ? (digest?.pr_state ?? workspace?.pr)

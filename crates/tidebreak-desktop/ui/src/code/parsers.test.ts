@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  liveCodeSession,
+  liveCodeSessions,
   parseCodeAction,
   parseCodeApproval,
   parseCodeCloneDefaults,
@@ -673,20 +673,31 @@ describe("parseCodeEvent", () => {
   });
 });
 
-describe("liveCodeSession", () => {
-  it("prefers the newest non-ended session", () => {
+describe("liveCodeSessions", () => {
+  it("drops ended sessions and orders the rest oldest first", () => {
     const ended = parseCodeSession({
       ...SESSION,
       id: "old",
       lifecycle: "ended",
+      created_at: "2026-08-15T09:00:00.000Z",
+    });
+    const later = parseCodeSession({
+      ...SESSION,
+      id: "sess-2",
+      created_at: "2026-08-15T13:00:00.000Z",
     });
     const live = parseCodeSession(SESSION);
-    expect(ended && live).toBeTruthy();
-    expect(liveCodeSession([ended!, live!])?.id).toBe("sess-1");
-    expect(liveCodeSession([ended!])).toBeNull();
+    expect(ended && later && live).toBeTruthy();
+    // The list arrives newest first; the tab strip reads left to right in the
+    // order the agents were started.
+    expect(liveCodeSessions([later!, live!, ended!]).map((s) => s.id)).toEqual([
+      "sess-1",
+      "sess-2",
+    ]);
+    expect(liveCodeSessions([ended!])).toEqual([]);
   });
 
-  it("never attaches a watch session to the workspace page", () => {
+  it("never offers a watch session as a conversation", () => {
     const watch = parseCodeSession({
       ...SESSION,
       id: "watch-1",
@@ -694,8 +705,10 @@ describe("liveCodeSession", () => {
     });
     const live = parseCodeSession(SESSION);
     expect(watch && live).toBeTruthy();
-    expect(liveCodeSession([watch!, live!])?.id).toBe("sess-1");
-    expect(liveCodeSession([watch!])).toBeNull();
+    expect(liveCodeSessions([watch!, live!]).map((s) => s.id)).toEqual([
+      "sess-1",
+    ]);
+    expect(liveCodeSessions([watch!])).toEqual([]);
   });
 });
 
