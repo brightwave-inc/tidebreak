@@ -476,28 +476,6 @@ pub fn app(state: AppState) -> Router {
         )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
-    // The engine-facing browser channel. Authenticated per request by the
-    // session-scoped capability bearer (see `routes::code::browser`), so this
-    // router is kept out of `require_token` below; the token never appears in
-    // a path or query, which is why every operation is a POST.
-    let browser_api = Router::new()
-        .route("/code/browser/list", post(routes::code::browser_list))
-        .route(
-            "/code/browser/navigate",
-            post(routes::code::browser_navigate),
-        )
-        .route(
-            "/code/browser/snapshot",
-            post(routes::code::browser_snapshot),
-        )
-        .route("/code/browser/wait", post(routes::code::browser_wait))
-        .route(
-            "/code/browser/screenshot",
-            post(routes::code::browser_screenshot),
-        )
-        .route("/code/browser/act", post(routes::code::browser_act))
-        .with_state(state.clone());
-
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
         .route(
@@ -929,13 +907,7 @@ pub fn app(state: AppState) -> Router {
             state.clone(),
             auth::require_token,
         ))
-        .with_state(state.clone())
-        // The engine-facing browser channel authenticates each request with
-        // the per-session capability bearer its capfile carries, never the
-        // launch token, so its routes merge after `route_layer` wrapped the
-        // routes above and stay outside `require_token`. They still sit
-        // inside `require_app_origin` and CORS with the rest of the API.
-        .merge(browser_api);
+        .with_state(state.clone());
     let frame_state = state.clone();
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
