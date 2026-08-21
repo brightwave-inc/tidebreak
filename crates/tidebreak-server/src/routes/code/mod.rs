@@ -1,12 +1,17 @@
 //! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
 //!
-//! Every route here is owner-scoped through `ScopedCode`. The routes that
-//! change what the machine *is* — installing pinned harness binaries, and the
-//! clone-parent and worktree-root directories every principal shares — are
-//! registered on the deployment-plane router in `crate::lib` instead, behind
-//! `require_admin`.
+//! Every route here is owner-scoped through `ScopedCode`, with two
+//! exceptions. The routes that change what the machine *is* — installing
+//! pinned harness binaries, and the clone-parent and worktree-root
+//! directories every principal shares — are registered on the
+//! deployment-plane router in `crate::lib` instead, behind `require_admin`.
+//! And the `/code/browser/*` routes in [`browser`] authenticate with the
+//! per-session capability bearer rather than the launch token, so they are
+//! registered outside `require_token` and derive their owner from the
+//! browser token registry.
 
 mod approvals;
+mod browser;
 mod delivery;
 mod git;
 mod harnesses;
