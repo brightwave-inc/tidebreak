@@ -181,6 +181,19 @@ pub(crate) struct CodeRuntime {
     pub(super) titling_in_flight: Mutex<std::collections::HashSet<tidebreak_core::WorkspaceId>>,
 }
 
+/// What a new session starts on, beyond the engine it is bound to.
+///
+/// One value rather than three parameters: a caller sets all of them together,
+/// and the routes that move them mid-conversation move them one at a time
+/// against the same session row.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NewSessionSettings {
+    pub permission_mode: CodePermissionMode,
+    pub model: Option<String>,
+    /// `None` leaves the engine's own default in force.
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 impl CodeRuntime {
     pub(crate) fn new(
         db: Arc<DbStore>,
@@ -1319,18 +1332,14 @@ impl CodeRuntime {
         owner: &OwnerId,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
-        reasoning_effort: Option<ReasoningEffort>,
+        settings: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         self.create_session_of_kind(
             owner,
             workspace_id,
             CodeSessionKind::Interactive,
             harness,
-            permission_mode,
-            model,
-            reasoning_effort,
+            settings,
         )
         .await
     }
@@ -1347,9 +1356,11 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         kind: CodeSessionKind,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
-        reasoning_effort: Option<ReasoningEffort>,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort,
+        }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {

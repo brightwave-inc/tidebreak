@@ -2211,9 +2211,10 @@ async fn a_workspace_still_holds_only_one_watch_session() {
             workspace_id,
             tidebreak_core::CodeSessionKind::Watch,
             HarnessKind::ClaudeCode,
-            CodePermissionMode::Plan,
-            None,
-            None,
+            crate::code::runtime::NewSessionSettings {
+                permission_mode: CodePermissionMode::Plan,
+                ..Default::default()
+            },
         )
     };
     watch(()).await.expect("the first watch session creates");

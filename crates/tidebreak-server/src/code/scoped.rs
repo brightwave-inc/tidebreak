@@ -32,7 +32,7 @@ use super::checkpoint::ChangedFile;
 use super::clone::CloneRequest;
 use super::delivery;
 use super::gh::{self, ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
-use super::runtime::{CodeRuntime, RepoRegistration, SubmitTurnOutcome};
+use super::runtime::{CodeRuntime, NewSessionSettings, RepoRegistration, SubmitTurnOutcome};
 use super::worktree;
 use crate::error::ServerError;
 use crate::principal::AuthContext;
@@ -414,19 +414,10 @@ impl ScopedCode {
         &self,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
-        model: Option<String>,
-        reasoning_effort: Option<ReasoningEffort>,
+        settings: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         self.runtime
-            .create_session(
-                &self.owner,
-                workspace_id,
-                harness,
-                permission_mode,
-                model,
-                reasoning_effort,
-            )
+            .create_session(&self.owner, workspace_id, harness, settings)
             .await
     }
 

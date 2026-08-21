@@ -31,7 +31,7 @@ use tidebreak_core::{
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
-use super::runtime::CodeRuntime;
+use super::runtime::{CodeRuntime, NewSessionSettings};
 use crate::error::ServerError;
 
 /// How often the watch sweep walks active watches.
@@ -271,12 +271,14 @@ impl CodeRuntime {
                 workspace_id,
                 CodeSessionKind::Watch,
                 harness,
-                CodePermissionMode::Auto,
-                model,
-                // A watch task inherits the engine and model of the session
-                // that spawned it, but not an effort a person picked for their
-                // own conversation.
-                None,
+                NewSessionSettings {
+                    permission_mode: CodePermissionMode::Auto,
+                    model,
+                    // A watch task inherits the engine and model of the
+                    // session that spawned it, but not an effort a person
+                    // picked for their own conversation.
+                    reasoning_effort: None,
+                },
             )
             .await?;
         let now = Utc::now();

@@ -16,7 +16,7 @@ use super::types::{
     SequencedCodeEventFrame, SetAttentionBody, SetPermissionModeBody, SetReasoningEffortBody,
     SteerBody, SubmitTurnBody,
 };
-use crate::code::runtime::SubmitTurnOutcome;
+use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
 
 pub async fn create_session(
@@ -28,9 +28,11 @@ pub async fn create_session(
         .create_session(
             workspace_id,
             body.harness,
-            body.permission_mode,
-            body.model,
-            body.reasoning_effort,
+            NewSessionSettings {
+                permission_mode: body.permission_mode,
+                model: body.model,
+                reasoning_effort: body.reasoning_effort,
+            },
         )
         .await?;
     Ok((
