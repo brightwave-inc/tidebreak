@@ -36,12 +36,13 @@ pub const BROWSER_ACT_TOOL: &str = "browser_act";
 /// Semantic act requires native input synthesis and is registered only when
 /// the engine adapter reports [`BrowserEngineCapabilities::semantic_actions`]
 /// as true.
-pub const BROWSER_TOOLS: [&str; 5] = [
+pub const BROWSER_TOOLS: [&str; 6] = [
     BROWSER_LIST_TOOL,
     BROWSER_NAVIGATE_TOOL,
     BROWSER_SNAPSHOT_TOOL,
     BROWSER_WAIT_TOOL,
     BROWSER_SCREENSHOT_TOOL,
+    BROWSER_ACT_TOOL,
 ];
 
 /// Maximum wire length of an opaque browser id.
@@ -1234,11 +1235,10 @@ mod tests {
         );
         assert_eq!(BrowserAction::Focus.value(), None);
         assert!(
-            BrowserAction::Fill {
-                value: String::new()
+            !BrowserAction::Fill {
+                value: String::new(),
             }
             .is_well_formed()
-                == false
         );
     }
 

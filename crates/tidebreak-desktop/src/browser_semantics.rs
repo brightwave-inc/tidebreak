@@ -756,38 +756,132 @@ async fn capture_screenshot(
 async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
     use std::ffi::c_void;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use block2::RcBlock;
-    use objc2::runtime::AnyObject;
+    use objc2::runtime::{AnyObject, Sel};
     use objc2_foundation::{NSError, NSString};
     use objc2_web_kit::WKWebView;
-    use tokio::sync::oneshot;
+    use tokio::{sync::oneshot, time::timeout};
 
     extern "C" {
-        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> *mut c_void;
-        fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
+        fn objc_msgSend(
+            receiver: *mut c_void,
+            selector: *mut c_void,
+            ...
+        ) -> *mut c_void;
+        fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
     }
 
-    pub struct NSData {
-        _inner: AnyObject,
+    const SCREENSHOT_TIMEOUT_SECONDS: u64 = 30;
+
+    unsafe fn get_class(name: &[u8]) -> *mut c_void {
+        objc_getClass(name.as_ptr().cast())
     }
 
-    impl NSData {
-        unsafe fn bytes(&self) -> *const u8 {
-            let sel = sel_registerName(b"bytes\0".as_ptr() as *const std::ffi::c_char);
-            objc_msgSend(
-                (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
-                sel,
-            ) as *const u8
+    unsafe fn sel(name: &str) -> Sel {
+        Sel::register(name).unwrap_or_else(|_| std::process::abort())
+    }
+
+    unsafe fn msg0(receiver: *mut c_void, name: &str) -> *mut c_void {
+        objc_msgSend(receiver, sel(name).as_ptr().cast())
+    }
+
+    /// Bytes pointer from an NSData object (message sent to the actual
+    /// object pointer, not a Rust wrapper).
+    unsafe fn ns_data_bytes(data: *mut c_void) -> *const u8 {
+        objc_msgSend(data, sel("bytes").as_ptr().cast()) as *const u8
+    }
+
+    unsafe fn ns_data_len(data: *mut c_void) -> usize {
+        objc_msgSend(data, sel("length").as_ptr().cast()) as usize
+    }
+
+    // Convert an NSImage snapshot to PNG base64 via NSBitmapImageRep.
+    unsafe fn snapshot_to_png_base64(
+        snapshot: *mut AnyObject,
+        error: *mut NSError,
+    ) -> Result<String, String> {
+        if !error.is_null() {
+            let msg = (&*error).localizedDescription().to_string();
+            return Err(format!("screenshot failed: {msg}"));
+        }
+        if snapshot.is_null() {
+            return Err("screenshot produced no image".to_owned());
         }
 
-        unsafe fn len(&self) -> usize {
-            let sel = sel_registerName(b"length\0".as_ptr() as *const std::ffi::c_char);
-            objc_msgSend(
-                (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
-                sel,
-            ) as usize
+        // [snapshot representations] → NSArray<NSImageRep>
+        let reps = msg0(snapshot as *mut c_void, "representations");
+        if reps.is_null() {
+            return Err("screenshot has no image representations".to_owned());
         }
+        if msg0(reps, "count") as usize == 0 {
+            return Err("screenshot image has zero representations".to_owned());
+        }
+
+        // NSPNGFileType = 4
+        let png_type: usize = 4;
+
+        // [NSNumber numberWithFloat: 1.0] for compression property
+        let num_cls = get_class(b"NSNumber ");
+        let num = objc_msgSend(
+            num_cls,
+            sel("numberWithFloat:").as_ptr().cast(),
+            1.0f64,
+        );
+
+        // NSImageCompressionFactor key
+        let bmp_cls = get_class(b"NSBitmapImageRep ");
+        let key = objc_msgSend(bmp_cls, sel("NSImageCompressionFactor").as_ptr().cast());
+
+        // [NSDictionary dictionaryWithObject:num forKey:key]
+        let dict_cls = get_class(b"NSDictionary ");
+        let props = objc_msgSend(
+            dict_cls,
+            sel("dictionaryWithObject:forKey:").as_ptr().cast(),
+            num,
+            key,
+        );
+
+        // [NSBitmapImageRep representationOfImageRepsInArray:reps
+        //                                      usingType:png_type
+        //                                    properties:props]
+        let png_data = objc_msgSend(
+            bmp_cls,
+            sel("representationOfImageRepsInArray:usingType:properties:")
+                .as_ptr()
+                .cast(),
+            reps,
+            png_type,
+            props,
+        );
+        if png_data.is_null() {
+            return Err("screenshot PNG conversion failed".to_owned());
+        }
+
+        let bytes_ptr = ns_data_bytes(png_data);
+        let byte_len = ns_data_len(png_data);
+        if bytes_ptr.is_null() || byte_len == 0 {
+            return Err("screenshot PNG data is empty".to_owned());
+        }
+        let buf = std::slice::from_raw_parts(bytes_ptr, byte_len);
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        Ok(BASE64.encode(buf))
+    }
+
+    unsafe fn take_snapshot_with_block(
+        view: &WKWebView,
+        handler: &RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+    ) {
+        let sel = sel("takeSnapshotWithConfiguration:completionHandler:");
+        let nil: *mut c_void = std::ptr::null_mut();
+        let raw_block: *mut c_void = RcBlock::as_ptr(handler).cast();
+        objc_msgSend(
+            (view as *const WKWebView).cast::<c_void>() as *mut c_void,
+            sel.as_ptr().cast(),
+            nil,
+            raw_block,
+        );
     }
 
     let (sender, receiver) = oneshot::channel();
@@ -800,48 +894,20 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
                 let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) else {
                     return;
                 };
-                if !error.is_null() {
-                    let msg = (&*error).localizedDescription().to_string();
-                    let _ = sender.send(Err(format!("screenshot failed: {msg}")));
-                    return;
-                }
-                if snapshot.is_null() {
-                    let _ = sender.send(Err("screenshot produced no image".to_owned()));
-                    return;
-                }
-                // Call TIFFRepresentation on NSImage
-                let sel =
-                    sel_registerName(b"TIFFRepresentation\0".as_ptr() as *const std::ffi::c_char);
-                let tiff: *mut NSData = objc_msgSend(snapshot as *mut c_void, sel).cast();
-                if tiff.is_null() {
-                    let _ = sender.send(Err("screenshot TIFF conversion failed".to_owned()));
-                    return;
-                }
-                let bytes = (&*tiff).bytes();
-                let len = (&*tiff).len();
-                let buf = std::slice::from_raw_parts(bytes, len);
-                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-                let b64 = BASE64.encode(buf);
-                let _ = sender.send(Ok(b64));
+                let result = snapshot_to_png_base64(snapshot, error);
+                let _ = sender.send(result);
             });
-            // takeSnapshotWithConfiguration:completionHandler: with nil config
-            let sel = sel_registerName(
-                b"takeSnapshotWithConfiguration:completionHandler:\0".as_ptr()
-                    as *const std::ffi::c_char,
-            );
-            let nil: *mut c_void = std::ptr::null_mut();
-            objc_msgSend(
-                (view as *const WKWebView).cast::<c_void>() as *mut c_void,
-                sel,
-                nil,
-                &*handler,
-            );
+            take_snapshot_with_block(view, &handler);
         })
         .map_err(|error| format!("browser host: {error}"))?;
 
-    receiver
-        .await
-        .map_err(|_| "screenshot capture was interrupted".to_owned())?
+    timeout(
+        Duration::from_secs(SCREENSHOT_TIMEOUT_SECONDS),
+        receiver,
+    )
+    .await
+    .map_err(|_| "screenshot capture timed out".to_owned())?
+    .map_err(|_| "screenshot capture was interrupted".to_owned())?
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -926,10 +992,6 @@ pub(crate) fn act_status_from_target_error(
     match error {
         BrowserTargetError::StaleTarget => BrowserActStatus::StaleTarget,
         BrowserTargetError::BrowserHidden => BrowserActStatus::HiddenTab,
-        BrowserTargetError::UnsupportedFrame => BrowserActStatus::UnsupportedFrame,
-        BrowserTargetError::UnsupportedNative => BrowserActStatus::UnsupportedNative,
-        BrowserTargetError::EngineFailure => BrowserActStatus::EngineFailure,
-        BrowserTargetError::Timeout => BrowserActStatus::Timeout,
     }
 }
 

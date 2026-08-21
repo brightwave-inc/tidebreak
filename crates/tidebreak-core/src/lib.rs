@@ -123,14 +123,20 @@ pub use blob::FsBlobStore;
 pub use browser::{
     browser_list_tool_spec, browser_navigate_tool_spec, browser_snapshot_tool_spec,
     is_browser_tool, valid_browser_id, valid_browser_url, validate_browser_list_arguments,
-    validate_browser_navigate_arguments, validate_browser_snapshot_arguments, BrowserContentTrust,
+    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    validate_browser_snapshot_arguments, validate_browser_wait_arguments,
+    browser_wait_tool_spec, browser_screenshot_tool_spec, browser_act_tool_spec,
+    BrowserActArgs, BrowserActResult, BrowserActStatus, BrowserAction, BrowserContentTrust,
     BrowserControllerKind, BrowserControllerState, BrowserElementBounds, BrowserEngineCapabilities,
     BrowserEngineDescriptor, BrowserEngineName, BrowserFrameStatus, BrowserGrantCapability,
     BrowserListArgs, BrowserListResult, BrowserLoadState, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserOrigin, BrowserOriginScope, BrowserPageSnapshot,
     BrowserSemanticFrame, BrowserSemanticNode, BrowserSemanticNodeKind, BrowserSessionSummary,
-    BrowserSnapshotArgs, BrowserViewport, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserViewport,
+    BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus,
+    BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_SCREENSHOT_TOOL,
     BROWSER_SNAPSHOT_TOOL, BROWSER_TOOLS, DEFAULT_BROWSER_SNAPSHOT_NODES, MAX_BROWSER_ID_CHARS,
+    BROWSER_WAIT_TOOL, DEFAULT_BROWSER_WAIT_TIMEOUT_MS,
     MAX_BROWSER_SNAPSHOT_NODES, MAX_BROWSER_URL_CHARS,
 };
 pub use cancel::{CancelToken, Cancelled};

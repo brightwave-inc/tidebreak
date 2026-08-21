@@ -255,6 +255,7 @@ struct BrowserRecord {
     pending_navigation_url: Option<String>,
     dispatch: BrowserDispatchState,
     semantic_snapshot: Option<StoredSemanticSnapshot>,
+    screenshot_epoch: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -1278,6 +1279,26 @@ impl BrowserRegistry {
             document_epoch,
             targets,
         });
+        Ok(())
+    }
+    pub(crate) fn record_screenshot_epoch(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if record.document_epoch != epoch {
+            return Err(
+                "browser document changed while screenshot was being captured".to_owned(),
+            );
+        }
+        record.screenshot_epoch = Some(epoch);
         Ok(())
     }
 
