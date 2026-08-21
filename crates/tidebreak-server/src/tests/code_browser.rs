@@ -726,16 +726,27 @@ async fn new_routes_require_capability_token() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
     let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
     let _t = mint_token(&a.code, ws, s);
-    for rt in ["wait", "screenshot"] {
+    for (rt, body) in [
+        (
+            "wait",
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "condition": {"kind": "load_state", "state": "ready"}
+            }),
+        ),
+        (
+            "screenshot",
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2
+            }),
+        ),
+    ] {
         assert_eq!(
-            post(
-                a.addr,
-                rt,
-                None,
-                serde_json::json!({"browser_id":"browser-1"}),
-            )
-            .await
-            .status(),
+            post(a.addr, rt, None, body).await.status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
     }
