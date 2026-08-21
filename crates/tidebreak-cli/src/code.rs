@@ -1373,7 +1373,23 @@ fn print_turn_line(turn: &CodeTurnSnapshot) {
     let usage = turn
         .usage
         .as_ref()
-        .map(|usage| format!("  in={} out={}", usage.input_tokens, usage.output_tokens))
+        .map(|usage| {
+            // Cache reads and writes are most of the prompt on every
+            // Anthropic-routed harness, and a cache write bills above base
+            // input. Printing only `in=` made the most expensive turn in a
+            // session read as the cheapest.
+            let mut line = format!("  in={} out={}", usage.input_tokens, usage.output_tokens);
+            if usage.cache_read_input_tokens > 0 {
+                line.push_str(&format!("  cache-read={}", usage.cache_read_input_tokens));
+            }
+            if usage.cache_creation_input_tokens > 0 {
+                line.push_str(&format!(
+                    "  cache-write={}",
+                    usage.cache_creation_input_tokens
+                ));
+            }
+            line
+        })
         .unwrap_or_default();
     println!(
         "{}\t{}\t{}{stat}{usage}",
