@@ -22,6 +22,7 @@ use tidebreak_core::{
 
 pub mod budget;
 pub mod child;
+pub mod browser_channel;
 pub mod claude;
 pub mod codex;
 pub mod grok;
@@ -286,6 +287,53 @@ impl ApprovalChannelSpec {
     }
 }
 
+/// Session-private browser capability-file path and metadata.
+///
+/// The trusted browser runtime writes a short-lived JSON capability file
+/// at `capability_file` before the engine child is spawned. The adapter
+/// injects only that path through a harness-owned environment key; no
+/// token, URL, or other secret enters argv, logs, approval previews, or
+/// persisted session metadata. The capability file is session-scoped: the
+/// engine's tool bridge reads it once at startup and the runtime revokes
+/// it when the session ends.
+///
+/// This struct carries only the metadata adapters need to construct the
+/// launch environment. The mint, write, and revoke lifecycle is owned by
+/// the trusted browser runtime (issue #2344).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BrowserChannelSpec {
+    /// Absolute path to the session-private capability file.
+    pub capability_file: std::path::PathBuf,
+}
+
+impl BrowserChannelSpec {
+    /// Adapter-owned environment key injected into every engine child.
+    ///
+    /// Prefix `TIDEBREAK_` is stripped from user `extra_env` and from
+    /// the probe snapshot, so a user setting cannot shadow or override
+    /// this value.
+    pub const ENV_KEY: &'static str = "TIDEBREAK_BROWSER_CAPFILE";
+
+    /// Construct a new spec.
+    #[must_use]
+    pub fn new(capability_file: std::path::PathBuf) -> Self {
+        Self { capability_file }
+    }
+
+    /// Inject the capability-file path into a [`std::process::Command`]
+    /// or [`tokio::process::Command`] as the final value for
+    /// [`Self::ENV_KEY`], after `plan.env` so it wins any shadow attempt.
+    pub fn inject_env(&self, cmd: &mut std::process::Command) {
+        cmd.env(Self::ENV_KEY, self.capability_file.as_os_str());
+    }
+
+    /// Tokio variant of [`Self::inject_env`].
+    pub fn inject_env_tokio(&self, cmd: &mut tokio::process::Command) {
+        cmd.env(Self::ENV_KEY, self.capability_file.as_os_str());
+    }
+}
+
 /// What an adapter needs to spawn or connect one session.
 pub struct SessionSpec {
     /// Worktree the engine should use as its working directory.
@@ -309,6 +357,10 @@ pub struct SessionSpec {
     pub binary: PathBuf,
     /// Where normalized events go.
     pub sink: Arc<dyn HarnessEventSink>,
+    /// Browser channel wiring, when the trusted browser runtime has
+    /// produced a session-private capability file. `None` preserves the
+    /// existing behavior: no browser tools are advertised or injected.
+    pub browser: Option<BrowserChannelSpec>,
 }
 
 /// Receives normalized events as the engine stream is parsed.

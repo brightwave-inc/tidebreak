@@ -493,6 +493,9 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
     for (key, value) in &plan.env {
         command.env(key, value);
     }
+    if let Some(ref browser) = session.spec.browser {
+        browser.inject_env(&mut command);
+    }
     let mut child = spawn_process_tree(&mut command)?;
     let stdin = child
         .take_stdin()
@@ -1299,6 +1302,7 @@ done
             approval: None,
             binary: PathBuf::from("codex"),
             sink,
+            browser: None,
         })
     }
 
@@ -1350,6 +1354,7 @@ done
             approval: None,
             binary: binary.to_path_buf(),
             sink: Arc::new(SilentSink),
+            browser: None,
         }
     }
 

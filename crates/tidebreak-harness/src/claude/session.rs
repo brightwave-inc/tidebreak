@@ -160,6 +160,9 @@ impl HarnessSession for ClaudeSession {
         for (key, value) in &plan.env {
             command.env(key, value);
         }
+        if let Some(ref browser) = self.spec.browser {
+            browser.inject_env(&mut command);
+        }
         let mut child = spawn_process_tree(&mut command)?;
         let mut stdin = child
             .take_stdin()
@@ -455,6 +458,7 @@ mod tests {
             approval: None,
             binary,
             sink: Arc::new(Discard),
+            browser: None,
         });
         assert!(
             session.child_pid_changes().is_some(),

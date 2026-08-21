@@ -1748,6 +1748,7 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
+            browser: None,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {

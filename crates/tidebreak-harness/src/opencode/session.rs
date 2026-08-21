@@ -226,6 +226,9 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, Harness
     for (key, value) in &plan.env {
         command.env(key, value);
     }
+    if let Some(ref browser) = session.spec.browser {
+        browser.inject_env(&mut command);
+    }
     let mut child = spawn_process_tree(&mut command)?;
     let stdout = child
         .take_stdout()
