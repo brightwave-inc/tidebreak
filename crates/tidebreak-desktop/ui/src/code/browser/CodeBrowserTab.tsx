@@ -105,6 +105,7 @@ function CodeBrowserTabSession({
   const [address, setAddress] = useState(session.address);
   const [addressError, setAddressError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [viewportOpen, setViewportOpen] = useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -112,6 +113,7 @@ function CodeBrowserTabSession({
   const nativeReady = useRef(false);
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
+  const nativeRevealFrame = useRef<number | null>(null);
   const persistTimer = useRef<number | null>(null);
   const sessionRef = useRef(session);
   const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
@@ -119,7 +121,11 @@ function CodeBrowserTabSession({
   const [renderedViewportWidth, setRenderedViewportWidth] = useState<number | null>(
     null,
   );
-  const visible = !obscured && !historyOpen && session.loadState !== "failed";
+  const visible =
+    !obscured &&
+    !historyOpen &&
+    !viewportOpen &&
+    session.loadState !== "failed";
   const visibleRef = useRef(visible);
 
   sessionRef.current = session;
@@ -438,9 +444,32 @@ function CodeBrowserTabSession({
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
-    void host
-      .command(workspaceId, browserId, { type: "set_visible", visible })
-      .catch(() => undefined);
+    if (nativeRevealFrame.current !== null) {
+      window.cancelAnimationFrame(nativeRevealFrame.current);
+      nativeRevealFrame.current = null;
+    }
+    if (!visible) {
+      void host
+        .command(workspaceId, browserId, { type: "set_visible", visible: false })
+        .catch(() => undefined);
+      return;
+    }
+
+    // Delay reveals by one frame so a click that hands off between two app
+    // overlays cannot briefly repaint the native WKWebView above the new one.
+    nativeRevealFrame.current = window.requestAnimationFrame(() => {
+      nativeRevealFrame.current = null;
+      if (!nativeReady.current || !visibleRef.current || !host.available()) return;
+      void host
+        .command(workspaceId, browserId, { type: "set_visible", visible: true })
+        .catch(() => undefined);
+    });
+    return () => {
+      if (nativeRevealFrame.current !== null) {
+        window.cancelAnimationFrame(nativeRevealFrame.current);
+        nativeRevealFrame.current = null;
+      }
+    };
   }, [browserId, host, visible, workspaceId]);
 
   async function navigate(input = address) {
@@ -639,6 +668,7 @@ function CodeBrowserTabSession({
             viewport={viewport}
             renderedWidth={renderedViewportWidth}
             onViewportChange={setViewport}
+            onOverlayOpenChange={setViewportOpen}
             disabled={!session.url}
           />
         }

@@ -55,6 +55,8 @@ export type BrowserViewportControlProps = {
   /** Actual rendered width in CSS px, for legibility without a second control. */
   renderedWidth: number | null;
   onViewportChange: (viewport: BrowserViewport) => void;
+  /** Notify the native surface while this app-owned popover covers it. */
+  onOverlayOpenChange?: (open: boolean) => void;
   disabled?: boolean;
 };
 
@@ -71,6 +73,7 @@ export function BrowserViewportControl({
   viewport,
   renderedWidth,
   onViewportChange,
+  onOverlayOpenChange,
   disabled = false,
 }: BrowserViewportControlProps) {
   const [open, setOpen] = useState(false);
@@ -89,8 +92,13 @@ export function BrowserViewportControl({
     onViewportChange({ ...viewport, preset });
   }
 
+  function setPopoverOpen(nextOpen: boolean) {
+    setOpen(nextOpen);
+    onOverlayOpenChange?.(nextOpen);
+  }
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={setPopoverOpen}>
       <WithTooltip label="Viewport size">
         <PopoverTrigger asChild>
           <Button

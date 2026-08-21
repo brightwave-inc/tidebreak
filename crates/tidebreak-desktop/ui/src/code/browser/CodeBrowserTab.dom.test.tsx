@@ -267,6 +267,68 @@ describe("CodeBrowserTab", () => {
     );
   });
 
+  it("keeps the native surface hidden until every overlay has closed", async () => {
+    const runtime = browserHost();
+    const view = render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    runtime.calls.splice(0);
+    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    expect(await screen.findByRole("radio", { name: "Fit" })).toBeVisible();
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      }),
+    );
+
+    runtime.calls.splice(0);
+    view.rerender(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+        obscured
+      />,
+    );
+    await userEvent.keyboard("{Escape}");
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
+    expect(runtime.calls).not.toContainEqual({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      action: { type: "set_visible", visible: true },
+    });
+
+    view.rerender(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+  });
+
   it("hides a native view that finishes creating after its tab unmounts", async () => {
     let releaseCreate: (() => void) | undefined;
     const createGate = new Promise<void>((resolve) => {
