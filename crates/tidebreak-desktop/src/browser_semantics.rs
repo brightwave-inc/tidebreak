@@ -664,7 +664,7 @@ async fn poll_wait_condition(
                 // budget so a slow JavaScript evaluation cannot overshoot
                 // the advertised hard timeout by up to 10 s.
                 let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
-                match tokio::time::timeout(
+                tokio::time::timeout(
                     std::time::Duration::from_millis(remaining),
                     evaluate_wait_condition(
                         &webview,
@@ -674,10 +674,7 @@ async fn poll_wait_condition(
                     ),
                 )
                 .await
-                {
-                    Ok(satisfied) => satisfied,
-                    Err(_elapsed) => false,
-                }
+                .unwrap_or_default()
             } => satisfied,
         };
 
