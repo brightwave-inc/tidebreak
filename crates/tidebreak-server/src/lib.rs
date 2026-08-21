@@ -1561,7 +1561,7 @@ async fn bind_inner(
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
-// Before `initialize`: a boot-file or persisted replacement derives the
+    // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
     // everything else instead of after a second reconcile.
     state
