@@ -176,6 +176,8 @@ the same treatment becomes available to it.
 - A socket that connects after some deltas have streamed and before the
   message lands assembles the same text as one that was connected the whole
   time.
+- A socket that reconnects from the transient tail's journal cursor keeps its
+  existing text and receives only later deltas.
 - A turn interrupted mid-sentence leaves the streamed text in the journal.
 - A journal written before this change — delta rows and all — still replays in
   order.

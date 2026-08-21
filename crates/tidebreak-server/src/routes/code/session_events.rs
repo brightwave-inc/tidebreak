@@ -70,7 +70,10 @@ async fn stream_events(
     {
         return;
     }
-    if send_live_tail(&mut socket, &tail, last_seq).await.is_err() {
+    if send_live_tail(&mut socket, &tail, after, last_seq)
+        .await
+        .is_err()
+    {
         return;
     }
     loop {
@@ -166,17 +169,18 @@ async fn stream_events(
 /// written down.
 ///
 /// Without this, a client that connects mid-answer sees the sentence from
-/// wherever it happened to arrive. The tail is only trustworthy while the
-/// replay stayed behind the position it was captured at: a replay that read
-/// further has already picked up the `assistant_message` (or the tool call,
-/// or the turn's end) that retired it, and sending the stale copy on top
-/// would show the same words twice.
+/// wherever it happened to arrive. A reconnect from the tail's cursor has
+/// already applied its transient text, so sending the tail again would append
+/// the same words twice. The tail is also only trustworthy while replay stays
+/// behind the position it was captured at: a replay that reads further has
+/// already picked up the event that retired it.
 async fn send_live_tail(
     socket: &mut WebSocket,
     tail: &LiveTail,
+    requested_after: i64,
     last_seq: i64,
 ) -> Result<(), axum::Error> {
-    if tail.assistant.is_empty() || last_seq > tail.cursor {
+    if tail.assistant.is_empty() || requested_after >= tail.cursor || last_seq > tail.cursor {
         return Ok(());
     }
     send_frame(

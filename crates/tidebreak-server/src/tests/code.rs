@@ -3894,6 +3894,153 @@ async fn connecting_mid_answer_replays_the_text_that_already_streamed() {
     let _ = turn.await;
 }
 
+/// A reconnect keeps the transient text it already applied. The server must
+/// not send the full live tail again from the same journal cursor.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnecting_mid_answer_does_not_repeat_the_live_tail() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    let epoch = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .spawn_epoch;
+    let marker = CodeEvent::HarnessNotice {
+        level: tidebreak_core::HarnessNoticeLevel::Info,
+        message: "reconnect cursor".into(),
+    };
+    let cursor = tidebreak_core::db::code::append_event(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        epoch,
+        &marker,
+    )
+    .await
+    .unwrap();
+    runtime.bus.publish(
+        parsed,
+        tidebreak_core::SequencedCodeEvent {
+            seq: cursor,
+            event: marker,
+        },
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            if value["seq"] == cursor {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the socket did not reach the reconnect cursor");
+
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "first ".into(),
+        },
+    );
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "second ".into(),
+        },
+    );
+
+    let mut assembled = String::new();
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("a live delta timed out")
+            .expect("the live socket closed")
+            .unwrap();
+        let WsMessage::Text(text) = frame else {
+            panic!("expected a text frame");
+        };
+        let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(value["seq"], cursor);
+        assert_eq!(value["transient"], true);
+        assembled.push_str(value["event"]["text"].as_str().unwrap());
+    }
+    assert_eq!(assembled, "first second ");
+    drop(socket);
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after={cursor}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut resumed, _) = connect_async(request).await.unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), resumed.next())
+            .await
+            .is_err(),
+        "the reconnect repeated text the client already applied"
+    );
+
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "third".into(),
+        },
+    );
+    let frame = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+        .await
+        .expect("the resumed delta timed out")
+        .expect("the resumed socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = frame else {
+        panic!("expected a text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(value["event"]["type"], "assistant_delta");
+    assert_eq!(value["event"]["text"], "third");
+    assembled.push_str(value["event"]["text"].as_str().unwrap());
+    assert_eq!(assembled, "first second third");
+}
+
 #[tokio::test]
 async fn superseded_worker_cannot_append_to_the_journal() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
