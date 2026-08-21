@@ -1322,39 +1322,47 @@ impl BrowserRegistry {
         targets: HashMap<String, BrowserTargetRecord>,
     ) -> Result<(), String> {
         let mut state = self.lock();
-        let capability = active_capability(&state, capability_id)
-            .map_err(|_| "browser capability is unavailable".to_owned())?;
-        let Some(record) = state.records.get_mut(browser_id) else {
-            return Err("browser session is not registered".to_owned());
-        };
-        if record.workspace_id != capability.workspace_id
-            || record.instance_id != instance_id
-            || record.document_epoch != document_epoch
-            || record.load_state != BrowserLoadState::Ready
+        let workspace_id = active_capability(&state, capability_id)
+            .map_err(|_| "browser capability is unavailable".to_owned())?
+            .workspace_id
+            .clone();
         {
-            return Err("browser document changed while it was being inspected".to_owned());
+            let Some(record) = state.records.get(browser_id) else {
+                return Err("browser session is not registered".to_owned());
+            };
+            if record.workspace_id != workspace_id
+                || record.instance_id != instance_id
+                || record.document_epoch != document_epoch
+                || record.load_state != BrowserLoadState::Ready
+            {
+                return Err("browser document changed while it was being inspected".to_owned());
+            }
+            if !record.visible {
+                return Err("browser is hidden".to_owned());
+            }
+            if *record.dispatch.halt.borrow() {
+                return Err("browser control was stopped by the user".to_owned());
+            }
+            if record.controller.kind != BrowserControllerKind::Agent
+                || record.controller_capability_id != Some(capability_id)
+            {
+                return Err("browser is not controlled by this agent".to_owned());
+            }
+            let origin = current_origin(record)
+                .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+            if !grants_cover(
+                &state,
+                &workspace_id,
+                &origin,
+                BrowserGrantCapability::BrowserObserveOrigin,
+            ) {
+                return Err("browser origin is not shared for this operation".to_owned());
+            }
         }
-        if !record.visible {
-            return Err("browser is hidden".to_owned());
-        }
-        if *record.dispatch.halt.borrow() {
-            return Err("browser control was stopped by the user".to_owned());
-        }
-        if record.controller.kind != BrowserControllerKind::Agent
-            || record.controller_capability_id != Some(capability_id)
-        {
-            return Err("browser is not controlled by this agent".to_owned());
-        }
-        let origin = current_origin(record)
-            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !grants_cover(
-            &state,
-            &capability.workspace_id,
-            &origin,
-            BrowserGrantCapability::BrowserObserveOrigin,
-        ) {
-            return Err("browser origin is not shared for this operation".to_owned());
-        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("browser record was validated under the same registry lock");
         record.semantic_snapshot = Some(StoredSemanticSnapshot {
             snapshot_id,
             document_epoch,
@@ -1401,46 +1409,56 @@ impl BrowserRegistry {
         snapshot_id: &str,
     ) -> Result<(), String> {
         let mut state = self.lock();
-        let capability = active_capability(&state, capability_id)?;
+        let workspace_id = active_capability(&state, capability_id)?
+            .workspace_id
+            .clone();
+        {
+            let record = state
+                .records
+                .get(browser_id)
+                .ok_or_else(|| "browser session is not registered".to_owned())?;
+            if record.workspace_id != workspace_id {
+                return Err("browser session belongs to a different workspace".to_owned());
+            }
+            if record.instance_id != instance_id
+                || record.document_epoch != document_epoch
+            {
+                return Err(
+                    "browser document changed while screenshot was being captured".to_owned(),
+                );
+            }
+            if !record.visible {
+                return Err("browser is hidden".to_owned());
+            }
+            if *record.dispatch.halt.borrow() {
+                return Err("browser control was stopped by the user".to_owned());
+            }
+            if record.controller.kind != BrowserControllerKind::Agent
+                || record.controller_capability_id != Some(capability_id)
+            {
+                return Err("browser is not controlled by this agent".to_owned());
+            }
+            let origin = current_origin(record)
+                .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+            if !grants_cover(
+                &state,
+                &workspace_id,
+                &origin,
+                BrowserGrantCapability::BrowserObserveOrigin,
+            ) {
+                return Err("browser origin is not shared for this operation".to_owned());
+            }
+            let Some(snapshot) = &record.semantic_snapshot else {
+                return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+            };
+            if snapshot.snapshot_id != snapshot_id || snapshot.document_epoch != document_epoch {
+                return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+            }
+        }
         let record = state
             .records
             .get_mut(browser_id)
-            .ok_or_else(|| "browser session is not registered".to_owned())?;
-        if record.workspace_id != capability.workspace_id {
-            return Err("browser session belongs to a different workspace".to_owned());
-        }
-        if record.instance_id != instance_id
-            || record.document_epoch != document_epoch
-        {
-            return Err("browser document changed while screenshot was being captured".to_owned());
-        }
-        if !record.visible {
-            return Err("browser is hidden".to_owned());
-        }
-        if *record.dispatch.halt.borrow() {
-            return Err("browser control was stopped by the user".to_owned());
-        }
-        if record.controller.kind != BrowserControllerKind::Agent
-            || record.controller_capability_id != Some(capability_id)
-        {
-            return Err("browser is not controlled by this agent".to_owned());
-        }
-        let origin = current_origin(record)
-            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
-        if !grants_cover(
-            &state,
-            &capability.workspace_id,
-            &origin,
-            BrowserGrantCapability::BrowserObserveOrigin,
-        ) {
-            return Err("browser origin is not shared for this operation".to_owned());
-        }
-        let Some(snapshot) = &record.semantic_snapshot else {
-            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
-        };
-        if snapshot.snapshot_id != snapshot_id || snapshot.document_epoch != document_epoch {
-            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
-        }
+            .expect("browser record was validated under the same registry lock");
         record.screenshot_epoch = Some(document_epoch);
         Ok(())
     }
