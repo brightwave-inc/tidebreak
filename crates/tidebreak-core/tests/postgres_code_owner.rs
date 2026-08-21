@@ -67,6 +67,9 @@ async fn seed_owner(
             pr: None,
             created_at: Utc::now(),
             archived_at: None,
+            released_at: None,
+            released_tip: None,
+            bundle_bytes: None,
         },
     )
     .await

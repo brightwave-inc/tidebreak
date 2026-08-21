@@ -24,6 +24,9 @@ pub async fn insert_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Res
         }),
         created_at: Set(workspace.created_at),
         archived_at: Set(workspace.archived_at),
+        released_at: Set(workspace.released_at),
+        released_tip: Set(workspace.released_tip.clone()),
+        bundle_bytes: Set(workspace.bundle_bytes),
     }
     .insert(&store.conn)
     .await
@@ -106,6 +109,18 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
             entities::code_workspace::Column::ArchivedAt,
             sea_orm::sea_query::Expr::value(workspace.archived_at),
         )
+        .col_expr(
+            entities::code_workspace::Column::ReleasedAt,
+            sea_orm::sea_query::Expr::value(workspace.released_at),
+        )
+        .col_expr(
+            entities::code_workspace::Column::ReleasedTip,
+            sea_orm::sea_query::Expr::value(workspace.released_tip.clone()),
+        )
+        .col_expr(
+            entities::code_workspace::Column::BundleBytes,
+            sea_orm::sea_query::Expr::value(workspace.bundle_bytes),
+        )
         .filter(entities::code_workspace::Column::Id.eq(workspace.id.0))
         .filter(entities::code_workspace::Column::Owner.eq(workspace.owner.as_str()))
         .exec(&store.conn)
@@ -177,5 +192,8 @@ pub(super) fn workspace_from_row(row: entities::code_workspace::Model) -> Result
         pr,
         created_at: row.created_at,
         archived_at: row.archived_at,
+        released_at: row.released_at,
+        released_tip: row.released_tip,
+        bundle_bytes: row.bundle_bytes,
     })
 }

@@ -63,6 +63,18 @@ pub struct CodeWorkspaceSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub released_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Commit the released branch pointed at, so a client can name the work
+    /// without the branch existing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub released_tip: Option<String>,
+    /// Stored bundle size, for reporting what a release reclaimed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bundle_bytes: Option<i64>,
 }
 
 impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
@@ -78,6 +90,9 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
             pr: workspace.pr,
             created_at: workspace.created_at,
             archived_at: workspace.archived_at,
+            released_at: workspace.released_at,
+            released_tip: workspace.released_tip,
+            bundle_bytes: workspace.bundle_bytes,
         }
     }
 }

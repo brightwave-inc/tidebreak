@@ -13,6 +13,18 @@ import { STATUS_CHIP, STATUS_MARK, type StatusTone } from "./statusTone";
  * them.
  */
 
+/**
+ * Whether a workspace has been put away rather than being live work.
+ *
+ * Archived and released are both reclaim tiers — released has simply given up
+ * more (its branch, not only its checkout). Every surface that asks "is this
+ * still on the rail?" wants both, so ask it here rather than comparing to
+ * `"archived"` and silently letting released workspaces read as live.
+ */
+export function isPutAway(workspace: CodeWorkspaceSnapshot): boolean {
+  return workspace.status === "archived" || workspace.status === "released";
+}
+
 export type WorkspaceGroup = {
   /** Null collects workspaces whose repo is missing from the catalog. */
   repo: CodeRepoSnapshot | null;
@@ -31,7 +43,7 @@ export function groupWorkspacesByRepo(
 ): WorkspaceGroup[] {
   const byRepo = new Map<string, CodeWorkspaceSnapshot[]>();
   for (const workspace of workspaces) {
-    if (workspace.status === "archived") continue;
+    if (isPutAway(workspace)) continue;
     const listed = byRepo.get(workspace.repo_id);
     if (listed) {
       listed.push(workspace);
@@ -119,7 +131,7 @@ export function workspaceStatusRank(
   workspace: CodeWorkspaceSnapshot,
   digest: CodeSessionDigest | undefined,
 ): WorkspaceStatusRank {
-  if (workspace.status === "archived") return "archived";
+  if (isPutAway(workspace)) return "archived";
   if (digest?.attention.state.type === "needs_you") return "needs_you";
   if (digest?.lifecycle === "running") return "running";
   const pr = digest?.pr_state ?? workspace.pr;
@@ -167,7 +179,7 @@ export function listWorkspacesByCreated(
   workspaces: readonly CodeWorkspaceSnapshot[],
 ): CodeWorkspaceSnapshot[] {
   return sortByCreated(
-    workspaces.filter((workspace) => workspace.status !== "archived"),
+    workspaces.filter((workspace) => !isPutAway(workspace)),
     "desc",
   );
 }
@@ -238,7 +250,7 @@ export function listArchivedWorkspaces(
   workspaces: readonly CodeWorkspaceSnapshot[],
 ): CodeWorkspaceSnapshot[] {
   return workspaces
-    .filter((workspace) => workspace.status === "archived")
+    .filter((workspace) => isPutAway(workspace))
     .sort((left, right) => {
       const byTime = (right.archived_at ?? right.created_at).localeCompare(
         left.archived_at ?? left.created_at,

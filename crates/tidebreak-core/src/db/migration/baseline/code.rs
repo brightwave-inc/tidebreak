@@ -99,6 +99,14 @@ pub(super) fn code_workspace_table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(ColumnDef::new(CodeWorkspace::ArchivedAt).timestamp_with_time_zone())
+        // Release is the deepest reclaim tier: worktree and branch both gone,
+        // the branch's own commits kept as a bundle beside the data directory.
+        // The tip and byte count are recorded so the reclaim surface can
+        // report what a release bought, and a restore can name what it
+        // rebuilds, without reading the bundle back.
+        .col(ColumnDef::new(CodeWorkspace::ReleasedAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(CodeWorkspace::ReleasedTip).text())
+        .col(ColumnDef::new(CodeWorkspace::BundleBytes).big_integer())
         .foreign_key(
             ForeignKey::create()
                 .name("fk_code_workspace_repo")
@@ -110,6 +118,7 @@ pub(super) fn code_workspace_table() -> TableCreateStatement {
             "setup_failed",
             "active",
             "archived",
+            "released",
         ]))
         .to_owned()
 }

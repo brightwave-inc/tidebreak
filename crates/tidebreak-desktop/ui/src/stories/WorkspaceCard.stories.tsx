@@ -5,6 +5,7 @@ import { workspaceCommands } from "@/code/workspaceActions";
 import { WorkspaceCard } from "@/code/WorkspaceCard";
 import {
   archivedWorkspace,
+  releasedWorkspace,
   closedPrDigest,
   codeSession,
   codeWorkspace,
@@ -242,6 +243,17 @@ export const TerminalOpen: Story = {
 export const Archived: Story = {
   args: {
     workspace: archivedWorkspace,
+    commands: workspaceCommands({ hasPr: false, archived: true }),
+  },
+};
+
+/**
+ * Released reads as put-away, like Archived: the rail must not show a
+ * workspace whose branch is gone as live work.
+ */
+export const Released: Story = {
+  args: {
+    workspace: releasedWorkspace,
     commands: workspaceCommands({ hasPr: false, archived: true }),
   },
 };

@@ -1696,6 +1696,9 @@ pub mod code_workspace {
         pub pr: Option<Json>,
         pub created_at: DateTimeUtc,
         pub archived_at: Option<DateTimeUtc>,
+        pub released_at: Option<DateTimeUtc>,
+        pub released_tip: Option<String>,
+        pub bundle_bytes: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

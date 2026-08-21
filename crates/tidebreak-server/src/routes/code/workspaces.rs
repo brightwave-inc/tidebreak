@@ -96,6 +96,23 @@ pub async fn archive_workspace(
     Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 
+/// `POST /code/workspaces/{id}/release` — reclaim an archived workspace's branch.
+///
+/// The deepest reclaim tier. The branch's own commits are bundled beside the
+/// database and the ref is dropped, which frees the objects the branch held
+/// alive. `restore_workspace` puts it back from that bundle, so the work stays
+/// rebuildable and the transcript is untouched. 409 kinds:
+/// `workspace_not_archived`, and `branch_unmerged` (the branch has commits the
+/// base does not — pass force).
+pub async fn release_workspace(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+    Json(body): Json<ArchiveWorkspaceBody>,
+) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
+    let released = code.release_workspace(id, body.force).await?;
+    Ok(Json(CodeWorkspaceSnapshot::from(released)))
+}
+
 /// `POST /code/workspaces/{id}/restore` — reactivate an archived workspace.
 ///
 /// The worktree comes back at the same path on the kept branch; session rows

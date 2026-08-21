@@ -648,6 +648,149 @@ pub(crate) async fn remove_worktree(
     prune_worktrees(repo_root).await
 }
 
+/// Where a released workspace's bundle lives.
+///
+/// Bundles are derived data, not user work: unlike a worktree (decision 53)
+/// they belong in the disposable app-data directory, beside the database that
+/// records them.
+pub(crate) fn bundle_path(data_dir: &Path, workspace: &uuid::Uuid) -> PathBuf {
+    data_dir
+        .join("code")
+        .join("bundles")
+        .join(format!("{workspace}.bundle"))
+}
+
+/// The commit a branch points at.
+pub(crate) async fn branch_tip(repo_root: &Path, branch: &str) -> Result<String, WorktreeError> {
+    let sha = git_stdout(
+        Some(repo_root),
+        &["rev-parse", &format!("refs/heads/{branch}")],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("could not resolve {branch}: {err}")))?;
+    Ok(sha.trim().to_owned())
+}
+
+/// Whether a released branch would strand commits nothing else can reach.
+///
+/// Release drops the branch, so the question archive asks about the checkout
+/// is asked here about the history: are these commits merged into the base, or
+/// would dropping the ref be the only copy going away? The bundle means the
+/// answer is recoverable either way — this is what the confirmation is for,
+/// not a correctness gate.
+pub(crate) async fn release_is_unmerged(
+    repo_root: &Path,
+    base_ref: &str,
+    branch: &str,
+) -> Result<bool, WorktreeError> {
+    let count = git_stdout(
+        Some(repo_root),
+        &[
+            "rev-list",
+            "--count",
+            &format!("{base_ref}..refs/heads/{branch}"),
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git rev-list failed: {err}")))?;
+    Ok(count.trim().parse::<u64>().unwrap_or(1) > 0)
+}
+
+/// Bundle a branch's own commits and return the file's size.
+///
+/// The range is `base..branch`, not the whole history: the base is still in
+/// the repository, so carrying it would multiply the bundle by the size of the
+/// project for nothing. What is left is the work this workspace did, which is
+/// what a restore needs to put the branch back.
+pub(crate) async fn create_bundle(
+    repo_root: &Path,
+    base_ref: &str,
+    branch: &str,
+    out: &Path,
+) -> Result<u64, WorktreeError> {
+    if let Some(parent) = out.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+            WorktreeError::internal(format!(
+                "could not create bundle directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
+    // `--` separates the revision range from the ref that names it, so the
+    // bundle carries `refs/heads/<branch>` and a restore can fetch it by name.
+    git(
+        Some(repo_root),
+        &[
+            "bundle",
+            "create",
+            &out.to_string_lossy(),
+            &format!("{base_ref}..refs/heads/{branch}"),
+            &format!("refs/heads/{branch}"),
+        ],
+        GIT_WORKTREE_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git bundle create failed: {err}")))?;
+    let size = tokio::fs::metadata(out)
+        .await
+        .map_err(|err| {
+            WorktreeError::internal(format!("could not stat bundle {}: {err}", out.display()))
+        })?
+        .len();
+    Ok(size)
+}
+
+/// Restore a branch from its bundle.
+///
+/// Verifies the bundle before fetching: a truncated or corrupt file must fail
+/// here, with the branch still absent, rather than half-populate the object
+/// store and leave a ref pointing at commits whose parents never arrived.
+pub(crate) async fn unbundle_branch(
+    repo_root: &Path,
+    bundle: &Path,
+    branch: &str,
+) -> Result<(), WorktreeError> {
+    if !bundle.exists() {
+        return Err(WorktreeError::user(format!(
+            "bundle {} is missing; this workspace cannot be restored",
+            bundle.display()
+        )));
+    }
+    let path = bundle.to_string_lossy();
+    git(
+        Some(repo_root),
+        &["bundle", "verify", path.as_ref()],
+        GIT_WORKTREE_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::user(format!("bundle {path} is not usable: {err}")))?;
+    git(
+        Some(repo_root),
+        &[
+            "fetch",
+            path.as_ref(),
+            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+        ],
+        GIT_WORKTREE_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git fetch from bundle failed: {err}")))?;
+    Ok(())
+}
+
+/// Delete a branch, discarding the ref whether or not it merged.
+///
+/// Release has already bundled the commits, so `-D` is the honest flag: `-d`
+/// would refuse exactly the unmerged branches release exists to reclaim.
+pub(crate) async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), WorktreeError> {
+    git(Some(repo_root), &["branch", "-D", branch], GIT_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(|err| WorktreeError::internal(format!("git branch -D {branch} failed: {err}")))
+}
+
 /// Drop stale worktree registrations from the repo.
 pub(crate) async fn prune_worktrees(repo_root: &Path) -> Result<(), WorktreeError> {
     git(Some(repo_root), &["worktree", "prune"], GIT_TIMEOUT)
@@ -1331,5 +1474,104 @@ mod tests {
             Path::new(r"\\Server\Share\Repo"),
             Path::new(r"\\Server\Other\Repo")
         ));
+    }
+
+    /// The whole premise of the release tier: a bundle of `base..branch`
+    /// carries the work, so dropping the branch is recoverable.
+    #[tokio::test]
+    async fn a_released_branch_round_trips_through_its_bundle() {
+        let (dir, repo) = init_repo();
+        run(&repo, &["git", "checkout", "-b", "tidebreak/work"]);
+        std::fs::write(repo.join("feature.txt"), "work\n").unwrap();
+        run(&repo, &["git", "add", "feature.txt"]);
+        run(&repo, &["git", "commit", "-m", "add the feature"]);
+        let tip = branch_tip(&repo, "tidebreak/work").await.unwrap();
+        run(&repo, &["git", "checkout", "main"]);
+
+        assert!(release_is_unmerged(&repo, "main", "tidebreak/work")
+            .await
+            .unwrap());
+
+        let bundle = dir.path().join("work.bundle");
+        let bytes = create_bundle(&repo, "main", "tidebreak/work", &bundle)
+            .await
+            .unwrap();
+        assert!(bytes > 0);
+
+        delete_branch(&repo, "tidebreak/work").await.unwrap();
+        assert!(!branch_exists(&repo, "tidebreak/work").await.unwrap());
+
+        unbundle_branch(&repo, &bundle, "tidebreak/work")
+            .await
+            .unwrap();
+        assert!(branch_exists(&repo, "tidebreak/work").await.unwrap());
+        // Same commit, not merely a branch of the same name.
+        assert_eq!(branch_tip(&repo, "tidebreak/work").await.unwrap(), tip);
+        run(&repo, &["git", "checkout", "tidebreak/work"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("feature.txt")).unwrap(),
+            "work\n"
+        );
+    }
+
+    /// The bundle carries the branch's own commits, not the history behind
+    /// them. This is what makes the tier worth having: the base is still in
+    /// the repository, so shipping it again would scale the bundle with the
+    /// project instead of with the work.
+    #[tokio::test]
+    async fn a_bundle_carries_only_the_branch_commits() {
+        let (dir, repo) = init_repo();
+        // Bulk on the base, which the bundle must not copy.
+        std::fs::write(repo.join("big.bin"), "x".repeat(400_000)).unwrap();
+        run(&repo, &["git", "add", "big.bin"]);
+        run(&repo, &["git", "commit", "-m", "add bulk to the base"]);
+
+        run(&repo, &["git", "checkout", "-b", "tidebreak/small"]);
+        std::fs::write(repo.join("note.txt"), "one line\n").unwrap();
+        run(&repo, &["git", "add", "note.txt"]);
+        run(&repo, &["git", "commit", "-m", "add a note"]);
+        run(&repo, &["git", "checkout", "main"]);
+
+        let bundle = dir.path().join("small.bundle");
+        let bytes = create_bundle(&repo, "main", "tidebreak/small", &bundle)
+            .await
+            .unwrap();
+        assert!(
+            bytes < 100_000,
+            "bundle carried the base: {bytes} bytes for a one-line commit"
+        );
+    }
+
+    /// A merged branch is the case release does not have to warn about.
+    #[tokio::test]
+    async fn a_merged_branch_is_not_reported_unmerged() {
+        let (_dir, repo) = init_repo();
+        run(&repo, &["git", "checkout", "-b", "tidebreak/merged"]);
+        std::fs::write(repo.join("merged.txt"), "done\n").unwrap();
+        run(&repo, &["git", "add", "merged.txt"]);
+        run(&repo, &["git", "commit", "-m", "merged work"]);
+        run(&repo, &["git", "checkout", "main"]);
+        run(
+            &repo,
+            &["git", "merge", "--no-ff", "-m", "merge", "tidebreak/merged"],
+        );
+
+        assert!(!release_is_unmerged(&repo, "main", "tidebreak/merged")
+            .await
+            .unwrap());
+    }
+
+    /// A corrupt bundle must fail before it half-populates the object store.
+    #[tokio::test]
+    async fn a_corrupt_bundle_is_refused_and_leaves_no_branch() {
+        let (dir, repo) = init_repo();
+        let bundle = dir.path().join("broken.bundle");
+        std::fs::write(&bundle, b"not a bundle").unwrap();
+
+        let err = unbundle_branch(&repo, &bundle, "tidebreak/nope")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::User(_)), "{err:?}");
+        assert!(!branch_exists(&repo, "tidebreak/nope").await.unwrap());
     }
 }

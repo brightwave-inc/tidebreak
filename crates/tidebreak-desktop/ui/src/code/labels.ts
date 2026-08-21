@@ -77,6 +77,7 @@ export const WORKSPACE_STATUS_LABELS: Record<CodeWorkspaceStatus, string> = {
   setup_failed: "Setup failed",
   active: "Active",
   archived: "Archived",
+  released: "Released",
 };
 
 export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {

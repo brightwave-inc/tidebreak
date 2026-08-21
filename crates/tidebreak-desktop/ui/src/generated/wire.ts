@@ -1509,12 +1509,21 @@ export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line
 /**
  * One isolated workspace (worktree + branch) on a repo.
  */
-export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, };
+export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string, 
+/**
+ * Commit the released branch pointed at, so a client can name the work
+ * without the branch existing.
+ */
+released_tip?: string, 
+/**
+ * Stored bundle size, for reporting what a release reclaimed.
+ */
+bundle_bytes?: number, };
 
 /**
  * Status of a persisted workspace.
  */
-export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived";
+export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived" | "released";
 
 /**
  * Bounded path listing for `GET /code/workspaces/{id}/tree`.

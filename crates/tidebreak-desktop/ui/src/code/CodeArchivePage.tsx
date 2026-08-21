@@ -35,7 +35,7 @@ import { openInBrowser } from "@/openInBrowser";
 import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeSidebar } from "./CodeSidebar";
-import { listArchivedWorkspaces } from "./workspaceCards";
+import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
 
@@ -105,7 +105,7 @@ function CodeArchiveBody() {
   };
 
   const totalArchived = workspaces.filter(
-    (workspace) => workspace.status === "archived",
+    (workspace) => isPutAway(workspace),
   ).length;
 
   return (

@@ -822,6 +822,9 @@ pub(crate) enum CodeWorkspace {
     Pr,
     CreatedAt,
     ArchivedAt,
+    ReleasedAt,
+    ReleasedTip,
+    BundleBytes,
     Owner,
 }
 
