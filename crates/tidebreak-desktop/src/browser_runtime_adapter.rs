@@ -134,26 +134,38 @@ impl SessionCapabilities {
                     return Err(BrowserRuntimeError::SessionEnded);
                 }
 
-                let active = match entry.get_mut() {
-                    SessionCapabilityState::Active(active) => active,
+                let previous = match entry.get() {
+                    SessionCapabilityState::Active(active) => active.capability_id,
                     SessionCapabilityState::Revoked => unreachable!("checked above"),
                 };
                 let workspace = scope.workspace.to_string();
                 if registry
-                    .heartbeat_agent_capability(active.capability_id, &workspace)
+                    .heartbeat_agent_capability(previous, &workspace)
                     .is_ok()
                 {
-                    return Ok(active.capability_id);
+                    return Ok(previous);
                 }
 
                 // A live code session may outlast the native capability's
-                // short TTL. Rotate it under the session-state lock so a
-                // concurrent revoke cannot resurrect the session.
-                let previous = active.capability_id;
-                let replacement = registry.issue_agent_capability(&workspace, "Code agent");
-                active.capability_id = replacement;
-                registry.revoke_agent_capability(previous);
-                Ok(replacement)
+                // short TTL. Rotate it atomically under both registries so a
+                // concurrent revoke cannot resurrect the session and active
+                // controller ownership does not become a permanent Stop.
+                match registry.rotate_expired_agent_capability(previous, &workspace, "Code agent") {
+                    Ok(replacement) => {
+                        match entry.get_mut() {
+                            SessionCapabilityState::Active(active) => {
+                                active.capability_id = replacement;
+                            }
+                            SessionCapabilityState::Revoked => unreachable!("checked above"),
+                        }
+                        Ok(replacement)
+                    }
+                    Err(_) => {
+                        *entry.get_mut() = SessionCapabilityState::Revoked;
+                        registry.revoke_agent_capability(previous);
+                        Err(BrowserRuntimeError::SessionEnded)
+                    }
+                }
             }
             Entry::Vacant(entry) => {
                 let capability_id =
@@ -199,27 +211,44 @@ impl SessionCapabilities {
 }
 
 fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeError {
-    if error.contains("browser capability is unavailable") {
-        return BrowserRuntimeError::SessionEnded;
-    }
-    if let Some(browser_id) = browser_id {
-        if error.contains("browser session is not registered")
-            || error.contains("belongs to a different workspace")
-            || error.contains("browser session is not open")
-        {
-            return BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned());
+    match error.as_str() {
+        "browser capability is unavailable" => return BrowserRuntimeError::SessionEnded,
+        "browser origin is not shared with this agent"
+        | "browser origin is not shared for this operation"
+        | "browser origin is not shared for control"
+        | "browser control was stopped by the user"
+        | "browser has no authorized HTTP origin" => {
+            return BrowserRuntimeError::NotAuthorized(error);
         }
+        "browser page is still loading"
+        | "browser origin changed before dispatch"
+        | "browser document changed while it was being inspected"
+        | "browser document changed since the snapshot was taken"
+        | "browser document changed while screenshot was being captured"
+        | "browser snapshot is stale; take a new browser snapshot"
+        | "browser session changed while control was transferring"
+        | "browser session was replaced while waiting" => {
+            return BrowserRuntimeError::StaleTarget;
+        }
+        "semantic browser control is not available on this platform yet" => {
+            return BrowserRuntimeError::Unsupported("semantic snapshots".to_owned());
+        }
+        _ => {}
     }
-    if error.contains("snapshot is stale")
-        || error.contains("stale target")
-        || error.contains("document changed")
+
+    let Some(browser_id) = browser_id else {
+        return BrowserRuntimeError::Failed(error);
+    };
+    if matches!(
+        error.as_str(),
+        "browser session is not registered"
+            | "browser session is not open"
+            | "browser is hidden"
+            | "browser is not controlled by this agent"
+            | "browser is controlled by another agent"
+    ) || error == format!("browser session {browser_id} belongs to a different workspace")
     {
-        return BrowserRuntimeError::StaleTarget;
-    }
-    if error.contains("not available on this platform")
-        || error.contains("does not support semantic")
-    {
-        return BrowserRuntimeError::Unsupported("semantic snapshots".to_owned());
+        return BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned());
     }
     BrowserRuntimeError::Failed(error)
 }
@@ -287,6 +316,131 @@ mod tests {
         assert_eq!(
             sessions.capability_for(&registry, &original),
             Err(BrowserRuntimeError::SessionEnded)
+        );
+    }
+
+    #[test]
+    fn expired_capability_rotates_without_stranding_agent_control() {
+        use tidebreak_core::{BrowserGrantCapability, BrowserOrigin, BrowserOriginScope};
+
+        let registry = BrowserRegistry::default();
+        let sessions = SessionCapabilities::default();
+        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let workspace = scope.workspace.to_string();
+        registry
+            .register(
+                "browser-1",
+                &workspace,
+                "https://example.com".to_owned(),
+                true,
+            )
+            .unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com").unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                &workspace,
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+
+        let previous = sessions.capability_for(&registry, &scope).unwrap();
+        registry.begin_agent_control(previous, "browser-1").unwrap();
+        registry.expire_agent_capability_for_test(previous);
+
+        let replacement = sessions.capability_for(&registry, &scope).unwrap();
+
+        assert_ne!(replacement, previous);
+        assert!(registry
+            .heartbeat_agent_capability(previous, &workspace)
+            .is_err());
+        registry
+            .begin_agent_control(replacement, "browser-1")
+            .unwrap();
+    }
+
+    #[test]
+    fn native_error_contract_maps_exact_status_categories() {
+        let browser_id = "browser-1";
+        let cases = [
+            (
+                "browser capability is unavailable",
+                BrowserRuntimeError::SessionEnded,
+            ),
+            (
+                "browser session is not registered",
+                BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned()),
+            ),
+            (
+                "browser session is not open",
+                BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned()),
+            ),
+            (
+                "browser is controlled by another agent",
+                BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned()),
+            ),
+            (
+                "browser is hidden",
+                BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned()),
+            ),
+            (
+                "browser origin is not shared with this agent",
+                BrowserRuntimeError::NotAuthorized(
+                    "browser origin is not shared with this agent".to_owned(),
+                ),
+            ),
+            (
+                "browser origin is not shared for this operation",
+                BrowserRuntimeError::NotAuthorized(
+                    "browser origin is not shared for this operation".to_owned(),
+                ),
+            ),
+            (
+                "browser page is still loading",
+                BrowserRuntimeError::StaleTarget,
+            ),
+            (
+                "browser control was stopped by the user",
+                BrowserRuntimeError::NotAuthorized(
+                    "browser control was stopped by the user".to_owned(),
+                ),
+            ),
+            (
+                "browser document changed while it was being inspected",
+                BrowserRuntimeError::StaleTarget,
+            ),
+            (
+                "semantic browser control is not available on this platform yet",
+                BrowserRuntimeError::Unsupported("semantic snapshots".to_owned()),
+            ),
+        ];
+
+        for (native, expected) in cases {
+            assert_eq!(
+                map_native_error(Some(browser_id), native.to_owned()),
+                expected,
+                "native error {native:?}"
+            );
+        }
+        assert_eq!(
+            map_native_error(
+                Some(browser_id),
+                format!("browser session {browser_id} belongs to a different workspace"),
+            ),
+            BrowserRuntimeError::UnknownBrowserId(browser_id.to_owned())
+        );
+    }
+
+    #[test]
+    fn native_error_contract_never_classifies_by_substring() {
+        let message = "wrapper: browser page is still loading".to_owned();
+        assert_eq!(
+            map_native_error(Some("browser-1"), message.clone()),
+            BrowserRuntimeError::Failed(message)
         );
     }
 }

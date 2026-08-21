@@ -563,6 +563,60 @@ impl BrowserRegistry {
         Ok(())
     }
 
+    /// Atomically replace one expired capability for the same live workspace.
+    ///
+    /// Controller ownership moves to the replacement id without changing the
+    /// halt latch, pending navigation, or semantic fences. This lets a live
+    /// code session recover after an idle TTL while preserving an explicit
+    /// user Stop or human takeover exactly as the native registry recorded it.
+    pub(crate) fn rotate_expired_agent_capability(
+        &self,
+        capability_id: Uuid,
+        workspace_id: &str,
+        controller_label: &str,
+    ) -> Result<Uuid, String> {
+        let mut state = self.lock();
+        let previous = state
+            .capabilities
+            .get(&capability_id)
+            .cloned()
+            .ok_or_else(|| "browser capability is unavailable".to_owned())?;
+        if previous.workspace_id != workspace_id || previous.expires_at > Instant::now() {
+            return Err("browser capability is unavailable".to_owned());
+        }
+
+        let replacement = Uuid::new_v4();
+        let controller_label = clean_controller_text(controller_label, 80, "Agent");
+        state.capabilities.remove(&capability_id);
+        state.capabilities.insert(
+            replacement,
+            BrowserAgentCapability {
+                workspace_id: workspace_id.to_owned(),
+                controller_label: controller_label.clone(),
+                expires_at: Instant::now() + AGENT_CAPABILITY_TTL,
+            },
+        );
+        for record in state.records.values_mut() {
+            if record.controller_capability_id == Some(capability_id) {
+                record.controller_capability_id = Some(replacement);
+                if record.controller.kind == BrowserControllerKind::Agent {
+                    record.controller.label = Some(controller_label.clone());
+                }
+            }
+        }
+        state
+            .confirmations
+            .retain(|_, confirmation| confirmation.capability_id != capability_id);
+        Ok(replacement)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_agent_capability_for_test(&self, capability_id: Uuid) {
+        if let Some(capability) = self.lock().capabilities.get_mut(&capability_id) {
+            capability.expires_at = Instant::now();
+        }
+    }
+
     pub(crate) fn revoke_agent_capability(&self, capability_id: Uuid) {
         let mut state = self.lock();
         state.capabilities.remove(&capability_id);
