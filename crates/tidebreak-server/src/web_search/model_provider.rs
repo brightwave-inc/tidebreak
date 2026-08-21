@@ -163,6 +163,13 @@ impl WebSearchProvider for ModelProviderSearch {
                         continue;
                     }
                     results.extend(cited_results(&output, &request));
+                    // One sub-request can run more than one search: a reasoning
+                    // model browses with `open_page` and `find_in_page` as well
+                    // as `search`, and each finished item arrives as its own
+                    // call. The caller asked for `max_results` in total, not per
+                    // item, so the cap belongs here rather than inside the
+                    // per-call mapping.
+                    results.truncate(request.max_results);
                 }
                 // A refusal is the model declining to answer, which is not the
                 // same as a search that found nothing: reporting it as an empty
@@ -228,7 +235,6 @@ fn cited_results(output: &Value, request: &WebSearchRequest) -> Vec<WebSearchRes
                 request.end_published_at,
             )
         })
-        .take(request.max_results)
         .collect()
 }
 
@@ -236,7 +242,83 @@ fn cited_results(output: &Value, request: &WebSearchRequest) -> Vec<WebSearchRes
 mod tests {
     use super::*;
     use crate::web_search::SearchDomain;
+    use futures::stream::{self, BoxStream};
     use serde_json::json;
+
+    /// A provider that answers with a scripted run of hosted-search calls.
+    struct ScriptedSearches(Vec<Value>);
+
+    #[async_trait]
+    impl ModelProvider for ScriptedSearches {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("scripted")
+        }
+
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> tidebreak_core::Result<BoxStream<'static, ProviderEvent>> {
+            let events: Vec<ProviderEvent> = self
+                .0
+                .iter()
+                .map(|output| ProviderEvent::ProviderExecutedToolCall {
+                    name: VENDOR_WEB_SEARCH_TOOL.to_owned(),
+                    input: json!({"query": "q"}),
+                    output: output.clone(),
+                    is_error: false,
+                    replay: None,
+                })
+                .collect();
+            Ok(stream::iter(events).boxed())
+        }
+    }
+
+    fn search_over(outputs: Vec<Value>) -> ModelProviderSearch {
+        ModelProviderSearch::new(
+            Arc::new(ScriptedSearches(outputs)),
+            SearchModel {
+                provider: Some(ProviderId::new("openai")),
+                model: "gpt-5.6-sol".into(),
+                reasoning_model: true,
+                reasoning_efforts: vec![ReasoningEffort::Low],
+            },
+        )
+    }
+
+    fn cited(urls: &[&str]) -> Value {
+        json!({
+            "provider": "openai",
+            "results": urls
+                .iter()
+                .map(|url| json!({"url": url, "title": "T", "snippet": ""}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// `max_results` is a total, not a per-call allowance.
+    ///
+    /// One sub-request can finish several hosted searches — a reasoning model
+    /// browses with `open_page` and `find_in_page` as well as `search`, and each
+    /// arrives as its own call. Capping inside the per-call mapping would let a
+    /// three-result request answer with nine, which no other backend does and
+    /// which the caller pays for in context.
+    #[tokio::test]
+    async fn several_searches_in_one_sub_request_still_honour_max_results() {
+        let search = search_over(vec![
+            cited(&["https://a.test/1", "https://a.test/2"]),
+            cited(&["https://b.test/1", "https://b.test/2"]),
+            cited(&["https://c.test/1"]),
+        ]);
+
+        let response = search
+            .search(WebSearchRequest::new("news", 3).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.results.len(), 3);
+        assert_eq!(response.results[0].url, "https://a.test/1");
+        assert_eq!(response.results[2].url, "https://b.test/1");
+    }
 
     fn request(query: &str) -> WebSearchRequest {
         WebSearchRequest::new(query, 5).unwrap()
