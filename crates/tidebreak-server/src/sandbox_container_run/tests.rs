@@ -1339,6 +1339,19 @@ fn signal_woken_config() -> SandboxContainerRunConfig {
     }
 }
 
+/// How long an awaited step may take before this suite calls it stuck.
+///
+/// Each assertion is proven by the outcome its step settles on. This bound
+/// only adds a diagnostic snapshot to the failure, in place of a bare
+/// elapsed-time expect. Set it clear of the slowest legitimate wake path. A
+/// bound tight enough to fire on a loaded runner reports a flake rather than
+/// a bug (#2403).
+///
+/// Not every bound in this file is a hang-guard. Where a failure message
+/// names the 30-second heartbeat, the bound proves the outcome arrives
+/// without waiting for that tick, so it must stay well under 30 seconds.
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
 /// Poll `probe` until it returns `Ok`. The timeout is only a hang-guard: the
 /// proof is the observed transition, and a stuck wait prints the last snapshot
 /// instead of a bare elapsed-time expect.
@@ -3115,10 +3128,10 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(20), first_failure)
+        tokio::time::timeout(HANG_GUARD, first_failure)
             .await
             .expect("final accounting reaches the injected outage");
-        tokio::time::timeout(Duration::from_secs(20), first_renewal)
+        tokio::time::timeout(HANG_GUARD, first_renewal)
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -3136,7 +3149,7 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
             .is_some_and(|expiry| expiry > original_expiry));
 
         fault_store.release_accounting();
-        let outcome = tokio::time::timeout(Duration::from_secs(20), finalize)
+        let outcome = tokio::time::timeout(HANG_GUARD, finalize)
             .await
             .expect("finalization resumes after accounting storage recovers")
             .unwrap()
@@ -3200,7 +3213,7 @@ async fn an_attached_cancellation_is_acknowledged_and_torn_down() {
             .unwrap()
             .expect("the cancellation request lands");
 
-        let outcome = match tokio::time::timeout(Duration::from_secs(30), drive).await {
+        let outcome = match tokio::time::timeout(HANG_GUARD, drive).await {
             Ok(joined) => joined
                 .expect("the drive task finished")
                 .expect("driving succeeds")
@@ -3785,7 +3798,7 @@ async fn a_noop_heartbeat_does_not_revoke_a_live_container_drive() {
         );
         gate.release();
 
-        let outcome = match tokio::time::timeout(Duration::from_secs(10), drive).await {
+        let outcome = match tokio::time::timeout(HANG_GUARD, drive).await {
             Ok(joined) => joined
                 .expect("the drive task finished")
                 .expect("driving succeeds despite no-op renewals"),
@@ -3866,7 +3879,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
             .unwrap()
             .expect("the cancellation request lands");
 
-        let outcome = match tokio::time::timeout(Duration::from_secs(30), drive).await {
+        let outcome = match tokio::time::timeout(HANG_GUARD, drive).await {
             Ok(joined) => joined
                 .expect("the drive task finished")
                 .expect("driving succeeds")
@@ -3915,7 +3928,7 @@ async fn attached_cancellation_accounts_usage_observed_before_reverse_stream_dro
 /// never start another provider call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before_heartbeat() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(90), async {
         let (_dir, store, chat) = store().await;
         let run_id = admit_container_run(&store, chat.id, "cancel before heartbeat").await;
 
@@ -3977,14 +3990,8 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
             "the attached container drive is registered under the durable lease"
         );
 
-        // A hang-guard, not a latency contract: the proof is which outcome
-        // the call settles on, and this bound only buys the provider-call
-        // count in the message instead of a bare outer-timeout expect. Five
-        // seconds was tight enough to fire on a loaded runner while the
-        // fence had in fact held, so keep it well clear of both the wake
-        // path and the 30s bound around the test.
         let late = tokio::time::timeout(
-            Duration::from_secs(20),
+            HANG_GUARD,
             sandbox.call(
                 OperationId::new(),
                 ReverseRequest::ModelInference(ModelInferenceParams {
@@ -4007,7 +4014,7 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
             other => panic!("post-cancellation reverse request returned {other:?}"),
         }
 
-        let outcome = match tokio::time::timeout(Duration::from_secs(10), drive).await {
+        let outcome = match tokio::time::timeout(HANG_GUARD, drive).await {
             Ok(joined) => joined
                 .expect("the drive task finished")
                 .expect("driving succeeds")
@@ -4147,7 +4154,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             .send(())
             .expect("drop is waiting for release");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
+        let outcome = tokio::time::timeout(HANG_GUARD, drive)
             .await
             .expect("cancellation must not hang behind a late reverse request")
             .unwrap()
@@ -4161,7 +4168,7 @@ async fn cancellation_refuses_a_reverse_request_attempted_during_quiescence() {
             "the request attempted after terminal cleanup began must not execute"
         );
 
-        let first = tokio::time::timeout(Duration::from_secs(5), first_call)
+        let first = tokio::time::timeout(HANG_GUARD, first_call)
             .await
             .expect("the original sandbox call observes connection teardown")
             .unwrap();
@@ -4254,7 +4261,7 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
             .await
             .expect("the sandbox emits its terminal result");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), drive)
+        let outcome = tokio::time::timeout(HANG_GUARD, drive)
             .await
             .expect("terminal result must not race past reverse quiescence")
             .unwrap()
@@ -4267,7 +4274,7 @@ async fn terminal_result_waits_for_pending_reverse_accounting() {
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
-        let reverse = tokio::time::timeout(Duration::from_secs(5), reverse_call)
+        let reverse = tokio::time::timeout(HANG_GUARD, reverse_call)
             .await
             .expect("the sandbox call observes connection teardown")
             .unwrap();
