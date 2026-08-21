@@ -325,7 +325,6 @@ pub struct BrowserChannelSpec {
     /// sidecar). The server validates absoluteness; the desktop sibling
     /// resolver validates existence and executability.
     pub bridge_command: std::path::PathBuf,
-
 }
 
 impl BrowserChannelSpec {
@@ -354,7 +353,6 @@ impl BrowserChannelSpec {
     #[must_use]
     pub fn bridge_command(&self) -> &std::path::Path {
         &self.bridge_command
-
     }
 
     /// Return the exact key/value pair adapters inject into engine children.

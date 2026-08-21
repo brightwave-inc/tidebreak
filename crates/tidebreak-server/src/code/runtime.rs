@@ -189,7 +189,6 @@ impl CodeRuntime {
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
         browser_bridge_command: Option<PathBuf>,
-
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -283,7 +282,6 @@ impl CodeRuntime {
         adapters: AdapterRegistry,
     ) -> Self {
         Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None)
-
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -293,7 +291,6 @@ impl CodeRuntime {
         adapters: AdapterRegistry,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
         browser_bridge_command: Option<PathBuf>,
-
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -1972,7 +1969,6 @@ impl CodeRuntime {
             _ => None,
         };
 
-
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
@@ -1985,7 +1981,6 @@ impl CodeRuntime {
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
-
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
@@ -2597,7 +2592,6 @@ mod managed_node_wait_tests {
             None,
             None,
             None,
-
         );
 
         assert_eq!(

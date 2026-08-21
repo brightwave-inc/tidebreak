@@ -1211,7 +1211,6 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
-
     )
     .await
 }
@@ -1233,7 +1232,6 @@ pub async fn bind_configured(config: Config) -> Result<Server> {
         None,
         None,
         None,
-
     )
     .await
 }
@@ -1260,7 +1258,6 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         None,
-
     )
     .await
 }
@@ -1286,7 +1283,6 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
-
     )
     .await
 }
@@ -1306,7 +1302,6 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
     bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
-
         config,
         client_executor_id,
         folder_grant_resolver,
@@ -1405,7 +1400,6 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
 ) -> Result<Server> {
-
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
     }
@@ -1430,7 +1424,6 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
         host_folders,
         browser_runtime,
         browser_bridge_command,
-
     )
     .await
 }
@@ -1486,7 +1479,6 @@ async fn bind_inner(
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
-
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1717,7 +1709,6 @@ async fn bind_inner(
         code_host_tool_broker,
         browser_runtime,
         browser_bridge_command,
-
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
