@@ -31,10 +31,13 @@ use tokio::sync::RwLock;
 
 use tidebreak_core::config::tidebreak_machine_resource;
 use tidebreak_core::keychain::KeychainSecretProvider;
+use tidebreak_core::secret_bundle::BundledSecretProvider;
 use tidebreak_core::storage::SecretProvider;
-
-/// Keychain key holding the bearer token for a legacy static-token machine.
-const TOKEN_KEY: &str = "desktop.remote-machine.token";
+// The credential key holding the bearer for a legacy static-token machine.
+// Declared in `tidebreak-core` rather than here so the server's credential
+// enumeration can name it: the shell depends on the server, not the other way
+// round, and a key that enumeration cannot name never gets re-homed.
+use tidebreak_core::DESKTOP_REMOTE_MACHINE_TOKEN_KEY as TOKEN_KEY;
 
 /// File under the profile data dir holding the attached machine's address.
 /// The address is not a secret; the token that reaches it is, and lives in the
@@ -176,11 +179,15 @@ impl RemoteAttachment {
     /// The service is the channel-scoped one the embedded server uses, so a
     /// staging build never reads the release build's remote token.
     pub fn new(data_dir: &Path, keychain_service: Option<&str>) -> Self {
-        let secrets: Arc<dyn SecretProvider> = Arc::new(match keychain_service {
+        let keychain: Arc<dyn SecretProvider> = Arc::new(match keychain_service {
             Some(service) => KeychainSecretProvider::with_service(service),
             None => KeychainSecretProvider::new(),
         });
-        Self::with_secrets(data_dir, secrets)
+        // The same bundle the embedded server reads, so the token shares the
+        // one item — and the one access prompt — with every other credential
+        // in the profile. Its own instance rather than the server's: this is
+        // read before the server has booted, and often instead of it.
+        Self::with_secrets(data_dir, Arc::new(BundledSecretProvider::new(keychain)))
     }
 
     fn with_secrets(data_dir: &Path, secrets: Arc<dyn SecretProvider>) -> Self {

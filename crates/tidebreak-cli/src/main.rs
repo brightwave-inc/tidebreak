@@ -951,26 +951,39 @@ async fn serve() -> Result<()> {
     server.serve().await
 }
 
-/// Rewrite each stored credential so the item belongs to this binary's code
-/// signature.
+/// Rewrite this profile's stored credentials so their item belongs to this
+/// binary's code signature.
 ///
 /// macOS keeps prompting for credentials an earlier, differently signed build
 /// created — see [`tidebreak_server::secret_rehome`] for why an approval given at
 /// that prompt does not survive the next rebuild. Run this through Cargo
 /// (`cargo run -p tidebreak-cli -- rehome-secrets`) so the dev signing runner
-/// applies; each credential asks for access once more, and then stops asking.
+/// applies; access is asked for once more, and then stops being asked.
+///
+/// Credentials live in one item, so this normally rewrites exactly that one.
+/// A profile last written by a build that predates the bundle also has its
+/// leftover per-key items swept in on the way past.
 async fn rehome_secrets() -> Result<()> {
+    use tidebreak_core::BUNDLE_KEY;
     use tidebreak_server::secret_rehome::RehomeOutcome;
 
     let config = profile_config()?;
     let mut touched = 0usize;
     let mut lost = 0usize;
     for (key, outcome) in tidebreak_server::rehome_configured_secrets(&config).await? {
+        // The bundle is the item itself; every other key is a credential that
+        // used to have one of its own. Saying "re-homed" about both would tell
+        // a reader nothing about which happened.
+        let bundle = key == BUNDLE_KEY;
         match outcome {
             RehomeOutcome::Absent => {}
+            RehomeOutcome::Rehomed if bundle => {
+                touched += 1;
+                println!("tidebreak: re-homed the credential bundle");
+            }
             RehomeOutcome::Rehomed => {
                 touched += 1;
-                println!("tidebreak: re-homed {key}");
+                println!("tidebreak: moved {key} into the credential bundle");
             }
             RehomeOutcome::Skipped(reason) => {
                 touched += 1;
