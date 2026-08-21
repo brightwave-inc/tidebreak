@@ -1327,9 +1327,9 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
 ///
 /// This function is preserved for source compatibility. A caller that
 /// supplies only a runtime — without the bridge executable — gets no
-/// browser tools: the bridge command is required too. The runtime is
-/// accepted so existing call sites compile, but it is silently dropped
-/// in favor of the binding variant's both-halves-required contract.
+/// browser tools: the bridge command is required too. The runtime remains
+/// installed for the native route seam, but session creation leaves
+/// `SessionSpec::browser` unset until both halves are present.
 /// New callers should use
 /// [`bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding`]
 /// directly.
@@ -1344,12 +1344,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
-    // The bridge executable is required to advertise browser tools. A
-    // runtime-only caller cannot construct a binding (the bridge_command
-    // field is not Optional), so pass None. The runtime is intentionally
-    // dropped: it cannot be used without its bridge counterpart.
-    let _ = browser_runtime;
-    bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
         config,
         client_executor_id,
         folder_grant_resolver,
@@ -1357,6 +1352,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         host_tool_broker,
         local_voice,
         host_folders,
+        browser_runtime,
         None,
     )
     .await
@@ -1382,23 +1378,51 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     binding: Option<BrowserChannelBinding>,
 ) -> Result<Server> {
-    if client_executor_id.is_nil() {
-        return Err(AgentError::config("client executor id must not be nil"));
-    }
-    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
     let (browser_runtime, browser_bridge_command) = match binding {
         Some(binding) => {
-            let bridge = &binding.bridge_command;
-            if !bridge.is_absolute() {
-                return Err(AgentError::config(format!(
-                    "browser bridge command must be an absolute path: {}",
-                    bridge.display()
-                )));
-            }
-            (Some(binding.runtime), Some(bridge.clone()))
+            (Some(binding.runtime), Some(binding.bridge_command))
         }
         None => (None, None),
     };
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        browser_runtime,
+        browser_bridge_command,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
+    browser_bridge_command: Option<PathBuf>,
+) -> Result<Server> {
+    if client_executor_id.is_nil() {
+        return Err(AgentError::config("client executor id must not be nil"));
+    }
+    if let Some(bridge) = browser_bridge_command
+        .as_ref()
+        .filter(|bridge| !bridge.is_absolute())
+    {
+        return Err(AgentError::config(format!(
+            "browser bridge command must be an absolute path: {}",
+            bridge.display()
+        )));
+    }
+    let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
     bind_inner(
         config,
         Some(client_executor_id),
