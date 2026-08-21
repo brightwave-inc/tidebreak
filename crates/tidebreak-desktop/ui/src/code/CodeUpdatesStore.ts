@@ -37,7 +37,7 @@ export type CodeUpdatesState = {
   /**
    * Conversation digests, keyed workspace → session. Never a watch.
    *
-   * A workspace runs several agents (record 54), so it names a set rather
+   * A workspace runs several agents (record 55), so it names a set rather
    * than one digest. List surfaces collapse the set through
    * `workspaceDigest`; the workspace page reads all of it to label its
    * conversation tabs.
