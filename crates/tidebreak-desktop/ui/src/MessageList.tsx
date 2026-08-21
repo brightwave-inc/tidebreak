@@ -271,7 +271,7 @@ type MessageListProps = {
   onRetryTurn?: (turn: RetryableTurn) => void;
   hydrated?: boolean;
   imageClient?: Pick<ApiClient, "getChatImageAttachment">;
-  executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
+  executionConfigClient?: Pick<ApiClient, "getExecConfig">;
   changeClient?: Pick<
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"

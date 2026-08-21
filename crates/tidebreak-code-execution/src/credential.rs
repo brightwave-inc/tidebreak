@@ -3,7 +3,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use tidebreak_core::SecretProvider;
 
-use crate::CodeExecutionError;
+use crate::ExecError;
 
 /// Shared storage and redaction primitive for managed-provider credentials.
 #[derive(Clone)]
@@ -19,14 +19,11 @@ impl std::fmt::Debug for SecretCredential {
 }
 
 impl SecretCredential {
-    pub(crate) fn parse(
-        provider: &str,
-        value: impl Into<String>,
-    ) -> Result<Self, CodeExecutionError> {
+    pub(crate) fn parse(provider: &str, value: impl Into<String>) -> Result<Self, ExecError> {
         let value = value.into();
         let trimmed = value.trim();
         if trimmed.is_empty() {
-            return Err(CodeExecutionError::InvalidRequest(format!(
+            return Err(ExecError::InvalidRequest(format!(
                 "{provider} API key must not be empty"
             )));
         }
@@ -37,9 +34,9 @@ impl SecretCredential {
         secrets: &dyn SecretProvider,
         key: &str,
         provider: &str,
-    ) -> Result<Option<Self>, CodeExecutionError> {
+    ) -> Result<Option<Self>, ExecError> {
         let value = secrets.get_secret(key).await.map_err(|_| {
-            CodeExecutionError::Unavailable(format!("{provider} credential storage is unavailable"))
+            ExecError::Unavailable(format!("{provider} credential storage is unavailable"))
         })?;
         value
             .filter(|value| !value.trim().is_empty())

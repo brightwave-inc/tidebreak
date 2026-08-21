@@ -1070,7 +1070,7 @@ pub struct Server {
     store: Arc<dyn Store>,
     /// The live exec staging registry, handed to native embedders so the host
     /// folder tools answer from the same per-turn copy exec writes into.
-    code_execution: Arc<code_execution::ConfiguredCodeExecutionProvider>,
+    code_execution: Arc<code_execution::ConfiguredExecProvider>,
     /// The live MCP runtime, handed to pairing so a profile that becomes
     /// managed mid-session takes its manual servers down immediately.
     mcp: Arc<mcp_config::McpRuntime>,
@@ -1615,7 +1615,7 @@ async fn bind_inner(
     ));
     let code_host_tool_broker = host_tool_broker.clone();
     let code_execution = Arc::new(
-        code_execution::ConfiguredCodeExecutionProvider::new(
+        code_execution::ConfiguredExecProvider::new(
             store.clone(),
             secrets.clone(),
             config.data_dir.join("scratch"),
@@ -1971,7 +1971,7 @@ async fn bind_inner(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn agent_deps(
-    code_execution: Arc<dyn tidebreak_code_execution::CodeExecutionProvider>,
+    code_execution: Arc<dyn tidebreak_code_execution::ExecProvider>,
     web_search: Box<dyn Tool>,
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
@@ -2004,7 +2004,7 @@ fn agent_deps(
 
 #[allow(clippy::too_many_arguments)]
 fn agent_deps_with_cancellation_acceleration(
-    code_execution: Arc<dyn tidebreak_code_execution::CodeExecutionProvider>,
+    code_execution: Arc<dyn tidebreak_code_execution::ExecProvider>,
     web_search: Box<dyn Tool>,
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,

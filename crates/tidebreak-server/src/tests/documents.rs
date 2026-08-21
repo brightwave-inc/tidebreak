@@ -1555,18 +1555,18 @@ async fn ingest_accepts_any_media_type_via_the_fallback_parser() {
 
 /// A code-execution provider that is never configured, for `agent_deps`
 /// assembly tests that never execute a command.
-struct UnavailableCodeExecution;
+struct UnavailableExec;
 
 #[async_trait::async_trait]
-impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecution {
+impl tidebreak_code_execution::ExecProvider for UnavailableExec {
     async fn execute(
         &self,
-        _request: tidebreak_code_execution::CodeExecutionRequest,
+        _request: tidebreak_code_execution::ExecRequest,
     ) -> std::result::Result<
-        tidebreak_code_execution::CodeExecutionResponse,
-        tidebreak_code_execution::CodeExecutionError,
+        tidebreak_code_execution::ExecResponse,
+        tidebreak_code_execution::ExecError,
     > {
-        Err(tidebreak_code_execution::CodeExecutionError::NotConfigured)
+        Err(tidebreak_code_execution::ExecError::NotConfigured)
     }
 }
 
@@ -1585,7 +1585,7 @@ async fn agent_deps_for_test(
     let extract_store = store.clone();
     let store_for_gateway = store.clone();
     agent_deps(
-        Arc::new(UnavailableCodeExecution),
+        Arc::new(UnavailableExec),
         web_search::foreground_tool(
             store.clone(),
             Arc::new(MemSecrets::default()),

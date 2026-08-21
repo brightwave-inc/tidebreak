@@ -11,7 +11,7 @@ use tidebreak_core::{AgentConfig, SecretProvider, Store, TurnWebSearch};
 use tokio::sync::Notify;
 
 use crate::bus::EventBus;
-use crate::code_execution::ConfiguredCodeExecutionProvider;
+use crate::code_execution::ConfiguredExecProvider;
 use crate::foreground_prompt::skill_summary_catalog_lines;
 use crate::resolver::ProviderResolver;
 use crate::retry::RetrySchedule;
@@ -51,7 +51,7 @@ pub(super) const SANDBOX_PROMPT_SKILLS_INTRO: &str = "Document skills available 
 /// at all loses the clause, exactly as a foreground turn's prompt does.
 ///
 /// `skills` / `plugins` are the same host-derived catalogs a foreground turn
-/// composes from (`ConfiguredCodeExecutionProvider::skill_catalog` /
+/// composes from (`ConfiguredExecProvider::skill_catalog` /
 /// `plugin_catalog`). An empty catalog omits the skills section rather than
 /// inventing entries or claiming none exist when the host has no surface.
 pub(super) fn sandbox_system_prompt(
@@ -232,6 +232,6 @@ pub(crate) struct SandboxAgentRunWorker {
     /// Same host code-execution surface the foreground turn uses for its skill
     /// catalog. Absent on a headless embedding with no exec provider — the
     /// sandbox prompt then carries no skills section.
-    pub(crate) code_execution: Option<Arc<ConfiguredCodeExecutionProvider>>,
+    pub(crate) code_execution: Option<Arc<ConfiguredExecProvider>>,
     pub(crate) config: SandboxAgentRunWorkerConfig,
 }

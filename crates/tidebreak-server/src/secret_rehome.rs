@@ -473,7 +473,7 @@ mod tests {
             };
             assert!(keys.iter().any(|key| key == expected), "{kind:?}");
         }
-        // `CodeExecutionProviderKind` is `#[non_exhaustive]`, so a match here
+        // `ExecProviderKind` is `#[non_exhaustive]`, so a match here
         // cannot stand in for coverage; assert the credentialed kinds' keys
         // directly (`Local` runs in the host sandbox and stores nothing).
         for expected in [E2B_CREDENTIAL_KEY, DAYTONA_CREDENTIAL_KEY] {

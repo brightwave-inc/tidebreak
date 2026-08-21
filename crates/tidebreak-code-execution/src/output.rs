@@ -2,9 +2,7 @@ use std::time::Instant;
 
 use base64::Engine as _;
 
-use crate::{
-    CodeExecutionError, CodeExecutionProviderKind, CodeExecutionResponse, MAX_CAPTURE_BYTES,
-};
+use crate::{ExecError, ExecProviderKind, ExecResponse, MAX_CAPTURE_BYTES};
 
 #[derive(Clone, Copy)]
 pub(crate) enum StreamKind {
@@ -38,13 +36,11 @@ impl Capture {
         value: &str,
         kind: StreamKind,
         provider: &str,
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(value)
             .map_err(|_| {
-                CodeExecutionError::Unavailable(format!(
-                    "{provider} returned invalid encoded output"
-                ))
+                ExecError::Unavailable(format!("{provider} returned invalid encoded output"))
             })?;
         self.append(&decoded, kind);
         Ok(())
@@ -52,12 +48,12 @@ impl Capture {
 
     pub(crate) fn response(
         self,
-        provider: CodeExecutionProviderKind,
+        provider: ExecProviderKind,
         started: Instant,
         exit_code: Option<i32>,
         timed_out: bool,
-    ) -> CodeExecutionResponse {
-        CodeExecutionResponse {
+    ) -> ExecResponse {
+        ExecResponse {
             provider,
             exit_code,
             stdout: String::from_utf8_lossy(&self.stdout).into_owned(),

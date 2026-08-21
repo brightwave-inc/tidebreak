@@ -9,13 +9,13 @@ import {
 } from "lucide-react";
 import type {
   ApiClient,
-  CodeExecutionConfigInfo,
+  ExecConfigInfo,
   PluginPromptInfo,
 } from "./api";
 import {
   MANAGED_EXECUTION_DISCLOSURE,
   requiresManagedExecutionDisclosure,
-} from "./CodeExecutionDisclosure";
+} from "./ExecDisclosure";
 import { Logomark } from "./Logomark";
 import type { PluginsApis } from "./plugins/pluginsApis";
 import { Button } from "@/components/ui/button";
@@ -148,7 +148,7 @@ export function WelcomeState({
   onStartWalkthrough,
 }: {
   onSelectPrompt?: (prompt: string, options?: StarterPromptOptions) => void;
-  executionConfigClient?: Pick<ApiClient, "getCodeExecutionConfig">;
+  executionConfigClient?: Pick<ApiClient, "getExecConfig">;
   heading?: string;
   description?: string;
   onStartWalkthrough?: () => void;
@@ -160,21 +160,21 @@ export function WelcomeState({
   promptLibrary?: PromptLibraryApis;
 }) {
   const [executionProviders, setExecutionProviders] = useState<
-    CodeExecutionConfigInfo["providers"] | null
+    ExecConfigInfo["providers"] | null
   >(null);
   const [libraryPrompts, setLibraryPrompts] = useState<PluginPromptInfo[]>([]);
 
   useEffect(() => {
     if (
       !executionConfigClient ||
-      typeof executionConfigClient.getCodeExecutionConfig !== "function"
+      typeof executionConfigClient.getExecConfig !== "function"
     ) {
       return;
     }
     let cancelled = false;
     setExecutionProviders(null);
     void executionConfigClient
-      .getCodeExecutionConfig()
+      .getExecConfig()
       .then((config) => {
         if (!cancelled) setExecutionProviders(config.providers);
       })

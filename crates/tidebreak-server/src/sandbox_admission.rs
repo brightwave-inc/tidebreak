@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tidebreak_code_execution::CodeExecutionProviderKind;
+use tidebreak_code_execution::ExecProviderKind;
 use tidebreak_core::{AgentRunExecutionLocation, Config, SandboxAdmissionMode};
 use tidebreak_sandbox_protocol::provisioning::SandboxBackend;
 
@@ -232,7 +232,7 @@ pub(crate) fn structural_preconditions(
 /// a detached run needs.
 pub(crate) fn settings_detached_admissions(
     config: &Config,
-) -> Vec<(CodeExecutionProviderKind, DetachedAdmission)> {
+) -> Vec<(ExecProviderKind, DetachedAdmission)> {
     let scoped_token = GatewayScopedTokenIssuer.available();
     let local = DockerSandboxBackend::new(docker_config(config));
     let local_facts = (
@@ -240,10 +240,10 @@ pub(crate) fn settings_detached_admissions(
         local.verifies_image_integrity(),
     );
     [
-        (CodeExecutionProviderKind::Local, local_facts),
-        (CodeExecutionProviderKind::E2b, (false, false)),
-        (CodeExecutionProviderKind::Daytona, (false, false)),
-        (CodeExecutionProviderKind::Docker, (false, false)),
+        (ExecProviderKind::Local, local_facts),
+        (ExecProviderKind::E2b, (false, false)),
+        (ExecProviderKind::Daytona, (false, false)),
+        (ExecProviderKind::Docker, (false, false)),
     ]
     .into_iter()
     .map(|(provider, (lifetime_cap, image_verified))| {

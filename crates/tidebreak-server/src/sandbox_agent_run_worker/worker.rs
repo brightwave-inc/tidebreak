@@ -92,7 +92,7 @@ impl SandboxAgentRunWorker {
         attempts: Arc<SandboxAttemptGuard>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
-        code_execution: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
+        code_execution: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
         config: SandboxAgentRunWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());

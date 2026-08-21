@@ -26,10 +26,10 @@ use crate::sandbox_image::{
     DOCUMENTS_IMAGE, DOCUMENTS_MEMORY_GB as DOCUMENTS_SNAPSHOT_MEMORY_GB,
 };
 use crate::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionWorkspaceId, SandboxPreparation, SandboxPreparationSink,
-    StagedUpload, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
-    MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    ExecError, ExecProvider, ExecProviderKind, ExecRequest, ExecResponse, ExecutionWorkspaceId,
+    SandboxPreparation, SandboxPreparationSink, StagedUpload, WorkspaceFileEntry,
+    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES,
+    MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const DAYTONA_API_BASE: &str = "https://app.daytona.io/api";
@@ -96,12 +96,12 @@ impl std::fmt::Debug for DaytonaCredential {
 }
 
 impl DaytonaCredential {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExecError> {
         SecretCredential::parse("Daytona", value).map(Self)
     }
 
     /// Resolve the credential without exposing it through serializable config.
-    pub async fn load(secrets: &dyn SecretProvider) -> Result<Option<Self>, CodeExecutionError> {
+    pub async fn load(secrets: &dyn SecretProvider) -> Result<Option<Self>, ExecError> {
         SecretCredential::load(secrets, DAYTONA_CREDENTIAL_KEY, "Daytona")
             .await
             .map(|credential| credential.map(Self))
@@ -168,7 +168,7 @@ impl Default for DaytonaEndpoints {
 }
 
 /// Why the documents snapshot could not be made ready. Separated from
-/// [`CodeExecutionError`] because the two outcomes differ: a rejected
+/// [`ExecError`] because the two outcomes differ: a rejected
 /// credential (401) is the user's problem and surfaces, while everything
 /// else — including a key that can create sandboxes but not register
 /// snapshots (403) — degrades to Daytona's default snapshot, which still
@@ -217,10 +217,7 @@ impl Drop for PreparationReport<'_> {
 }
 
 impl DaytonaExecutionProvider {
-    pub fn new(
-        credential: DaytonaCredential,
-        timeout: Duration,
-    ) -> Result<Self, CodeExecutionError> {
+    pub fn new(credential: DaytonaCredential, timeout: Duration) -> Result<Self, ExecError> {
         Self::with_session_pool(credential, timeout, RemoteSessionPool::default())
     }
 
@@ -228,7 +225,7 @@ impl DaytonaExecutionProvider {
         credential: DaytonaCredential,
         timeout: Duration,
         pool: RemoteSessionPool,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         Self::with_endpoints(credential, timeout, pool, DaytonaEndpoints::default())
     }
 
@@ -237,9 +234,9 @@ impl DaytonaExecutionProvider {
         timeout: Duration,
         pool: RemoteSessionPool,
         endpoints: DaytonaEndpoints,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         if timeout.is_zero() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "execution timeout must be positive".into(),
             ));
         }
@@ -247,9 +244,7 @@ impl DaytonaExecutionProvider {
             .connect_timeout(Duration::from_secs(10))
             .timeout(timeout.saturating_add(DAYTONA_TRANSPORT_GRACE))
             .build()
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("could not configure Daytona transport".into())
-            })?;
+            .map_err(|_| ExecError::Unavailable("could not configure Daytona transport".into()))?;
         Ok(Self {
             credential,
             timeout,
@@ -298,15 +293,15 @@ impl DaytonaExecutionProvider {
     /// list declared by [`Self::egress_enforcement`], and to Daytona's plan
     /// gating on per-sandbox network overrides. Fails when the allowlist
     /// exceeds Daytona's entry limits, before any sandbox is created.
-    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Result<Self, CodeExecutionError> {
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Result<Self, ExecError> {
         if let EgressPolicy::Allowlist(allowlist) = &policy {
             if allowlist.cidrs().len() > DAYTONA_MAX_NETWORK_ALLOW_ENTRIES {
-                return Err(CodeExecutionError::InvalidRequest(format!(
+                return Err(ExecError::InvalidRequest(format!(
                     "Daytona accepts at most {DAYTONA_MAX_NETWORK_ALLOW_ENTRIES} egress address blocks"
                 )));
             }
             if allowlist.domains().len() > DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES {
-                return Err(CodeExecutionError::InvalidRequest(format!(
+                return Err(ExecError::InvalidRequest(format!(
                     "Daytona accepts at most {DAYTONA_MAX_DOMAIN_ALLOW_ENTRIES} egress domain patterns"
                 )));
             }
@@ -352,10 +347,7 @@ impl DaytonaExecutionProvider {
         EgressEnforcement::external(Vec::new())
     }
 
-    async fn create_sandbox(
-        &self,
-        workspace_id: &str,
-    ) -> Result<RemoteSession, CodeExecutionError> {
+    async fn create_sandbox(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
         let snapshot = self.resolve_snapshot(workspace_id).await?;
         let response = self
             .client
@@ -375,14 +367,12 @@ impl DaytonaExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         let sandbox = self.decode_sandbox(response).await?;
         self.wait_until_started(sandbox, true)
             .await?
             .ok_or_else(|| {
-                CodeExecutionError::Unavailable(
-                    "Daytona sandbox disappeared while it was starting".into(),
-                )
+                ExecError::Unavailable("Daytona sandbox disappeared while it was starting".into())
             })
     }
 
@@ -404,10 +394,7 @@ impl DaytonaExecutionProvider {
     /// made ready once per provider instance — registered from the pinned
     /// digest if missing, reactivated if Daytona let it lapse — and `None`
     /// (Daytona's default snapshot) is the degraded answer when that fails.
-    async fn resolve_snapshot(
-        &self,
-        workspace_id: &str,
-    ) -> Result<Option<&str>, CodeExecutionError> {
+    async fn resolve_snapshot(&self, workspace_id: &str) -> Result<Option<&str>, ExecError> {
         if let Some(configured) = self.snapshot.as_deref() {
             return Ok(Some(configured));
         }
@@ -564,7 +551,7 @@ impl DaytonaExecutionProvider {
     async fn reconnect_sandbox(
         &self,
         sandbox_id: &str,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    ) -> Result<Option<RemoteSession>, ExecError> {
         validate_sandbox_id(sandbox_id)?;
         let response = self
             .client
@@ -572,7 +559,7 @@ impl DaytonaExecutionProvider {
             .bearer_auth(self.credential.as_str())
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -584,7 +571,7 @@ impl DaytonaExecutionProvider {
         &self,
         mut sandbox: DaytonaSandbox,
         start_if_stopped: bool,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    ) -> Result<Option<RemoteSession>, ExecError> {
         let deadline = Instant::now() + DAYTONA_START_TIMEOUT;
         let mut requested_start = false;
         loop {
@@ -596,7 +583,7 @@ impl DaytonaExecutionProvider {
                 }
                 Some("destroyed" | "destroying") => return Ok(None),
                 Some("error" | "build_failed") => {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "Daytona sandbox failed to start".into(),
                     ));
                 }
@@ -607,9 +594,7 @@ impl DaytonaExecutionProvider {
                         .bearer_auth(self.credential.as_str())
                         .send()
                         .await
-                        .map_err(|_| {
-                            CodeExecutionError::Unavailable("could not reach Daytona".into())
-                        })?;
+                        .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
                     if response.status() == StatusCode::NOT_FOUND {
                         return Ok(None);
                     }
@@ -622,18 +607,18 @@ impl DaytonaExecutionProvider {
                     | "pulling_snapshot" | "resuming",
                 ) => {}
                 Some("stopped" | "paused" | "archived") => {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "Daytona sandbox did not start".into(),
                     ));
                 }
                 _ => {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "Daytona returned an unknown sandbox state".into(),
                     ));
                 }
             }
             if Instant::now() >= deadline {
-                return Err(CodeExecutionError::Unavailable(
+                return Err(ExecError::Unavailable(
                     "Daytona sandbox did not start before its deadline".into(),
                 ));
             }
@@ -644,7 +629,7 @@ impl DaytonaExecutionProvider {
                 .bearer_auth(self.credential.as_str())
                 .send()
                 .await
-                .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+                .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
@@ -655,11 +640,11 @@ impl DaytonaExecutionProvider {
     async fn run_daytona_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         validate_sandbox_id(&session.sandbox_id)?;
         let endpoint = session.endpoint.as_deref().ok_or_else(|| {
-            CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
+            ExecError::Unavailable("Daytona toolbox endpoint is unavailable".into())
         })?;
         let url = toolbox_url(
             endpoint,
@@ -679,7 +664,7 @@ impl DaytonaExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| CodeExecutionError::AmbiguousExecution)?;
+            .map_err(|_| ExecError::AmbiguousExecution)?;
         if matches!(
             response.status(),
             StatusCode::NOT_FOUND | StatusCode::GONE | StatusCode::BAD_GATEWAY
@@ -687,12 +672,7 @@ impl DaytonaExecutionProvider {
             return Err(RemoteSessionError::Missing);
         }
         if response.status() == StatusCode::REQUEST_TIMEOUT {
-            return Ok(Capture::default().response(
-                CodeExecutionProviderKind::Daytona,
-                started,
-                None,
-                true,
-            ));
+            return Ok(Capture::default().response(ExecProviderKind::Daytona, started, None, true));
         }
         if !response.status().is_success() {
             let status = response.status();
@@ -708,7 +688,7 @@ impl DaytonaExecutionProvider {
                 .is_some_and(|code| code == "PROCESS_EXECUTION_TIMEOUT")
             {
                 return Ok(Capture::default().response(
-                    CodeExecutionProviderKind::Daytona,
+                    ExecProviderKind::Daytona,
                     started,
                     None,
                     true,
@@ -721,21 +701,12 @@ impl DaytonaExecutionProvider {
                 .await?;
         let mut capture = Capture::default();
         capture.append(body.result.as_bytes(), StreamKind::Stdout);
-        Ok(capture.response(
-            CodeExecutionProviderKind::Daytona,
-            started,
-            body.exit_code,
-            false,
-        ))
+        Ok(capture.response(ExecProviderKind::Daytona, started, body.exit_code, false))
     }
 
-    fn toolbox_file_url(
-        &self,
-        session: &RemoteSession,
-        suffix: &str,
-    ) -> Result<Url, CodeExecutionError> {
+    fn toolbox_file_url(&self, session: &RemoteSession, suffix: &str) -> Result<Url, ExecError> {
         let endpoint = session.endpoint.as_deref().ok_or_else(|| {
-            CodeExecutionError::Unavailable("Daytona toolbox endpoint is unavailable".into())
+            ExecError::Unavailable("Daytona toolbox endpoint is unavailable".into())
         })?;
         toolbox_url(
             endpoint,
@@ -745,10 +716,7 @@ impl DaytonaExecutionProvider {
         )
     }
 
-    async fn decode_sandbox(
-        &self,
-        response: Response,
-    ) -> Result<DaytonaSandbox, CodeExecutionError> {
+    async fn decode_sandbox(&self, response: Response) -> Result<DaytonaSandbox, ExecError> {
         if !response.status().is_success() {
             return Err(provider_status_error(response.status()));
         }
@@ -765,8 +733,8 @@ impl DaytonaExecutionProvider {
 
 #[async_trait]
 impl RemoteSandboxAdapter for DaytonaExecutionProvider {
-    fn kind(&self) -> CodeExecutionProviderKind {
-        CodeExecutionProviderKind::Daytona
+    fn kind(&self) -> ExecProviderKind {
+        ExecProviderKind::Daytona
     }
 
     fn credential_fingerprint(&self) -> [u8; 32] {
@@ -777,14 +745,11 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
         crate::remote::egress_policy_fingerprint(self.egress.as_ref())
     }
 
-    async fn create_session(
-        &self,
-        workspace_id: &str,
-    ) -> Result<RemoteSession, CodeExecutionError> {
+    async fn create_session(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
         self.create_sandbox(workspace_id).await
     }
 
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), ExecError> {
         validate_sandbox_id(&session.sandbox_id)?;
         let response = self
             .client
@@ -792,7 +757,7 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
             .bearer_auth(self.credential.as_str())
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
             return Ok(());
         }
@@ -802,15 +767,15 @@ impl RemoteSandboxAdapter for DaytonaExecutionProvider {
     async fn reconnect_session(
         &self,
         session: &RemoteSession,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    ) -> Result<Option<RemoteSession>, ExecError> {
         self.reconnect_sandbox(&session.sandbox_id).await
     }
 
     async fn run_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         self.run_daytona_command(session, request).await
     }
 }
@@ -834,7 +799,7 @@ impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
             .body(multipart.body)
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         if matches!(
             response.status(),
             StatusCode::NOT_FOUND | StatusCode::GONE | StatusCode::BAD_GATEWAY
@@ -860,11 +825,11 @@ impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
             .query(&[("path", path.as_str())])
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         // The session was reconciled immediately before this call, so a 404
         // here is the file rather than the sandbox.
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+            return Err(ExecError::WorkspaceFileNotFound.into());
         }
         if matches!(
             response.status(),
@@ -894,9 +859,9 @@ impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
             .query(&[("path", listed)])
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach Daytona".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach Daytona".into()))?;
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+            return Err(ExecError::WorkspaceFileNotFound.into());
         }
         if matches!(
             response.status(),
@@ -938,24 +903,15 @@ impl RemoteWorkspaceAdapter for DaytonaExecutionProvider {
 
 #[async_trait]
 impl WorkspaceLifecycle for DaytonaExecutionProvider {
-    async fn create_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn create_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         create_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn connect_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<bool, CodeExecutionError> {
+    async fn connect_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<bool, ExecError> {
         connect_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn destroy_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn destroy_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
@@ -964,9 +920,9 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         with_remote_session(
             self,
@@ -982,9 +938,9 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<StagedUpload, CodeExecutionError> {
+    ) -> Result<StagedUpload, ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         stage_remote_file(self, &self.pool, workspace.as_str(), path, content).await
     }
@@ -993,7 +949,7 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> Result<Vec<u8>, CodeExecutionError> {
+    ) -> Result<Vec<u8>, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -1007,7 +963,7 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> Result<WorkspaceListing, CodeExecutionError> {
+    ) -> Result<WorkspaceListing, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -1019,11 +975,8 @@ impl WorkspaceLifecycle for DaytonaExecutionProvider {
 }
 
 #[async_trait]
-impl CodeExecutionProvider for DaytonaExecutionProvider {
-    async fn execute(
-        &self,
-        request: CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+impl ExecProvider for DaytonaExecutionProvider {
+    async fn execute(&self, request: ExecRequest) -> Result<ExecResponse, ExecError> {
         let mut response = execute_remote(self, &self.pool, request).await?;
         if self.degradation_pending.swap(false, Ordering::Relaxed) {
             response.degraded = Some(ExecDegradation::SandboxImageUnavailable);
@@ -1189,7 +1142,7 @@ struct DaytonaSandbox {
 }
 
 impl DaytonaSandbox {
-    fn into_session(self, allow_insecure: bool) -> Result<RemoteSession, CodeExecutionError> {
+    fn into_session(self, allow_insecure: bool) -> Result<RemoteSession, ExecError> {
         validate_toolbox_base(&self.toolbox_proxy_url, allow_insecure)?;
         Ok(RemoteSession {
             sandbox_id: self.id,
@@ -1240,7 +1193,7 @@ struct DaytonaFileInfo {
 /// Preserve the provider-neutral direct argv contract over Daytona's shell-text
 /// transport. Quoting every element keeps metacharacters as argument data; the
 /// shell is only the protocol bridge and is replaced by the requested process.
-fn direct_command(request: &CodeExecutionRequest) -> String {
+fn direct_command(request: &ExecRequest) -> String {
     std::iter::once(request.command.as_str())
         .chain(request.arguments.iter().map(String::as_str))
         .map(shell_quote)
@@ -1275,7 +1228,7 @@ fn toolbox_url(
     sandbox_id: &str,
     allow_insecure: bool,
     suffix: &str,
-) -> Result<Url, CodeExecutionError> {
+) -> Result<Url, ExecError> {
     validate_sandbox_id(sandbox_id)?;
     let mut url = validate_toolbox_base(endpoint, allow_insecure)?;
     let path = format!("{}/{sandbox_id}/{suffix}", url.path().trim_end_matches('/'));
@@ -1283,9 +1236,9 @@ fn toolbox_url(
     Ok(url)
 }
 
-fn validate_toolbox_base(endpoint: &str, allow_insecure: bool) -> Result<Url, CodeExecutionError> {
+fn validate_toolbox_base(endpoint: &str, allow_insecure: bool) -> Result<Url, ExecError> {
     let url = Url::parse(endpoint).map_err(|_| {
-        CodeExecutionError::Unavailable("Daytona returned an invalid toolbox endpoint".into())
+        ExecError::Unavailable("Daytona returned an invalid toolbox endpoint".into())
     })?;
     let host = url.host_str().unwrap_or_default();
     let cloud_endpoint =
@@ -1299,36 +1252,36 @@ fn validate_toolbox_base(endpoint: &str, allow_insecure: bool) -> Result<Url, Co
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(CodeExecutionError::Unavailable(
+        return Err(ExecError::Unavailable(
             "Daytona returned an invalid toolbox endpoint".into(),
         ));
     }
     Ok(url)
 }
 
-fn validate_sandbox_id(value: &str) -> Result<(), CodeExecutionError> {
+fn validate_sandbox_id(value: &str) -> Result<(), ExecError> {
     if value.is_empty()
         || value.len() > 128
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(CodeExecutionError::Unavailable(
+        return Err(ExecError::Unavailable(
             "Daytona returned an invalid sandbox identity".into(),
         ));
     }
     Ok(())
 }
 
-fn provider_status_error(status: StatusCode) -> CodeExecutionError {
+fn provider_status_error(status: StatusCode) -> ExecError {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            CodeExecutionError::Unavailable("Daytona credential was rejected".into())
+            ExecError::Unavailable("Daytona credential was rejected".into())
         }
         StatusCode::TOO_MANY_REQUESTS => {
-            CodeExecutionError::Unavailable("Daytona rate limit exceeded".into())
+            ExecError::Unavailable("Daytona rate limit exceeded".into())
         }
-        _ => CodeExecutionError::Unavailable(format!(
+        _ => ExecError::Unavailable(format!(
             "Daytona request failed with status {}",
             status.as_u16()
         )),
@@ -1608,8 +1561,8 @@ mod tests {
         body[start..body.len() - tail.len()].to_vec()
     }
 
-    fn request(execution_id: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request(execution_id: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse(execution_id).unwrap(),
             ExecutionWorkspaceId::parse("chat-123").unwrap(),
             "printf",
@@ -1623,8 +1576,8 @@ mod tests {
         .unwrap()
     }
 
-    fn request_in(workspace_id: &str, execution_id: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request_in(workspace_id: &str, execution_id: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse(execution_id).unwrap(),
             ExecutionWorkspaceId::parse(workspace_id).unwrap(),
             "printf",
@@ -1649,8 +1602,8 @@ mod tests {
         }
     }
 
-    fn timeout_request() -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn timeout_request() -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse("call-timeout").unwrap(),
             ExecutionWorkspaceId::parse("chat-timeout").unwrap(),
             "slow",
@@ -1676,7 +1629,7 @@ mod tests {
         let first = provider.execute(request("call-123")).await.unwrap();
         let second = provider.execute(request("call-456")).await.unwrap();
         let replay = provider.execute(request("call-456")).await.unwrap();
-        assert_eq!(first.provider, CodeExecutionProviderKind::Daytona);
+        assert_eq!(first.provider, ExecProviderKind::Daytona);
         assert_eq!(first.stdout, "ok\n");
         assert_eq!(second, replay);
 
@@ -1793,7 +1746,7 @@ mod tests {
         let cidr_refs: Vec<&str> = cidrs.iter().map(String::as_str).collect();
         assert!(matches!(
             provider().with_egress_policy(allowlist(&[], &cidr_refs)),
-            Err(CodeExecutionError::InvalidRequest(_))
+            Err(ExecError::InvalidRequest(_))
         ));
         let domains: Vec<String> = (0..21)
             .map(|index| format!("host{index}.example.com"))
@@ -1801,7 +1754,7 @@ mod tests {
         let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
         assert!(matches!(
             provider().with_egress_policy(allowlist(&domain_refs, &[])),
-            Err(CodeExecutionError::InvalidRequest(_))
+            Err(ExecError::InvalidRequest(_))
         ));
     }
 
@@ -1832,7 +1785,7 @@ mod tests {
             provider
                 .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
                 .await,
-            Err(CodeExecutionError::WorkspaceFileNotFound)
+            Err(ExecError::WorkspaceFileNotFound)
         ));
 
         let listing = provider
@@ -2107,7 +2060,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CodeExecutionError::Unavailable(ref message) if message.contains("credential")
+                ExecError::Unavailable(ref message) if message.contains("credential")
             ),
             "expected a credential rejection, got {error:?}"
         );

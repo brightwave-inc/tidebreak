@@ -34,7 +34,7 @@
 //!
 //! A run's *published outputs* live under `scratch_root/<chat_id>/outputs/…`,
 //! never under the run's own workspace — that split (and the bug it fixed) is
-//! in `ConfiguredCodeExecutionProvider::publish_output_directory`. Destroying
+//! in `ConfiguredExecProvider::publish_output_directory`. Destroying
 //! `scratch_root/agent-run-<id>` therefore never touches a published output;
 //! the two live under different directory names by construction.
 
@@ -49,7 +49,7 @@ use tidebreak_code_execution::{ExecutionWorkspaceId, WorkspaceLifecycle};
 use tidebreak_core::{AgentError, AgentRunId, Result, Store};
 use tokio::sync::Mutex;
 
-use crate::code_execution::ConfiguredCodeExecutionProvider;
+use crate::code_execution::ConfiguredExecProvider;
 
 /// Directory-name prefix for a background run's workspace; must match
 /// `sandbox_exec_worker::agent_run_workspace`.
@@ -102,7 +102,7 @@ pub(crate) struct AgentRunScratchReapFailure {
 #[derive(Clone)]
 pub(crate) struct AgentRunScratchReaper {
     store: Arc<dyn Store>,
-    code_execution: Arc<ConfiguredCodeExecutionProvider>,
+    code_execution: Arc<ConfiguredExecProvider>,
     scratch_root: Arc<PathBuf>,
     sweep: Arc<Mutex<()>>,
     inventory: Arc<Mutex<VecDeque<AgentRunId>>>,
@@ -118,7 +118,7 @@ struct ScanResult {
 impl AgentRunScratchReaper {
     pub(crate) fn new(
         store: Arc<dyn Store>,
-        code_execution: Arc<ConfiguredCodeExecutionProvider>,
+        code_execution: Arc<ConfiguredExecProvider>,
         scratch_root: impl Into<PathBuf>,
         config: AgentRunScratchReaperConfig,
     ) -> Self {
@@ -281,7 +281,7 @@ impl AgentRunScratchReaper {
 /// deleted conversation's former runs immediately rather than waiting for the
 /// next sweep. Safe to call when the workspace is already gone.
 pub(crate) async fn destroy_agent_run_workspace(
-    code_execution: &ConfiguredCodeExecutionProvider,
+    code_execution: &ConfiguredExecProvider,
     scratch_root: &Path,
     run_id: AgentRunId,
 ) -> Result<()> {
@@ -453,8 +453,8 @@ mod tests {
         )
     }
 
-    fn provider(store: Arc<DbStore>, scratch_root: &Path) -> Arc<ConfiguredCodeExecutionProvider> {
-        Arc::new(ConfiguredCodeExecutionProvider::new(
+    fn provider(store: Arc<DbStore>, scratch_root: &Path) -> Arc<ConfiguredExecProvider> {
+        Arc::new(ConfiguredExecProvider::new(
             store,
             Arc::new(NoSecrets),
             scratch_root,
@@ -642,7 +642,7 @@ mod tests {
     }
 
     /// The bytes a run published are the parent conversation's, not the run's
-    /// own — see `ConfiguredCodeExecutionProvider::publish_output_directory`.
+    /// own — see `ConfiguredExecProvider::publish_output_directory`.
     /// A reap of the run's workspace must never reach into the conversation's
     /// own scratch directory, even when both are old.
     #[tokio::test]

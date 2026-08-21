@@ -28,11 +28,11 @@ use crate::output::{Capture, StreamKind};
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
 use crate::sbpl::SANDBOX_EXEC;
 #[cfg(target_os = "macos")]
-use crate::CodeExecutionProviderKind;
+use crate::ExecProviderKind;
 use crate::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionRequest, CodeExecutionResponse,
-    CodeExecutionUnavailableReason, ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath,
-    WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    ExecError, ExecProvider, ExecRequest, ExecResponse, ExecUnavailableReason,
+    ExecutionWorkspaceId, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle,
+    WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 #[cfg(target_os = "macos")]
 use crate::{ExecFolderAccess, ExecFolderGrant};
@@ -137,12 +137,9 @@ struct CanonicalExecFolderGrant {
 }
 
 impl LocalExecutionProvider {
-    pub fn new(
-        scratch_root: impl Into<PathBuf>,
-        timeout: Duration,
-    ) -> Result<Self, CodeExecutionError> {
+    pub fn new(scratch_root: impl Into<PathBuf>, timeout: Duration) -> Result<Self, ExecError> {
         if timeout.is_zero() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "execution timeout must be positive".into(),
             ));
         }
@@ -200,12 +197,12 @@ impl LocalExecutionProvider {
     /// `Ok(())` means the mandatory confinement primitive exists. The error is
     /// a stable reason code, so a caller can report *why* local execution is
     /// impossible without re-deriving the platform rules itself.
-    pub fn availability() -> Result<(), CodeExecutionUnavailableReason> {
+    pub fn availability() -> Result<(), ExecUnavailableReason> {
         if !cfg!(target_os = "macos") {
-            return Err(CodeExecutionUnavailableReason::UnsupportedPlatform);
+            return Err(ExecUnavailableReason::UnsupportedPlatform);
         }
         if !Path::new(SANDBOX_EXEC).is_file() {
-            return Err(CodeExecutionUnavailableReason::MissingSandboxBinary);
+            return Err(ExecUnavailableReason::MissingSandboxBinary);
         }
         Ok(())
     }
@@ -218,32 +215,28 @@ impl LocalExecutionProvider {
         tidebreak_egress::EgressEnforcement::external(Vec::new())
     }
 
-    fn resolve_paths(
-        &self,
-        request: &CodeExecutionRequest,
-    ) -> Result<ResolvedExecutionPaths, CodeExecutionError> {
-        let root = fs::canonicalize(&self.scratch_root).map_err(|_| {
-            CodeExecutionError::Sandbox("private scratch root is unavailable".into())
-        })?;
+    fn resolve_paths(&self, request: &ExecRequest) -> Result<ResolvedExecutionPaths, ExecError> {
+        let root = fs::canonicalize(&self.scratch_root)
+            .map_err(|_| ExecError::Sandbox("private scratch root is unavailable".into()))?;
         let workspace_candidate = root.join(request.workspace_id.as_str());
         let metadata = fs::symlink_metadata(&workspace_candidate)
-            .map_err(|_| CodeExecutionError::Sandbox("private workspace is unavailable".into()))?;
+            .map_err(|_| ExecError::Sandbox("private workspace is unavailable".into()))?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(CodeExecutionError::Sandbox(
+            return Err(ExecError::Sandbox(
                 "private workspace is not a regular directory".into(),
             ));
         }
         let workspace = fs::canonicalize(workspace_candidate)
-            .map_err(|_| CodeExecutionError::Sandbox("private workspace is unavailable".into()))?;
+            .map_err(|_| ExecError::Sandbox("private workspace is unavailable".into()))?;
         if !workspace.starts_with(&root) {
-            return Err(CodeExecutionError::Sandbox(
+            return Err(ExecError::Sandbox(
                 "private workspace escaped its root".into(),
             ));
         }
         let cwd = fs::canonicalize(workspace.join(&request.cwd))
-            .map_err(|_| CodeExecutionError::Sandbox("working directory is unavailable".into()))?;
+            .map_err(|_| ExecError::Sandbox("working directory is unavailable".into()))?;
         if !cwd.starts_with(&workspace) || !cwd.is_dir() {
-            return Err(CodeExecutionError::Sandbox(
+            return Err(ExecError::Sandbox(
                 "working directory escaped the private workspace".into(),
             ));
         }
@@ -266,19 +259,18 @@ impl LocalExecutionProvider {
         })
     }
 
-    fn ensured_root(&self) -> Result<PathBuf, CodeExecutionError> {
-        fs::create_dir_all(&self.scratch_root).map_err(|_| {
-            CodeExecutionError::Sandbox("private scratch root is unavailable".into())
-        })?;
+    fn ensured_root(&self) -> Result<PathBuf, ExecError> {
+        fs::create_dir_all(&self.scratch_root)
+            .map_err(|_| ExecError::Sandbox("private scratch root is unavailable".into()))?;
         fs::canonicalize(&self.scratch_root)
-            .map_err(|_| CodeExecutionError::Sandbox("private scratch root is unavailable".into()))
+            .map_err(|_| ExecError::Sandbox("private scratch root is unavailable".into()))
     }
 
-    fn existing_root(&self) -> Result<Option<PathBuf>, CodeExecutionError> {
+    fn existing_root(&self) -> Result<Option<PathBuf>, ExecError> {
         match fs::canonicalize(&self.scratch_root) {
             Ok(root) => Ok(Some(root)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(CodeExecutionError::Sandbox(
+            Err(_) => Err(ExecError::Sandbox(
                 "private scratch root is unavailable".into(),
             )),
         }
@@ -287,12 +279,10 @@ impl LocalExecutionProvider {
     /// Open the host-owned scratch `root` as a pinned descriptor. The root is
     /// canonicalized by the caller and is not sandbox-writable, so ambient
     /// resolution of it carries no containment question.
-    async fn root_dir(root: &Path) -> Result<ScratchDir, CodeExecutionError> {
+    async fn root_dir(root: &Path) -> Result<ScratchDir, ExecError> {
         resolve_scratch_directory(root, "", false)
             .await
-            .ok_or_else(|| {
-                CodeExecutionError::Sandbox("private scratch root is unavailable".into())
-            })
+            .ok_or_else(|| ExecError::Sandbox("private scratch root is unavailable".into()))
     }
 
     /// Open the workspace directory one level under `root` as a pinned
@@ -303,7 +293,7 @@ impl LocalExecutionProvider {
         root: &ScratchDir,
         workspace: &ExecutionWorkspaceId,
         create: bool,
-    ) -> Result<Option<ScratchDir>, CodeExecutionError> {
+    ) -> Result<Option<ScratchDir>, ExecError> {
         let name = workspace.as_str();
         let opened = if create {
             root.create_dir(name).await
@@ -317,11 +307,11 @@ impl LocalExecutionProvider {
                 // The no-follow open is what refused; the stats only label the
                 // refusal and are not what enforced it.
                 if root.is_symlink(name).await || root.file_stamp(name).await.is_some() {
-                    return Err(CodeExecutionError::Sandbox(
+                    return Err(ExecError::Sandbox(
                         "private workspace is not a regular directory".into(),
                     ));
                 }
-                Err(CodeExecutionError::Sandbox(
+                Err(ExecError::Sandbox(
                     "private workspace is unavailable".into(),
                 ))
             }
@@ -332,7 +322,7 @@ impl LocalExecutionProvider {
         root: &Path,
         workspace: &ExecutionWorkspaceId,
         create: bool,
-    ) -> Result<Option<ScratchDir>, CodeExecutionError> {
+    ) -> Result<Option<ScratchDir>, ExecError> {
         let root = Self::root_dir(root).await?;
         Self::workspace_under(&root, workspace, create).await
     }
@@ -340,11 +330,11 @@ impl LocalExecutionProvider {
     async fn ensured_workspace(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> Result<ScratchDir, CodeExecutionError> {
+    ) -> Result<ScratchDir, ExecError> {
         let root = self.ensured_root()?;
         Self::workspace_in(&root, workspace, true)
             .await?
-            .ok_or_else(|| CodeExecutionError::Sandbox("private workspace is unavailable".into()))
+            .ok_or_else(|| ExecError::Sandbox("private workspace is unavailable".into()))
     }
 
     /// Open `path`'s parent directory inside `workspace` as a pinned
@@ -382,14 +372,11 @@ impl LocalExecutionProvider {
 }
 
 #[async_trait]
-impl CodeExecutionProvider for LocalExecutionProvider {
-    async fn execute(
-        &self,
-        request: CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+impl ExecProvider for LocalExecutionProvider {
+    async fn execute(&self, request: ExecRequest) -> Result<ExecResponse, ExecError> {
         request.validate()?;
         if let Err(reason) = Self::availability() {
-            return Err(CodeExecutionError::Unavailable(format!(
+            return Err(ExecError::Unavailable(format!(
                 "native local sandboxing is not available on this host: {}",
                 reason.message()
             )));
@@ -427,8 +414,8 @@ impl CodeExecutionProvider for LocalExecutionProvider {
         }
         #[cfg(target_os = "macos")]
         if denied_host_path.is_some() {
-            let response = CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::Local,
+            let response = ExecResponse {
+                provider: ExecProviderKind::Local,
                 exit_code: Some(126),
                 stdout: String::new(),
                 stderr: sandbox_path_denied_message(!folder_grants.is_empty()),
@@ -452,9 +439,7 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             .as_ref()
             .map(|path| {
                 fs::canonicalize(path).map_err(|_| {
-                    CodeExecutionError::Sandbox(
-                        "bundled document helper directory is unavailable".into(),
-                    )
+                    ExecError::Sandbox("bundled document helper directory is unavailable".into())
                 })
             })
             .transpose()?;
@@ -462,9 +447,8 @@ impl CodeExecutionProvider for LocalExecutionProvider {
             .shared_package_cache
             .as_ref()
             .map(|path| {
-                fs::canonicalize(path).map_err(|_| {
-                    CodeExecutionError::Sandbox("shared package cache is unavailable".into())
-                })
+                fs::canonicalize(path)
+                    .map_err(|_| ExecError::Sandbox("shared package cache is unavailable".into()))
             })
             .transpose()?;
         // A runtime that has been uninstalled between turns simply drops out:
@@ -532,27 +516,18 @@ impl CodeExecutionProvider for LocalExecutionProvider {
 
 #[async_trait]
 impl WorkspaceLifecycle for LocalExecutionProvider {
-    async fn create_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn create_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         self.ensured_workspace(workspace).await.map(|_| ())
     }
 
-    async fn connect_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<bool, CodeExecutionError> {
+    async fn connect_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<bool, ExecError> {
         let Some(root) = self.existing_root()? else {
             return Ok(false);
         };
         Ok(Self::workspace_in(&root, workspace, false).await?.is_some())
     }
 
-    async fn destroy_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn destroy_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         let Some(root) = self.existing_root()? else {
             return Ok(());
         };
@@ -565,14 +540,14 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
-                    return Err(CodeExecutionError::Sandbox(
+                    return Err(ExecError::Sandbox(
                         "could not remove private execution storage".into(),
                     ))
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
-                return Err(CodeExecutionError::Sandbox(
+                return Err(ExecError::Sandbox(
                     "could not remove private execution storage".into(),
                 ))
             }
@@ -585,7 +560,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         }
         root.remove_dir_all(workspace.as_str())
             .await
-            .map_err(|_| CodeExecutionError::Sandbox("could not remove private workspace".into()))
+            .map_err(|_| ExecError::Sandbox("could not remove private workspace".into()))
     }
 
     async fn put_workspace_file(
@@ -593,16 +568,14 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         let workspace = self.ensured_workspace(workspace).await?;
         let parent = Self::resolve_parent(&workspace, path, true)
             .await
-            .ok_or_else(|| {
-                CodeExecutionError::Sandbox("workspace directories are unavailable".into())
-            })?;
+            .ok_or_else(|| ExecError::Sandbox("workspace directories are unavailable".into()))?;
         // The write goes to an unpredictable temp name created exclusively and
         // without following, then renamed into place — both relative to the
         // pinned parent. A process with write access to chat scratch (an
@@ -612,22 +585,22 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         parent
             .write_file(path.file_name(), content)
             .await
-            .map_err(|_| CodeExecutionError::Sandbox("could not write the workspace file".into()))
+            .map_err(|_| ExecError::Sandbox("could not write the workspace file".into()))
     }
 
     async fn get_workspace_file(
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> Result<Vec<u8>, CodeExecutionError> {
+    ) -> Result<Vec<u8>, ExecError> {
         let Some(root) = self.existing_root()? else {
-            return Err(CodeExecutionError::WorkspaceFileNotFound);
+            return Err(ExecError::WorkspaceFileNotFound);
         };
         let Some(workspace) = Self::workspace_in(&root, workspace, false).await? else {
-            return Err(CodeExecutionError::WorkspaceFileNotFound);
+            return Err(ExecError::WorkspaceFileNotFound);
         };
         let Some(parent) = Self::resolve_parent(&workspace, path, false).await else {
-            return Err(CodeExecutionError::WorkspaceFileNotFound);
+            return Err(ExecError::WorkspaceFileNotFound);
         };
         // Open relative to the pinned parent without following the final
         // component, then judge the opened descriptor — never a path stat'd
@@ -643,35 +616,35 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
                 // indistinguishable from absence; the stat explains the refusal
                 // and is not what enforced it.
                 if parent.is_symlink(path.file_name()).await {
-                    return Err(CodeExecutionError::InvalidRequest(
+                    return Err(ExecError::InvalidRequest(
                         "workspace path is not a regular file".into(),
                     ));
                 }
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    return Err(CodeExecutionError::WorkspaceFileNotFound);
+                    return Err(ExecError::WorkspaceFileNotFound);
                 }
-                return Err(CodeExecutionError::Sandbox(
+                return Err(ExecError::Sandbox(
                     "could not read the workspace file".into(),
                 ));
             }
         };
         let metadata = file
             .metadata()
-            .map_err(|_| CodeExecutionError::Sandbox("could not read the workspace file".into()))?;
+            .map_err(|_| ExecError::Sandbox("could not read the workspace file".into()))?;
         if !metadata.is_file() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "workspace path is not a regular file".into(),
             ));
         }
         if metadata.len() > MAX_WORKSPACE_FILE_BYTES as u64 {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         let mut content = Vec::new();
         file.take(MAX_WORKSPACE_FILE_BYTES as u64 + 1)
             .read_to_end(&mut content)
-            .map_err(|_| CodeExecutionError::Sandbox("could not read the workspace file".into()))?;
+            .map_err(|_| ExecError::Sandbox("could not read the workspace file".into()))?;
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         Ok(content)
     }
@@ -680,7 +653,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> Result<WorkspaceListing, CodeExecutionError> {
+    ) -> Result<WorkspaceListing, ExecError> {
         let workspace = self.ensured_workspace(workspace).await?;
         let base = match path {
             None => workspace,
@@ -701,23 +674,21 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
                             // The stats below only label the refusal; they are
                             // not what enforced it.
                             if error.kind() == std::io::ErrorKind::NotFound {
-                                return Err(CodeExecutionError::WorkspaceFileNotFound);
+                                return Err(ExecError::WorkspaceFileNotFound);
                             }
                             if base.is_symlink(component).await {
-                                return Err(CodeExecutionError::Sandbox(
+                                return Err(ExecError::Sandbox(
                                     "workspace path escaped the private workspace".into(),
                                 ));
                             }
                             if index + 1 == components.len()
                                 && base.file_stamp(component).await.is_some()
                             {
-                                return Err(CodeExecutionError::InvalidRequest(
+                                return Err(ExecError::InvalidRequest(
                                     "workspace path is not a directory".into(),
                                 ));
                             }
-                            return Err(CodeExecutionError::Sandbox(
-                                "could not list the workspace".into(),
-                            ));
+                            return Err(ExecError::Sandbox("could not list the workspace".into()));
                         }
                     };
                 }
@@ -728,7 +699,7 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
         for entry in base
             .entries()
             .await
-            .map_err(|_| CodeExecutionError::Sandbox("could not list the workspace".into()))?
+            .map_err(|_| ExecError::Sandbox("could not list the workspace".into()))?
         {
             let (directory, size_bytes) = match entry.kind {
                 ScratchEntryKind::Directory => (true, None),
@@ -759,10 +730,10 @@ impl WorkspaceLifecycle for LocalExecutionProvider {
     }
 }
 
-fn begin_execution(path: &Path, fingerprint: &str) -> Result<BeginExecution, CodeExecutionError> {
+fn begin_execution(path: &Path, fingerprint: &str) -> Result<BeginExecution, ExecError> {
     let receipt = ExecutionReceipt::running(fingerprint);
     let bytes = serde_json::to_vec(&receipt)
-        .map_err(|_| CodeExecutionError::Sandbox("could not encode receipt".into()))?;
+        .map_err(|_| ExecError::Sandbox("could not encode receipt".into()))?;
     begin_execution_with_persistence(path, fingerprint, |file| {
         file.write_all(&bytes).and_then(|()| file.sync_all())
     })
@@ -772,10 +743,10 @@ fn begin_execution_with_persistence(
     path: &Path,
     fingerprint: &str,
     persist: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
-) -> Result<BeginExecution, CodeExecutionError> {
+) -> Result<BeginExecution, ExecError> {
     let parent = path
         .parent()
-        .ok_or_else(|| CodeExecutionError::Sandbox("execution receipt has no parent".into()))?;
+        .ok_or_else(|| ExecError::Sandbox("execution receipt has no parent".into()))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -785,71 +756,68 @@ fn begin_execution_with_persistence(
             if persist(&mut file).and_then(|()| sync_dir(parent)).is_err() {
                 drop(file);
                 discard_unstarted_receipt(path, parent)?;
-                return Err(CodeExecutionError::Sandbox(
-                    "could not persist receipt".into(),
-                ));
+                return Err(ExecError::Sandbox("could not persist receipt".into()));
             }
             Ok(BeginExecution::Started)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let receipt = read_receipt(path)?;
-            receipt.replay(fingerprint, CodeExecutionError::Sandbox)
+            receipt.replay(fingerprint, ExecError::Sandbox)
         }
-        Err(_) => Err(CodeExecutionError::Sandbox(
+        Err(_) => Err(ExecError::Sandbox(
             "could not create execution receipt".into(),
         )),
     }
 }
 
-fn discard_unstarted_receipt(path: &Path, parent: &Path) -> Result<(), CodeExecutionError> {
+fn discard_unstarted_receipt(path: &Path, parent: &Path) -> Result<(), ExecError> {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {
-            return Err(CodeExecutionError::Sandbox(
+            return Err(ExecError::Sandbox(
                 "could not clean up incomplete execution receipt".into(),
             ));
         }
     }
-    sync_dir(parent).map_err(|_| {
-        CodeExecutionError::Sandbox("could not clean up incomplete execution receipt".into())
-    })
+    sync_dir(parent)
+        .map_err(|_| ExecError::Sandbox("could not clean up incomplete execution receipt".into()))
 }
 
-fn read_receipt(path: &Path) -> Result<ExecutionReceipt, CodeExecutionError> {
+fn read_receipt(path: &Path) -> Result<ExecutionReceipt, ExecError> {
     let file = fs::File::open(path)
-        .map_err(|_| CodeExecutionError::Sandbox("could not read execution receipt".into()))?;
+        .map_err(|_| ExecError::Sandbox("could not read execution receipt".into()))?;
     if file
         .metadata()
-        .map_err(|_| CodeExecutionError::Sandbox("could not inspect execution receipt".into()))?
+        .map_err(|_| ExecError::Sandbox("could not inspect execution receipt".into()))?
         .len()
         > MAX_RECEIPT_BYTES
     {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "execution receipt exceeds its bound".into(),
         ));
     }
     let mut bytes = Vec::new();
     file.take(MAX_RECEIPT_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| CodeExecutionError::Sandbox("could not read execution receipt".into()))?;
+        .map_err(|_| ExecError::Sandbox("could not read execution receipt".into()))?;
     serde_json::from_slice(&bytes)
-        .map_err(|_| CodeExecutionError::Sandbox("execution receipt is invalid".into()))
+        .map_err(|_| ExecError::Sandbox("execution receipt is invalid".into()))
 }
 
-fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), CodeExecutionError> {
+fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), ExecError> {
     let parent = path
         .parent()
-        .ok_or_else(|| CodeExecutionError::Sandbox("execution receipt has no parent".into()))?;
+        .ok_or_else(|| ExecError::Sandbox("execution receipt has no parent".into()))?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| CodeExecutionError::Sandbox("execution receipt name is invalid".into()))?;
+        .ok_or_else(|| ExecError::Sandbox("execution receipt name is invalid".into()))?;
     let temporary = parent.join(format!(".{file_name}.terminal"));
     let bytes = serde_json::to_vec(receipt)
-        .map_err(|_| CodeExecutionError::Sandbox("could not encode receipt".into()))?;
+        .map_err(|_| ExecError::Sandbox("could not encode receipt".into()))?;
     if bytes.len() as u64 > MAX_RECEIPT_BYTES {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "execution receipt exceeds its bound".into(),
         ));
     }
@@ -859,12 +827,12 @@ fn finish_execution(path: &Path, receipt: &ExecutionReceipt) -> Result<(), CodeE
     options.mode(0o600);
     let mut file = options
         .open(&temporary)
-        .map_err(|_| CodeExecutionError::AmbiguousExecution)?;
+        .map_err(|_| ExecError::AmbiguousExecution)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|_| CodeExecutionError::AmbiguousExecution)?;
-    fs::rename(&temporary, path).map_err(|_| CodeExecutionError::AmbiguousExecution)?;
-    sync_dir(parent).map_err(|_| CodeExecutionError::AmbiguousExecution)
+        .map_err(|_| ExecError::AmbiguousExecution)?;
+    fs::rename(&temporary, path).map_err(|_| ExecError::AmbiguousExecution)?;
+    sync_dir(parent).map_err(|_| ExecError::AmbiguousExecution)
 }
 
 #[cfg(unix)]
@@ -877,29 +845,26 @@ fn sync_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
-    fs::create_dir_all(path).map_err(|_| {
-        CodeExecutionError::Sandbox("could not create private execution storage".into())
-    })?;
-    let metadata = fs::symlink_metadata(path).map_err(|_| {
-        CodeExecutionError::Sandbox("could not inspect private execution storage".into())
-    })?;
+fn secure_dir(path: &Path) -> Result<(), ExecError> {
+    fs::create_dir_all(path)
+        .map_err(|_| ExecError::Sandbox("could not create private execution storage".into()))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ExecError::Sandbox("could not inspect private execution storage".into()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "private execution storage is not a regular directory".into(),
         ));
     }
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
-        CodeExecutionError::Sandbox("could not secure private execution storage".into())
-    })?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|_| ExecError::Sandbox("could not secure private execution storage".into()))?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn run_native(
-    request: &CodeExecutionRequest,
+    request: &ExecRequest,
     workspace: &Path,
     cwd: &Path,
     env_home: &Path,
@@ -909,7 +874,7 @@ async fn run_native(
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     network_policy: &NetworkPolicy,
-) -> Result<CodeExecutionResponse, CodeExecutionError> {
+) -> Result<ExecResponse, ExecError> {
     let broker = if matches!(network_policy, NetworkPolicy::Off) {
         None
     } else {
@@ -972,23 +937,23 @@ async fn run_native(
     configure_unix_limits(&mut command, timeout);
 
     let started = Instant::now();
-    let mut child = command.spawn().map_err(|_| CodeExecutionError::Spawn)?;
+    let mut child = command.spawn().map_err(|_| ExecError::Spawn)?;
     let process_group = child.id().map(|id| id as i32);
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| CodeExecutionError::Sandbox("stdout capture is unavailable".into()))?;
+        .ok_or_else(|| ExecError::Sandbox("stdout capture is unavailable".into()))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| CodeExecutionError::Sandbox("stderr capture is unavailable".into()))?;
+        .ok_or_else(|| ExecError::Sandbox("stderr capture is unavailable".into()))?;
     let capture = Arc::new(Mutex::new(Capture::default()));
     let stdout_reader = tokio::spawn(drain_output(stdout, capture.clone(), StreamKind::Stdout));
     let stderr_reader = tokio::spawn(drain_output(stderr, capture.clone(), StreamKind::Stderr));
 
     let (status, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(waited) => (
-            waited.map_err(|_| CodeExecutionError::Sandbox("could not wait for command".into()))?,
+            waited.map_err(|_| ExecError::Sandbox("could not wait for command".into()))?,
             false,
         ),
         Err(_) => {
@@ -1000,13 +965,13 @@ async fn run_native(
                 child
                     .kill()
                     .await
-                    .map_err(|_| CodeExecutionError::Sandbox("could not stop command".into()))?;
+                    .map_err(|_| ExecError::Sandbox("could not stop command".into()))?;
             }
             (
                 child
                     .wait()
                     .await
-                    .map_err(|_| CodeExecutionError::Sandbox("could not reap command".into()))?,
+                    .map_err(|_| ExecError::Sandbox("could not reap command".into()))?,
                 true,
             )
         }
@@ -1020,18 +985,13 @@ async fn run_native(
     finish_reader(stderr_reader).await;
 
     let capture = std::mem::take(&mut *capture.lock().unwrap());
-    Ok(capture.response(
-        CodeExecutionProviderKind::Local,
-        started,
-        status.code(),
-        timed_out,
-    ))
+    Ok(capture.response(ExecProviderKind::Local, started, status.code(), timed_out))
 }
 
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 async fn run_native(
-    _request: &CodeExecutionRequest,
+    _request: &ExecRequest,
     _workspace: &Path,
     _cwd: &Path,
     _env_home: &Path,
@@ -1041,8 +1001,8 @@ async fn run_native(
     _managed_node_dir: Option<&Path>,
     _folder_grants: &[()],
     _network_policy: &NetworkPolicy,
-) -> Result<CodeExecutionResponse, CodeExecutionError> {
-    Err(CodeExecutionError::Unavailable(
+) -> Result<ExecResponse, ExecError> {
+    Err(ExecError::Unavailable(
         "native local sandboxing is not supported on this host".into(),
     ))
 }
@@ -1136,7 +1096,7 @@ fn sandbox_path(developer_dir: Option<&Path>, managed_node_dir: Option<&Path>) -
 
 #[cfg(target_os = "macos")]
 fn direct_denied_host_path(
-    request: &CodeExecutionRequest,
+    request: &ExecRequest,
     workspace: &Path,
     env_home: &Path,
     document_scripts_dir: Option<&Path>,
@@ -1170,7 +1130,7 @@ fn annotate_seatbelt_access_denial(
     shared_package_cache: Option<&Path>,
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
-    response: &mut CodeExecutionResponse,
+    response: &mut ExecResponse,
 ) {
     if response.stdout.contains(SANDBOX_PATH_DENIED_CODE)
         || response.stderr.contains(SANDBOX_PATH_DENIED_CODE)
@@ -1525,7 +1485,7 @@ fn macos_profile(
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     broker_port: Option<u16>,
-) -> Result<String, CodeExecutionError> {
+) -> Result<String, ExecError> {
     const RUNTIME_ANCESTORS: &[&str] = &[
         "/Applications",
         "/Applications/Xcode.app",
@@ -1650,7 +1610,7 @@ fn macos_profile(
 #[cfg(target_os = "macos")]
 fn sandbox_metadata_ancestors<'a>(
     paths: impl IntoIterator<Item = &'a Path>,
-) -> Result<String, CodeExecutionError> {
+) -> Result<String, ExecError> {
     let mut ancestors = paths
         .into_iter()
         .flat_map(|path| path.ancestors().skip(1))
@@ -1667,7 +1627,7 @@ fn sandbox_metadata_ancestors<'a>(
 #[cfg(target_os = "macos")]
 fn canonicalize_folder_grants(
     grants: &[ExecFolderGrant],
-) -> Result<Vec<CanonicalExecFolderGrant>, CodeExecutionError> {
+) -> Result<Vec<CanonicalExecFolderGrant>, ExecError> {
     let mut canonical = Vec::<CanonicalExecFolderGrant>::new();
     for grant in grants {
         let path = canonicalize_grant_directory(&grant.path)?;
@@ -1701,21 +1661,20 @@ fn canonicalize_folder_grants(
 }
 
 #[cfg(target_os = "macos")]
-fn canonicalize_grant_directory(path: &Path) -> Result<PathBuf, CodeExecutionError> {
+fn canonicalize_grant_directory(path: &Path) -> Result<PathBuf, ExecError> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))?;
+        .map_err(|_| ExecError::Sandbox("granted folder is unavailable".into()))?;
     if metadata.file_type().is_symlink() {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "granted folder must not be a symbolic link".into(),
         ));
     }
     if !metadata.is_dir() {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "granted folder is not a directory".into(),
         ));
     }
-    fs::canonicalize(path)
-        .map_err(|_| CodeExecutionError::Sandbox("granted folder is unavailable".into()))
+    fs::canonicalize(path).map_err(|_| ExecError::Sandbox("granted folder is unavailable".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -1742,13 +1701,13 @@ fn sbpl_subpath(path: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn sandbox_subpath(path: &Path) -> Result<String, CodeExecutionError> {
-    crate::sbpl::subpath(path).map_err(|error| CodeExecutionError::Sandbox(error.to_string()))
+fn sandbox_subpath(path: &Path) -> Result<String, ExecError> {
+    crate::sbpl::subpath(path).map_err(|error| ExecError::Sandbox(error.to_string()))
 }
 
 #[cfg(target_os = "macos")]
-fn sandbox_literal(path: &Path) -> Result<String, CodeExecutionError> {
-    crate::sbpl::literal(path).map_err(|error| CodeExecutionError::Sandbox(error.to_string()))
+fn sandbox_literal(path: &Path) -> Result<String, ExecError> {
+    crate::sbpl::literal(path).map_err(|error| ExecError::Sandbox(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1810,8 +1769,8 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn request(workspace: &str, execution: &str, script: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request(workspace: &str, execution: &str, script: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse(execution).unwrap(),
             ExecutionWorkspaceId::parse(workspace).unwrap(),
             "/bin/sh",
@@ -1841,7 +1800,7 @@ mod tests {
             vec![ExecFolderGrant::new(&connected_path, ExecFolderAccess::ReadOnly).unwrap()];
 
         let denied_path = "/tmp/sentinel-denied-path-do-not-leak.md";
-        let denied = CodeExecutionRequest::new(
+        let denied = ExecRequest::new(
             ExecutionId::parse("call-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -1855,7 +1814,7 @@ mod tests {
         let first = provider.execute(denied.clone()).await.unwrap();
         let replay = provider.execute(denied).await.unwrap();
         assert_eq!(first, replay);
-        assert_eq!(first.provider, CodeExecutionProviderKind::Local);
+        assert_eq!(first.provider, ExecProviderKind::Local);
         assert_eq!(first.exit_code, Some(126));
         assert!(first.stderr.contains(SANDBOX_PATH_DENIED_CODE));
         assert!(first.stderr.contains("available capabilities"));
@@ -1868,7 +1827,7 @@ mod tests {
             .contains("sentinel-connected-folder-do-not-leak"));
         assert!(!first.stderr.contains(&connected_path.display().to_string()));
 
-        let changed = CodeExecutionRequest::new(
+        let changed = ExecRequest::new(
             ExecutionId::parse("call-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -1878,10 +1837,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             provider.execute(changed).await.unwrap_err(),
-            CodeExecutionError::IdentityConflict
+            ExecError::IdentityConflict
         ));
 
-        let missing = CodeExecutionRequest::new(
+        let missing = ExecRequest::new(
             ExecutionId::parse("call-missing-workspace-file").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -1931,7 +1890,7 @@ mod tests {
             .join("sentinel-dynamic-connected-folder-do-not-leak");
         fs::create_dir(&connected).unwrap();
         let connected = fs::canonicalize(connected).unwrap();
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-dynamic-python-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -1999,7 +1958,7 @@ mod tests {
         let (_root, provider, workspace) = fixture(Duration::from_secs(3));
         let denied_path = "/tmp/sentinel-caught-python-denied-path-do-not-leak";
         let script = "try:\n    open('/' + 'tmp' + '/sentinel-caught-python-denied-path-do-not-leak').read()\nexcept PermissionError as error:\n    print(error)\n    raise SystemExit(19)";
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-caught-python-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2024,7 +1983,7 @@ mod tests {
         let (_root, provider, workspace) = fixture(Duration::from_secs(3));
         let denied_path = "/tmp/sentinel-caught-success-denied-path-do-not-leak";
         let script = "path = '/' + 'tmp' + '/sentinel-caught-success-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print(f'Operation not permitted: x{path}')";
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-caught-success-python-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2053,7 +2012,7 @@ try:
     open(path).read()
 except PermissionError as error:
     print("Operation not permitted: https://" + error.filename)"#;
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-malformed-url-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2100,7 +2059,7 @@ except PermissionError as error:
         ];
 
         for (execution_id, script, sentinel) in cases {
-            let request = CodeExecutionRequest::new(
+            let request = ExecRequest::new(
                 ExecutionId::parse(execution_id).unwrap(),
                 ExecutionWorkspaceId::parse(&workspace).unwrap(),
                 "/usr/bin/python3",
@@ -2137,7 +2096,7 @@ try:
     open(path).read()
 except PermissionError as error:
     print("Operation not permitted: file://" + error.filename, file=sys.stderr)"#;
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-file-url-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2162,7 +2121,7 @@ except PermissionError as error:
         let (_root, provider, workspace) = fixture(Duration::from_secs(3));
         let denied_path = "/tmp/sentinel-cross-channel-denied-path-do-not-leak";
         let script = "import sys\npath = '/' + 'tmp' + '/sentinel-cross-channel-denied-path-do-not-leak'\ntry:\n    open(path).read()\nexcept PermissionError:\n    print('Operation not permitted')\n    print(f'x{path}', file=sys.stderr)\n    raise SystemExit(29)";
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-cross-channel-python-denied-path").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2284,7 +2243,7 @@ path = os.path.join(os.getcwd(), "allowed.txt")
 print('Operation not permitted: "' + path.replace("/", "\\/") + '"')
 print("Operation not permitted: https://example.com/tmp/sentinel-url-path")
 print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sys.stderr)"#;
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-successful-allowed-path-diagnostic").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/usr/bin/python3",
@@ -2318,7 +2277,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
         let connected = tempfile::tempdir().unwrap();
         let connected_path = fs::canonicalize(connected.path()).unwrap();
         let missing = connected_path.join("incident-notes.md");
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             ExecutionId::parse("call-connected-missing").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -2348,7 +2307,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
         let workspace_path = fs::canonicalize(root.path().join(&workspace)).unwrap();
         fs::create_dir(workspace_path.join("nested")).unwrap();
         let in_workspace = workspace_path.join("nested/../incident-notes.md");
-        let missing = CodeExecutionRequest::new(
+        let missing = ExecRequest::new(
             ExecutionId::parse("call-absolute-workspace-missing").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -2363,7 +2322,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
 
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), workspace_path.join("escaped")).unwrap();
-        let escaped = CodeExecutionRequest::new(
+        let escaped = ExecRequest::new(
             ExecutionId::parse("call-workspace-symlink-escape").unwrap(),
             ExecutionWorkspaceId::parse(&workspace).unwrap(),
             "/bin/cat",
@@ -2434,7 +2393,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
                 eprintln!("skipping {command}: host interpreter unusable in this environment");
                 continue;
             }
-            let python = CodeExecutionRequest::new(
+            let python = ExecRequest::new(
                 ExecutionId::parse(execution).unwrap(),
                 ExecutionWorkspaceId::parse("chat-1").unwrap(),
                 command,
@@ -2561,7 +2520,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             .execute(request(&workspace, "call-conflict", "printf two"))
             .await
             .unwrap_err();
-        assert!(matches!(conflict, CodeExecutionError::IdentityConflict));
+        assert!(matches!(conflict, ExecError::IdentityConflict));
     }
 
     #[tokio::test]
@@ -2610,7 +2569,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             provider
                 .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
                 .await,
-            Err(CodeExecutionError::WorkspaceFileNotFound)
+            Err(ExecError::WorkspaceFileNotFound)
         ));
         assert!(matches!(
             provider
@@ -2620,7 +2579,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
                     &vec![0_u8; crate::MAX_WORKSPACE_FILE_BYTES + 1],
                 )
                 .await,
-            Err(CodeExecutionError::WorkspaceFileTooLarge)
+            Err(ExecError::WorkspaceFileTooLarge)
         ));
 
         // A symlink planted in the workspace must never let a read escape it,
@@ -2695,7 +2654,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             .get_workspace_file(&workspace, &WorkspaceFilePath::parse("leak.txt").unwrap())
             .await;
         assert!(
-            matches!(leak, Err(CodeExecutionError::InvalidRequest(_))),
+            matches!(leak, Err(ExecError::InvalidRequest(_))),
             "no-follow read must refuse a symlink, got {leak:?}"
         );
 
@@ -2758,7 +2717,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             Ok(_) => panic!("injected persistence failure unexpectedly succeeded"),
         };
 
-        assert!(matches!(error, CodeExecutionError::Sandbox(_)));
+        assert!(matches!(error, ExecError::Sandbox(_)));
         assert!(
             !path.exists(),
             "an unstarted partial claim must not block retries"

@@ -1,7 +1,7 @@
 //! Provider-neutral, bounded command execution for Tidebreak.
 //!
-//! The model-facing [`ExecTool`] sends a normalized [`CodeExecutionRequest`] to
-//! a host-selected [`CodeExecutionProvider`]. Requests carry a stable execution
+//! The model-facing [`ExecTool`] sends a normalized [`ExecRequest`] to
+//! a host-selected [`ExecProvider`]. Requests carry a stable execution
 //! identity and an opaque workspace identity, so a future managed adapter can
 //! reconcile retries and map a chat to its own remote session without exposing
 //! provider credentials or accepting model-authored host paths.
@@ -91,12 +91,11 @@ pub use skills::{
 };
 pub use tool::{ExecTool, EXEC_TOOL_NAME};
 pub use types::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, CodeExecutionUnavailableReason, ExecFolderAccess, ExecFolderGrant,
-    ExecutionId, ExecutionWorkspaceId, OutputArtifactEntry, OutputArtifactScan,
-    OutputArtifactStatus, SandboxPreparation, SandboxPreparationSink, StagedUpload,
-    WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_ARGUMENTS,
-    MAX_ARGUMENT_BYTES, MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
+    ExecError, ExecFolderAccess, ExecFolderGrant, ExecProvider, ExecProviderKind, ExecRequest,
+    ExecResponse, ExecUnavailableReason, ExecutionId, ExecutionWorkspaceId, OutputArtifactEntry,
+    OutputArtifactScan, OutputArtifactStatus, SandboxPreparation, SandboxPreparationSink,
+    StagedUpload, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
+    MAX_ARGUMENTS, MAX_ARGUMENT_BYTES, MAX_CAPTURE_BYTES, MAX_COMMAND_BYTES, MAX_CWD_BYTES,
     MAX_EXEC_FOLDER_GRANTS, MAX_STAGED_PATHS, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
     MAX_WORKSPACE_PATH_BYTES,
 };

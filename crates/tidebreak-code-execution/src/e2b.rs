@@ -22,10 +22,9 @@ use crate::remote::{
     RemoteSessionError, RemoteSessionPool, RemoteWorkspaceAdapter,
 };
 use crate::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, ExecutionWorkspaceId, StagedUpload, WorkspaceFileEntry,
-    WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, MAX_WORKSPACE_FILE_BYTES,
-    MAX_WORKSPACE_LIST_ENTRIES,
+    ExecError, ExecProvider, ExecProviderKind, ExecRequest, ExecResponse, ExecutionWorkspaceId,
+    StagedUpload, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
+    MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 const E2B_API_BASE: &str = "https://api.e2b.app";
@@ -84,12 +83,12 @@ impl std::fmt::Debug for E2BCredential {
 }
 
 impl E2BCredential {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExecError> {
         SecretCredential::parse("E2B", value).map(Self)
     }
 
     /// Resolve the credential without exposing it through serializable config.
-    pub async fn load(secrets: &dyn SecretProvider) -> Result<Option<Self>, CodeExecutionError> {
+    pub async fn load(secrets: &dyn SecretProvider) -> Result<Option<Self>, ExecError> {
         SecretCredential::load(secrets, E2B_CREDENTIAL_KEY, "E2B")
             .await
             .map(|credential| credential.map(Self))
@@ -142,7 +141,7 @@ impl Default for E2BEndpoints {
 }
 
 impl E2BExecutionProvider {
-    pub fn new(credential: E2BCredential, timeout: Duration) -> Result<Self, CodeExecutionError> {
+    pub fn new(credential: E2BCredential, timeout: Duration) -> Result<Self, ExecError> {
         Self::with_session_pool(credential, timeout, RemoteSessionPool::default())
     }
 
@@ -150,7 +149,7 @@ impl E2BExecutionProvider {
         credential: E2BCredential,
         timeout: Duration,
         pool: RemoteSessionPool,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         Self::with_endpoints(credential, timeout, pool, E2BEndpoints::default())
     }
 
@@ -159,9 +158,9 @@ impl E2BExecutionProvider {
         timeout: Duration,
         pool: RemoteSessionPool,
         endpoints: E2BEndpoints,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         if timeout.is_zero() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "execution timeout must be positive".into(),
             ));
         }
@@ -172,9 +171,7 @@ impl E2BExecutionProvider {
             // preventing a stalled HTTP response from holding the tool forever.
             .timeout(timeout.saturating_add(E2B_TRANSPORT_GRACE))
             .build()
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("could not configure E2B transport".into())
-            })?;
+            .map_err(|_| ExecError::Unavailable("could not configure E2B transport".into()))?;
         Ok(Self {
             credential,
             timeout,
@@ -249,10 +246,7 @@ impl E2BExecutionProvider {
         ])
     }
 
-    async fn create_sandbox(
-        &self,
-        workspace_id: &str,
-    ) -> Result<RemoteSession, CodeExecutionError> {
+    async fn create_sandbox(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
         if !self.default_template || self.template_unavailable.load(Ordering::Relaxed) {
             let template = if self.default_template {
                 E2B_FALLBACK_TEMPLATE
@@ -315,7 +309,7 @@ impl E2BExecutionProvider {
             .send()
             .await
             .map_err(|_| {
-                CreateSandboxFailure::Other(CodeExecutionError::Unavailable(
+                CreateSandboxFailure::Other(ExecError::Unavailable(
                     "could not reach the E2B API".into(),
                 ))
             })?;
@@ -332,10 +326,7 @@ impl E2BExecutionProvider {
             .map_err(CreateSandboxFailure::Other)
     }
 
-    async fn connect_sandbox(
-        &self,
-        sandbox_id: &str,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    async fn connect_sandbox(&self, sandbox_id: &str) -> Result<Option<RemoteSession>, ExecError> {
         validate_sandbox_id(sandbox_id)?;
         let url = format!(
             "{}/sandboxes/{sandbox_id}/connect",
@@ -350,7 +341,7 @@ impl E2BExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach the E2B API".into()))?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -360,12 +351,13 @@ impl E2BExecutionProvider {
     async fn run_e2b_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         validate_sandbox_id(&session.sandbox_id)?;
-        let access_token = session.access_token.as_deref().ok_or_else(|| {
-            CodeExecutionError::Unavailable("E2B sandbox token is unavailable".into())
-        })?;
+        let access_token = session
+            .access_token
+            .as_deref()
+            .ok_or_else(|| ExecError::Unavailable("E2B sandbox token is unavailable".into()))?;
         let started = Instant::now();
         let request_json = serde_json::to_vec(&StartRequest {
             process: ProcessConfig {
@@ -376,9 +368,7 @@ impl E2BExecutionProvider {
             },
             stdin: false,
         })
-        .map_err(|_| {
-            CodeExecutionError::InvalidRequest("E2B request is not serializable".into())
-        })?;
+        .map_err(|_| ExecError::InvalidRequest("E2B request is not serializable".into()))?;
         let body = connect_envelope(0, &request_json)?;
         let timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
         let url = format!(
@@ -397,7 +387,7 @@ impl E2BExecutionProvider {
             .body(body)
             .send()
             .await
-            .map_err(|_| CodeExecutionError::AmbiguousExecution)?;
+            .map_err(|_| ExecError::AmbiguousExecution)?;
         if response.status() == StatusCode::NOT_FOUND
             || response.status() == StatusCode::BAD_GATEWAY
         {
@@ -416,10 +406,11 @@ impl E2BExecutionProvider {
         &self,
         builder: reqwest::RequestBuilder,
         session: &RemoteSession,
-    ) -> Result<reqwest::RequestBuilder, CodeExecutionError> {
-        let access_token = session.access_token.as_deref().ok_or_else(|| {
-            CodeExecutionError::Unavailable("E2B sandbox token is unavailable".into())
-        })?;
+    ) -> Result<reqwest::RequestBuilder, ExecError> {
+        let access_token = session
+            .access_token
+            .as_deref()
+            .ok_or_else(|| ExecError::Unavailable("E2B sandbox token is unavailable".into()))?;
         Ok(builder
             .header("E2b-Sandbox-Id", &session.sandbox_id)
             .header("E2b-Sandbox-Port", E2B_ENVD_PORT)
@@ -436,8 +427,8 @@ impl E2BExecutionProvider {
 
 #[async_trait]
 impl RemoteSandboxAdapter for E2BExecutionProvider {
-    fn kind(&self) -> CodeExecutionProviderKind {
-        CodeExecutionProviderKind::E2b
+    fn kind(&self) -> ExecProviderKind {
+        ExecProviderKind::E2b
     }
 
     fn credential_fingerprint(&self) -> [u8; 32] {
@@ -448,14 +439,11 @@ impl RemoteSandboxAdapter for E2BExecutionProvider {
         crate::remote::egress_policy_fingerprint(self.egress.as_ref())
     }
 
-    async fn create_session(
-        &self,
-        workspace_id: &str,
-    ) -> Result<RemoteSession, CodeExecutionError> {
+    async fn create_session(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
         self.create_sandbox(workspace_id).await
     }
 
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), ExecError> {
         validate_sandbox_id(&session.sandbox_id)?;
         let url = format!(
             "{}/sandboxes/{}",
@@ -468,7 +456,7 @@ impl RemoteSandboxAdapter for E2BExecutionProvider {
             .header("X-API-Key", self.credential.as_str())
             .send()
             .await
-            .map_err(|_| CodeExecutionError::Unavailable("could not reach the E2B API".into()))?;
+            .map_err(|_| ExecError::Unavailable("could not reach the E2B API".into()))?;
         if response.status() == StatusCode::NOT_FOUND || response.status().is_success() {
             return Ok(());
         }
@@ -478,15 +466,15 @@ impl RemoteSandboxAdapter for E2BExecutionProvider {
     async fn reconnect_session(
         &self,
         session: &RemoteSession,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    ) -> Result<Option<RemoteSession>, ExecError> {
         self.connect_sandbox(&session.sandbox_id).await
     }
 
     async fn run_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         self.run_e2b_command(session, request).await
     }
 }
@@ -511,9 +499,7 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
             .body(multipart.body)
             .send()
             .await
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
-            })?;
+            .map_err(|_| ExecError::Unavailable("could not reach the E2B sandbox".into()))?;
         if response.status() == StatusCode::NOT_FOUND
             || response.status() == StatusCode::BAD_GATEWAY
         {
@@ -539,13 +525,11 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
             ])
             .send()
             .await
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
-            })?;
+            .map_err(|_| ExecError::Unavailable("could not reach the E2B sandbox".into()))?;
         // The session was reconciled immediately before this call, so a 404
         // here is the file, while a routing failure surfaces as 502.
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+            return Err(ExecError::WorkspaceFileNotFound.into());
         }
         if response.status() == StatusCode::BAD_GATEWAY {
             return Err(RemoteSessionError::Missing);
@@ -577,11 +561,9 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
             })
             .send()
             .await
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("could not reach the E2B sandbox".into())
-            })?;
+            .map_err(|_| ExecError::Unavailable("could not reach the E2B sandbox".into()))?;
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(CodeExecutionError::WorkspaceFileNotFound.into());
+            return Err(ExecError::WorkspaceFileNotFound.into());
         }
         if response.status() == StatusCode::BAD_GATEWAY {
             return Err(RemoteSessionError::Missing);
@@ -626,24 +608,15 @@ impl RemoteWorkspaceAdapter for E2BExecutionProvider {
 
 #[async_trait]
 impl WorkspaceLifecycle for E2BExecutionProvider {
-    async fn create_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn create_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         create_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn connect_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<bool, CodeExecutionError> {
+    async fn connect_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<bool, ExecError> {
         connect_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn destroy_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn destroy_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
@@ -652,9 +625,9 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         with_remote_session(
             self,
@@ -670,9 +643,9 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<StagedUpload, CodeExecutionError> {
+    ) -> Result<StagedUpload, ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         stage_remote_file(self, &self.pool, workspace.as_str(), path, content).await
     }
@@ -681,7 +654,7 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> Result<Vec<u8>, CodeExecutionError> {
+    ) -> Result<Vec<u8>, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -695,7 +668,7 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> Result<WorkspaceListing, CodeExecutionError> {
+    ) -> Result<WorkspaceListing, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -707,11 +680,8 @@ impl WorkspaceLifecycle for E2BExecutionProvider {
 }
 
 #[async_trait]
-impl CodeExecutionProvider for E2BExecutionProvider {
-    async fn execute(
-        &self,
-        request: CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+impl ExecProvider for E2BExecutionProvider {
+    async fn execute(&self, request: ExecRequest) -> Result<ExecResponse, ExecError> {
         let mut response = execute_remote(self, &self.pool, request).await?;
         if self.degradation_pending.swap(false, Ordering::Relaxed) {
             response.degraded = Some(ExecDegradation::SandboxImageUnavailable);
@@ -725,17 +695,17 @@ impl CodeExecutionProvider for E2BExecutionProvider {
 }
 
 /// Why a single sandbox-creation attempt failed. Split out from
-/// [`CodeExecutionError`] because only one shape — E2B failing to resolve the
+/// [`ExecError`] because only one shape — E2B failing to resolve the
 /// template — may be retried against a different template.
 enum CreateSandboxFailure {
     TemplateMissing,
-    Other(CodeExecutionError),
+    Other(ExecError),
 }
 
 impl CreateSandboxFailure {
-    fn into_error(self, template: &str) -> CodeExecutionError {
+    fn into_error(self, template: &str) -> ExecError {
         match self {
-            Self::TemplateMissing => CodeExecutionError::Unavailable(format!(
+            Self::TemplateMissing => ExecError::Unavailable(format!(
                 "E2B could not find the sandbox template '{template}'"
             )),
             Self::Other(error) => error,
@@ -808,7 +778,7 @@ struct SandboxResponse {
     access_token: Option<String>,
 }
 
-async fn decode_session(response: Response) -> Result<RemoteSession, CodeExecutionError> {
+async fn decode_session(response: Response) -> Result<RemoteSession, ExecError> {
     if !response.status().is_success() {
         return Err(provider_status_error(response.status()));
     }
@@ -820,7 +790,7 @@ async fn decode_session(response: Response) -> Result<RemoteSession, CodeExecuti
         .access_token
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
-            CodeExecutionError::Unavailable("E2B did not return a secure sandbox token".into())
+            ExecError::Unavailable("E2B did not return a secure sandbox token".into())
         })?;
     Ok(RemoteSession {
         sandbox_id: body.sandbox_id,
@@ -829,29 +799,27 @@ async fn decode_session(response: Response) -> Result<RemoteSession, CodeExecuti
     })
 }
 
-fn provider_status_error(status: StatusCode) -> CodeExecutionError {
+fn provider_status_error(status: StatusCode) -> ExecError {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            CodeExecutionError::Unavailable("E2B credential was rejected".into())
+            ExecError::Unavailable("E2B credential was rejected".into())
         }
-        StatusCode::TOO_MANY_REQUESTS => {
-            CodeExecutionError::Unavailable("E2B rate limit exceeded".into())
-        }
-        _ => CodeExecutionError::Unavailable(format!(
+        StatusCode::TOO_MANY_REQUESTS => ExecError::Unavailable("E2B rate limit exceeded".into()),
+        _ => ExecError::Unavailable(format!(
             "E2B request failed with status {}",
             status.as_u16()
         )),
     }
 }
 
-fn validate_sandbox_id(value: &str) -> Result<(), CodeExecutionError> {
+fn validate_sandbox_id(value: &str) -> Result<(), ExecError> {
     if value.is_empty()
         || value.len() > 128
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(CodeExecutionError::Unavailable(
+        return Err(ExecError::Unavailable(
             "E2B returned an invalid sandbox identity".into(),
         ));
     }
@@ -899,20 +867,20 @@ struct ListDirEntry {
     size: Option<serde_json::Value>,
 }
 
-fn remote_cwd(cwd: &str) -> Result<String, CodeExecutionError> {
+fn remote_cwd(cwd: &str) -> Result<String, ExecError> {
     let mut remote = E2B_WORKSPACE_ROOT.to_owned();
     for component in Path::new(cwd).components() {
         match component {
             Component::CurDir => {}
             Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    CodeExecutionError::InvalidRequest("invalid working directory".into())
-                })?;
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| ExecError::InvalidRequest("invalid working directory".into()))?;
                 remote.push('/');
                 remote.push_str(part);
             }
             _ => {
-                return Err(CodeExecutionError::InvalidRequest(
+                return Err(ExecError::InvalidRequest(
                     "invalid working directory".into(),
                 ));
             }
@@ -935,10 +903,9 @@ struct ProcessConfig<'a> {
     cwd: String,
 }
 
-fn connect_envelope(flags: u8, payload: &[u8]) -> Result<Vec<u8>, CodeExecutionError> {
-    let length = u32::try_from(payload.len()).map_err(|_| {
-        CodeExecutionError::InvalidRequest("E2B request exceeds the protocol bound".into())
-    })?;
+fn connect_envelope(flags: u8, payload: &[u8]) -> Result<Vec<u8>, ExecError> {
+    let length = u32::try_from(payload.len())
+        .map_err(|_| ExecError::InvalidRequest("E2B request exceeds the protocol bound".into()))?;
     let mut encoded = Vec::with_capacity(payload.len() + 5);
     encoded.push(flags);
     encoded.extend_from_slice(&length.to_be_bytes());
@@ -949,7 +916,7 @@ fn connect_envelope(flags: u8, payload: &[u8]) -> Result<Vec<u8>, CodeExecutionE
 async fn decode_command_response(
     response: Response,
     started: Instant,
-) -> Result<CodeExecutionResponse, CodeExecutionError> {
+) -> Result<ExecResponse, ExecError> {
     let mut decoder = EnvelopeDecoder::default();
     let mut stream = response.bytes_stream();
     let mut capture = Capture::default();
@@ -957,31 +924,29 @@ async fn decode_command_response(
     let mut end_stream = false;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| CodeExecutionError::AmbiguousExecution)?;
+        let chunk = chunk.map_err(|_| ExecError::AmbiguousExecution)?;
         for envelope in decoder.decode(&chunk)? {
             if envelope.flags & CONNECT_COMPRESSED_FLAG != 0 {
-                return Err(CodeExecutionError::Unavailable(
+                return Err(ExecError::Unavailable(
                     "E2B returned unsupported compressed output".into(),
                 ));
             }
             if envelope.flags & CONNECT_END_STREAM_FLAG != 0 {
                 if end_stream {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "E2B returned duplicate stream trailers".into(),
                     ));
                 }
                 end_stream = true;
                 let end: ConnectEndStream =
                     serde_json::from_slice(&envelope.payload).map_err(|_| {
-                        CodeExecutionError::Unavailable(
-                            "E2B returned invalid stream trailers".into(),
-                        )
+                        ExecError::Unavailable("E2B returned invalid stream trailers".into())
                     })?;
                 if let Some(error) = end.error {
                     if error.code == "deadline_exceeded" {
                         return Ok(command_response(started, capture, None, true));
                     }
-                    return Err(CodeExecutionError::Unavailable(format!(
+                    return Err(ExecError::Unavailable(format!(
                         "E2B command stream failed: {}",
                         error.code
                     )));
@@ -989,12 +954,12 @@ async fn decode_command_response(
                 continue;
             }
             if end_stream {
-                return Err(CodeExecutionError::Unavailable(
+                return Err(ExecError::Unavailable(
                     "E2B returned output after stream trailers".into(),
                 ));
             }
             let event: StartResponse = serde_json::from_slice(&envelope.payload).map_err(|_| {
-                CodeExecutionError::Unavailable("E2B returned an invalid command event".into())
+                ExecError::Unavailable("E2B returned an invalid command event".into())
             })?;
             let Some(event) = event.event else {
                 continue;
@@ -1009,7 +974,7 @@ async fn decode_command_response(
             }
             if let Some(end) = event.end {
                 if process_end.is_some() {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "E2B returned duplicate process completion".into(),
                     ));
                 }
@@ -1022,9 +987,9 @@ async fn decode_command_response(
     }
 
     if decoder.has_incomplete_frame() || !end_stream {
-        return Err(CodeExecutionError::AmbiguousExecution);
+        return Err(ExecError::AmbiguousExecution);
     }
-    let end = process_end.ok_or(CodeExecutionError::AmbiguousExecution)?;
+    let end = process_end.ok_or(ExecError::AmbiguousExecution)?;
     let exit_code = end.exited.then_some(end.exit_code.unwrap_or_default());
     Ok(command_response(started, capture, exit_code, false))
 }
@@ -1034,13 +999,8 @@ fn command_response(
     capture: Capture,
     exit_code: Option<i32>,
     timed_out: bool,
-) -> CodeExecutionResponse {
-    capture.response(
-        CodeExecutionProviderKind::E2b,
-        started,
-        exit_code,
-        timed_out,
-    )
+) -> ExecResponse {
+    capture.response(ExecProviderKind::E2b, started, exit_code, timed_out)
 }
 
 #[derive(Default)]
@@ -1054,9 +1014,9 @@ struct Envelope {
 }
 
 impl EnvelopeDecoder {
-    fn decode(&mut self, chunk: &[u8]) -> Result<Vec<Envelope>, CodeExecutionError> {
+    fn decode(&mut self, chunk: &[u8]) -> Result<Vec<Envelope>, ExecError> {
         if chunk.len() > MAX_CONNECT_FRAME_BYTES.saturating_mul(2) {
-            return Err(CodeExecutionError::Unavailable(
+            return Err(ExecError::Unavailable(
                 "E2B returned an oversized stream chunk".into(),
             ));
         }
@@ -1075,7 +1035,7 @@ impl EnvelopeDecoder {
                 self.buffer[offset + 4],
             ]) as usize;
             if length > MAX_CONNECT_FRAME_BYTES {
-                return Err(CodeExecutionError::Unavailable(
+                return Err(ExecError::Unavailable(
                     "E2B returned an oversized stream frame".into(),
                 ));
             }
@@ -1083,7 +1043,7 @@ impl EnvelopeDecoder {
                 .checked_add(5)
                 .and_then(|start| start.checked_add(length))
                 .ok_or_else(|| {
-                    CodeExecutionError::Unavailable("E2B returned an invalid stream frame".into())
+                    ExecError::Unavailable("E2B returned an invalid stream frame".into())
                 })?;
             if self.buffer.len() < end {
                 break;
@@ -1098,7 +1058,7 @@ impl EnvelopeDecoder {
             self.buffer.drain(..offset);
         }
         if self.buffer.len() > MAX_CONNECT_FRAME_BYTES + 5 {
-            return Err(CodeExecutionError::Unavailable(
+            return Err(ExecError::Unavailable(
                 "E2B returned an oversized incomplete frame".into(),
             ));
         }
@@ -1481,8 +1441,8 @@ mod tests {
         connect_envelope(flags, &serde_json::to_vec(value).unwrap()).unwrap()
     }
 
-    fn request(execution: &str, workspace: &str, argument: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request(execution: &str, workspace: &str, argument: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse(execution).unwrap(),
             ExecutionWorkspaceId::parse(workspace).unwrap(),
             "/bin/echo",
@@ -1504,7 +1464,7 @@ mod tests {
         let (provider, state, server) = mock_provider(ProcessMode::Complete, None).await;
         let first_request = request("execution-1", "workspace-1", "first");
         let first = provider.execute(first_request.clone()).await.unwrap();
-        assert_eq!(first.provider, CodeExecutionProviderKind::E2b);
+        assert_eq!(first.provider, ExecProviderKind::E2b);
         assert_eq!(first.exit_code, Some(0));
         assert_eq!(first.stdout, "ok\n");
 
@@ -1512,7 +1472,7 @@ mod tests {
         assert_eq!(replay, first);
         assert_eq!(state.starts.load(Ordering::SeqCst), 1);
 
-        let conflict = CodeExecutionRequest::new(
+        let conflict = ExecRequest::new(
             first_request.execution_id.clone(),
             first_request.workspace_id.clone(),
             "/bin/echo",
@@ -1522,7 +1482,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             provider.execute(conflict).await,
-            Err(CodeExecutionError::IdentityConflict)
+            Err(ExecError::IdentityConflict)
         ));
 
         provider
@@ -1597,7 +1557,7 @@ mod tests {
             provider
                 .get_workspace_file(&workspace, &WorkspaceFilePath::parse("missing").unwrap())
                 .await,
-            Err(CodeExecutionError::WorkspaceFileNotFound)
+            Err(ExecError::WorkspaceFileNotFound)
         ));
 
         let listing = provider
@@ -1774,7 +1734,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, CodeExecutionError::Unavailable(message) if message.contains("acme-custom")),
+            matches!(&error, ExecError::Unavailable(message) if message.contains("acme-custom")),
             "unexpected error: {error:?}"
         );
         assert_eq!(
