@@ -40,14 +40,27 @@ session. Turns across all of them are serialized on the worktree.
 
 The turn lock is a per-workspace async mutex held by a session worker for the
 length of a turn, from the moment the turn row is written to the moment the
-harness reports an outcome. A worker whose turn is queued behind another waits
-on the lock rather than running, so the guarantee holds no matter which route
-started the turn — a user send, a queued follow-up, or the watch sweep.
+harness reports an outcome. The guarantee holds no matter which route started
+the turn — a user send, a queued follow-up, or the watch sweep.
 
-`submit_turn` treats a busy sibling the same way record 9 treats a busy
-session: the message parks in the session's single follow-up slot and the
-route answers `Queued`. The reader sees a queued message, not a stalled
-request, and the worker runs it when the worktree frees.
+Taking the lock *is* the reservation. No database read can stand in for it: two
+idle siblings both pass any "is a sibling running?" check before either one
+marks itself running, so a pre-flight filter answers for a moment that has
+already passed. A send therefore tries the lock and does not wait for it. If a
+sibling holds it, `submit_turn` treats that exactly as record 9 treats a busy
+session: the message parks in the session's single follow-up slot and the route
+answers `Queued`. The reader sees a queued message, not a stalled request, and
+the worker runs it when the worktree frees.
+
+A queued turn does wait on the lock, since nobody is holding a connection open
+for it. That wait keeps answering control commands, so a stop pressed while a
+message is still queued drops the turn before it starts rather than reaching
+the engine after it has begun.
+
+The lock orders the workers this process owns, which is every writer except
+one: a fenced session may have left a harness child alive in the checkout from
+before a restart. While any session in a workspace is fenced, no session in
+that workspace may start a turn. The reap that clears the fence reopens it.
 
 Concurrency lives in the conversation list. The filesystem stays single-file.
 
@@ -65,8 +78,15 @@ when another session in the workspace is running, so it looked like the
 serialization was there to reuse. It is not: the check is one-directional and
 advisory. It makes watch defer to interactive, never the reverse, and it lives
 in the sweep rather than on the turn path, so two interactive sends would sail
-straight past it. The check stays as a cheap pre-filter that avoids waking a
-harness that would only wait; the lock is what makes it a rule.
+straight past it. The sweep keeps its check, because a skipped sweep cycle
+costs nothing and comes around again. The turn path gets the lock instead.
+
+**A pre-flight check on the turn path, so a send never has to be refused.**
+Read the workspace's sessions, and park the message if any sibling is running.
+Rejected: it is a check, not a reservation. Two simultaneous first sends both
+read an idle workspace, both proceed, and one then blocks inside the worker —
+holding its HTTP request open for the length of the other's turn. Trying the
+lock costs one atomic operation and answers for the present moment.
 
 **A queue per workspace instead of per session.** One ordered queue for the
 whole worktree, drained by whichever worker is free. Rejected: it moves the
@@ -78,11 +98,19 @@ session's queued turn would mean reaching into a shared structure.
 
 - A second agent starts immediately, but its first turn may wait. The wait is
   visible as a queued message, and it is bounded by the sibling's turn.
-- A worker waiting on the lock is not reading its command channel, so a
-  shutdown or an interrupt aimed at a queued session applies after the sibling
-  turn ends. The session is not running at that point, so there is nothing in
-  flight to lose; the worker re-reads the session before it starts, and a
-  session ended during the wait never takes its turn.
+- A worker waiting on the lock still answers control, so an interrupt or a
+  shutdown aimed at a queued session takes effect while it is still queued.
+  Stopping a turn that has not started needs no engine call: dropping it is the
+  stop, and no turn row is ever written. The worker also re-reads the session
+  before it starts, so a session ended during the wait never takes its turn.
+- One fenced session closes its whole workspace to turns, not just itself. That
+  is stricter than the old rule, and deliberately so: the alternative is a
+  single-writer guarantee that holds only for the sessions this process knows
+  about. Reaping the fenced session lifts it.
+- Archiving a workspace keeps its turn lock when a worker outlived its shutdown
+  grace. Dropping it would hand the next worker on that checkout a second lock
+  over the same files, which is the one thing the lock exists to prevent. The
+  cost is a map entry per archived workspace.
 - The `session_exists` conflict now fires for watch sessions only. Clients that
   read it as "this workspace is taken" need the session list instead.
 - Per-workspace client state keyed on the workspace alone becomes wrong. The
@@ -93,4 +121,7 @@ session's queued turn would mean reaching into a shared structure.
 `cargo test -p tidebreak-server code::` covers the create guard for both kinds
 and the serialization: two interactive sessions in one workspace create
 cleanly, a turn submitted while a sibling is running comes back `Queued`, and
-the watch guard still refuses a second watch.
+the watch guard still refuses a second watch. Three tests cover the races the
+lock exists for — two idle siblings sending at once get one turn and one queue
+rather than two turns and a held request, an interrupt reaches a queued turn
+before it starts, and a fenced sibling refuses turns until it is reaped.

@@ -1152,6 +1152,279 @@ async fn a_workspace_runs_several_agents_that_take_turns_on_one_worktree() {
     .expect("the queued sibling turn never ran");
 }
 
+/// Create `count` interactive sessions in one workspace, returning their ids.
+async fn create_sibling_sessions(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    workspace: &serde_json::Value,
+    count: usize,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        let created = client
+            .post(format!(
+                "http://{addr}/code/workspaces/{}/sessions",
+                json_id(workspace)
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "harness": "claude_code",
+                "permission_mode": "plan",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            created.status(),
+            reqwest::StatusCode::CREATED,
+            "a sibling agent in one workspace must create"
+        );
+        let body: serde_json::Value = created.json().await.unwrap();
+        ids.push(json_id(&body).to_owned());
+    }
+    ids
+}
+
+#[tokio::test]
+async fn two_idle_siblings_sending_at_once_get_one_turn_and_one_queue() {
+    // Both sends leave before either session is marked Running, so no
+    // database read can tell them apart — the turn lock is the only thing
+    // that can, and taking it is the reservation. The reader sees one turn
+    // and one queued message; neither request is left open for the length of
+    // the other's turn.
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_millis(400)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+
+    let send = |session_id: String, message: &'static str| {
+        let client = client.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            let response = client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": message }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        })
+    };
+    let first = send(ids[0].clone(), "first");
+    let second = send(ids[1].clone(), "second");
+    let (first, second) = tokio::time::timeout(Duration::from_secs(20), async {
+        (first.await.unwrap(), second.await.unwrap())
+    })
+    .await
+    .expect("a send blocked on the sibling's turn instead of queueing");
+
+    for (status, body) in [&first, &second] {
+        assert_eq!(*status, reqwest::StatusCode::ACCEPTED, "unexpected: {body}");
+    }
+    // A queued reply carries the parked message and its position; a turn
+    // reply carries the turn. Exactly one of each is the whole contract.
+    let queued = [&first, &second]
+        .into_iter()
+        .filter(|(_, body)| body.get("position").is_some())
+        .count();
+    assert_eq!(
+        queued, 1,
+        "one send must queue and one must run: {first:?} {second:?}"
+    );
+
+    // Both turns still land, one after the other, on the shared checkout.
+    let parsed: Vec<CodeSessionId> = ids.iter().map(|id| id.parse().unwrap()).collect();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let mut windows = Vec::new();
+            for id in &parsed {
+                let turns = tidebreak_core::db::code::list_turns(
+                    &runtime.db,
+                    &tidebreak_core::OwnerId::local(),
+                    *id,
+                )
+                .await
+                .unwrap();
+                match turns.first() {
+                    Some(turn) if turn.status == CodeTurnStatus::Completed => {
+                        windows.push((turn.started_at, turn.ended_at.expect("a completed turn")));
+                    }
+                    _ => break,
+                }
+            }
+            if windows.len() == parsed.len() {
+                windows.sort_by_key(|(started, _)| *started);
+                assert!(
+                    windows[1].0 >= windows[0].1,
+                    "the turns overlapped on one checkout: {windows:?}"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both turns never completed");
+}
+
+#[tokio::test]
+async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
+    // A queued turn waits for the sibling's turn to end, and that wait has to
+    // keep answering control. Otherwise a stop pressed while the message is
+    // still queued is delivered only once the turn has started, which reads
+    // as the stop being ignored.
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_delay(Duration::from_millis(2_000)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+
+    let holder_id = ids[0].clone();
+    let holder = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{holder_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "long" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let first_parsed: CodeSessionId = ids[0].parse().unwrap();
+    wait_for_open_turn(&runtime, first_parsed).await;
+
+    let queued = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "queued" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(
+        queued
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+            .get("position")
+            .is_some(),
+        "the sibling send must queue while the worktree is held"
+    );
+
+    // By now the worker has taken the message out of its queue and is waiting
+    // on the checkout: parking happens before the send's response is written,
+    // so a whole HTTP round trip has passed since. The stop has to be
+    // answered from inside that wait, not after it.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(1),
+        client
+            .post(format!("http://{addr}/code/sessions/{}/interrupt", ids[1]))
+            .bearer_auth(&token)
+            .send(),
+    )
+    .await
+    .expect("the stop waited for the sibling's turn instead of being answered")
+    .unwrap();
+    assert_eq!(stopped.status(), reqwest::StatusCode::ACCEPTED);
+
+    assert_eq!(
+        holder.await.unwrap().status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let second_parsed: CodeSessionId = ids[1].parse().unwrap();
+    let turns = tidebreak_core::db::code::list_turns(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        second_parsed,
+    )
+    .await
+    .unwrap();
+    assert!(
+        turns.is_empty(),
+        "a stopped queued turn must never reach the worktree: {turns:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
+    // A fence means an engine may still be alive in this checkout from before
+    // a restart, outside every lock this process holds. The turn lock cannot
+    // order a process it does not own, so no sibling writes until the reap.
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+
+    let owner = tidebreak_core::OwnerId::local();
+    let fenced_id: CodeSessionId = ids[0].parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, fenced_id)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Fenced;
+    row.fence_reason = Some(FenceReason::OrphanAlive);
+    row.attention = Attention::new(
+        AttentionState::Fenced {
+            reason: FenceReason::OrphanAlive,
+        },
+        AttentionSource::Lifecycle,
+    );
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "while a sibling is fenced" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_fenced");
+
+    // Reaping the fenced session reopens the workspace.
+    let reaped = client
+        .post(format!("http://{addr}/code/sessions/{}/reap", ids[0]))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
+    let accepted = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "after the reap" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "the reap must reopen the workspace: {}",
+        accepted.text().await.unwrap()
+    );
+}
+
 #[tokio::test]
 async fn a_workspace_still_holds_only_one_watch_session() {
     // Watch keeps its cap: the fix loop belongs to the workspace, not to one

@@ -747,7 +747,7 @@ impl CodeRuntime {
                 ));
             }
         }
-        self.end_workspace_sessions(owner, id).await?;
+        let workers_stopped = self.end_workspace_sessions(owner, id).await?;
         remove_worktree(std::path::Path::new(&repo.root_path), path)
             .await
             .map_err(map_worktree)?;
@@ -772,13 +772,23 @@ impl CodeRuntime {
         workspace.status = CodeWorkspaceStatus::Archived;
         workspace.archived_at = Some(Utc::now());
         save_workspace(&self.db, &workspace).await?;
-        // The checkout is gone and every session on it has ended, so nothing
-        // can take this workspace's turn lock again. Restore mints a fresh
-        // one on the first session it starts.
-        self.worktree_turns
-            .lock()
-            .expect("worktree turn locks")
-            .remove(&workspace.id);
+        // Drop the turn lock only once every worker confirmed it was gone.
+        // The lock is an `Arc`, so forgetting it here does not disturb a
+        // worker that outlived its shutdown grace — it hands the *next* one a
+        // second lock over the same checkout, which is the one thing this is
+        // supposed to make impossible. Keeping the entry costs a map slot per
+        // archived workspace and keeps restore on the same lock.
+        if workers_stopped {
+            self.worktree_turns
+                .lock()
+                .expect("worktree turn locks")
+                .remove(&workspace.id);
+        } else {
+            tracing::warn!(
+                workspace = %workspace.id,
+                "code-mode: keeping the workspace turn lock; a worker outlived its shutdown"
+            );
+        }
         Ok(workspace)
     }
 
@@ -1250,58 +1260,91 @@ impl CodeRuntime {
             session.model = Some(model);
             let _ = save_session(&self.db, &session).await?;
         }
+        // A fenced sibling means an engine from a previous boot may still be
+        // alive in this checkout, outside every lock this process holds. The
+        // turn lock cannot see it, so nothing in the workspace writes until it
+        // is reaped (record 54).
+        if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
+            return Err(ServerError::conflict_kind("workspace_fenced", reason));
+        }
         // Queue-default (0009): a send while a turn is in flight parks one
         // follow-up. This does not consult mid_turn_steering — that cap
         // gates the separate /steer route only.
-        //
-        // A sibling session's turn counts as in flight too. The workspace's
-        // sessions share one checkout and take turns on it (record 54), so a
-        // send that would only wait on the turn lock parks here instead and
-        // the route answers promptly.
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
-            || get_open_turn(&self.db, owner, id).await?.is_some()
-            || self.workspace_turn_running(owner, &session).await?;
+            || get_open_turn(&self.db, owner, id).await?.is_some();
         if in_flight {
-            if !queue_follow_up(&handle, message, session.model.clone(), attachments) {
-                return Err(ServerError::conflict_kind(
-                    "queue_full",
-                    "a follow-up is already queued on this session",
-                ));
-            }
-            return Ok(SubmitTurnOutcome::Queued);
+            return self.park_follow_up(&handle, &session, message, attachments);
         }
         let (reply, rx) = oneshot::channel();
         handle
             .commands
             .send(WorkerCommand::RunTurn {
-                message,
+                message: message.clone(),
                 model: session.model.clone(),
-                attachments,
+                attachments: attachments.clone(),
                 reply,
             })
             .await
             .map_err(|_| ServerError::internal("session worker is gone"))?;
-        let turn = rx
+        let turn = match rx
             .await
             .map_err(|_| ServerError::internal("session worker dropped the turn"))?
-            .map_err(map_worker)?;
+        {
+            Ok(turn) => turn,
+            // A sibling holds the workspace's turn lock. Taking that lock is
+            // the reservation, so this is the first moment either send can
+            // know which one won — a check before the send would let two idle
+            // siblings both believe the checkout was free. The loser parks
+            // exactly as a busy session does, and the route answers now rather
+            // than holding the connection open for someone else's turn.
+            Err(WorkerError::WorktreeBusy) => {
+                return self.park_follow_up(&handle, &session, message, attachments);
+            }
+            Err(err) => return Err(map_worker(err)),
+        };
         Ok(SubmitTurnOutcome::Ran(Box::new(turn)))
     }
 
-    /// Whether another session in this session's workspace is mid-turn.
+    /// Park a message in the session's single follow-up slot (record 9).
+    fn park_follow_up(
+        &self,
+        handle: &WorkerHandle,
+        session: &CodeSession,
+        message: String,
+        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        if !queue_follow_up(handle, message, session.model.clone(), attachments) {
+            return Err(ServerError::conflict_kind(
+                "queue_full",
+                "a follow-up is already queued on this session",
+            ));
+        }
+        Ok(SubmitTurnOutcome::Queued)
+    }
+
+    /// Why this session's workspace is closed to turns, if it is.
     ///
-    /// A pre-filter, not the guarantee: the turn lock in the worker is what
-    /// actually serializes the checkout. This only keeps a send that would
-    /// block on that lock from holding its route open (record 54).
-    async fn workspace_turn_running(
+    /// The turn lock lives in this process, so it can only order the workers
+    /// this process owns. A fenced session is the one case where that is not
+    /// enough: it means a harness child outlived a restart and may still be
+    /// writing to the checkout. Until it is reaped, no sibling may start a
+    /// turn there — otherwise the single-writer rule holds only for the
+    /// sessions we happen to know about.
+    async fn workspace_fence_reason(
         &self,
         owner: &OwnerId,
         session: &CodeSession,
-    ) -> Result<bool, ServerError> {
+    ) -> Result<Option<String>, ServerError> {
         let siblings = list_sessions_for_workspace(&self.db, owner, session.workspace_id).await?;
-        Ok(siblings.iter().any(|other| {
-            other.id != session.id && other.lifecycle == CodeSessionLifecycle::Running
-        }))
+        Ok(siblings
+            .iter()
+            .find(|other| other.id != session.id && other.lifecycle == CodeSessionLifecycle::Fenced)
+            .map(|fenced| {
+                format!(
+                    "another session in this workspace is fenced until it is reaped ({})",
+                    fenced.id
+                )
+            }))
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
@@ -1664,11 +1707,17 @@ impl CodeRuntime {
         Ok(())
     }
 
+    /// End every session in a workspace.
+    ///
+    /// Returns whether every worker confirmed it stopped. A `false` means at
+    /// least one is still running somewhere with its own handle on the
+    /// workspace's turn lock.
     async fn end_workspace_sessions(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-    ) -> Result<(), ServerError> {
+    ) -> Result<bool, ServerError> {
+        let mut all_stopped = true;
         let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         for mut session in sessions {
             if session.lifecycle == CodeSessionLifecycle::Ended {
@@ -1688,7 +1737,7 @@ impl CodeRuntime {
             session.fence_reason = None;
             super::attention::persist_session(&self.db, &self.bus, &session).await?;
             if let Some(handle) = handle {
-                Self::shut_down_worker(session.id, handle).await;
+                all_stopped &= Self::shut_down_worker(session.id, handle).await;
             }
             // The outgoing worker still holds this epoch, so a persist during
             // the wait can overwrite Ended. Re-assert from a fresh load.
@@ -1703,7 +1752,7 @@ impl CodeRuntime {
                 ));
             }
         }
-        Ok(())
+        Ok(all_stopped)
     }
 
     /// Ask a superseded worker to stop, and wait for its command receiver to
@@ -1711,7 +1760,12 @@ impl CodeRuntime {
     /// enough; resending would only replay `interrupt` into an engine that is
     /// already stopping. The wait is bounded so a wedged engine cannot hold
     /// an archive or a reap open.
-    async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) {
+    ///
+    /// Returns whether the worker confirmed it was gone. That answer matters
+    /// to the caller: a worker that outlived its grace still holds this
+    /// workspace's turn lock, so anything keyed on "the checkout is now
+    /// unowned" has to stay put.
+    async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) -> bool {
         const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         let commands = handle.commands.clone();
         drop(handle);
@@ -1730,6 +1784,7 @@ impl CodeRuntime {
                 "code-mode: session worker did not stop in time; continuing without it"
             );
         }
+        stopped
     }
 
     async fn attach_and_spawn_worker(
@@ -2154,6 +2209,13 @@ fn map_worker(err: WorkerError) -> ServerError {
             ServerError::conflict_kind("steering_rejected", message)
         }
         WorkerError::Failed(message) => ServerError::internal(message),
+        // `submit_turn` intercepts this and parks the message instead, so
+        // reaching here means a caller took the turn path without handling
+        // contention. Answer as a conflict rather than a 500.
+        WorkerError::WorktreeBusy => ServerError::conflict_kind(
+            "workspace_busy",
+            "another session in this workspace is mid-turn",
+        ),
     }
 }
 
