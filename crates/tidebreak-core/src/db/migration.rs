@@ -166,6 +166,7 @@ async fn ensure_code_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+    use sea_orm_migration::prelude::SqliteQueryBuilder;
     use sea_orm_migration::MigratorTrait;
 
     use super::Migrator;
@@ -292,5 +293,79 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.try_get::<String>("", "owner").unwrap(), "local");
+    }
+    /// The baseline *is* the desktop schema, and nothing notices when it moves.
+    /// `Migrator::up` records one migration name, so SeaORM cannot tell that
+    /// the statements behind that name changed; the reset that repairs an
+    /// existing database is keyed on `DESKTOP_SCHEMA_EPOCH`, an integer a
+    /// contributor has to remember to bump in a different crate.
+    ///
+    /// Decision record 2 names this gap in its own validation section: "no
+    /// test fails if a baseline edit ships without an epoch bump. Reviewers
+    /// of a change touching `db/migration/baseline/` should confirm
+    /// `DESKTOP_SCHEMA_EPOCH` moved in the same diff." This is that test, and
+    /// it retires that review instruction.
+    ///
+    /// Like the journal shape fixtures it is a change *detector*, not a
+    /// compatibility contract. It does not know what the epoch is. It knows
+    /// the schema moved, and that a human owes it a decision.
+    ///
+    /// SQLite is what it renders: the epoch guards the desktop profile, and
+    /// one backend is enough to catch a change. A Postgres-only difference is
+    /// not something this fixture claims to see.
+    ///
+    /// Regenerate with `UPDATE_SCHEMA_FIXTURE=1 cargo test -p tidebreak-core`.
+    ///
+    /// At v1 this inverts with the rest of decision record 2: the baseline
+    /// becomes the first entry in a real chain, and the fix for a diff here
+    /// becomes an ordered migration rather than a bump.
+    #[test]
+    fn the_schema_baseline_is_pinned() {
+        const SCHEMA_FIXTURE: &str = "fixtures/schema-baseline.sql";
+
+        // sea-query renders one statement per line. Break each column and
+        // table constraint onto its own line so a one-column edit reviews as a
+        // one-line diff rather than a rewritten table. Splitting on `, ` only
+        // before a quoted identifier or a constraint keyword leaves list
+        // literals inside a CHECK alone.
+        fn readable(statement: &str) -> String {
+            statement
+                .replacen(" ( ", " (\n    ", 1)
+                .replace(", \"", ",\n    \"")
+                .replace(", CHECK", ",\n    CHECK")
+                .replace(", FOREIGN KEY", ",\n    FOREIGN KEY")
+                .replace(" )", "\n)")
+        }
+
+        let mut rendered = String::new();
+        for entry in super::baseline::tables() {
+            rendered.push_str(&readable(&entry.table.to_string(SqliteQueryBuilder)));
+            rendered.push_str(";\n\n");
+            for index in entry.indexes {
+                rendered.push_str(&index.to_string(SqliteQueryBuilder));
+                rendered.push_str(";\n");
+            }
+            rendered.push('\n');
+        }
+        for seed in super::baseline::SEED_STATEMENTS {
+            rendered.push_str(seed);
+            rendered.push_str(";\n");
+        }
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SCHEMA_FIXTURE);
+        if std::env::var_os("UPDATE_SCHEMA_FIXTURE").is_some() {
+            std::fs::create_dir_all(path.parent().expect("the fixture path has a parent"))
+                .expect("the fixture directory is creatable");
+            std::fs::write(&path, &rendered).expect("the fixture path is writable");
+            return;
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            existing, rendered,
+            "the schema baseline changed; if this is deliberate, bump \
+             DESKTOP_SCHEMA_EPOCH in tidebreak-server so existing databases are \
+             discarded, then regenerate with UPDATE_SCHEMA_FIXTURE=1 cargo \
+             test -p tidebreak-core"
+        );
     }
 }
