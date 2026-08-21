@@ -2147,10 +2147,9 @@ async fn foreground_browser_tools_reject_malformed_arguments() {
     let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
 
     // list has no required fields — an empty object must pass.
-    assert!(tools.client_arguments_are_valid(
-        tidebreak_core::BROWSER_LIST_TOOL,
-        &serde_json::json!({})
-    ));
+    assert!(
+        tools.client_arguments_are_valid(tidebreak_core::BROWSER_LIST_TOOL, &serde_json::json!({}))
+    );
     assert!(!tools.client_arguments_are_valid(
         tidebreak_core::BROWSER_LIST_TOOL,
         &serde_json::json!({ "unknown": true })
@@ -2189,10 +2188,8 @@ async fn foreground_browser_tools_reject_malformed_arguments() {
     ));
 
     // wait must have required fields and bounded timeout.
-    assert!(!tools.client_arguments_are_valid(
-        tidebreak_core::BROWSER_WAIT_TOOL,
-        &serde_json::json!({})
-    ));
+    assert!(!tools
+        .client_arguments_are_valid(tidebreak_core::BROWSER_WAIT_TOOL, &serde_json::json!({})));
     assert!(tools.client_arguments_are_valid(
         tidebreak_core::BROWSER_WAIT_TOOL,
         &serde_json::json!({
