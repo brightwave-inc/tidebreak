@@ -13,8 +13,8 @@ use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
-    ChatRootAttachment, Message, OwnerId, PermissionMode, ReasoningEffort, Role,
-    RootAttachmentOrigin, ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
+    ChatRootAttachment, Message, OwnerId, ReasoningEffort, Role, RootAttachmentOrigin,
+    ToolCallRecord, TurnRunStatus, MAX_ROOT_ATTACHMENTS,
 };
 use crate::provider::MessageReasoning;
 use crate::storage::{
@@ -22,6 +22,7 @@ use crate::storage::{
     ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MessageInvokedSkills,
     MoveChatOutcome,
 };
+use crate::PermissionMode;
 
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::blob as blob_ops;

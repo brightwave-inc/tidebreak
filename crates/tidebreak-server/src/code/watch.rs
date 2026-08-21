@@ -25,9 +25,9 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, save_watch,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodePermissionMode, CodeSessionKind, CodeSessionLifecycle,
-    CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId,
-    PullRequestDigest, WorkspaceId,
+    Attention, AttentionSource, CodeSessionKind, CodeSessionLifecycle, CodeWatch, CodeWatchId,
+    CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, PullRequestDigest,
+    WorkspaceId,
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
@@ -272,7 +272,7 @@ impl CodeRuntime {
                 CodeSessionKind::Watch,
                 harness,
                 NewSessionSettings {
-                    permission_mode: CodePermissionMode::Auto,
+                    permission_mode: PermissionMode::Auto,
                     model,
                     // A watch task inherits the engine and model of the
                     // session that spawned it, but not an effort a person

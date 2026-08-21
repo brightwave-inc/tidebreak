@@ -153,7 +153,7 @@ mod tests {
     use crate::opencode::session::{compose_serve_plan, session_create_body};
     use crate::{ApprovalDecision, HarnessEvent};
     use std::path::PathBuf;
-    use tidebreak_core::CodePermissionMode;
+    use tidebreak_core::PermissionMode;
 
     fn fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/1.18.18")
@@ -357,9 +357,9 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("dangerous") || arg == "--auto"));
         for mode in [
-            CodePermissionMode::Plan,
-            CodePermissionMode::Ask,
-            CodePermissionMode::Auto,
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::Auto,
         ] {
             let body = session_create_body(mode, None);
             assert_ne!(body.get("agent").and_then(|v| v.as_str()), Some(""));
@@ -370,7 +370,7 @@ mod tests {
                 );
             }
         }
-        let allow = session_create_body(CodePermissionMode::Allow, None);
+        let allow = session_create_body(PermissionMode::Allow, None);
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));
     }

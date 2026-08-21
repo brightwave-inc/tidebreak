@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, CodePermissionMode, HarnessCaps, HarnessKind, ReasoningEffort};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, PermissionMode, ReasoningEffort};
 use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
@@ -88,7 +88,7 @@ pub(crate) struct ScriptedAdapter {
     /// The effort each turn ran at, and every mode a live switch moved this
     /// engine onto. Shared with the session so both survive a relaunch.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
-    modes: Arc<std::sync::Mutex<Vec<CodePermissionMode>>>,
+    modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
@@ -198,7 +198,7 @@ impl ScriptedAdapter {
     }
 
     /// Every mode a live switch moved this engine onto, in order.
-    pub(crate) fn live_modes(&self) -> Vec<CodePermissionMode> {
+    pub(crate) fn live_modes(&self) -> Vec<PermissionMode> {
         self.modes.lock().expect("scripted modes").clone()
     }
 
@@ -349,7 +349,7 @@ struct ScriptedSession {
     /// Shared with the adapter so a test can read what the engine was told
     /// after the runtime has dropped and relaunched the session.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
-    modes: Arc<std::sync::Mutex<Vec<CodePermissionMode>>>,
+    modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
 }
 
 impl ScriptedSession {
@@ -438,7 +438,7 @@ impl HarnessSession for ScriptedSession {
         self.approver.complete(&approval.call_id, decision).await
     }
 
-    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         if !self.live_mode_switch {
             return Err(HarnessError::PermissionModeSwitchUnsupported);
         }

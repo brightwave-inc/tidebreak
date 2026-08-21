@@ -11,13 +11,13 @@ use crate::event::AgentEvent;
 use crate::id::{AgentRunId, CallId, ChatId, TurnId};
 use crate::image::ImageAttachments;
 use crate::model::{
-    Chat, PermissionMode, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus,
+    Chat, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
 };
 use crate::preview::{ToolActionPreview, ToolResultPreview};
 use crate::provider::{ChatMessage, ContentBlock, MessageReasoning};
 use crate::storage::ResolveToolCallOutcome;
 use crate::tool::{ApprovalClass, ToolCtx, ToolErrorCategory, ToolOutput};
+use crate::PermissionMode;
 
 use super::events::EventSink;
 use super::transcript::{

@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
     AgentError, Attention, CapLevel, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus,
-    CodeUsage, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId, Result, WorkspaceId,
+    CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeUsage,
+    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
+    HarnessTier, PermissionMode, PullRequestDigest, QuickAction, RepoId, Result, WorkspaceId,
 };
 
 use super::client::{Client, EventSocket};
@@ -62,7 +62,7 @@ pub struct CodeSessionSnapshot {
     pub harness_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_resume_ref: Option<String>,
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub lifecycle: CodeSessionLifecycle,
@@ -398,7 +398,7 @@ impl Client {
         &self,
         workspace: WorkspaceId,
         harness: HarnessKind,
-        permission_mode: CodePermissionMode,
+        permission_mode: PermissionMode,
     ) -> Result<CodeSessionSnapshot> {
         self.post_json(
             format!("{}/code/workspaces/{workspace}/sessions", self.base_url()),
@@ -449,7 +449,7 @@ impl Client {
     pub async fn set_session_permission_mode(
         &self,
         session: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
     ) -> Result<CodeSessionSnapshot> {
         self.post_json(
             format!("{}/code/sessions/{session}/mode", self.base_url()),

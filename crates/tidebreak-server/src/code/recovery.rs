@@ -314,9 +314,9 @@ mod tests {
         set_session_subagents,
     };
     use tidebreak_core::{
-        Attention, CodePermissionMode, CodeRepo, CodeSessionId, CodeSessionKind,
-        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-        RepoId, WorkspaceId,
+        Attention, CodeRepo, CodeSessionId, CodeSessionKind, CodeSubagentSummary, CodeTurn,
+        CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId,
+        WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
@@ -441,7 +441,7 @@ mod tests {
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
                 harness_resume_ref: None,
-                permission_mode: CodePermissionMode::Plan,
+                permission_mode: PermissionMode::Plan,
                 model: None,
                 reasoning_effort: None,
                 lifecycle,
@@ -625,7 +625,7 @@ mod tests {
         .with_delay(std::time::Duration::from_secs(30))
         .launch(tidebreak_harness::SessionSpec {
             worktree: _dir.path().join("wt"),
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             resume_ref: None,

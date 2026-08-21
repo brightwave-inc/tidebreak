@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::id::{ChatId, HostRootId, ProjectId};
 
-use super::chat_settings::{NetworkPolicy, PermissionMode, ReasoningEffort};
+use super::chat_settings::{NetworkPolicy, ReasoningEffort};
 use super::identity::{
     ChatRootAttachment, Project, RootAttachmentOrigin, MAX_ATTACHMENT_REVISION,
     MAX_ROOT_ATTACHMENTS,
@@ -12,6 +12,7 @@ use super::identity::{
 use super::messages::{ToolCallRecord, ToolCallResolution};
 use super::turns::{TurnCheckpointProgress, TurnRun};
 use crate::provider::Usage;
+use crate::PermissionMode;
 
 /// A persistent conversation with an exact, ordered host-root projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]

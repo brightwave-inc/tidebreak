@@ -1,9 +1,9 @@
 use super::temp_store;
 use crate::code::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
-    CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+    CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
+    CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_repo_by_root_path, get_session,
@@ -13,6 +13,7 @@ use crate::db::code::{
     CodeJournalError, MAX_REPLAY_EVENTS,
 };
 use crate::OwnerId;
+use crate::PermissionMode;
 use chrono::Utc;
 
 fn now() -> chrono::DateTime<Utc> {
@@ -91,7 +92,7 @@ async fn seed_owner(
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("2.1.233".into()),
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Ask,
+            permission_mode: PermissionMode::Ask,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,
@@ -897,7 +898,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Auto,
+            permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Running,

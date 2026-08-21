@@ -17,9 +17,9 @@ use tidebreak_core::{
     BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
     BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
     BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSessionSummary, BrowserSnapshotArgs,
-    BrowserViewport, BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodePermissionMode,
-    CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
-    CodeWorkspaceStatus, DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
+    BrowserViewport, BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodeRepo, CodeSession,
+    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus,
+    DbStore, HarnessKind, OwnerId, PermissionMode, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -284,7 +284,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
         harness_resume_ref: None,
-        permission_mode: CodePermissionMode::Ask,
+        permission_mode: PermissionMode::Ask,
         model: None,
         reasoning_effort: None,
         lifecycle: lc,

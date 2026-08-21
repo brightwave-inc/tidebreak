@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ApiClient } from "../api/client";
 import type {
-  CodePermissionMode,
+  PermissionMode,
   HarnessDoctorEntry,
   HarnessKind,
   ModelInfo,
@@ -51,11 +51,11 @@ export function StartSessionPrompt({
   workspaceId: string;
   harnesses: HarnessDoctorEntry[];
   starting: boolean;
-  selectedMode: CodePermissionMode | null;
-  onSelectMode: (mode: CodePermissionMode) => void;
+  selectedMode: PermissionMode | null;
+  onSelectMode: (mode: PermissionMode) => void;
   onStart: (
     harness: HarnessKind,
-    mode: CodePermissionMode,
+    mode: PermissionMode,
     message: string,
     model?: string,
   ) => Promise<void> | void;
@@ -79,7 +79,7 @@ export function StartSessionPrompt({
       (entry) => entry.kind === picked && !harnessUnusableReason(entry),
     ) ?? ready[0];
   const availableModes = selected ? createPermissionModes(selected.caps) : [];
-  const mode: CodePermissionMode =
+  const mode: PermissionMode =
     selectedMode && availableModes.includes(selectedMode)
       ? selectedMode
       : selected

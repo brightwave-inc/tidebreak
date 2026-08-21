@@ -605,10 +605,8 @@ fn render_header(
     let _ = writeln!(
         out,
         "| Permission mode | {} |",
-        chat.permission_mode.map_or(
-            "ask (default)",
-            tidebreak_core::model::PermissionMode::as_str
-        ),
+        chat.permission_mode
+            .map_or("ask (default)", tidebreak_core::PermissionMode::as_str),
     );
     let _ = writeln!(
         out,
@@ -1329,9 +1327,10 @@ mod tests {
     use super::*;
     use tidebreak_core::error::AgentErrorInfo;
     use tidebreak_core::id::{CallId, MessageId, TurnId};
-    use tidebreak_core::model::{NetworkPolicy, PermissionMode, Role, TurnRunStatus};
+    use tidebreak_core::model::{NetworkPolicy, Role, TurnRunStatus};
     use tidebreak_core::provider::Usage;
     use tidebreak_core::tool::ToolOutput;
+    use tidebreak_core::PermissionMode;
     use tidebreak_core::{AgentRunId, ProjectId};
 
     fn at(seconds: i64) -> DateTime<Utc> {

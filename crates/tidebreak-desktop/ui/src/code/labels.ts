@@ -1,6 +1,6 @@
 import type {
   Attention,
-  CodePermissionMode,
+  PermissionMode,
   CodeSessionLifecycle,
   CodeWorkspaceStatus,
   FenceReason,
@@ -80,7 +80,7 @@ export const WORKSPACE_STATUS_LABELS: Record<CodeWorkspaceStatus, string> = {
   released: "Released",
 };
 
-export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
+export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
   plan: "Plan",
   ask: "Ask",
   auto: "Auto",
@@ -167,9 +167,7 @@ export function autoIsUnsupervised(caps: ModeCaps): boolean {
  * where the work runs. The mode is never silent: whichever surface offers it
  * states the posture next to the control (decisions 0033, 0038).
  */
-export function defaultCreatePermissionMode(
-  caps: ModeCaps,
-): CodePermissionMode {
+export function defaultCreatePermissionMode(caps: ModeCaps): PermissionMode {
   if (caps.allow_mode === "supported") return "allow";
   if (caps.auto_mode === "supported") return "auto";
   if (caps.structured_approvals === "supported") return "ask";
@@ -182,8 +180,8 @@ export function harnessHonorsTurnModel(kind: HarnessKind): boolean {
 }
 
 /** The modes create may post for this engine, each on its own flag. */
-export function createPermissionModes(caps: ModeCaps): CodePermissionMode[] {
-  const modes: CodePermissionMode[] = [];
+export function createPermissionModes(caps: ModeCaps): PermissionMode[] {
+  const modes: PermissionMode[] = [];
   if (caps.plan_mode === "supported") modes.push("plan");
   if (caps.structured_approvals === "supported") modes.push("ask");
   if (caps.auto_mode === "supported") modes.push("auto");

@@ -26,14 +26,14 @@ use crate::event::AgentEvent;
 use crate::id::{AgentRunId, ProjectId};
 use crate::image::ImageRef;
 use crate::model::{
-    Chat, MessageAttachment, PermissionMode, Project, ToolCallExecution, ToolCallStatus,
-    TurnRunStatus,
+    Chat, MessageAttachment, Project, ToolCallExecution, ToolCallStatus, TurnRunStatus,
 };
 use crate::provider::{ChatRequest, ProviderEvent, ProviderId, ToolChoice, Usage, VendorWebSearch};
 use crate::semantic_checkpoint::{ContextCheckpoint, ContextCheckpointPayloadV2};
 use crate::storage::AcceptClaimedToolCallOutcome;
 use crate::tool::{ApprovalClass, Tool, ToolCtx, ToolErrorCategory, ToolScratch, ToolSpec};
 use crate::tools::{ListDir, ReadFile, WriteFile};
+use crate::PermissionMode;
 
 fn tool_scratch(path: &std::path::Path) -> ToolScratch {
     ToolScratch::from_dir(
@@ -5571,10 +5571,7 @@ async fn standing_grant_for_another_chat_does_not_bypass_the_gate() {
     assert_eq!(ran.load(Ordering::SeqCst), 0, "RefuseGate blocks the tool");
 }
 
-async fn permission_mode_chat(
-    store: &Arc<dyn Store>,
-    mode: Option<crate::model::PermissionMode>,
-) -> Chat {
+async fn permission_mode_chat(store: &Arc<dyn Store>, mode: Option<crate::PermissionMode>) -> Chat {
     let chat = Chat {
         id: ChatId::new(),
         project_id: None,
@@ -5700,7 +5697,7 @@ async fn ask_mode_parks_workspace_writes_by_default() {
 #[tokio::test]
 async fn auto_mode_runs_workspace_writes_without_asking() {
     let store = search_grant_store().await;
-    let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Auto)).await;
+    let chat = permission_mode_chat(&store, Some(crate::PermissionMode::Auto)).await;
 
     let ran = Arc::new(AtomicUsize::new(0));
     let agent = workspace_write_agent(store, ran.clone());
@@ -5725,7 +5722,7 @@ async fn auto_mode_runs_workspace_writes_without_asking() {
 #[tokio::test]
 async fn allow_mode_runs_sensitive_without_the_gate() {
     let store = search_grant_store().await;
-    let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Allow)).await;
+    let chat = permission_mode_chat(&store, Some(crate::PermissionMode::Allow)).await;
 
     let ran = Arc::new(AtomicUsize::new(0));
     let agent = search_agent(
@@ -5754,7 +5751,7 @@ async fn allow_mode_runs_sensitive_without_the_gate() {
 #[tokio::test]
 async fn plan_mode_refuses_workspace_writes_without_parking() {
     let store = search_grant_store().await;
-    let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Plan)).await;
+    let chat = permission_mode_chat(&store, Some(crate::PermissionMode::Plan)).await;
 
     let ran = Arc::new(AtomicUsize::new(0));
     let agent = workspace_write_agent(store, ran.clone());
@@ -5788,7 +5785,7 @@ async fn plan_mode_standing_grant_does_not_bypass_the_refusal() {
     use crate::approval::{GrantLevel, StandingGrant, StandingGrants};
 
     let store = search_grant_store().await;
-    let chat = permission_mode_chat(&store, Some(crate::model::PermissionMode::Plan)).await;
+    let chat = permission_mode_chat(&store, Some(crate::PermissionMode::Plan)).await;
     let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
         GrantLevel::Chat { chat_id: chat.id },
         "search",

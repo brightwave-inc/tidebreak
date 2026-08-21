@@ -16,8 +16,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BoundedError, CodePermissionMode, CodeUsage, Diffstat, FileChangeKind, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, ReasoningEffort, ToolDetail, ToolOutcome,
+    BoundedError, CodeUsage, Diffstat, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind,
+    HarnessNoticeLevel, PermissionMode, ReasoningEffort, ToolDetail, ToolOutcome,
 };
 
 pub mod browser_channel;
@@ -383,7 +383,7 @@ pub struct SessionSpec {
     /// Worktree the engine should use as its working directory.
     pub worktree: PathBuf,
     /// Permission mode. Adapters refuse a mode they cannot honor.
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     /// Engine model id, when the session chose one.
     pub model: Option<String>,
     /// Reasoning effort the session starts on, when it chose one.
@@ -490,7 +490,7 @@ pub trait HarnessSession: Send + Sync {
     /// An adapter that accepts the change owns remembering it: a later
     /// relaunch of the same session must compose the new mode, not the one the
     /// spec was built with.
-    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         let _ = mode;
         Err(HarnessError::PermissionModeSwitchUnsupported)
     }
@@ -581,7 +581,7 @@ pub enum HarnessError {
     LaunchRejected(#[from] BypassFlagError),
     /// The engine cannot honor the requested permission mode.
     #[error("permission mode {0} is not available on this engine")]
-    PermissionModeUnsupported(CodePermissionMode),
+    PermissionModeUnsupported(PermissionMode),
     /// The engine no longer knows the session this spec asked to resume.
     ///
     /// The stored resume ref is dead: retrying with it fails identically

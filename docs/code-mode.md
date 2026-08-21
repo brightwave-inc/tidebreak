@@ -51,7 +51,8 @@ crates/tidebreak-core/src/code/
   event.rs       CodeEvent, SequencedCodeEvent (conventions of src/event.rs)
   attention.rs   AttentionState, AttentionSource, should_replace
   caps.rs        HarnessCaps, CapLevel, HarnessTier
-  permission.rs  CodePermissionMode { Plan, Ask, Auto, Allow } and its per-mode contract
+  (permission)   PermissionMode { Plan, Ask, Auto, Allow }, shared with chat
+                 (decision 48 step 2), and its per-mode contract
 
 crates/tidebreak-core/src/db/entities.rs      six new entities (below)
 crates/tidebreak-core/src/db/ops/code/        repo.rs, workspace.rs, session.rs,

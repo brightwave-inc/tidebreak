@@ -18,10 +18,10 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
-    CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace,
-    CodeWorkspaceStatus, DbStore, Diffstat, FenceReason, HarnessKind, OwnerId, ReasoningEffort,
-    RepoId, WorkspaceId,
+    CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
+    Diffstat, FenceReason, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId,
+    WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -191,7 +191,7 @@ pub(crate) struct CodeRuntime {
 /// against the same session row.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NewSessionSettings {
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     pub model: Option<String>,
     /// `None` leaves the engine's own default in force.
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -1862,7 +1862,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         id: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
     ) -> Result<CodeSession, ServerError> {
         let session = self.get_session(owner, id).await?;
         if session.permission_mode == mode {
@@ -1930,7 +1930,7 @@ impl CodeRuntime {
     async fn repostured_in_place(
         &self,
         id: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
     ) -> Result<bool, ServerError> {
         let Ok(handle) = self.require_worker(id) else {
             return Ok(false);
@@ -1958,8 +1958,8 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         session: &CodeSession,
-        previous: CodePermissionMode,
-        mode: CodePermissionMode,
+        previous: PermissionMode,
+        mode: PermissionMode,
     ) {
         let _ = super::session_worker::journal_event(
             &self.db,
@@ -2592,9 +2592,9 @@ impl CodeRuntime {
     fn approval_channel(
         &self,
         session_id: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
     ) -> Option<ApprovalChannelSpec> {
-        if !matches!(mode, CodePermissionMode::Ask | CodePermissionMode::Auto) {
+        if !matches!(mode, PermissionMode::Ask | PermissionMode::Auto) {
             return None;
         }
         let base = self.loopback_base.lock().expect("loopback base").clone()?;
@@ -2762,32 +2762,32 @@ fn normalize_model(model: Option<String>) -> Option<String> {
 
 fn refuse_unhonored_mode(
     harness: HarnessKind,
-    mode: CodePermissionMode,
+    mode: PermissionMode,
     caps: &tidebreak_core::HarnessCaps,
 ) -> Result<(), ServerError> {
     // Each mode stands on its own capability flag (decision 0038): Auto is
     // never derived from the approval channel, so an engine whose only
     // honest posture is unsupervised Auto can still be driven.
     let ok = match mode {
-        CodePermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
-        CodePermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
-        CodePermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
-        CodePermissionMode::Allow => caps.allow_mode == CapLevel::Supported,
+        PermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
+        PermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
+        PermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
+        PermissionMode::Allow => caps.allow_mode == CapLevel::Supported,
     };
     if ok {
         return Ok(());
     }
     let reason = match mode {
-        CodePermissionMode::Plan => format!("{harness} cannot honor plan mode"),
-        CodePermissionMode::Ask => format!(
+        PermissionMode::Plan => format!("{harness} cannot honor plan mode"),
+        PermissionMode::Ask => format!(
             "{harness} cannot honor {mode}: structured approvals are {}",
             caps.structured_approvals.as_str()
         ),
-        CodePermissionMode::Auto => format!(
+        PermissionMode::Auto => format!(
             "{harness} cannot honor {mode}: an auto posture is {}",
             caps.auto_mode.as_str()
         ),
-        CodePermissionMode::Allow => format!(
+        PermissionMode::Allow => format!(
             "{harness} cannot honor {mode}: an allow-all posture is {}",
             caps.allow_mode.as_str()
         ),

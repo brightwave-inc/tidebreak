@@ -135,7 +135,6 @@ import {
   type CodeApprovalSnapshot as WireCodeApprovalSnapshot,
   type CodeApprovalState as WireCodeApprovalState,
   type CodeEvent as WireCodeEvent,
-  type CodePermissionMode as WireCodePermissionMode,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
   type CodeSessionId as WireCodeSessionId,
   type CodeSessionKind as WireCodeSessionKind,
@@ -1118,7 +1117,6 @@ export type CodeSessionSnapshot = WireCodeSessionSnapshot;
 export type CodeSessionId = WireCodeSessionId;
 export type CodeSessionKind = WireCodeSessionKind;
 export type CodeSessionLifecycle = WireCodeSessionLifecycle;
-export type CodePermissionMode = WireCodePermissionMode;
 export type FenceReason = WireFenceReason;
 export type Attention = WireAttention;
 export type AttentionState = WireAttentionState;

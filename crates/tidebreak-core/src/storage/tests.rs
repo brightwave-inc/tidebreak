@@ -22,10 +22,10 @@ use crate::model::{
 };
 use crate::model::{
     BeginRootAttachmentChange, Chat, DocumentListCursor, DocumentRecord, DocumentScope,
-    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, PermissionMode, Project,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution,
+    DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, Project, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
 };
+use crate::PermissionMode;
 
 /// Minimal in-memory `Store` — proves the trait is object-safe and usable
 /// behind `Arc<dyn Store>`, and exercises the signatures.

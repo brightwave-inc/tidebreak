@@ -78,6 +78,8 @@ pub mod image;
 pub mod keychain;
 pub mod local_app;
 pub mod model;
+pub mod permission;
+pub use permission::PermissionMode;
 #[cfg(feature = "tools")]
 pub mod output_scan;
 pub mod plan_mode;
@@ -168,15 +170,15 @@ pub use client_tools::{
 pub use code::{
     bound_subagents, should_replace, ApprovalDecisionKind, Attention, AttentionSource,
     AttentionState, BoundedError, CapLevel, CheckpointHint, CodeApproval, CodeApprovalId,
-    CodeApprovalKind, CodeApprovalState, CodeEvent, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
-    CodeUsage, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus,
-    Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind,
-    HarnessNoticeLevel, HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestComment,
-    PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail,
-    ToolOutcome, WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS,
-    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    CodeApprovalKind, CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionActivity,
+    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary,
+    CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatch,
+    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
+    FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier,
+    PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
+    PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
+    MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
@@ -244,17 +246,17 @@ pub use model::{
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
     ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
     ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
-    PermissionMode, Project, QueuedTurn, ReasoningEffort, Role, RootAttachmentChange,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
-    RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
-    SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
-    SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
-    SandboxToolCallStatus, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
-    TurnAdmissionLease, TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
-    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
-    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
-    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES,
-    MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
+    Project, QueuedTurn, ReasoningEffort, Role, RootAttachmentChange, RootAttachmentChangeAction,
+    RootAttachmentChangeFailure, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxSpawnCheckpoint,
+    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
+    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, ToolCallExecution,
+    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAdmissionLease, TurnAdmissionRequest,
+    TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait,
+    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
+    TurnSteerStatus, EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION,
+    MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS,
+    MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(feature = "tools")]
 pub use output_scan::{

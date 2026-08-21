@@ -6,7 +6,7 @@ import type {
   CodeApprovalSnapshot,
   CodeApprovalState,
   CodeEvent,
-  CodePermissionMode,
+  PermissionMode,
   CodeRepoSnapshot,
   CodeSessionActivity,
   CodeSessionLifecycle,
@@ -159,7 +159,7 @@ const HARNESS_TIERS = new Set<HarnessTier>([
   "best_effort",
 ]);
 const CAP_LEVELS = new Set<CapLevel>(["supported", "unsupported", "unknown"]);
-const PERMISSION_MODES = new Set<CodePermissionMode>([
+const PERMISSION_MODES = new Set<PermissionMode>([
   "plan",
   "ask",
   "auto",

@@ -505,21 +505,21 @@ mod tests {
     #[test]
     fn permission_mode_mapping_is_explicit() {
         use crate::claude::session::permission_mode_flags;
-        use tidebreak_core::CodePermissionMode;
+        use tidebreak_core::PermissionMode;
         assert_eq!(
-            permission_mode_flags(CodePermissionMode::Plan),
+            permission_mode_flags(PermissionMode::Plan),
             ["--permission-mode", "plan"]
         );
         assert_eq!(
-            permission_mode_flags(CodePermissionMode::Ask),
+            permission_mode_flags(PermissionMode::Ask),
             ["--permission-mode", "manual"]
         );
         assert_eq!(
-            permission_mode_flags(CodePermissionMode::Auto),
+            permission_mode_flags(PermissionMode::Auto),
             ["--permission-mode", "acceptEdits"]
         );
         assert_eq!(
-            permission_mode_flags(CodePermissionMode::Allow),
+            permission_mode_flags(PermissionMode::Allow),
             [
                 "--dangerously-skip-permissions",
                 "--allow-dangerously-skip-permissions"

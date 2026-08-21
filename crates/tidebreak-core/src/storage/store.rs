@@ -20,13 +20,13 @@ use crate::model::{
     BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord,
     DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord,
-    ToolCallResolution, TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
-    TurnSteer,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedTurn, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
+    TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
 };
 use crate::provider::{RefusalOutcome, StopReason, Usage};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
+use crate::PermissionMode;
 use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
 
 use super::types::*;

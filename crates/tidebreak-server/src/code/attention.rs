@@ -525,7 +525,7 @@ mod tests {
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: tidebreak_core::CodePermissionMode::Plan,
+            permission_mode: tidebreak_core::PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,
