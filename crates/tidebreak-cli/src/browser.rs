@@ -904,6 +904,32 @@ mod tests {
 
     const VALID_TOKEN: &str = "tbreak_bt_00000000-0000-0000-0000-000000000000";
 
+    /// Serialize and unwind-safely restore the short process-environment
+    /// mutation needed to prove reqwest ignores ambient proxy settings.
+    static PROXY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     /// Extract the error from `BrowserCapfile::load` without requiring
     /// `Debug` on the `Ok` type. `BrowserCapfile` intentionally does not
     /// implement `Debug` because it carries the bearer token, so
@@ -2205,14 +2231,45 @@ mod tests {
     /// Authorization bearer through the proxy.
     #[tokio::test]
     async fn browser_client_ignores_ambient_http_proxy() {
-        // Set HTTP_PROXY to an unreachable address.
-        let proxy_guard = std::env::var("HTTP_PROXY").ok();
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:65535")
-
-        // Build a real client — must not fail on proxy resolution since
-        // .no_proxy() tells reqwest to skip proxy configuration.
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+
+        // A client that honored the ambient proxy would send its bearer here
+        // and receive a 502 instead of reaching the browser endpoint.
+        let proxy_handle = tokio::spawn(async move {
+            let (stream, _) = proxy_listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+            loop {
+                let mut line = String::new();
+                if tokio::io::AsyncBufReadExt::read_line(&mut buf_reader, &mut line)
+                    .await
+                    .unwrap()
+                    == 0
+                    || line == "\r\n"
+                    || line == "\n"
+                {
+                    break;
+                }
+            }
+            let body = serde_json::json!({
+                "kind": "proxy_used",
+                "message": "browser request reached ambient proxy"
+            });
+            let body_bytes = serde_json::to_vec(&body).unwrap();
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body_bytes.len()
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut writer, response.as_bytes())
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
+                .await
+                .unwrap();
+        });
 
         let handle = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -2254,18 +2311,27 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
         };
-        let client = BrowserClient::new(&cap).unwrap();
-        let mut test_client = client.clone();
-        test_client.endpoint = format!("http://127.0.0.1:{}/code/browser/list", addr.port());
+        let client = {
+            let _env_lock = PROXY_ENV_LOCK.lock().await;
+            let proxy_url = format!("http://{proxy_addr}");
+            let _proxy_env = [
+                ScopedEnv::set("HTTP_PROXY", &proxy_url),
+                ScopedEnv::set("http_proxy", &proxy_url),
+                ScopedEnv::set("ALL_PROXY", &proxy_url),
+                ScopedEnv::set("all_proxy", &proxy_url),
+                ScopedEnv::set("NO_PROXY", ""),
+                ScopedEnv::set("no_proxy", ""),
+            ];
+            BrowserClient::new(&cap).unwrap()
+        };
 
-        let result = browser_list(&test_client).await;
-        let req_headers = handle.await.unwrap();
-
-        // Restore HTTP_PROXY.
-        match proxy_guard {
-            Some(v) => std::env::set_var("HTTP_PROXY", v),
-            None => std::env::remove_var("HTTP_PROXY"),
-        }
+        let result = browser_list(&client).await;
+        let req_headers = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("direct browser endpoint was not reached")
+            .unwrap();
+        proxy_handle.abort();
+        let _ = proxy_handle.await;
 
         // The request must reach the listener, not the bogus proxy.
         assert!(result.is_ok(), "request must bypass ambient proxy: {result:?}");
