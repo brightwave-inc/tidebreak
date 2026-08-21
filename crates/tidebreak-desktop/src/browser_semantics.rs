@@ -535,8 +535,6 @@ fn marker_for_snapshot(snapshot_id: &str) -> String {
     format!("__tidebreak_ref_{}", snapshot_id.replace('-', ""))
 }
 
-
-
 // ── Deterministic waits ─────────────────────────────────────────────
 
 pub(crate) async fn browser_wait(
@@ -623,12 +621,8 @@ async fn poll_wait_condition(
         }
 
         let satisfied = match &arguments.condition {
-            BrowserWaitCondition::LoadState { state } => {
-                snapshot.load_state == Some(*state)
-            }
-            BrowserWaitCondition::UrlChanged => {
-                snapshot.url != start_url
-            }
+            BrowserWaitCondition::LoadState { state } => snapshot.load_state == Some(*state),
+            BrowserWaitCondition::UrlChanged => snapshot.url != start_url,
             BrowserWaitCondition::TextPresent { text } => {
                 page_contains_text(&webview, text).await.unwrap_or(false)
             }
@@ -780,9 +774,7 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
 
     impl NSData {
         unsafe fn bytes(&self) -> *const u8 {
-            let sel = sel_registerName(
-                b"bytes\0".as_ptr() as *const std::ffi::c_char
-            );
+            let sel = sel_registerName(b"bytes\0".as_ptr() as *const std::ffi::c_char);
             objc_msgSend(
                 (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
                 sel,
@@ -790,9 +782,7 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
         }
 
         unsafe fn len(&self) -> usize {
-            let sel = sel_registerName(
-                b"length\0".as_ptr() as *const std::ffi::c_char
-            );
+            let sel = sel_registerName(b"length\0".as_ptr() as *const std::ffi::c_char);
             objc_msgSend(
                 (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
                 sel,
@@ -806,42 +796,38 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
     webview
         .with_webview(move |platform| unsafe {
             let view: &WKWebView = &*platform.inner().cast();
-            let handler = RcBlock::new(
-                move |snapshot: *mut AnyObject, error: *mut NSError| {
-                    let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) else {
-                        return;
-                    };
-                    if !error.is_null() {
-                        let msg = (&*error).localizedDescription().to_string();
-                        let _ = sender.send(Err(format!("screenshot failed: {msg}")));
-                        return;
-                    }
-                    if snapshot.is_null() {
-                        let _ = sender.send(Err("screenshot produced no image".to_owned()));
-                        return;
-                    }
-                    // Call TIFFRepresentation on NSImage
-                    let sel = sel_registerName(
-                        b"TIFFRepresentation\0".as_ptr() as *const std::ffi::c_char,
-                    );
-                    let tiff: *mut NSData =
-                        objc_msgSend(snapshot as *mut c_void, sel).cast();
-                    if tiff.is_null() {
-                        let _ = sender.send(Err("screenshot TIFF conversion failed".to_owned()));
-                        return;
-                    }
-                    let bytes = (&*tiff).bytes();
-                    let len = (&*tiff).len();
-                    let buf = std::slice::from_raw_parts(bytes, len);
-                    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-                    let b64 = BASE64.encode(buf);
-                    let _ = sender.send(Ok(b64));
-                },
-            );
+            let handler = RcBlock::new(move |snapshot: *mut AnyObject, error: *mut NSError| {
+                let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) else {
+                    return;
+                };
+                if !error.is_null() {
+                    let msg = (&*error).localizedDescription().to_string();
+                    let _ = sender.send(Err(format!("screenshot failed: {msg}")));
+                    return;
+                }
+                if snapshot.is_null() {
+                    let _ = sender.send(Err("screenshot produced no image".to_owned()));
+                    return;
+                }
+                // Call TIFFRepresentation on NSImage
+                let sel =
+                    sel_registerName(b"TIFFRepresentation\0".as_ptr() as *const std::ffi::c_char);
+                let tiff: *mut NSData = objc_msgSend(snapshot as *mut c_void, sel).cast();
+                if tiff.is_null() {
+                    let _ = sender.send(Err("screenshot TIFF conversion failed".to_owned()));
+                    return;
+                }
+                let bytes = (&*tiff).bytes();
+                let len = (&*tiff).len();
+                let buf = std::slice::from_raw_parts(bytes, len);
+                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                let b64 = BASE64.encode(buf);
+                let _ = sender.send(Ok(b64));
+            });
             // takeSnapshotWithConfiguration:completionHandler: with nil config
             let sel = sel_registerName(
-                b"takeSnapshotWithConfiguration:completionHandler:\0"
-                    .as_ptr() as *const std::ffi::c_char,
+                b"takeSnapshotWithConfiguration:completionHandler:\0".as_ptr()
+                    as *const std::ffi::c_char,
             );
             let nil: *mut c_void = std::ptr::null_mut();
             objc_msgSend(
@@ -933,7 +919,9 @@ fn act_result(
 }
 
 /// Map a [`BrowserTargetError`] to the corresponding typed status.
-pub(crate) fn act_status_from_target_error(error: BrowserTargetError) -> tidebreak_core::BrowserActStatus {
+pub(crate) fn act_status_from_target_error(
+    error: BrowserTargetError,
+) -> tidebreak_core::BrowserActStatus {
     use tidebreak_core::BrowserActStatus;
     match error {
         BrowserTargetError::StaleTarget => BrowserActStatus::StaleTarget,

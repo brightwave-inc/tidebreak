@@ -62,7 +62,7 @@ pub const MAX_BROWSER_ACTION_VALUE_CHARS: usize = 8_192;
 pub const MAX_BROWSER_SCREENSHOT_DIMENSION: u64 = 4_096;
 
 /// Whether a host browser is idle, loading, ready, or failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserLoadState {
     Idle,
@@ -389,7 +389,7 @@ pub struct BrowserNavigateResult {
 // ── Wait contracts ────────────────────────────────────────────────
 
 /// The kind of condition a deterministic wait polls for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum BrowserWaitCondition {
     /// Wait until the page URL changes from its current value.
@@ -431,12 +431,14 @@ impl BrowserWaitArgs {
     /// Whether a trusted client may consider this proposal for authorization.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
+        let condition_is_well_formed = match &self.condition {
+            BrowserWaitCondition::LoadState { .. } | BrowserWaitCondition::UrlChanged => true,
+            BrowserWaitCondition::TextPresent { text }
+            | BrowserWaitCondition::TextAbsent { text } => text.chars().count() <= 512,
+        };
+
         valid_browser_id(&self.browser_id)
-            && matches!(&self.condition, BrowserWaitCondition::LoadState { .. }
-                | BrowserWaitCondition::UrlChanged
-                | BrowserWaitCondition::TextPresent { text } if text.len() <= 512)
-            .then_some(())
-            .is_some()
+            && condition_is_well_formed
             && self
                 .timeout_ms
                 .is_none_or(|ms| (100..=MAX_BROWSER_WAIT_TIMEOUT_MS).contains(&ms))
@@ -969,15 +971,9 @@ mod tests {
         assert!(browser_snapshot_tool_spec()
             .description
             .contains("ephemeral"));
-        assert!(browser_wait_tool_spec()
-            .description
-            .contains("timeout"));
-        assert!(browser_wait_tool_spec()
-            .description
-            .contains("Stop"));
-        assert!(browser_screenshot_tool_spec()
-            .description
-            .contains("epoch"));
+        assert!(browser_wait_tool_spec().description.contains("timeout"));
+        assert!(browser_wait_tool_spec().description.contains("Stop"));
+        assert!(browser_screenshot_tool_spec().description.contains("epoch"));
         assert!(browser_act_tool_spec()
             .description
             .contains("semantic action"));
@@ -1117,6 +1113,8 @@ mod tests {
 
     #[test]
     fn wait_arguments_enforce_timeout_bounds() {
+        let oversized_text = "x".repeat(513);
+
         assert!(validate_browser_wait_arguments(&json!({
             "browser_id": "browser-1",
             "snapshot_id": "snapshot-1",
@@ -1127,8 +1125,26 @@ mod tests {
             "browser_id": "browser-1",
             "snapshot_id": "snapshot-1",
             "document_epoch": 0,
+            "condition": { "kind": "url_changed" }
+        })));
+        assert!(validate_browser_wait_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
             "condition": { "kind": "text_present", "text": "Submit" },
             "timeout_ms": 15000
+        })));
+        assert!(validate_browser_wait_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "condition": { "kind": "text_absent", "text": "Still loading" }
+        })));
+        assert!(!validate_browser_wait_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "condition": { "kind": "text_absent", "text": oversized_text }
         })));
         assert!(!validate_browser_wait_arguments(&json!({
             "browser_id": "browser-1",
@@ -1217,11 +1233,13 @@ mod tests {
             Some("Hi")
         );
         assert_eq!(BrowserAction::Focus.value(), None);
-        assert!(BrowserAction::Fill {
-            value: String::new()
-        }
-        .is_well_formed()
-            == false);
+        assert!(
+            BrowserAction::Fill {
+                value: String::new()
+            }
+            .is_well_formed()
+                == false
+        );
     }
 
     #[test]
