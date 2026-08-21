@@ -161,17 +161,25 @@ pub(crate) async fn code_browser_command(
             ))
         }
         CodeBrowserAction::ShareWithAgent => {
-            if existing.is_none() {
+            let Some(webview) = existing else {
                 registry.remove(&request.browser_id, &request.workspace_id)?;
                 return Err("browser session is not open".to_owned());
-            }
-            let snapshot = share_browser_with_agent(
+            };
+            let (snapshot, pending_navigation) = share_browser_with_agent(
                 &app,
                 &registry,
                 &request.browser_id,
                 &request.workspace_id,
             )
             .await?;
+            if let Some(url) = pending_navigation {
+                run_action(
+                    &app,
+                    &request.browser_id,
+                    &webview,
+                    CodeBrowserAction::Navigate { url },
+                )?;
+            }
             emit_access_event(&app, "agent_access_changed", &snapshot, None);
             Ok(snapshot)
         }
@@ -318,6 +326,7 @@ fn create_browser(
                 &navigation_browser,
                 &navigation_workspace,
                 instance_id,
+                safe_url.as_str(),
                 &origin,
             ) {
                 BrowserNavigationDecision::Allow => true,
@@ -479,7 +488,7 @@ async fn share_browser_with_agent(
     registry: &BrowserRegistry,
     browser_id: &str,
     workspace_id: &str,
-) -> Result<BrowserSnapshot, String> {
+) -> Result<(BrowserSnapshot, Option<String>), String> {
     let origin = registry.share_target_origin(browser_id, workspace_id)?;
     let scope = if origin.is_loopback() {
         native_loopback_share_choice(app, &origin).await?
@@ -491,15 +500,17 @@ async fn share_browser_with_agent(
         None
     };
     let Some(scope) = scope else {
-        return registry.snapshot(browser_id, workspace_id);
+        return Ok((registry.snapshot(browser_id, workspace_id)?, None));
     };
-    registry.grant_browser_access(
+    let snapshot = registry.grant_browser_access(
         browser_id,
         workspace_id,
         &origin,
         scope,
         &[BrowserGrantCapability::BrowserControlOrigin],
-    )
+    )?;
+    let pending_navigation = registry.take_pending_navigation(browser_id, workspace_id)?;
+    Ok((snapshot, pending_navigation))
 }
 
 async fn native_public_share_choice(

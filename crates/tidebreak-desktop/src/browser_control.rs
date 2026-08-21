@@ -252,6 +252,7 @@ struct BrowserRecord {
     controller: BrowserController,
     controller_capability_id: Option<Uuid>,
     paused_origin: Option<BrowserOrigin>,
+    pending_navigation_url: Option<String>,
     dispatch: BrowserDispatchState,
     semantic_snapshot: Option<StoredSemanticSnapshot>,
 }
@@ -433,6 +434,7 @@ impl BrowserRegistry {
                 controller: BrowserController::default(),
                 controller_capability_id: None,
                 paused_origin: None,
+                pending_navigation_url: None,
                 dispatch: BrowserDispatchState::default(),
                 semantic_snapshot: None,
             },
@@ -555,6 +557,8 @@ impl BrowserRegistry {
                 record.controller.halted = true;
                 record.controller.action = None;
                 record.controller.takeover_required = false;
+                record.paused_origin = None;
+                record.pending_navigation_url = None;
                 record.semantic_snapshot = None;
             }
         }
@@ -649,6 +653,8 @@ impl BrowserRegistry {
                 .get_mut(browser_id)
                 .expect("browser was checked above");
             record.dispatch.halt.send_replace(true);
+            record.paused_origin = None;
+            record.pending_navigation_url = None;
             if record.controller.kind == BrowserControllerKind::Agent {
                 record.controller = BrowserController::default();
                 record.controller_capability_id = None;
@@ -675,6 +681,26 @@ impl BrowserRegistry {
         ensure_workspace(browser_id, workspace_id, record)?;
         share_target_for_record(record)
             .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())
+    }
+
+    /// Return the exact validated URL that native navigation paused before
+    /// exposing it, after the user has approved access to that destination.
+    /// The renderer never receives or chooses this replay target.
+    pub(crate) fn take_pending_navigation(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<String>, String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if record.paused_origin.is_some() {
+            return Err("browser navigation has not been approved".to_owned());
+        }
+        Ok(record.pending_navigation_url.take())
     }
 
     pub(crate) fn list_for_capability(
@@ -820,28 +846,44 @@ impl BrowserRegistry {
         browser_id: &str,
         workspace_id: &str,
     ) -> Result<BrowserSnapshot, String> {
-        let gate = {
+        let (gate, instance_id) = {
             let mut state = self.lock();
             let record = state
                 .records
                 .get_mut(browser_id)
                 .ok_or_else(|| "browser session is not registered".to_owned())?;
             ensure_workspace(browser_id, workspace_id, record)?;
-            if record.controller.kind != BrowserControllerKind::Agent {
-                None
-            } else {
-                record.dispatch.halt.send_replace(true);
+            record.dispatch.halt.send_replace(true);
+            if record.controller.kind == BrowserControllerKind::Agent {
                 record.controller = BrowserController::default();
                 record.controller_capability_id = None;
-                record.semantic_snapshot = None;
-                Some(Arc::clone(&record.dispatch.gate))
             }
+            record.paused_origin = None;
+            record.pending_navigation_url = None;
+            record.semantic_snapshot = None;
+            (Arc::clone(&record.dispatch.gate), record.instance_id)
         };
-        if let Some(gate) = gate {
-            let _dispatch = gate.lock().await;
-            return self.snapshot(browser_id, workspace_id);
+
+        // Publish the halt before waiting so queued input fails closed. Once
+        // the active dispatch drains, release the latch as part of the same
+        // explicit human-control transition. A recreated browser instance is
+        // never modified by this older takeover request.
+        let _dispatch = gate.lock().await;
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if record.instance_id != instance_id {
+            return Err("browser session changed while control was transferring".to_owned());
         }
-        self.snapshot(browser_id, workspace_id)
+        record.dispatch.halt.send_replace(false);
+        let record = state
+            .records
+            .get(browser_id)
+            .expect("browser was checked above");
+        Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
     }
 
     /// Record one native act-time confirmation. Only native browser executor
@@ -1068,6 +1110,7 @@ impl BrowserRegistry {
         browser_id: &str,
         workspace_id: &str,
         instance_id: u64,
+        destination_url: &str,
         destination: &BrowserOrigin,
     ) -> BrowserNavigationDecision {
         let mut state = self.lock();
@@ -1106,6 +1149,7 @@ impl BrowserRegistry {
                 .expect("browser was checked above");
             record.dispatch.halt.send_replace(true);
             record.paused_origin = Some(destination.clone());
+            record.pending_navigation_url = Some(destination_url.to_owned());
             record.controller.halted = true;
             record.controller.action = Some(format!(
                 "Navigation paused for {}",
@@ -1138,6 +1182,7 @@ impl BrowserRegistry {
             record.load_state = BrowserLoadState::Loading;
             record.document_epoch = record.document_epoch.saturating_add(1);
             record.paused_origin = None;
+            record.pending_navigation_url = None;
             record.semantic_snapshot = None;
         })
     }
@@ -2425,10 +2470,16 @@ mod tests {
     #[test]
     fn cross_origin_redirects_pause_before_the_destination_is_exposed() {
         let (registry, instance, _origin, _capability, _private) = controlled_registry();
+        let destination_url = "https://accounts.example.org/login?continue=%2Fsettings";
         let destination = BrowserOrigin::from_url("https://accounts.example.org/login").unwrap();
 
-        let decision =
-            registry.authorize_navigation("browser-1", "workspace-1", instance, &destination);
+        let decision = registry.authorize_navigation(
+            "browser-1",
+            "workspace-1",
+            instance,
+            destination_url,
+            &destination,
+        );
         let BrowserNavigationDecision::Pause {
             origin: paused_origin,
             snapshot,
@@ -2452,6 +2503,30 @@ mod tests {
                 .unwrap(),
             destination
         );
+
+        let approved = registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &destination,
+                BrowserOriginScope::Origin {
+                    origin: destination.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        assert!(!approved.agent_access.unwrap().paused);
+        assert_eq!(
+            registry
+                .take_pending_navigation("browser-1", "workspace-1")
+                .unwrap()
+                .as_deref(),
+            Some(destination_url)
+        );
+        assert!(registry
+            .take_pending_navigation("browser-1", "workspace-1")
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2500,5 +2575,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(human.controller.unwrap().kind, BrowserControllerKind::Human);
+        assert!(!human.agent_access.unwrap().halted);
+
+        let next_capability = registry.issue_agent_capability("workspace-1", "Next agent");
+        let reclaimed = registry
+            .begin_agent_control(next_capability, "browser-1")
+            .unwrap();
+        assert_eq!(
+            reclaimed.controller.unwrap().label.as_deref(),
+            Some("Next agent")
+        );
     }
 }
