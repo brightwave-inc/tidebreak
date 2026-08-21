@@ -77,16 +77,6 @@
     "text": "The user wants me to run exactly this shell command and then stop: echo hi"
   },
   {
-    "type": "tool_started",
-    "call_id": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
-    "name": "bash",
-    "detail": {
-      "kind": "command",
-      "cmd": "",
-      "cwd": ""
-    }
-  },
-  {
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "per_006f28b45001X8Mo5OoIrM4xyl"
@@ -118,6 +108,16 @@
     "decision": {
       "type": "deny",
       "feedback": "use the fixtures directory instead"
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_UWLCr2nBoXdhyc2JM4ef2097",
+    "name": "bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "echo hi",
+      "cwd": ""
     }
   },
   {
@@ -249,7 +249,7 @@
     "name": "glob",
     "detail": {
       "kind": "search",
-      "query": "glob"
+      "query": "**/fixtures/**"
     }
   },
   {
@@ -319,16 +319,6 @@
     "text": "No fixtures directory found. Let me look at the directory structure."
   },
   {
-    "type": "tool_started",
-    "call_id": "call_00_pTqLHUb6Tp5CWsKjACRA5197",
-    "name": "bash",
-    "detail": {
-      "kind": "command",
-      "cmd": "",
-      "cwd": ""
-    }
-  },
-  {
     "type": "approval_requested",
     "harness_ref": {
       "call_id": "per_006f2966b001Edi4ogHcyFv2aT"
@@ -350,6 +340,16 @@
         "callID": "call_00_pTqLHUb6Tp5CWsKjACRA5197",
         "messageID": "msg_006f291c6001FWSz6DRzZDHn24"
       }
+    }
+  },
+  {
+    "type": "tool_started",
+    "call_id": "call_00_pTqLHUb6Tp5CWsKjACRA5197",
+    "name": "bash",
+    "detail": {
+      "kind": "command",
+      "cmd": "ls -la",
+      "cwd": ""
     }
   }
 ]

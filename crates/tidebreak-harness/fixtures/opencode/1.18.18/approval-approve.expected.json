@@ -78,7 +78,7 @@
     "name": "bash",
     "detail": {
       "kind": "command",
-      "cmd": "",
+      "cmd": "echo hi",
       "cwd": ""
     }
   },

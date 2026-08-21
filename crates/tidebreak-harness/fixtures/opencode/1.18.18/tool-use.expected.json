@@ -98,7 +98,7 @@
     "name": "read",
     "detail": {
       "kind": "file_read",
-      "path": ""
+      "path": "/workspace/README.md"
     }
   },
   {

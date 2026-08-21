@@ -742,4 +742,83 @@ mod tests {
             name.contains("image") && (name.ends_with(".ndjson") || name.ends_with(".json"))
         })
     }
+
+    /// A supervising user reads a tool call while it runs, so every adapter
+    /// has to name the call when it starts.
+    ///
+    /// Engines open a call before its arguments finish streaming. An adapter
+    /// that starts the call at that first view publishes an empty `cmd` or
+    /// `path` and names the tool only once the result lands, which leaves an
+    /// unlabelled card on screen for as long as the tool runs. Codex and
+    /// grok already named their calls at the start; this pins that, and the
+    /// claude-code and opencode captures that used to fail it.
+    #[test]
+    fn every_captured_tool_call_names_its_subject_when_it_starts() {
+        for (harness, path) in captured_streams() {
+            let input = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("unreadable fixture {}: {err}", path.display()));
+            let events = replay_captured_stream(&harness, &input);
+            let fixture = path.display();
+            let mut started: Vec<&str> = Vec::new();
+            for event in &events {
+                match event {
+                    HarnessEvent::ToolStarted {
+                        call_id,
+                        name,
+                        detail,
+                        ..
+                    } => {
+                        assert!(
+                            detail.specificity() > 0,
+                            "{fixture}: {name} starts with a detail that names nothing"
+                        );
+                        started.push(call_id);
+                    }
+                    HarnessEvent::ToolCompleted { call_id, .. } => assert!(
+                        started.contains(&call_id.as_str()),
+                        "{fixture}: {call_id} completes without having started"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Every captured stream, as `(harness, path)` pairs.
+    fn captured_streams() -> Vec<(String, PathBuf)> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let mut streams = Vec::new();
+        for harness in read_dir_sorted(&root) {
+            let name = harness.file_name().to_string_lossy().into_owned();
+            for version in read_dir_sorted(&harness.path()) {
+                for capture in read_dir_sorted(&version.path()) {
+                    let path = capture.path();
+                    if path.extension().is_some_and(|ext| ext == "ndjson") {
+                        streams.push((name.clone(), path));
+                    }
+                }
+            }
+        }
+        assert!(!streams.is_empty(), "fixtures must ship captured streams");
+        streams
+    }
+
+    fn read_dir_sorted(dir: &Path) -> Vec<std::fs::DirEntry> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        entries
+    }
+
+    fn replay_captured_stream(harness: &str, input: &str) -> Vec<HarnessEvent> {
+        match harness {
+            "claude-code" => claude::parse::ClaudeStreamParser::parse_ndjson(input).events,
+            "codex" => codex::parse::CodexStreamParser::parse_ndjson(input).events,
+            "grok" => grok::parse::GrokStreamParser::parse_ndjson(input).events,
+            "opencode" => opencode::parse::OpencodeStreamParser::parse_ndjson(input).events,
+            other => panic!("fixtures/{other} has no parser in this test"),
+        }
+    }
 }

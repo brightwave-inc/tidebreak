@@ -11,7 +11,7 @@
     "name": "Write",
     "detail": {
       "kind": "file_edit",
-      "path": ""
+      "path": "/workspace/probe.txt"
     }
   }
 ]
