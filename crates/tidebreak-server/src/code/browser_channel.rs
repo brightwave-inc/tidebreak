@@ -825,7 +825,10 @@ mod tests {
         // strand the fixture in a state that obscures the registry invariant.
         std::fs::remove_file(&capdir).expect("remove capfile path blocker");
         std::fs::rename(&held_capdir, &capdir).expect("restore capfile directory");
-        assert!(result.is_err(), "issue must fail when capfile parent is a file");
+        assert!(
+            result.is_err(),
+            "issue must fail when capfile parent is a file"
+        );
         assert_eq!(
             reg.subject_for_token(&warm_token).as_ref(),
             Some(&subject("warm")),
