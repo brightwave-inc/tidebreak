@@ -217,6 +217,7 @@ const APPROVAL_STATES = new Set<CodeApprovalState>([
   "pending",
   "approved",
   "denied",
+  "abandoned",
 ]);
 const TOOL_OUTCOMES = new Set<ToolOutcome>(["succeeded", "failed", "denied"]);
 const ATTENTION_SOURCES = new Set<AttentionSource>([
@@ -2582,7 +2583,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         !onlyKeys(value, ["type", "approval_id", "decision"]) ||
         !nonEmpty(value.approval_id) ||
         !isRecord(value.decision) ||
-        (value.decision.type !== "approve" && value.decision.type !== "deny")
+        (value.decision.type !== "approve" &&
+          value.decision.type !== "deny" &&
+          value.decision.type !== "abandoned")
       ) {
         return null;
       }
@@ -2699,11 +2702,20 @@ function parseUsage(value: unknown): CodeUsage | null {
   ) {
     return null;
   }
+  // `context_tokens` is serde-defaulted, so a turn journaled before the field
+  // existed omits it. Rejecting the whole object over a missing occupancy
+  // reading would throw away the spend counts beside it; absent reads as no
+  // reading, which is what zero already means here.
+  const contextTokens = value.context_tokens;
+  if (contextTokens !== undefined && !isFiniteNumber(contextTokens)) {
+    return null;
+  }
   return {
     input_tokens: value.input_tokens,
     output_tokens: value.output_tokens,
     cache_read_input_tokens: value.cache_read_input_tokens,
     cache_creation_input_tokens: value.cache_creation_input_tokens,
+    context_tokens: contextTokens ?? 0,
   };
 }
 

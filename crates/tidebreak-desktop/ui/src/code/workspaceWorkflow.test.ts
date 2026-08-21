@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
 import {
+  resolveWorkflowShortcut,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
+  type WorkflowShortcut,
 } from "./workspaceWorkflow";
 
 const CLEAN: CodeWorkspacePrSnapshot = {
@@ -182,5 +184,163 @@ describe("workspaceWorkflowModel", () => {
     );
     expect(model.stage).toBe("clean");
     expect(model.pr).toBeUndefined();
+  });
+});
+
+describe("resolveWorkflowShortcut", () => {
+  /** What a chord does against a snapshot, as a string the assertions read. */
+  function chord(
+    shortcut: WorkflowShortcut,
+    snapshot: CodeWorkspacePrSnapshot | null,
+    watching = false,
+  ): string {
+    const resolution = resolveWorkflowShortcut(
+      shortcut,
+      workspaceWorkflowModel(snapshot),
+      watching,
+    );
+    if ("run" in resolution) return resolution.run;
+    if ("stopWatch" in resolution) return "stop_watch";
+    if ("autoMerge" in resolution) return "auto_merge";
+    return `blocked: ${resolution.blocked}`;
+  }
+
+  it("carries one chord through commit, push, create, and view", () => {
+    // Cmd+Shift+P names an intent, not an action: the reader means "get this in
+    // front of reviewers" at every stage, and the action that serves it changes
+    // under them. Uncommitted work goes to the commit box rather than being
+    // refused, because that is the actual next step towards a pull request.
+    expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe("open_source");
+    expect(chord("pull_request", { ...CLEAN, unpushed: true, ahead: 1 })).toBe(
+      "push",
+    );
+    expect(chord("pull_request", { ...CLEAN, ahead: 2 })).toBe("create_pr");
+    expect(
+      chord("pull_request", { ...CLEAN, pr: pr({ url: "https://x/41" }) }),
+    ).toBe("open_pr");
+    expect(chord("pull_request", CLEAN)).toBe(
+      "blocked: No commits to open a pull request for",
+    );
+  });
+
+  it("runs whatever the header's primary control says next", () => {
+    // The point of Cmd+Shift+Enter: one chord the reader can hold down the
+    // whole workflow, wired to the same decision the button draws.
+    expect(chord("next", { ...CLEAN, unpushed: true, ahead: 1 })).toBe("push");
+    expect(chord("next", { ...CLEAN, pr: pr({ draft: true }) })).toBe(
+      "mark_ready",
+    );
+    expect(
+      chord("next", {
+        ...CLEAN,
+        pr: pr({ mergeable: "mergeable", merge_state_status: "clean" }),
+      }),
+    ).toBe("merge");
+    // A clean workspace has no next step, and says which state it is in rather
+    // than swallowing the key.
+    expect(chord("next", CLEAN)).toBe("blocked: Workspace is clean");
+  });
+
+  it("picks conflict resolution over a plain rebase, and refuses over dirt", () => {
+    expect(
+      chord("update_branch", { ...CLEAN, pr: pr({ mergeable: "conflicting" }) }),
+    ).toBe("resolve_conflicts");
+    expect(
+      chord("update_branch", {
+        ...CLEAN,
+        pr: pr({ merge_state_status: "behind" }),
+      }),
+    ).toBe("update_branch");
+    // Rebasing over uncommitted work is how it gets lost, and the snapshot
+    // already knows the worktree is dirty.
+    expect(chord("update_branch", { ...CLEAN, dirty: true, pr: pr({}) })).toBe(
+      "blocked: Commit or discard your changes before rebasing",
+    );
+    expect(chord("update_branch", CLEAN)).toBe("blocked: No pull request yet");
+  });
+
+  it("stops a running watch with the key that started it", () => {
+    const withPr = { ...CLEAN, pr: pr({}) };
+    expect(chord("watch", withPr)).toBe("watch_and_fix");
+    expect(chord("watch", withPr, true)).toBe("stop_watch");
+  });
+
+  it("refuses the chords that would start a second agent in a watched worktree", () => {
+    // The header disables the same actions for the same reason: two agents in
+    // one worktree is a corrupt checkout, not a race worth running.
+    const withPr = { ...CLEAN, pr: pr({ url: "https://x/41" }) };
+    const busy = "blocked: A watch task is already working on this pull request";
+    expect(chord("next", withPr, true)).toBe(busy);
+    expect(chord("merge", withPr, true)).toBe(busy);
+    expect(chord("update_branch", withPr, true)).toBe(busy);
+    // Reading and pushing do not contend, so they stay live.
+    expect(chord("view_pr", withPr, true)).toBe("open_pr");
+    expect(chord("source_control", withPr, true)).toBe("open_source");
+  });
+
+  it("merges only when the pull request is green", () => {
+    // Merging publishes to a shared branch, so the chord runs the real merge
+    // rather than asking an agent to. That makes "green" a question it has to
+    // answer honestly, from the same table the review sidebar's Merge button
+    // reads — otherwise the chord offers merges the button refuses.
+    const green = {
+      ...CLEAN,
+      pr: pr({ mergeable: "mergeable", merge_state_status: "clean" }),
+    };
+    expect(chord("merge", green)).toBe("merge");
+
+    // Not green but still landable: the reader means "get this in" either way,
+    // so the chord arms auto-merge and GitHub finishes the job. Which one is
+    // about to happen is named in the confirmation, not guessed at here.
+    for (const snapshot of [
+      pr({ checks: [{ name: "ci", bucket: "fail" }] }),
+      pr({ checks: [{ name: "ci", bucket: "pending" }] }),
+      pr({ merge_state_status: "behind" }),
+      pr({ review_decision: "changes_requested" }),
+    ]) {
+      expect(chord("merge", { ...CLEAN, pr: snapshot })).toBe("auto_merge");
+    }
+
+    // Neither path is open in these states, so the chord says why. Conflicts
+    // and drafts cannot even be queued, and the last two are already landing.
+    for (const [snapshot, reason] of [
+      [pr({ draft: true }), "Mark the pull request ready for review on GitHub before merging it."],
+      [pr({ mergeable: "conflicting" }), "Resolve the merge conflicts before merging directly."],
+      [pr({ in_merge_queue: true }), "This pull request is already waiting in the merge queue."],
+      [pr({ auto_merge_enabled: true }), "Auto-merge is already enabled and will merge after the remaining requirements pass."],
+    ] as const) {
+      expect(chord("merge", { ...CLEAN, pr: snapshot })).toBe(
+        `blocked: ${reason}`,
+      );
+    }
+
+    // Local state blocks too: work that is not in the pull request would be
+    // left behind by a merge the reader thought was landing all of it.
+    expect(chord("merge", { ...green, dirty: true })).toBe(
+      "blocked: Commit or discard your changes before merging",
+    );
+    expect(chord("merge", { ...green, unpushed: true })).toBe(
+      "blocked: Push your local commits before merging",
+    );
+  });
+
+  it("says why a merged or closed pull request has nothing to do", () => {
+    const merged = { ...CLEAN, pr: pr({ state: "merged" }) };
+    expect(chord("merge", merged)).toBe(
+      "blocked: Pull request #41 is already merged",
+    );
+    expect(chord("watch", { ...CLEAN, pr: pr({ state: "closed" }) })).toBe(
+      "blocked: Pull request #41 is closed",
+    );
+    expect(chord("view_pr", CLEAN)).toBe("blocked: No pull request to open yet");
+  });
+
+  it("opens source control before the status has loaded", () => {
+    // The review rail is chrome, not a Git operation. Everything else waits for
+    // a snapshot rather than acting on a guess.
+    expect(chord("source_control", null)).toBe("open_source");
+    expect(chord("merge", null)).toBe(
+      "blocked: Still reading this workspace's status",
+    );
   });
 });

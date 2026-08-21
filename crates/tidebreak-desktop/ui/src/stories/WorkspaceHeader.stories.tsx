@@ -59,6 +59,8 @@ function HeaderState({
             client={{
               pushCodeWorkspace: fn(),
               createCodePullRequest: fn(),
+              markCodePrReady: fn(),
+              mergeCodePr: fn(),
               startCodeWatch: fn(),
               stopCodeWatch: fn(),
             }}

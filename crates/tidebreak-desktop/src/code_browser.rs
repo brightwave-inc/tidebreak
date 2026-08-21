@@ -26,6 +26,7 @@ use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
 };
+use crate::browser_semantics::{browser_inject_inspect_overlay, browser_remove_inspect_overlay};
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
 const CODE_BROWSER_EVENT: &str = "code-browser:event";
@@ -69,6 +70,10 @@ enum CodeBrowserAction {
     RevokeAgentAccess,
     StopAgentControl,
     TakeHumanControl,
+    SetInspect {
+        enabled: bool,
+    },
+    RemoveInspect,
     Close,
 }
 
@@ -155,6 +160,46 @@ pub(crate) async fn code_browser_command(
                 ))
             }
         },
+        CodeBrowserAction::SetInspect { enabled } => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            registry.set_inspect(&request.browser_id, &request.workspace_id, enabled)?;
+            if enabled {
+                let _ = browser_inject_inspect_overlay(
+                    &app,
+                    &registry,
+                    &request.browser_id,
+                    &request.workspace_id,
+                )
+                .await;
+            } else {
+                let _ = browser_remove_inspect_overlay(
+                    &app,
+                    &registry,
+                    &request.browser_id,
+                    &request.workspace_id,
+                )
+                .await;
+            }
+            registry.snapshot(&request.browser_id, &request.workspace_id)
+        }
+        CodeBrowserAction::RemoveInspect => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let _ = browser_remove_inspect_overlay(
+                &app,
+                &registry,
+                &request.browser_id,
+                &request.workspace_id,
+            )
+            .await;
+            registry.clear_inspect(&request.browser_id, &request.workspace_id)?;
+            registry.snapshot(&request.browser_id, &request.workspace_id)
+        }
         CodeBrowserAction::Close => {
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
@@ -702,6 +747,8 @@ fn run_action(
         | CodeBrowserAction::RevokeAgentAccess
         | CodeBrowserAction::StopAgentControl
         | CodeBrowserAction::TakeHumanControl
+        | CodeBrowserAction::SetInspect { .. }
+        | CodeBrowserAction::RemoveInspect
         | CodeBrowserAction::Close => Err(format!(
             "browser action is not valid for the open session {browser_id}"
         )),

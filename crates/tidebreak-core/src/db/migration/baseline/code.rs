@@ -378,7 +378,7 @@ pub(super) fn code_approval_table() -> TableCreateStatement {
                 .from(CodeApproval::Table, CodeApproval::TurnId)
                 .to(CodeTurn::Table, CodeTurn::Id),
         )
-        .check(Expr::col(CodeApproval::State).is_in(["pending", "approved", "denied"]))
+        .check(Expr::col(CodeApproval::State).is_in(["pending", "approved", "denied", "abandoned"]))
         .to_owned()
 }
 

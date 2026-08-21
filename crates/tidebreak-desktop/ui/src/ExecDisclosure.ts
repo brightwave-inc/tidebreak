@@ -1,4 +1,4 @@
-import type { CodeExecutionConfigInfo } from "./api";
+import type { ExecConfigInfo } from "./api";
 
 export const MANAGED_EXECUTION_DISCLOSURE =
   "Code execution runs in an E2B or Daytona cloud sandbox on this device. Files staged for a run leave this machine and are uploaded to that provider.";
@@ -9,7 +9,7 @@ export const MANAGED_EXECUTION_DISCLOSURE =
  * interprets its structured Local-provider capability row.
  */
 export function requiresManagedExecutionDisclosure(
-  providers: CodeExecutionConfigInfo["providers"] | null | undefined,
+  providers: ExecConfigInfo["providers"] | null | undefined,
 ): boolean {
   const local = providers?.find((row) => row.provider === "local");
   return (

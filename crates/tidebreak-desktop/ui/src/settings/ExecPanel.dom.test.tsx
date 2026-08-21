@@ -10,16 +10,16 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApiClient,
-  CodeExecutionConfigInfo,
-  CodeExecutionCredentialReadiness,
+  ExecConfigInfo,
+  ExecCredentialReadiness,
 } from "../api";
-import { CodeExecutionPanel } from "./CodeExecutionPanel";
+import { ExecPanel } from "./ExecPanel";
 
 /**
  * The default egress projection: open policy, E2B applied-with-gaps, Daytona a
  * strict per-sandbox boundary conditional on org tier 3+ (no phantom gaps).
  */
-const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
+const OPEN_EGRESS: ExecConfigInfo["egress"] = {
   policy: { mode: "open" },
   enforcement: [
     {
@@ -40,7 +40,7 @@ const OPEN_EGRESS: CodeExecutionConfigInfo["egress"] = {
  * Today's server position: no provider is admitted for detached runs, and the
  * local row names the three structural gaps.
  */
-const NO_DETACHED: CodeExecutionConfigInfo["detached_admission"] = [
+const NO_DETACHED: ExecConfigInfo["detached_admission"] = [
   {
     provider: "local",
     admitted: false,
@@ -71,54 +71,54 @@ const NO_DETACHED: CodeExecutionConfigInfo["detached_admission"] = [
 ];
 
 /** Every provider usable: the macOS shape, where nothing is dark. */
-const ALL_PROVIDERS_AVAILABLE: CodeExecutionConfigInfo["providers"] = [
+const ALL_PROVIDERS_AVAILABLE: ExecConfigInfo["providers"] = [
   { provider: "local", available: true },
   { provider: "e2b", available: true },
   { provider: "daytona", available: true },
 ];
 
 function clientFor(
-  config: Omit<CodeExecutionConfigInfo, "providers"> &
-    Partial<Pick<CodeExecutionConfigInfo, "providers">>,
-  credentials: CodeExecutionCredentialReadiness[] = [
+  config: Omit<ExecConfigInfo, "providers"> &
+    Partial<Pick<ExecConfigInfo, "providers">>,
+  credentials: ExecCredentialReadiness[] = [
     { provider: "e2b", has_credential: false },
     { provider: "daytona", has_credential: false },
   ],
 ) {
-  const resolved: CodeExecutionConfigInfo = {
+  const resolved: ExecConfigInfo = {
     providers: ALL_PROVIDERS_AVAILABLE,
     ...config,
   };
-  const putCodeExecutionConfig = vi.fn().mockResolvedValue(resolved);
-  const putCodeExecutionCredential = vi
+  const putExecConfig = vi.fn().mockResolvedValue(resolved);
+  const putExecCredential = vi
     .fn()
     .mockImplementation((provider: string) =>
       Promise.resolve({ provider, has_credential: true }),
     );
-  const deleteCodeExecutionCredential = vi
+  const deleteExecCredential = vi
     .fn()
     .mockImplementation((provider: string) =>
       Promise.resolve({ provider, has_credential: false }),
     );
   return {
     client: {
-      getCodeExecutionConfig: vi.fn().mockResolvedValue(resolved),
-      listCodeExecutionCredentials: vi.fn().mockResolvedValue({ credentials }),
-      putCodeExecutionConfig,
-      putCodeExecutionCredential,
-      deleteCodeExecutionCredential,
+      getExecConfig: vi.fn().mockResolvedValue(resolved),
+      listExecCredentials: vi.fn().mockResolvedValue({ credentials }),
+      putExecConfig,
+      putExecCredential,
+      deleteExecCredential,
     } as unknown as ApiClient,
-    putCodeExecutionConfig,
-    putCodeExecutionCredential,
-    deleteCodeExecutionCredential,
+    putExecConfig,
+    putExecCredential,
+    deleteExecCredential,
   };
 }
 
 afterEach(cleanup);
 
-describe("CodeExecutionPanel", () => {
+describe("ExecPanel", () => {
   it("saves a key per managed provider before the active selection", async () => {
-    const { client, putCodeExecutionConfig, putCodeExecutionCredential } =
+    const { client, putExecConfig, putExecCredential } =
       clientFor({
         provider: "e2b",
         timeout_ms: 20_000,
@@ -128,7 +128,7 @@ describe("CodeExecutionPanel", () => {
       detached_admission: NO_DETACHED,
       });
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/E2B API key/), {
       target: { value: "  e2b-secret  " },
@@ -142,30 +142,30 @@ describe("CodeExecutionPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
-      expect(putCodeExecutionCredential).toHaveBeenCalledWith(
+      expect(putExecCredential).toHaveBeenCalledWith(
         "e2b",
         "e2b-secret",
       ),
     );
-    expect(putCodeExecutionCredential).toHaveBeenCalledWith(
+    expect(putExecCredential).toHaveBeenCalledWith(
       "daytona",
       "daytona-secret",
     );
-    expect(putCodeExecutionConfig).toHaveBeenCalledWith({
+    expect(putExecConfig).toHaveBeenCalledWith({
       provider: "e2b",
       timeout_ms: 30_000,
     });
     // A provider must not go active in a pass that failed to store its key.
     expect(
-      putCodeExecutionCredential.mock.invocationCallOrder[0],
-    ).toBeLessThan(putCodeExecutionConfig.mock.invocationCallOrder[0]);
+      putExecCredential.mock.invocationCallOrder[0],
+    ).toBeLessThan(putExecConfig.mock.invocationCallOrder[0]);
     expect(
       screen.queryByText(/Files staged for a run leave this machine/i),
     ).toBeNull();
   });
 
   it("removes one provider's saved key without touching the other", async () => {
-    const { client, deleteCodeExecutionCredential } = clientFor(
+    const { client, deleteExecCredential } = clientFor(
       {
         provider: "e2b",
         timeout_ms: 20_000,
@@ -180,16 +180,16 @@ describe("CodeExecutionPanel", () => {
       ],
     );
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Remove saved Daytona key" }),
     );
 
     await waitFor(() =>
-      expect(deleteCodeExecutionCredential).toHaveBeenCalledWith("daytona"),
+      expect(deleteExecCredential).toHaveBeenCalledWith("daytona"),
     );
-    expect(deleteCodeExecutionCredential).toHaveBeenCalledTimes(1);
+    expect(deleteExecCredential).toHaveBeenCalledTimes(1);
   });
 
   it("does not present E2B as a full boundary and surfaces its gaps inline", async () => {
@@ -202,7 +202,7 @@ describe("CodeExecutionPanel", () => {
       detached_admission: NO_DETACHED,
     });
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     // The E2B badge must read "not a full boundary", never a plain green
     // "Enforced"/boundary, and the reachable holes are shown next to it.
@@ -223,7 +223,7 @@ describe("CodeExecutionPanel", () => {
       detached_admission: NO_DETACHED,
     });
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     // The tier-3+ requirement is surfaced inline, and the badge reads
     // conditional — never a plain green "Boundary".
@@ -235,7 +235,7 @@ describe("CodeExecutionPanel", () => {
   });
 
   it("rejects a timeout outside the bounds before touching the server", async () => {
-    const { client, putCodeExecutionConfig } = clientFor({
+    const { client, putExecConfig } = clientFor({
       provider: "local",
       timeout_ms: 20_000,
       available: true,
@@ -244,7 +244,7 @@ describe("CodeExecutionPanel", () => {
       detached_admission: NO_DETACHED,
     });
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     fireEvent.change(await screen.findByLabelText(/Execution timeout/), {
       target: { value: "500" },
@@ -252,7 +252,7 @@ describe("CodeExecutionPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await screen.findByRole("alert");
-    expect(putCodeExecutionConfig).not.toHaveBeenCalled();
+    expect(putExecConfig).not.toHaveBeenCalled();
   });
 
   it("names why each provider is unusable on a host with no execution at all", async () => {
@@ -282,7 +282,7 @@ describe("CodeExecutionPanel", () => {
       detached_admission: NO_DETACHED,
     });
 
-    render(<CodeExecutionPanel client={client} />);
+    render(<ExecPanel client={client} />);
 
     // The headline states the host has nothing, and each row says what would
     // change it — a missing key must be readable here, not archaeological.

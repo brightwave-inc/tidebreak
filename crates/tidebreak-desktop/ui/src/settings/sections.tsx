@@ -23,7 +23,7 @@ import { useManagedPolicy } from "@/managedPolicy";
 import { useTheme } from "@/theme";
 import { AppearancePanel } from "./AppearancePanel";
 import { AgentsPanel } from "./AgentsPanel";
-import { CodeExecutionPanel } from "./CodeExecutionPanel";
+import { ExecPanel } from "./ExecPanel";
 import { CompactionPanel } from "./CompactionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
@@ -124,9 +124,9 @@ function VoiceTranscriptionSection() {
   return <VoiceTranscriptionPanel client={client} />;
 }
 
-function CodeExecutionSection() {
+function ExecSection() {
   const { client } = useApp();
-  return <CodeExecutionPanel client={client} />;
+  return <ExecPanel client={client} />;
 }
 
 function CompactionSection() {
@@ -270,7 +270,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     label: "Code execution",
     icon: SquareTerminal,
     iconClass: "text-icon-green",
-    Component: CodeExecutionSection,
+    Component: ExecSection,
   },
   {
     path: "coding-harnesses",

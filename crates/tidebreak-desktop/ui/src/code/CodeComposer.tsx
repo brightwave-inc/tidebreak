@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { RendererTurnUsage } from "../generated/wire";
+import type { ContextUsageReading } from "../ContextUsageIndicator";
 import type { CodeTurnSubmission } from "./parsers";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
@@ -490,12 +490,8 @@ export function CodeComposer({
   lastTurnBeganId?: string | null;
   onModelChange?: (model: string) => void;
   onModeChange?: (mode: CodePermissionMode) => void;
-  /** Same meter as chat: last turn's usage in the send cluster. */
-  contextUsage?: {
-    usage: RendererTurnUsage | null;
-    contextWindow: number | undefined;
-    modelName: string | undefined;
-  };
+  /** Same meter as chat: the last turn's reading in the send cluster. */
+  contextUsage?: ContextUsageReading | null;
   /**
    * Engine-discovered slash commands. Empty or absent hides the `/` popup;
    * free-typed `/` text still submits verbatim.

@@ -202,6 +202,28 @@ mod tests {
             .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
     }
 
+    /// `step-finish` reports one model call, and the parser keeps the most
+    /// recent one. `approval-approve` ran two calls — 5267 then 123 fresh
+    /// input — so the prompt still resident at the end is the second.
+    #[test]
+    fn context_tokens_are_the_last_step_prompt() {
+        let (events, _) = replay("approval-approve");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 7_675);
+        assert_eq!(usage.input_tokens, 123);
+        assert_eq!(usage.cache_read_input_tokens, 7_552);
+    }
+
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+        events
+            .iter()
+            .find_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("the fixture completes its turn")
+    }
+
     #[test]
     fn fixture_replay_tool_use() {
         let (events, _) = replay("tool-use");

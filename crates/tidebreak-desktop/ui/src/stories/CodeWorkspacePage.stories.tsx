@@ -197,6 +197,7 @@ const usage = {
   output_tokens: 1_842,
   cache_read_input_tokens: 11_730,
   cache_creation_input_tokens: 0,
+  context_tokens: 24_180,
 };
 
 const turns: CodeTurnSnapshot[] = [

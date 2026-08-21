@@ -83,14 +83,14 @@ pub(crate) trait PluginMcpCatalog: Send + Sync {
 /// The production catalog: the installed plugin tree, the stored enable flags,
 /// and the app data directory the `PLUGIN_DATA` directories live under.
 pub(crate) struct InstalledPluginMcpCatalog {
-    exec: Arc<crate::code_execution::ConfiguredCodeExecutionProvider>,
+    exec: Arc<crate::code_execution::ConfiguredExecProvider>,
     store: Arc<dyn Store>,
     data_root: PathBuf,
 }
 
 impl InstalledPluginMcpCatalog {
     pub(crate) fn new(
-        exec: Arc<crate::code_execution::ConfiguredCodeExecutionProvider>,
+        exec: Arc<crate::code_execution::ConfiguredExecProvider>,
         store: Arc<dyn Store>,
         data_root: PathBuf,
     ) -> Self {

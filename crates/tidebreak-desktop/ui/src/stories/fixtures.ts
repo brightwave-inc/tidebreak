@@ -24,6 +24,7 @@ import type {
   WebSearchCredentialReadiness,
 } from "@/api";
 import type { CodeDeliveryNotification } from "@/code/CodeDeliveryStore";
+import type { ContextUsageReading } from "@/ContextUsageIndicator";
 
 export const taskPlan: TaskPlan = {
   turn_id: "turn-storybook",
@@ -1210,3 +1211,45 @@ export const webSearchCredentials: WebSearchCredentialReadiness[] = [
   { provider: "tavily", has_credential: false },
   { provider: "brave", has_credential: true },
 ];
+
+/**
+ * A finished six-call code turn, as the composer's ring receives it.
+ *
+ * The spend is the shape that made the ring lie: 258,738 prompt-side tokens
+ * summed across every call against a 200k window, while the prompt actually
+ * resident at the end was 44,172. The ring reads the latter.
+ */
+export const contextUsageNormal: ContextUsageReading = {
+  contextTokens: 44_172,
+  spend: {
+    input: 1_244,
+    output: 12_902,
+    cacheRead: 236_180,
+    cacheWrite: 8_412,
+  },
+  contextWindow: 200_000,
+  modelName: "Sonnet 5",
+};
+
+export const contextUsageWarning: ContextUsageReading = {
+  ...contextUsageNormal,
+  contextTokens: 158_400,
+};
+
+export const contextUsageCritical: ContextUsageReading = {
+  ...contextUsageNormal,
+  contextTokens: 191_600,
+};
+
+/** A model whose window the catalog does not publish: tokens, no percent. */
+export const contextUsageUnmetered: ContextUsageReading = {
+  ...contextUsageNormal,
+  contextWindow: undefined,
+  modelName: "Local model",
+};
+
+/** An engine that publishes no per-call figure: no fill, no invented percent. */
+export const contextUsageNoReading: ContextUsageReading = {
+  ...contextUsageNormal,
+  contextTokens: null,
+};

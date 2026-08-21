@@ -6,10 +6,10 @@ import { useApp } from "./AppContext";
 import { chatUsageTotals } from "./ChatUsage";
 import { useChatSessionStore } from "./ChatSessionStore";
 import {
-  contextTokens,
   contextUsageLevel,
   contextUsagePercent,
   formatTokenCount,
+  summedTurnTokens,
 } from "./ContextUsage";
 import type { ChatTerminalTurnSnapshot, RendererTurnUsage } from "./generated/wire";
 import { modelForChat } from "./ModelSelection";
@@ -51,8 +51,11 @@ export function ChatUsageDialog({
   const [turns, setTurns] = useState<ChatTerminalTurnSnapshot[] | null>(null);
   const model = modelForChat(models, chat.model, defaultModelKey);
   const contextWindow = model?.context_window ?? undefined;
+  // Chat has no per-call reading, so this dialog keeps the summed turn
+  // totals. Same over-read the code-mode ring just shed: it needs the
+  // provider paths to publish the last call's prompt before it can improve.
   const percent = lastTurnUsage
-    ? contextUsagePercent(lastTurnUsage, contextWindow)
+    ? contextUsagePercent(summedTurnTokens(lastTurnUsage), contextWindow)
     : null;
   const totals = chatUsageTotals(turns ?? undefined);
 
@@ -121,7 +124,7 @@ function ContextWindowPanel({
     );
   }
 
-  const used = contextTokens(lastTurnUsage);
+  const used = summedTurnTokens(lastTurnUsage);
   const metered = percent !== null && contextWindow !== undefined;
   const level = metered ? contextUsageLevel(percent) : "normal";
 

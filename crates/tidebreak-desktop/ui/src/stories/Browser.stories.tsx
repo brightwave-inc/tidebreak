@@ -34,7 +34,9 @@ type BrowserScenario =
   | "viewport-desktop"
   | "viewport-tablet"
   | "viewport-mobile"
-  | "viewport-custom";
+  | "viewport-custom"
+  | "inspect-off"
+  | "inspect-on";
 
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   name: "wk_webview",
@@ -113,6 +115,7 @@ function browserSession(
     loadState,
     error: loadState === "failed" ? "The local preview stopped responding." : null,
     notice: null,
+    inspectEnabled: false,
     history: url
       ? [
           { url: "https://github.com/brightwave-inc/tidebreak/pull/2335", title: "Agent browser epic" },
@@ -145,6 +148,7 @@ function BrowserStory({
   const [viewportState, setViewportState] = useState<BrowserViewport>(
     viewport ?? { preset: "fit", customWidth: 1024 },
   );
+  const inspectEnabled = scenario === "inspect-on";
   const controller = scenario === "agent"
     ? activeAgent
     : scenario === "takeover"
@@ -189,6 +193,8 @@ function BrowserStory({
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
+          onToggleInspect={fn()}
+          inspectEnabled={inspectEnabled}
           viewportControl={
             <BrowserViewportControl
               viewport={viewportState}
@@ -324,6 +330,8 @@ function NarrowToolbarStory({
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
+          onToggleInspect={fn()}
+          inspectEnabled={false}
           viewportControl={
             <BrowserViewportControl
               viewport={viewport}
@@ -586,6 +594,26 @@ export const ToolbarNarrow390Paused: Story = {
       access={{ ...pausedAccess, shared: true, scope: "origin" }}
     />
   ),
+};
+
+export const InspectOff: Story = {
+  args: { scenario: "inspect-off" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+    const btn = canvas.getByRole("button", { name: "Inspect page elements" });
+    await expect(btn).toHaveAttribute("aria-pressed", "false");
+  },
+};
+
+export const InspectOn: Story = {
+  args: { scenario: "inspect-on" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "Hide inspect highlights" })).toBeVisible();
+    const btn = canvas.getByRole("button", { name: "Hide inspect highlights" });
+    await expect(btn).toHaveAttribute("aria-pressed", "true");
+  },
 };
 
 export const ViewportAgentControlled: Story = {

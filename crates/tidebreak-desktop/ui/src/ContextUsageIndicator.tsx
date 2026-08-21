@@ -1,6 +1,4 @@
-import type { RendererTurnUsage } from "./generated/wire";
 import {
-  contextTokens,
   contextUsageLevel,
   contextUsagePercent,
   formatTokenCount,
@@ -9,10 +7,43 @@ import { WithTooltip } from "./components/ui/tooltip";
 import { cn } from "./lib/utils";
 
 /**
- * How much of the active model's context window the last turn accounted for.
+ * The two readings a finished turn produces, mapped by whoever has them.
  *
- * Renders nothing only when no turn has finished. An unknown window still
- * shows the used tokens — a missing denominator is not a missing reading.
+ * Deliberately not a wire type. Code mode reads occupancy from the engine's
+ * last model call; chat has only turn totals. Naming both here forces each
+ * surface to say which number it is handing over, instead of passing a usage
+ * struct whose four counts get quietly reinterpreted as occupancy.
+ */
+export type ContextUsageReading = {
+  /**
+   * Prompt tokens resident on the last model call — the ring's numerator.
+   *
+   * Null when the engine published nothing that answers "how full is the
+   * window". The ring then shows no fill rather than a made-up one.
+   */
+  contextTokens: number | null;
+  /** The turn's token spend, summed across every model call it made. */
+  spend: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  };
+  contextWindow: number | undefined;
+  modelName: string | undefined;
+};
+
+/**
+ * How much of the active model's context window the last turn left resident.
+ *
+ * The ring shows context; the hover shows spend. They are different numbers:
+ * a turn that ran six model calls spent roughly six prompts' worth of tokens
+ * while the window still only held one, so summing the spend to fill the ring
+ * reads several times too high and pins a healthy session at "full".
+ *
+ * An unknown window still shows the resident tokens — a missing denominator is
+ * not a missing reading. An engine that publishes no per-call figure gets no
+ * fill at all, which is the honest presentation of "not measured".
  *
  * The denominator is the *currently selected* model, not the one that ran the
  * turn. Switching models mid-chat is a question about what will fit next, so
@@ -22,25 +53,25 @@ import { cn } from "./lib/utils";
  * magnitude is a glance, and the numbers wait on hover.
  */
 export function ContextUsageIndicator({
-  usage,
+  contextTokens,
+  spend,
   contextWindow,
   modelName,
-}: {
-  usage: RendererTurnUsage | null;
-  contextWindow: number | undefined;
-  modelName: string | undefined;
-}) {
-  if (!usage) return null;
-
-  const used = contextTokens(usage);
-  const percent = contextUsagePercent(usage, contextWindow);
-  const metered = percent !== null && contextWindow !== undefined;
+}: ContextUsageReading) {
+  // Zero is not a reading. An engine that publishes nothing usable reports
+  // zero, and filling a ring from it would read as an empty window rather
+  // than an unmeasured one.
+  const resident = contextTokens && contextTokens > 0 ? contextTokens : null;
+  const percent =
+    resident === null ? null : contextUsagePercent(resident, contextWindow);
+  const metered =
+    resident !== null && percent !== null && contextWindow !== undefined;
   const level = metered ? contextUsageLevel(percent) : "normal";
   const parts = [
-    { label: "In", tokens: usage.input_tokens },
-    { label: "Out", tokens: usage.output_tokens },
-    { label: "Cache read", tokens: usage.cache_read_input_tokens },
-    { label: "Cache write", tokens: usage.cache_creation_input_tokens },
+    { label: "In", tokens: spend.input },
+    { label: "Out", tokens: spend.output },
+    { label: "Cache read", tokens: spend.cacheRead },
+    { label: "Cache write", tokens: spend.cacheWrite },
   ].filter((part) => part.tokens > 0);
 
   return (
@@ -60,13 +91,13 @@ export function ContextUsageIndicator({
                 <>
                   {percent}%
                   <span className="mx-1 opacity-50">·</span>
-                  {formatTokenCount(used)}
+                  {formatTokenCount(resident)}
                   <span className="mx-0.5 opacity-50">/</span>
                   {formatTokenCount(contextWindow)}
                 </>
-              ) : (
-                <>{used.toLocaleString()} tokens</>
-              )}
+              ) : resident !== null ? (
+                <>{resident.toLocaleString()} tokens</>
+              ) : null}
             </div>
           </div>
           {metered ? (
@@ -86,20 +117,42 @@ export function ContextUsageIndicator({
             </div>
           ) : (
             <p className="text-[11px] leading-snug opacity-70">
-              No published context window
+              {resident === null
+                ? "This engine reports no context reading"
+                : "No published context window"}
             </p>
           )}
+          <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-[11px] leading-relaxed">
+            <div className="col-span-2 grid grid-cols-subgrid">
+              <dt className="opacity-70">Context</dt>
+              <dd className="font-mono tabular-nums">
+                {resident === null
+                  ? "—"
+                  : contextWindow
+                    ? `${resident.toLocaleString()} / ${contextWindow.toLocaleString()}`
+                    : resident.toLocaleString()}
+              </dd>
+            </div>
+          </dl>
           {parts.length > 0 && (
-            <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-[11px] leading-relaxed">
-              {parts.map((part) => (
-                <div key={part.label} className="col-span-2 grid grid-cols-subgrid">
-                  <dt className="opacity-70">{part.label}</dt>
-                  <dd className="font-mono tabular-nums">
-                    {part.tokens.toLocaleString()}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+            <div className="space-y-1 border-t border-primary-foreground/15 pt-2">
+              {/* Labeled, because these are not the ring's numbers: they sum
+                  every model call the turn made, and on a long turn they run
+                  well past what the window ever held. */}
+              <p className="text-[10px] uppercase tracking-wide opacity-60">
+                Turn spend
+              </p>
+              <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-[11px] leading-relaxed">
+                {parts.map((part) => (
+                  <div key={part.label} className="col-span-2 grid grid-cols-subgrid">
+                    <dt className="opacity-70">{part.label}</dt>
+                    <dd className="font-mono tabular-nums">
+                      {part.tokens.toLocaleString()}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
           )}
         </div>
       }
@@ -117,7 +170,9 @@ export function ContextUsageIndicator({
         aria-label={
           metered
             ? `Context: ${percent}% of ${formatTokenCount(contextWindow)} tokens used`
-            : `Context: ${used.toLocaleString()} tokens used`
+            : resident !== null
+              ? `Context: ${resident.toLocaleString()} tokens used`
+              : "Context: no reading from this engine"
         }
       >
         <ContextUsageRing percent={metered ? percent : null} />

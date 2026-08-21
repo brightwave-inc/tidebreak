@@ -57,7 +57,7 @@ async fn a_published_output_is_listed_read_revised_restored_and_exported_over_ht
     std::fs::create_dir_all(&output_dir).unwrap();
     let published = b"def revenue():\n    return 'up'\n";
     std::fs::write(output_dir.join("analysis.py"), published).unwrap();
-    let provider = crate::code_execution::ConfiguredCodeExecutionProvider::new(
+    let provider = crate::code_execution::ConfiguredExecProvider::new(
         store.clone(),
         Arc::new(MemSecrets::default()),
         &scratch_root,

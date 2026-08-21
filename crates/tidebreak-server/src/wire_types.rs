@@ -362,10 +362,8 @@ mod tests {
         generate::collect_from::<crate::chatgpt_runtime::ChatGptSignInStatus>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchConfigInfo>(&cfg, &mut out);
         generate::collect_from::<crate::web_search::WebSearchCredentialReadiness>(&cfg, &mut out);
-        generate::collect_from::<crate::code_execution::CodeExecutionConfigInfo>(&cfg, &mut out);
-        generate::collect_from::<crate::code_execution::CodeExecutionCredentialReadiness>(
-            &cfg, &mut out,
-        );
+        generate::collect_from::<crate::code_execution::ExecConfigInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::code_execution::ExecCredentialReadiness>(&cfg, &mut out);
         generate::collect_from::<crate::mcp_config::McpServersInfo>(&cfg, &mut out);
         // The installed plugin/skill catalog, its host-derived capability
         // badges, and the toggle body the management surface sends back.

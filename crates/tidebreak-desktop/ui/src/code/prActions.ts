@@ -98,12 +98,118 @@ export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
 }
 
 /**
- * Prompt actions run in the workspace's interactive session. "Watch and fix"
- * is not one of them: it starts a durable server-side watch task instead
- * (`POST /code/workspaces/{id}/watch`).
+ * Whether a pull request in this state may be merged, or auto-merge armed.
+ *
+ * One table for every surface that offers merging. Decision 42 makes merging a
+ * user action rather than an agent capability, so the answer to "may this
+ * merge" has to be the same whether the reader clicks the review sidebar's
+ * button, the workspace header's, or presses the chord — a second copy would
+ * eventually let one of them offer a merge the others refuse.
+ *
+ * `explanation` is the sentence to show when the answer is no. `null` means
+ * the pull request is either mergeable or already resolved, and there is
+ * nothing to explain.
+ */
+export function prMergeControls(state: PrWorkflowState): {
+  canMerge: boolean;
+  canEnableAutoMerge: boolean;
+  explanation: string | null;
+} {
+  switch (state) {
+    case "ready":
+      return { canMerge: true, canEnableAutoMerge: true, explanation: null };
+    case "checking":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "GitHub is still determining mergeability. Merge stays unavailable until the pull request is explicitly ready.",
+      };
+    case "pending":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Wait for the pending checks before merging directly.",
+      };
+    case "failing":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Fix the failing checks before merging directly.",
+      };
+    case "conflict":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "Resolve the merge conflicts before merging directly.",
+      };
+    case "behind":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Update the branch from its base before merging directly.",
+      };
+    case "blocked":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "A review or repository requirement is still blocking a direct merge.",
+      };
+    case "changes_requested":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Address the requested changes before merging directly.",
+      };
+    case "draft":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Mark the pull request ready for review on GitHub before merging it.",
+      };
+    case "queued":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "This pull request is already waiting in the merge queue.",
+      };
+    case "auto_merge":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Auto-merge is already enabled and will merge after the remaining requirements pass.",
+      };
+    case "merged":
+    case "closed":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: null,
+      };
+  }
+}
+
+/** The workflow actions an agent carries out, as opposed to an endpoint. */
+export type PrPromptAction = Exclude<
+  PrWorkflowAction,
+  "watch_and_fix" | "mark_ready" | "merge"
+>;
+
+/**
+ * Prompt actions run in the workspace's interactive session.
+ *
+ * Three of the workflow actions are deliberately absent. "Watch and fix"
+ * starts a durable server-side watch task (`POST
+ * /code/workspaces/{id}/watch`). Merging and readying a draft are
+ * pull-request state changes, which decision 42 reserves for the user: they
+ * run through their own endpoints, and excluding them from this type is what
+ * stops a merge prompt from being wired back up by accident.
  */
 export function prWorkflowPrompt(
-  action: Exclude<PrWorkflowAction, "watch_and_fix">,
+  action: PrPromptAction,
   pr: PullRequestDigest,
 ): string {
   const number = `#${pr.number}`;
@@ -111,12 +217,6 @@ export function prWorkflowPrompt(
   const context = prWorkflowPromptContext(pr);
   let instruction: string;
   switch (action) {
-    case "mark_ready":
-      instruction = `Mark pull request ${number} ready for review. First confirm the current head is pushed and the pull request is still a draft. Do not merge it. Report the result.`;
-      break;
-    case "merge":
-      instruction = `Merge pull request ${number} into ${base}. Re-check the current head SHA, required checks, reviews, conflicts, and queue requirements immediately before merging. Use the repository's preferred merge or merge-queue path. Do not change the branch unless the merge requires it. Report the result.`;
-      break;
     case "fix_errors":
       instruction = `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
       break;

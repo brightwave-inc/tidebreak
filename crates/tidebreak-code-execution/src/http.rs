@@ -3,30 +3,29 @@ use reqwest::Response;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
-use crate::CodeExecutionError;
+use crate::ExecError;
 
 /// Bound JSON returned by managed-provider control and command APIs.
 pub(crate) async fn decode_bounded_json<T: DeserializeOwned>(
     response: Response,
     provider: &str,
     max_bytes: usize,
-) -> Result<T, CodeExecutionError> {
+) -> Result<T, ExecError> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
-            CodeExecutionError::Unavailable(format!("{provider} returned an incomplete response"))
+            ExecError::Unavailable(format!("{provider} returned an incomplete response"))
         })?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(CodeExecutionError::Unavailable(format!(
+            return Err(ExecError::Unavailable(format!(
                 "{provider} returned an oversized response"
             )));
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        CodeExecutionError::Unavailable(format!("{provider} returned an invalid response"))
-    })
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ExecError::Unavailable(format!("{provider} returned an invalid response")))
 }
 
 /// Download one workspace file, refusing anything beyond the transfer bound.
@@ -34,15 +33,15 @@ pub(crate) async fn download_bounded_file(
     response: Response,
     provider: &str,
     max_bytes: usize,
-) -> Result<Vec<u8>, CodeExecutionError> {
+) -> Result<Vec<u8>, ExecError> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
-            CodeExecutionError::Unavailable(format!("{provider} returned an incomplete file"))
+            ExecError::Unavailable(format!("{provider} returned an incomplete file"))
         })?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }

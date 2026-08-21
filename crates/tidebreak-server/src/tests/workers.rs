@@ -62,7 +62,7 @@ async fn test_app_with_skills(
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     state.code_execution = Some(Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+        crate::code_execution::ConfiguredExecProvider::new(
             store.clone(),
             secrets,
             dir.path().join("scratch"),
@@ -93,7 +93,7 @@ fn test_router_with_skills_from_store(
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     state.code_execution = Some(Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(store, secrets, scratch_dir)
+        crate::code_execution::ConfiguredExecProvider::new(store, secrets, scratch_dir)
             .with_skills(Some(root.join("skills"))),
     ));
     let token = state.token.clone();

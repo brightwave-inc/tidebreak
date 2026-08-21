@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   FolderOpen,
+  Globe2,
   Shapes,
   Shield,
 } from "lucide-react";
@@ -51,6 +52,8 @@ export type ChatStatusChipProps = {
   onOpenPermissions: () => void;
   /** Bring the agents table forward. */
   onOpenAgents: () => void;
+  /** Open the chat-scoped browser tab.  Absent when no native host is available. */
+  onOpenBrowser?: () => void;
   /** How many standing approvals reach this chat, when known. */
   permissionCount?: number;
 };
@@ -74,6 +77,7 @@ export function ChatStatusChip({
   onOpenFolders,
   onOpenPermissions,
   onOpenAgents,
+  onOpenBrowser,
   permissionCount,
 }: ChatStatusChipProps) {
   const [open, setOpen] = useState(false);
@@ -135,6 +139,10 @@ export function ChatStatusChip({
       onOpenFolders={onOpenFolders}
       onOpenPermissions={onOpenPermissions}
       onOpenAgents={onOpenAgents}
+      onOpenBrowser={onOpenBrowser}
+      browserSummary={
+        onOpenBrowser ? "Open shared tab" : undefined
+      }
       onChoose={() => setOpen(false)}
     />
   );
@@ -217,16 +225,20 @@ function ActivityDetails({
   onOpenFolders,
   onOpenPermissions,
   onOpenAgents,
+  onOpenBrowser,
+  browserSummary,
   onChoose,
 }: {
   outputsSummary: string;
   folderSummary: string;
   permissionsSummary: string;
   agentsSummary: string;
+  browserSummary?: string;
   onOpenOutputs: () => void;
   onOpenFolders: () => void;
   onOpenPermissions: () => void;
   onOpenAgents: () => void;
+  onOpenBrowser?: () => void;
   onChoose: () => void;
 }) {
   const choose = (action: () => void) => {
@@ -260,6 +272,14 @@ function ActivityDetails({
         value={agentsSummary}
         onClick={() => choose(onOpenAgents)}
       />
+      {onOpenBrowser && (
+        <DetailRow
+          icon={<Globe2 className="size-4" aria-hidden="true" />}
+          label="Browser"
+          value={browserSummary ?? "Open shared tab"}
+          onClick={() => choose(onOpenBrowser)}
+        />
+      )}
     </>
   );
 }

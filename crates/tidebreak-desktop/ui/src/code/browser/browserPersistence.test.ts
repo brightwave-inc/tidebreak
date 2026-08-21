@@ -27,6 +27,7 @@ describe("browser persistence", () => {
         url: "https://example.com/sign-in",
         message: "popup",
       },
+      inspectEnabled: true,
     };
     writeStoredBrowserSession(session);
     expect(readStoredBrowserSession("browser-1")).toMatchObject({
@@ -36,6 +37,7 @@ describe("browser persistence", () => {
       loadState: "ready",
       error: null,
       notice: null,
+      inspectEnabled: false,
     });
   });
 

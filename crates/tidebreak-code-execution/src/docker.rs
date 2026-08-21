@@ -1,4 +1,4 @@
-//! A [`CodeExecutionProvider`] over a host-local Docker-compatible runtime.
+//! A [`ExecProvider`] over a host-local Docker-compatible runtime.
 //!
 //! # Why this exists
 //!
@@ -102,10 +102,9 @@ use crate::sandbox_image::{
     image_digest_pinned, DOCUMENTS_CPU, DOCUMENTS_IMAGE, DOCUMENTS_MEMORY_GB,
 };
 use crate::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind, CodeExecutionRequest,
-    CodeExecutionResponse, CodeExecutionUnavailableReason, ExecutionWorkspaceId, StagedUpload,
-    WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing,
-    MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
+    ExecError, ExecProvider, ExecProviderKind, ExecRequest, ExecResponse, ExecUnavailableReason,
+    ExecutionWorkspaceId, StagedUpload, WorkspaceFileEntry, WorkspaceFilePath, WorkspaceLifecycle,
+    WorkspaceListing, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_LIST_ENTRIES,
 };
 
 /// The runtime binary, preferred on `PATH`. Any Docker-CLI-compatible runtime
@@ -312,16 +311,16 @@ fn container_network(policy: Option<&EgressPolicy>) -> ContainerNetwork {
 }
 
 impl DockerExecutionProvider {
-    pub fn new(timeout: Duration) -> Result<Self, CodeExecutionError> {
+    pub fn new(timeout: Duration) -> Result<Self, ExecError> {
         Self::with_session_pool(timeout, RemoteSessionPool::default())
     }
 
     pub fn with_session_pool(
         timeout: Duration,
         pool: RemoteSessionPool,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         if timeout.is_zero() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "execution timeout must be positive".into(),
             ));
         }
@@ -411,12 +410,12 @@ impl DockerExecutionProvider {
     /// socket not permitted to this user). The answer is cached for
     /// [`AVAILABILITY_TTL`] in both directions, so a settings render costs at
     /// most one probe and starting the daemon is picked up without a restart.
-    pub async fn availability() -> Result<(), CodeExecutionUnavailableReason> {
+    pub async fn availability() -> Result<(), ExecUnavailableReason> {
         Self::availability_of(&resolve_container_runtime_binary()).await
     }
 
     /// [`Self::availability`] for a named runtime binary.
-    pub async fn availability_of(binary: &str) -> Result<(), CodeExecutionUnavailableReason> {
+    pub async fn availability_of(binary: &str) -> Result<(), ExecUnavailableReason> {
         static CACHE: LazyLock<Mutex<HashMap<String, (Instant, AvailabilityAnswer)>>> =
             LazyLock::new(|| Mutex::new(HashMap::new()));
         if let Ok(cache) = CACHE.lock() {
@@ -466,7 +465,7 @@ impl DockerExecutionProvider {
     ///
     /// Adopts an existing container rather than duplicating it, so a host that
     /// restarted reuses the files a previous session left in the workspace.
-    async fn ensure_container(&self, workspace_id: &str) -> Result<String, CodeExecutionError> {
+    async fn ensure_container(&self, workspace_id: &str) -> Result<String, ExecError> {
         let name = container_name(workspace_id);
         let configuration = self.configuration_identity();
         if let Some(existing) = self.inspect_container(&name).await? {
@@ -497,7 +496,7 @@ impl DockerExecutionProvider {
                     self.remove_container(&existing.id).await?;
                 }
                 ExistingContainerDisposition::Conflict => {
-                    return Err(CodeExecutionError::Unavailable(
+                    return Err(ExecError::Unavailable(
                         "the workspace container name is already in use".into(),
                     ));
                 }
@@ -505,9 +504,7 @@ impl DockerExecutionProvider {
         }
         match self.control(&self.run_args(workspace_id)).await {
             Ok(stdout) => parse_container_id(&stdout).ok_or_else(|| {
-                CodeExecutionError::Unavailable(
-                    "the container runtime returned no container id".into(),
-                )
+                ExecError::Unavailable("the container runtime returned no container id".into())
             }),
             // Another process (or another Tidebreak window) won the race to
             // create this workspace's container; adopt what is there.
@@ -522,7 +519,7 @@ impl DockerExecutionProvider {
                     {
                         Ok(existing.id)
                     }
-                    _ => Err(CodeExecutionError::Unavailable(
+                    _ => Err(ExecError::Unavailable(
                         "the workspace container could not be started".into(),
                     )),
                 }
@@ -535,7 +532,7 @@ impl DockerExecutionProvider {
     async fn inspect_container(
         &self,
         reference: &str,
-    ) -> Result<Option<ContainerState>, CodeExecutionError> {
+    ) -> Result<Option<ContainerState>, ExecError> {
         let args = inspect_args(reference);
         match self.control(&args).await {
             Ok(stdout) => Ok(parse_inspect(&stdout)),
@@ -547,7 +544,7 @@ impl DockerExecutionProvider {
     /// `docker rm -f -v`, treating a missing container as success. `-v`
     /// removes the anonymous workspace volume; without it every torn-down
     /// workspace would leave its volume dangling on the host's disk.
-    async fn remove_container(&self, reference: &str) -> Result<(), CodeExecutionError> {
+    async fn remove_container(&self, reference: &str) -> Result<(), ExecError> {
         match self.control(&remove_args(reference)).await {
             Ok(_) => Ok(()),
             Err(ControlFailure::Refused(stderr)) if is_no_such_container(&stderr) => Ok(()),
@@ -665,8 +662,8 @@ impl DockerExecutionProvider {
     async fn run_docker_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         validate_container_id(&session.sandbox_id)?;
         let started = Instant::now();
         let mut command = self.command();
@@ -677,7 +674,7 @@ impl DockerExecutionProvider {
         )?);
         let child = command
             .spawn()
-            .map_err(|_| CodeExecutionError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
+            .map_err(|_| ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
         let Some(output) = bounded_output(
             child,
             self.timeout.saturating_add(CLI_GRACE),
@@ -687,10 +684,10 @@ impl DockerExecutionProvider {
         else {
             // The CLI itself was abandoned, so whether the command ran to
             // completion inside the container is genuinely unknown.
-            return Err(CodeExecutionError::AmbiguousExecution.into());
+            return Err(ExecError::AmbiguousExecution.into());
         };
         if output.status.is_none() {
-            return Err(CodeExecutionError::AmbiguousExecution.into());
+            return Err(ExecError::AmbiguousExecution.into());
         }
         if is_missing_container(output.status, &output.stderr) {
             return Err(RemoteSessionError::Missing);
@@ -704,7 +701,7 @@ impl DockerExecutionProvider {
         // every backend's timeout reporting carries.
         let timed_out = output.status == Some(TIMEOUT_EXIT);
         Ok(capture.response(
-            CodeExecutionProviderKind::Docker,
+            ExecProviderKind::Docker,
             started,
             if timed_out { None } else { output.status },
             timed_out,
@@ -729,12 +726,12 @@ impl DockerExecutionProvider {
         command.args(helper_args(&session.sandbox_id, script, argument));
         let mut child = command
             .spawn()
-            .map_err(|_| CodeExecutionError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
+            .map_err(|_| ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
         if let Some(bytes) = stdin {
             let mut pipe = child
                 .stdin
                 .take()
-                .ok_or_else(|| CodeExecutionError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
+                .ok_or_else(|| ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
             let bytes = bytes.to_vec();
             tokio::spawn(async move {
                 let _ = pipe.write_all(&bytes).await;
@@ -743,7 +740,7 @@ impl DockerExecutionProvider {
         }
         let output = bounded_output(child, CONTROL_TIMEOUT, capture_bytes)
             .await
-            .ok_or_else(|| CodeExecutionError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
+            .ok_or_else(|| ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()))?;
         if is_missing_container(output.status, &output.stderr) {
             return Err(RemoteSessionError::Missing);
         }
@@ -753,8 +750,8 @@ impl DockerExecutionProvider {
 
 #[async_trait]
 impl RemoteSandboxAdapter for DockerExecutionProvider {
-    fn kind(&self) -> CodeExecutionProviderKind {
-        CodeExecutionProviderKind::Docker
+    fn kind(&self) -> ExecProviderKind {
+        ExecProviderKind::Docker
     }
 
     /// There is no credential; what distinguishes one configuration's
@@ -776,10 +773,7 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
         egress_policy_fingerprint(self.egress.as_ref())
     }
 
-    async fn create_session(
-        &self,
-        workspace_id: &str,
-    ) -> Result<RemoteSession, CodeExecutionError> {
+    async fn create_session(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
         let id = self.ensure_container(workspace_id).await?;
         Ok(RemoteSession {
             sandbox_id: id,
@@ -788,7 +782,7 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
         })
     }
 
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError> {
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), ExecError> {
         validate_container_id(&session.sandbox_id)?;
         self.remove_container(&session.sandbox_id).await
     }
@@ -796,7 +790,7 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
     async fn reconnect_session(
         &self,
         session: &RemoteSession,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+    ) -> Result<Option<RemoteSession>, ExecError> {
         validate_container_id(&session.sandbox_id)?;
         let Some(state) = self.inspect_container(&session.sandbox_id).await? else {
             return Ok(None);
@@ -812,8 +806,8 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
     async fn run_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError> {
         self.run_docker_command(session, request).await
     }
 }
@@ -838,7 +832,7 @@ impl RemoteWorkspaceAdapter for DockerExecutionProvider {
         if output.status == Some(0) {
             return Ok(());
         }
-        Err(CodeExecutionError::Unavailable("could not write the workspace file".into()).into())
+        Err(ExecError::Unavailable("could not write the workspace file".into()).into())
     }
 
     async fn download_file(
@@ -857,11 +851,9 @@ impl RemoteWorkspaceAdapter for DockerExecutionProvider {
             .await?;
         match output.status {
             Some(0) => Ok(output.stdout),
-            Some(FILE_MISSING_EXIT) => Err(CodeExecutionError::WorkspaceFileNotFound.into()),
-            Some(FILE_TOO_LARGE_EXIT) => Err(CodeExecutionError::WorkspaceFileTooLarge.into()),
-            _ => Err(
-                CodeExecutionError::Unavailable("could not read the workspace file".into()).into(),
-            ),
+            Some(FILE_MISSING_EXIT) => Err(ExecError::WorkspaceFileNotFound.into()),
+            Some(FILE_TOO_LARGE_EXIT) => Err(ExecError::WorkspaceFileTooLarge.into()),
+            _ => Err(ExecError::Unavailable("could not read the workspace file".into()).into()),
         }
     }
 
@@ -882,12 +874,11 @@ impl RemoteWorkspaceAdapter for DockerExecutionProvider {
             .await?;
         match output.status {
             Some(0) => {}
-            Some(DIR_MISSING_EXIT) => return Err(CodeExecutionError::WorkspaceFileNotFound.into()),
+            Some(DIR_MISSING_EXIT) => return Err(ExecError::WorkspaceFileNotFound.into()),
             _ => {
-                return Err(CodeExecutionError::Unavailable(
-                    "could not list the workspace directory".into(),
+                return Err(
+                    ExecError::Unavailable("could not list the workspace directory".into()).into(),
                 )
-                .into())
             }
         }
         Ok(parse_listing(&output.stdout, path))
@@ -896,24 +887,15 @@ impl RemoteWorkspaceAdapter for DockerExecutionProvider {
 
 #[async_trait]
 impl WorkspaceLifecycle for DockerExecutionProvider {
-    async fn create_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn create_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         create_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn connect_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<bool, CodeExecutionError> {
+    async fn connect_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<bool, ExecError> {
         connect_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
-    async fn destroy_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError> {
+    async fn destroy_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError> {
         destroy_remote_workspace(self, &self.pool, workspace.as_str()).await
     }
 
@@ -922,9 +904,9 @@ impl WorkspaceLifecycle for DockerExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         with_remote_session(
             self,
@@ -940,9 +922,9 @@ impl WorkspaceLifecycle for DockerExecutionProvider {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<StagedUpload, CodeExecutionError> {
+    ) -> Result<StagedUpload, ExecError> {
         if content.len() > MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::WorkspaceFileTooLarge);
+            return Err(ExecError::WorkspaceFileTooLarge);
         }
         stage_remote_file(self, &self.pool, workspace.as_str(), path, content).await
     }
@@ -951,7 +933,7 @@ impl WorkspaceLifecycle for DockerExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> Result<Vec<u8>, CodeExecutionError> {
+    ) -> Result<Vec<u8>, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -965,7 +947,7 @@ impl WorkspaceLifecycle for DockerExecutionProvider {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> Result<WorkspaceListing, CodeExecutionError> {
+    ) -> Result<WorkspaceListing, ExecError> {
         with_remote_session(
             self,
             &self.pool,
@@ -977,11 +959,8 @@ impl WorkspaceLifecycle for DockerExecutionProvider {
 }
 
 #[async_trait]
-impl CodeExecutionProvider for DockerExecutionProvider {
-    async fn execute(
-        &self,
-        request: CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError> {
+impl ExecProvider for DockerExecutionProvider {
+    async fn execute(&self, request: ExecRequest) -> Result<ExecResponse, ExecError> {
         execute_remote(self, &self.pool, request).await
     }
 
@@ -1024,11 +1003,11 @@ enum AvailabilityAnswer {
 }
 
 impl AvailabilityAnswer {
-    fn into_result(self) -> Result<(), CodeExecutionUnavailableReason> {
+    fn into_result(self) -> Result<(), ExecUnavailableReason> {
         match self {
             Self::Ready => Ok(()),
-            Self::MissingRuntime => Err(CodeExecutionUnavailableReason::MissingContainerRuntime),
-            Self::Unreachable => Err(CodeExecutionUnavailableReason::ContainerRuntimeUnreachable),
+            Self::MissingRuntime => Err(ExecUnavailableReason::MissingContainerRuntime),
+            Self::Unreachable => Err(ExecUnavailableReason::ContainerRuntimeUnreachable),
         }
     }
 }
@@ -1063,20 +1042,20 @@ enum ControlFailure {
 }
 
 impl ControlFailure {
-    fn into_error(self) -> CodeExecutionError {
+    fn into_error(self) -> ExecError {
         match self {
-            Self::Runtime => CodeExecutionError::Unavailable(RUNTIME_SPAWN_FAILED.into()),
+            Self::Runtime => ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()),
             // The runtime's own message is not surfaced: it is operator
             // diagnostics, and the model-facing error stays a stable sentence.
             Self::Refused(stderr) => {
                 tracing::debug!(stderr = %stderr, "container runtime refused an invocation");
-                CodeExecutionError::Unavailable("the container runtime refused the request".into())
+                ExecError::Unavailable("the container runtime refused the request".into())
             }
         }
     }
 }
 
-impl From<ControlFailure> for CodeExecutionError {
+impl From<ControlFailure> for ExecError {
     fn from(failure: ControlFailure) -> Self {
         failure.into_error()
     }
@@ -1206,9 +1185,9 @@ fn inspect_args(reference: &str) -> Vec<String> {
 /// would leave the command running inside the container.
 fn exec_command_args(
     container: &str,
-    request: &CodeExecutionRequest,
+    request: &ExecRequest,
     timeout: Duration,
-) -> Result<Vec<String>, CodeExecutionError> {
+) -> Result<Vec<String>, ExecError> {
     let mut args = vec![
         "exec".to_owned(),
         "--workdir".to_owned(),
@@ -1242,20 +1221,20 @@ fn helper_args(container: &str, script: &str, argument: &str) -> Vec<String> {
 }
 
 /// Resolve a workspace-relative working directory to its container path.
-fn container_cwd(cwd: &str) -> Result<String, CodeExecutionError> {
+fn container_cwd(cwd: &str) -> Result<String, ExecError> {
     let mut resolved = WORKSPACE_ROOT.to_owned();
     for component in Path::new(cwd).components() {
         match component {
             Component::CurDir => {}
             Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    CodeExecutionError::InvalidRequest("invalid working directory".into())
-                })?;
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| ExecError::InvalidRequest("invalid working directory".into()))?;
                 resolved.push('/');
                 resolved.push_str(part);
             }
             _ => {
-                return Err(CodeExecutionError::InvalidRequest(
+                return Err(ExecError::InvalidRequest(
                     "invalid working directory".into(),
                 ))
             }
@@ -1335,7 +1314,7 @@ fn parse_listing(stdout: &[u8], parent: Option<&WorkspaceFilePath>) -> Workspace
 /// argument vectors, so each one is re-proved to be an identifier before use.
 /// The leading character must be alphanumeric: an id that could start with
 /// `-` would read as a flag to the next invocation it is passed to.
-fn validate_container_id(value: &str) -> Result<(), CodeExecutionError> {
+fn validate_container_id(value: &str) -> Result<(), ExecError> {
     if value.is_empty()
         || value.len() > 128
         || !value.starts_with(|first: char| first.is_ascii_alphanumeric())
@@ -1343,7 +1322,7 @@ fn validate_container_id(value: &str) -> Result<(), CodeExecutionError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(CodeExecutionError::Unavailable(
+        return Err(ExecError::Unavailable(
             "the container runtime returned an invalid container identity".into(),
         ));
     }
@@ -1376,8 +1355,8 @@ mod tests {
         DockerExecutionProvider::new(Duration::from_secs(30)).unwrap()
     }
 
-    fn request(cwd: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request(cwd: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse("call-123").unwrap(),
             ExecutionWorkspaceId::parse("chat-123").unwrap(),
             "python3",
@@ -1731,7 +1710,7 @@ mod tests {
 
         let response = provider
             .execute(
-                CodeExecutionRequest::new(
+                ExecRequest::new(
                     ExecutionId::parse("call-e2e-1").unwrap(),
                     workspace.clone(),
                     "python3",
@@ -1744,7 +1723,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.exit_code, Some(0), "stderr: {}", response.stderr);
         assert_eq!(response.stdout.trim(), "ok");
-        assert_eq!(response.provider, CodeExecutionProviderKind::Docker);
+        assert_eq!(response.provider, ExecProviderKind::Docker);
 
         let path = WorkspaceFilePath::parse("output/report.bin").unwrap();
         let content = b"\x00docker\xff".to_vec();
@@ -1771,7 +1750,7 @@ mod tests {
             provider
                 .get_workspace_file(&workspace, &WorkspaceFilePath::parse("nope").unwrap())
                 .await,
-            Err(CodeExecutionError::WorkspaceFileNotFound)
+            Err(ExecError::WorkspaceFileNotFound)
         ));
 
         // The command is stopped inside the container, not by abandoning the
@@ -1782,7 +1761,7 @@ mod tests {
         )
         .unwrap()
         .execute(
-            CodeExecutionRequest::new(
+            ExecRequest::new(
                 ExecutionId::parse("call-e2e-2").unwrap(),
                 workspace.clone(),
                 "sleep",

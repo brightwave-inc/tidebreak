@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 
 use crate::receipt::{request_fingerprint, BeginExecution, ExecutionReceipt};
 use crate::{
-    CodeExecutionError, CodeExecutionProviderKind, CodeExecutionRequest, CodeExecutionResponse,
-    StagedUpload, WorkspaceFilePath, WorkspaceListing,
+    ExecError, ExecProviderKind, ExecRequest, ExecResponse, StagedUpload, WorkspaceFilePath,
+    WorkspaceListing,
 };
 
 /// How long a receipt left in `Running` keeps reporting the execution as
@@ -155,14 +155,14 @@ struct StagedDigests {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct SessionKey {
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
     credential: [u8; 32],
     workspace_id: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ReceiptKey {
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
     execution_id: String,
 }
 
@@ -208,18 +208,18 @@ pub(crate) fn egress_policy_fingerprint(policy: Option<&EgressPolicy>) -> [u8; 3
 
 pub(crate) enum RemoteSessionError {
     Missing,
-    Provider(CodeExecutionError),
+    Provider(ExecError),
 }
 
-impl From<CodeExecutionError> for RemoteSessionError {
-    fn from(error: CodeExecutionError) -> Self {
+impl From<ExecError> for RemoteSessionError {
+    fn from(error: ExecError) -> Self {
         Self::Provider(error)
     }
 }
 
 #[async_trait]
 pub(crate) trait RemoteSandboxAdapter: Send + Sync {
-    fn kind(&self) -> CodeExecutionProviderKind;
+    fn kind(&self) -> ExecProviderKind;
     fn credential_fingerprint(&self) -> [u8; 32];
 
     /// Fingerprint of the egress policy this adapter compiles into sandbox
@@ -228,22 +228,21 @@ pub(crate) trait RemoteSandboxAdapter: Send + Sync {
     /// and must be replaced rather than reused.
     fn egress_fingerprint(&self) -> [u8; 32];
 
-    async fn create_session(&self, workspace_id: &str)
-        -> Result<RemoteSession, CodeExecutionError>;
+    async fn create_session(&self, workspace_id: &str) -> Result<RemoteSession, ExecError>;
 
     /// Destroy the remote sandbox. A sandbox that is already gone is success.
-    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), CodeExecutionError>;
+    async fn destroy_sandbox(&self, session: &RemoteSession) -> Result<(), ExecError>;
 
     async fn reconnect_session(
         &self,
         session: &RemoteSession,
-    ) -> Result<Option<RemoteSession>, CodeExecutionError>;
+    ) -> Result<Option<RemoteSession>, ExecError>;
 
     async fn run_command(
         &self,
         session: &RemoteSession,
-        request: &CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, RemoteSessionError>;
+        request: &ExecRequest,
+    ) -> Result<ExecResponse, RemoteSessionError>;
 }
 
 /// Vendor file and teardown transports behind the shared workspace lifecycle.
@@ -272,9 +271,9 @@ pub(crate) trait RemoteWorkspaceAdapter: RemoteSandboxAdapter {
 impl RemoteSessionPool {
     async fn begin_execution(
         &self,
-        provider: CodeExecutionProviderKind,
-        request: &CodeExecutionRequest,
-    ) -> Result<BeginExecution, CodeExecutionError> {
+        provider: ExecProviderKind,
+        request: &ExecRequest,
+    ) -> Result<BeginExecution, ExecError> {
         let fingerprint = request_fingerprint(request)?;
         let key = ReceiptKey {
             provider,
@@ -290,18 +289,16 @@ impl RemoteSessionPool {
                 );
                 Ok(BeginExecution::Started)
             }
-            Some(entry) => entry
-                .receipt
-                .replay(&fingerprint, CodeExecutionError::Unavailable),
+            Some(entry) => entry.receipt.replay(&fingerprint, ExecError::Unavailable),
         }
     }
 
     async fn finish_execution(
         &self,
-        provider: CodeExecutionProviderKind,
-        request: &CodeExecutionRequest,
-        outcome: &Result<CodeExecutionResponse, CodeExecutionError>,
-    ) -> Result<(), CodeExecutionError> {
+        provider: ExecProviderKind,
+        request: &ExecRequest,
+        outcome: &Result<ExecResponse, ExecError>,
+    ) -> Result<(), ExecError> {
         let key = ReceiptKey {
             provider,
             execution_id: request.execution_id.as_str().to_owned(),
@@ -317,7 +314,7 @@ impl RemoteSessionPool {
 
     async fn session(
         &self,
-        provider: CodeExecutionProviderKind,
+        provider: ExecProviderKind,
         credential: [u8; 32],
         workspace_id: &str,
     ) -> Arc<Mutex<Option<PooledSession>>> {
@@ -428,8 +425,8 @@ impl RemoteSessionPool {
 pub(crate) async fn execute_remote(
     adapter: &dyn RemoteSandboxAdapter,
     pool: &RemoteSessionPool,
-    request: CodeExecutionRequest,
-) -> Result<CodeExecutionResponse, CodeExecutionError> {
+    request: ExecRequest,
+) -> Result<ExecResponse, ExecError> {
     request.validate()?;
     let provider = adapter.kind();
     match pool.begin_execution(provider, &request).await? {
@@ -444,8 +441,8 @@ pub(crate) async fn execute_remote(
 async fn execute_uncached(
     adapter: &dyn RemoteSandboxAdapter,
     pool: &RemoteSessionPool,
-    request: &CodeExecutionRequest,
-) -> Result<CodeExecutionResponse, CodeExecutionError> {
+    request: &ExecRequest,
+) -> Result<ExecResponse, ExecError> {
     with_remote_session(
         adapter,
         pool,
@@ -464,7 +461,7 @@ pub(crate) async fn with_remote_session<'a, A, T, F, Fut>(
     pool: &RemoteSessionPool,
     workspace_id: &str,
     operation: F,
-) -> Result<T, CodeExecutionError>
+) -> Result<T, ExecError>
 where
     A: RemoteSandboxAdapter + ?Sized,
     F: FnOnce(&'a A, RemoteSession) -> Fut,
@@ -483,7 +480,7 @@ where
         Ok(value) => Ok(value),
         Err(RemoteSessionError::Missing) => {
             *slot = None;
-            Err(CodeExecutionError::Unavailable(format!(
+            Err(ExecError::Unavailable(format!(
                 "{} sandbox is no longer available",
                 adapter.kind()
             )))
@@ -504,7 +501,7 @@ pub(crate) async fn stage_remote_file<A>(
     workspace_id: &str,
     path: &WorkspaceFilePath,
     content: &[u8],
-) -> Result<StagedUpload, CodeExecutionError>
+) -> Result<StagedUpload, ExecError>
 where
     A: RemoteWorkspaceAdapter + ?Sized,
 {
@@ -533,7 +530,7 @@ async fn connected_session<A>(
     adapter: &A,
     slot: &mut Option<PooledSession>,
     workspace_id: &str,
-) -> Result<RemoteSession, CodeExecutionError>
+) -> Result<RemoteSession, ExecError>
 where
     A: RemoteSandboxAdapter + ?Sized,
 {
@@ -568,7 +565,7 @@ pub(crate) async fn create_remote_workspace<A>(
     adapter: &A,
     pool: &RemoteSessionPool,
     workspace_id: &str,
-) -> Result<(), CodeExecutionError>
+) -> Result<(), ExecError>
 where
     A: RemoteSandboxAdapter + ?Sized,
 {
@@ -592,7 +589,7 @@ pub(crate) async fn connect_remote_workspace<A>(
     adapter: &A,
     pool: &RemoteSessionPool,
     workspace_id: &str,
-) -> Result<bool, CodeExecutionError>
+) -> Result<bool, ExecError>
 where
     A: RemoteSandboxAdapter + ?Sized,
 {
@@ -638,7 +635,7 @@ pub(crate) async fn destroy_remote_workspace<A>(
     adapter: &A,
     pool: &RemoteSessionPool,
     workspace_id: &str,
-) -> Result<(), CodeExecutionError>
+) -> Result<(), ExecError>
 where
     A: RemoteWorkspaceAdapter + ?Sized,
 {
@@ -700,8 +697,8 @@ mod tests {
 
     #[async_trait]
     impl RemoteSandboxAdapter for FakeAdapter {
-        fn kind(&self) -> CodeExecutionProviderKind {
-            CodeExecutionProviderKind::E2b
+        fn kind(&self) -> ExecProviderKind {
+            ExecProviderKind::E2b
         }
 
         fn credential_fingerprint(&self) -> [u8; 32] {
@@ -712,10 +709,7 @@ mod tests {
             [9; 32]
         }
 
-        async fn create_session(
-            &self,
-            _workspace_id: &str,
-        ) -> Result<RemoteSession, CodeExecutionError> {
+        async fn create_session(&self, _workspace_id: &str) -> Result<RemoteSession, ExecError> {
             Ok(RemoteSession {
                 sandbox_id: "sandbox-1".to_owned(),
                 endpoint: None,
@@ -723,10 +717,7 @@ mod tests {
             })
         }
 
-        async fn destroy_sandbox(
-            &self,
-            _session: &RemoteSession,
-        ) -> Result<(), CodeExecutionError> {
+        async fn destroy_sandbox(&self, _session: &RemoteSession) -> Result<(), ExecError> {
             self.destroys.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -734,21 +725,21 @@ mod tests {
         async fn reconnect_session(
             &self,
             session: &RemoteSession,
-        ) -> Result<Option<RemoteSession>, CodeExecutionError> {
+        ) -> Result<Option<RemoteSession>, ExecError> {
             Ok(Some(session.clone()))
         }
 
         async fn run_command(
             &self,
             _session: &RemoteSession,
-            _request: &CodeExecutionRequest,
-        ) -> Result<CodeExecutionResponse, RemoteSessionError> {
+            _request: &ExecRequest,
+        ) -> Result<ExecResponse, RemoteSessionError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             if self.hang.load(Ordering::SeqCst) {
                 std::future::pending::<()>().await;
             }
-            Ok(CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::E2b,
+            Ok(ExecResponse {
+                provider: ExecProviderKind::E2b,
                 exit_code: Some(0),
                 stdout: "done".to_owned(),
                 stderr: String::new(),
@@ -792,8 +783,8 @@ mod tests {
         }
     }
 
-    fn request(execution: &str, workspace: &str) -> CodeExecutionRequest {
-        CodeExecutionRequest::new(
+    fn request(execution: &str, workspace: &str) -> ExecRequest {
+        ExecRequest::new(
             ExecutionId::parse(execution).unwrap(),
             ExecutionWorkspaceId::parse(workspace).unwrap(),
             "/bin/echo",
@@ -826,7 +817,7 @@ mod tests {
         adapter.hang.store(false, Ordering::SeqCst);
         let replayed = execute_remote(&adapter, &pool, request("execution-1", "workspace-1")).await;
         assert!(
-            matches!(replayed, Err(CodeExecutionError::AmbiguousExecution)),
+            matches!(replayed, Err(ExecError::AmbiguousExecution)),
             "an execution that may still be running stays ambiguous"
         );
 

@@ -61,6 +61,7 @@ import { followScrollBehavior } from "@/ChatScroll";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import {
   SHELL_SHORTCUTS,
   shortcutKeycaps,
@@ -201,7 +202,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const closedBrowserIdsRef = useRef(new Set<string>());
   const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
-  const workspaceOverlayOpen = useWorkspaceOverlayOpen();
+  const workspaceOverlayOpen = usePortalOverlayOpen();
   const navigate = useNavigate();
   const workspaceSearch = useSearch({ strict: false }) as {
     task?: string;
@@ -217,6 +218,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     (state) => state.setReviewSidebarOpen,
   );
   const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
+  const archivePending = useCodeUiStore((state) => state.archivePending);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
     null,
@@ -559,6 +561,29 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!useCodeUiStore.getState().takeQuickOpen()) return;
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
+
+  /**
+   * Archive from the keyboard, through the same confirmation the menu uses.
+   *
+   * The page takes this one rather than the header control, because archiving
+   * is a workspace command and not a step in the pull-request workflow.
+   */
+  useEffect(() => {
+    if (!archivePending) return;
+    if (!useCodeUiStore.getState().takeArchiveWorkspace()) return;
+    if (!workspace) return;
+    if (workspace.status === "archived") {
+      toast.message("This workspace is already archived");
+      return;
+    }
+    run("archive", {
+      workspace,
+      title: title ?? workspace.title,
+      session: session ?? undefined,
+    });
+    // The chord is the trigger; the rest is state read when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivePending]);
 
   /**
    * Attach a child task's transcript (or the conversation when undefined).
@@ -1316,45 +1341,6 @@ function storedBrowserTitles(layout: LayoutState): Record<string, string> {
 }
 
 /** Native child webviews must yield whenever a portaled app surface overlaps them. */
-function useWorkspaceOverlayOpen(): boolean {
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    const selector = [
-      '[role="dialog"][data-state="open"]',
-      '[role="alertdialog"][data-state="open"]',
-      '[role="menu"][data-state="open"]',
-      '[role="listbox"][data-state="open"]',
-    ].join(",");
-    let frame: number | null = null;
-    const update = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        setOpen(document.querySelector(selector) !== null);
-      });
-    };
-    const stateObserver = new MutationObserver(update);
-    stateObserver.observe(document.body, {
-      attributes: true,
-      attributeFilter: ["data-state", "role"],
-      subtree: true,
-    });
-    // Radix portals are direct body children. Keep transcript and editor DOM
-    // churn out of this observer so streaming content does not trigger global
-    // overlay queries.
-    const portalObserver = new MutationObserver(update);
-    portalObserver.observe(document.body, { childList: true });
-    update();
-    return () => {
-      stateObserver.disconnect();
-      portalObserver.disconnect();
-      if (frame !== null) window.cancelAnimationFrame(frame);
-    };
-  }, []);
-
-  return open;
-}
 
 function shortcutHint(id: ShellShortcutAction, command: boolean): string {
   const def = SHELL_SHORTCUTS.find((item) => item.id === id);
@@ -1847,16 +1833,30 @@ function CodeSessionPane({
           onModelChange={
             harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
           }
-          contextUsage={{
-            usage: lastUsage,
-            contextWindow: catalogModels.find(
-              (entry) => entry.id === model || entry.key === model,
-            )?.context_window,
-            modelName:
-              modelOptions.find((option) => option.id === model)?.label ??
-              model ??
-              undefined,
-          }}
+          contextUsage={
+            lastUsage
+              ? {
+                  // The engine's own reading of the prompt still resident
+                  // after its last model call. The four counts below are the
+                  // turn's spend across every call, which on a long turn runs
+                  // to several times this.
+                  contextTokens: lastUsage.context_tokens,
+                  spend: {
+                    input: lastUsage.input_tokens,
+                    output: lastUsage.output_tokens,
+                    cacheRead: lastUsage.cache_read_input_tokens,
+                    cacheWrite: lastUsage.cache_creation_input_tokens,
+                  },
+                  contextWindow: catalogModels.find(
+                    (entry) => entry.id === model || entry.key === model,
+                  )?.context_window,
+                  modelName:
+                    modelOptions.find((option) => option.id === model)?.label ??
+                    model ??
+                    undefined,
+                }
+              : null
+          }
           onSend={send}
           onSteer={steeringSupported ? steer : undefined}
           onInterrupt={interrupt}

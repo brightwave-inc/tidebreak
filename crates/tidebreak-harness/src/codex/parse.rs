@@ -548,7 +548,32 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
         output_tokens: field("outputTokens"),
         cache_read_input_tokens,
         cache_creation_input_tokens,
+        context_tokens: context_tokens_from(value),
     }
+}
+
+/// The prompt resident on the turn's last model call.
+///
+/// `last` is that call, and its `inputTokens` is the whole prompt it sent.
+/// Both cache figures are subsets already inside that number, so neither is
+/// added back.
+///
+/// That `cacheWriteInputTokens` sits inside rather than beside `inputTokens`
+/// is what the payload's own arithmetic says: `totalTokens` equals
+/// `inputTokens + outputTokens` in every captured object, so `inputTokens`
+/// has to carry the whole prompt or the total would not balance once a write
+/// is non-zero. [`usage_from`] reads it the same way — it subtracts both cache
+/// figures back out to keep the four spend counts disjoint, which is also why
+/// this reads the raw payload instead of that remainder.
+///
+/// Every captured fixture has `cacheWriteInputTokens: 0`, so no test
+/// distinguishes the two readings. Adding the write on top would double-count
+/// it exactly on a cache miss — the case the context ring exists to show.
+///
+/// A payload with no `last` is itself one call.
+fn context_tokens_from(usage: &Value) -> u64 {
+    let last = usage.get("last").unwrap_or(usage);
+    last.get("inputTokens").and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn id_key(id: &Value) -> String {
@@ -614,6 +639,49 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 30);
         assert_eq!(usage.cache_creation_input_tokens, 10);
         assert_eq!(usage.output_tokens, 7);
+    }
+
+    /// A written cache block is inside `inputTokens`, not beside it.
+    ///
+    /// No captured fixture proves this — every one reports
+    /// `cacheWriteInputTokens: 0`. The payload's arithmetic does:
+    /// `totalTokens` is `inputTokens + outputTokens`, so `inputTokens` carries
+    /// the whole prompt. [`usage_from`] agrees, subtracting the written block
+    /// back out to keep the spend counts disjoint.
+    ///
+    /// Adding it on top instead would inflate the context reading by exactly
+    /// the written block on a cache miss — the moment the ring matters most.
+    #[test]
+    fn a_written_cache_block_is_not_added_on_top_of_the_prompt() {
+        let payload = serde_json::json!({
+            "total": {
+                "totalTokens": 60_020, "inputTokens": 60_000,
+                "cachedInputTokens": 12_000, "cacheWriteInputTokens": 8_000,
+                "outputTokens": 20, "reasoningOutputTokens": 0
+            },
+            "last": {
+                "totalTokens": 40_007, "inputTokens": 40_000,
+                "cachedInputTokens": 12_000, "cacheWriteInputTokens": 8_000,
+                "outputTokens": 7, "reasoningOutputTokens": 0
+            }
+        });
+
+        assert_eq!(
+            context_tokens_from(&payload),
+            40_000,
+            "the resident prompt is the last call's inputTokens, not that plus the write"
+        );
+
+        // The same reading `usage_from` takes: the three prompt-side spend
+        // counts reconstruct the turn's `inputTokens` exactly.
+        let usage = usage_from(Some(&payload));
+        assert_eq!(
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
+            60_000
+        );
+        // And the resident prompt is below the turn's prompt-side spend,
+        // which is the whole reason the two numbers are separate fields.
+        assert!(usage.context_tokens < 60_000);
     }
 
     use super::*;

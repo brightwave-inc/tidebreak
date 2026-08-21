@@ -22,7 +22,7 @@ use crate::host_paths::{
     try_resolve_scratch_directory, ScratchDir, ScratchEntryKind, ScratchRefusal,
 };
 use crate::{
-    CodeExecutionError, ExecutionWorkspaceId, StagedUpload, WorkspaceFilePath, WorkspaceLifecycle,
+    ExecError, ExecutionWorkspaceId, StagedUpload, WorkspaceFilePath, WorkspaceLifecycle,
     MAX_WORKSPACE_FILE_BYTES,
 };
 
@@ -103,7 +103,7 @@ struct StagedFile {
 pub async fn validate_staged_paths(
     host_dir: &Path,
     listed: &[WorkspaceFilePath],
-) -> Result<(), CodeExecutionError> {
+) -> Result<(), ExecError> {
     resolve_staged_files(host_dir, listed).await.map(|_| ())
 }
 
@@ -117,7 +117,7 @@ pub async fn stage_listed_paths(
     workspace: &ExecutionWorkspaceId,
     host_dir: &Path,
     listed: &[WorkspaceFilePath],
-) -> Result<SyncReport, CodeExecutionError> {
+) -> Result<SyncReport, ExecError> {
     let (files, mut report) = resolve_staged_files(host_dir, listed).await?;
     for staged in files {
         let content = match staged.dir.read_file(&staged.name).await {
@@ -169,7 +169,7 @@ pub async fn stage_listed_paths(
 async fn resolve_staged_files(
     host_dir: &Path,
     listed: &[WorkspaceFilePath],
-) -> Result<(Vec<StagedFile>, SyncReport), CodeExecutionError> {
+) -> Result<(Vec<StagedFile>, SyncReport), ExecError> {
     let mut report = SyncReport::default();
     let mut files: Vec<StagedFile> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -182,7 +182,7 @@ async fn resolve_staged_files(
             .await
             .map_err(|refusal| listed_path_error(path, refusal))?;
         if parent.is_symlink(name).await {
-            return Err(CodeExecutionError::InvalidRequest(format!(
+            return Err(ExecError::InvalidRequest(format!(
                 "staged path '{}' is a symlink; symlinks are never staged",
                 path.as_str()
             )));
@@ -191,13 +191,13 @@ async fn resolve_staged_files(
             expand_directory(dir, path, &mut files, &mut seen, &mut report).await?;
         } else {
             let Some(stamp) = parent.file_stamp(name).await else {
-                return Err(CodeExecutionError::InvalidRequest(format!(
+                return Err(ExecError::InvalidRequest(format!(
                     "staged path '{}' does not exist in the chat's files",
                     path.as_str()
                 )));
             };
             if stamp.len > MAX_WORKSPACE_FILE_BYTES as u64 {
-                return Err(CodeExecutionError::InvalidRequest(format!(
+                return Err(ExecError::InvalidRequest(format!(
                     "staged path '{}' exceeds the {MAX_WORKSPACE_FILE_BYTES}-byte file limit",
                     path.as_str()
                 )));
@@ -227,7 +227,7 @@ async fn expand_directory(
     files: &mut Vec<StagedFile>,
     seen: &mut HashSet<String>,
     report: &mut SyncReport,
-) -> Result<(), CodeExecutionError> {
+) -> Result<(), ExecError> {
     let mut stack: Vec<(ScratchDir, String)> = vec![(root, listed.as_str().to_owned())];
     while let Some((dir, prefix)) = stack.pop() {
         let entries = match dir.entries().await {
@@ -320,15 +320,15 @@ async fn expand_directory(
     Ok(())
 }
 
-fn staging_bound_error(listed: &WorkspaceFilePath, count: usize) -> CodeExecutionError {
-    CodeExecutionError::InvalidRequest(format!(
+fn staging_bound_error(listed: &WorkspaceFilePath, count: usize) -> ExecError {
+    ExecError::InvalidRequest(format!(
         "staging '{}' expands the staged set past the {MAX_STAGED_FILES}-file bound \
          ({count}+ files); list fewer or more specific paths",
         listed.as_str()
     ))
 }
 
-fn listed_path_error(path: &WorkspaceFilePath, refusal: ScratchRefusal) -> CodeExecutionError {
+fn listed_path_error(path: &WorkspaceFilePath, refusal: ScratchRefusal) -> ExecError {
     let reason = match refusal {
         ScratchRefusal::Escape => "escapes the chat's files",
         ScratchRefusal::SymlinkedComponent => "crosses a symlink",
@@ -336,7 +336,7 @@ fn listed_path_error(path: &WorkspaceFilePath, refusal: ScratchRefusal) -> CodeE
             "does not exist in the chat's files"
         }
     };
-    CodeExecutionError::InvalidRequest(format!("staged path '{}' {reason}", path.as_str()))
+    ExecError::InvalidRequest(format!("staged path '{}' {reason}", path.as_str()))
 }
 
 /// Pull the `output/` and `preview/` subtrees back into `host_dir`, writing
@@ -347,7 +347,7 @@ pub async fn pull_result_dirs(
     lifecycle: &dyn WorkspaceLifecycle,
     workspace: &ExecutionWorkspaceId,
     host_dir: &Path,
-) -> Result<SyncReport, CodeExecutionError> {
+) -> Result<SyncReport, ExecError> {
     let mut report = SyncReport::default();
     let mut stack: Vec<WorkspaceFilePath> = PULLED_DIRS
         .iter()
@@ -359,7 +359,7 @@ pub async fn pull_result_dirs(
             Ok(listing) => listing,
             // A workspace with no output/ or preview/ yet has nothing to pull;
             // a directory that vanished mid-walk means the same.
-            Err(CodeExecutionError::WorkspaceFileNotFound) => continue,
+            Err(ExecError::WorkspaceFileNotFound) => continue,
             Err(error) => return Err(error),
         };
         if listing.truncated {
@@ -556,26 +556,26 @@ fn refuse(report: &mut SyncReport, path: &WorkspaceFilePath, refusal: ScratchRef
 /// host-side — an unreadable file, a directory that vanished mid-walk — and
 /// those are per-entry by nature: the next entry has every chance of
 /// succeeding, so none of them are ever fatal.
-fn aborts_the_sync(error: &CodeExecutionError) -> bool {
+fn aborts_the_sync(error: &ExecError) -> bool {
     match error {
-        CodeExecutionError::WorkspaceFileNotFound
-        | CodeExecutionError::WorkspaceFileTooLarge
-        | CodeExecutionError::InvalidRequest(_)
-        | CodeExecutionError::Sandbox(_) => false,
-        CodeExecutionError::NotConfigured
-        | CodeExecutionError::Unavailable(_)
-        | CodeExecutionError::Spawn
-        | CodeExecutionError::IdentityConflict
-        | CodeExecutionError::AmbiguousExecution => true,
+        ExecError::WorkspaceFileNotFound
+        | ExecError::WorkspaceFileTooLarge
+        | ExecError::InvalidRequest(_)
+        | ExecError::Sandbox(_) => false,
+        ExecError::NotConfigured
+        | ExecError::Unavailable(_)
+        | ExecError::Spawn
+        | ExecError::IdentityConflict
+        | ExecError::AmbiguousExecution => true,
     }
 }
 
-fn unwritable(path: &str) -> CodeExecutionError {
-    CodeExecutionError::Sandbox(format!("private scratch entry '{path}' is unwritable"))
+fn unwritable(path: &str) -> ExecError {
+    ExecError::Sandbox(format!("private scratch entry '{path}' is unwritable"))
 }
 
-fn unwritable_dir() -> CodeExecutionError {
-    CodeExecutionError::Sandbox("the private scratch directory is unwritable".into())
+fn unwritable_dir() -> ExecError {
+    ExecError::Sandbox("the private scratch directory is unwritable".into())
 }
 
 #[cfg(test)]
@@ -614,21 +614,21 @@ mod tests {
         async fn create_workspace(
             &self,
             _workspace: &ExecutionWorkspaceId,
-        ) -> Result<(), CodeExecutionError> {
+        ) -> Result<(), ExecError> {
             Ok(())
         }
 
         async fn connect_workspace(
             &self,
             _workspace: &ExecutionWorkspaceId,
-        ) -> Result<bool, CodeExecutionError> {
+        ) -> Result<bool, ExecError> {
             Ok(true)
         }
 
         async fn destroy_workspace(
             &self,
             _workspace: &ExecutionWorkspaceId,
-        ) -> Result<(), CodeExecutionError> {
+        ) -> Result<(), ExecError> {
             Ok(())
         }
 
@@ -637,7 +637,7 @@ mod tests {
             _workspace: &ExecutionWorkspaceId,
             path: &WorkspaceFilePath,
             content: &[u8],
-        ) -> Result<(), CodeExecutionError> {
+        ) -> Result<(), ExecError> {
             self.insert(path.as_str(), content);
             Ok(())
         }
@@ -646,16 +646,16 @@ mod tests {
             &self,
             _workspace: &ExecutionWorkspaceId,
             path: &WorkspaceFilePath,
-        ) -> Result<Vec<u8>, CodeExecutionError> {
+        ) -> Result<Vec<u8>, ExecError> {
             self.get(path.as_str())
-                .ok_or_else(|| CodeExecutionError::Sandbox("missing file".into()))
+                .ok_or_else(|| ExecError::Sandbox("missing file".into()))
         }
 
         async fn list_workspace_files(
             &self,
             _workspace: &ExecutionWorkspaceId,
             path: Option<&WorkspaceFilePath>,
-        ) -> Result<WorkspaceListing, CodeExecutionError> {
+        ) -> Result<WorkspaceListing, ExecError> {
             let prefix = path.map_or(String::new(), |dir| format!("{}/", dir.as_str()));
             let mut entries: Vec<WorkspaceFileEntry> = Vec::new();
             let mut seen_dirs: Vec<String> = Vec::new();

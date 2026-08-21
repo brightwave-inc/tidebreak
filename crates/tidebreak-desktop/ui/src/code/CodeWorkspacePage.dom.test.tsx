@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -171,6 +172,9 @@ const TURN = {
     output_tokens: 12,
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
+    // Deliberately not the sum of the four: the ring reads the prompt the
+    // engine reported resident, not what the turn spent getting there.
+    context_tokens: 9_500,
   },
 };
 
@@ -248,6 +252,32 @@ function makeClient() {
         ahead: 0,
         has_upstream: false,
         suggested_commit_message: "",
+        gh_found: true,
+        gh_authenticated: true,
+        remediation: "",
+      }),
+    ),
+    markCodePrReady: vi.fn(
+      async (): Promise<CodeWorkspacePrSnapshot> => ({
+        dirty: false,
+        unpushed: false,
+        ahead: 0,
+        has_upstream: true,
+        suggested_commit_message: "",
+        pr: { ...PR, draft: false },
+        gh_found: true,
+        gh_authenticated: true,
+        remediation: "",
+      }),
+    ),
+    mergeCodePr: vi.fn(
+      async (): Promise<CodeWorkspacePrSnapshot> => ({
+        dirty: false,
+        unpushed: false,
+        ahead: 0,
+        has_upstream: true,
+        suggested_commit_message: "",
+        pr: { ...PR, draft: false, state: "merged", merged: true },
         gh_found: true,
         gh_authenticated: true,
         remediation: "",
@@ -487,6 +517,8 @@ afterEach(() => {
   useCodeUiStore.setState({
     pendingComposerPrompt: null,
     composerActionScope: null,
+    workflowShortcutPending: null,
+    archivePending: false,
   });
   browserMocks.close.mockClear();
   window.localStorage.clear();
@@ -521,7 +553,7 @@ describe("CodeWorkspacePage", () => {
     expect(seam).toHaveTextContent("2 files +42 −7");
     expect(seam).not.toHaveTextContent("in /");
     expect(
-      screen.getByRole("button", { name: /Context: 11,012 tokens used/ }),
+      screen.getByRole("button", { name: /Context: 9,500 tokens used/ }),
     ).toBeInTheDocument();
   });
 
@@ -709,24 +741,6 @@ describe("CodeWorkspacePage", () => {
     expect(popover).toHaveTextContent("1 passing · 1 pending");
 
     await user.click(
-      within(control).getByRole("button", { name: "Mark ready" }),
-    );
-    await waitFor(() =>
-      expect(client.submitCodeTurn).toHaveBeenCalledWith(
-        "sess-1",
-        expect.stringMatching(/Mark pull request #41 ready for review/),
-        undefined,
-        undefined,
-      ),
-    );
-    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toMatch(
-      /Pull request: #41 - Fix login flow/,
-    );
-    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toMatch(
-      /Branch: tidebreak\/fix-login -> main/,
-    );
-
-    await user.click(
       within(control).getByRole("button", { name: "More workspace actions" }),
     );
     await user.click(
@@ -736,12 +750,250 @@ describe("CodeWorkspacePage", () => {
     await waitFor(() =>
       expect(client.startCodeWatch).toHaveBeenCalledWith("ws-1"),
     );
-    expect(client.submitCodeTurn).toHaveBeenCalledTimes(1);
+
+    // Readying a draft is a pull-request state change, so the button calls the
+    // endpoint rather than composing a prompt, and the adopted snapshot moves
+    // the control off draft. It goes last for that reason. `prActions` covers
+    // what the remaining prompt-backed actions put in front of the agent.
+    await user.click(
+      within(control).getByRole("button", { name: "Mark ready" }),
+    );
+    await waitFor(() =>
+      expect(client.markCodePrReady).toHaveBeenCalledWith("ws-1"),
+    );
+    await waitFor(() => expect(control).not.toHaveTextContent("Draft"));
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     const menu = await screen.findByRole("menu");
     expect(menu).toHaveTextContent("app");
     expect(menu).toHaveTextContent(WORKSPACE.worktree_path);
+  });
+
+  it("runs Ship chords through the same actions the header buttons do", async () => {
+    // The shell's keymap sits above the route, so a chord arrives as a request
+    // on the store and the header resolves it against the branch and pull
+    // request state only it holds. This is that seam: raise the chord, and the
+    // right server call has to follow with no button in between.
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 1,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: PR,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    await mountWorkspace(client);
+    await screen.findByTestId("workspace-workflow-control");
+
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "watch"));
+    await waitFor(() =>
+      expect(client.startCodeWatch).toHaveBeenCalledWith("ws-1"),
+    );
+
+    // This one is a draft, so it is not green. The chord says so rather than
+    // asking an agent to merge it — decision 42 keeps merging off the agent
+    // path, so "not mergeable" has to be a refusal, not a prompt.
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    await waitFor(() =>
+      expect(toast.message).toHaveBeenCalledWith(
+        "Mark the pull request ready for review on GitHub before merging it.",
+      ),
+    );
+    expect(client.mergeCodePr).not.toHaveBeenCalled();
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+  });
+
+  it("merges a green pull request through the user endpoint, not the agent", async () => {
+    // Decision 42: the general `gh` runner refuses merge argv, and only
+    // POST /pr/merge reaches the runner that allows it. A chord that prompted
+    // an agent to merge would route around that boundary using the agent's own
+    // shell, so this pins that the chord calls the endpoint instead.
+    const green: PullRequestDigest = {
+      ...PR,
+      draft: false,
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      checks: [{ name: "ci / rust", bucket: "pass" as const }],
+    };
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: green });
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: green,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+    const control = await screen.findByTestId("workspace-workflow-control");
+    await waitFor(() => expect(control).toHaveTextContent("Ready"));
+
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+
+    // Merging publishes to a shared branch, so the chord still stops at the
+    // same confirmation the review sidebar's Merge button shows.
+    const confirmation = await screen.findByRole("alertdialog");
+    expect(confirmation).toHaveTextContent("Merge #41?");
+    expect(confirmation).toHaveTextContent("squash-merged into main");
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Merge" }),
+    );
+
+    await waitFor(() =>
+      expect(client.mergeCodePr).toHaveBeenCalledWith("ws-1", {
+        method: "squash",
+        auto: false,
+      }),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+  });
+
+  it("says why a Ship chord did nothing instead of swallowing it", async () => {
+    // A chord that silently no-ops is indistinguishable from one that never
+    // fired, which is the fastest way to stop trusting the keyboard.
+    const client = makeClient();
+    client.getCodeWorkspace.mockResolvedValue(WORKSPACE);
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    await mountWorkspace(client);
+    const control = await screen.findByTestId("workspace-workflow-control");
+    await waitFor(() => expect(control).toHaveTextContent("No changes"));
+
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+    await waitFor(() =>
+      expect(toast.message).toHaveBeenCalledWith("No pull request yet"),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+
+    // A chord raised on another workspace — an archived one, which draws no
+    // header control to take it — must not fire on whatever is open here.
+    act(() =>
+      useCodeUiStore.getState().requestWorkflowShortcut("ws-other", "merge"),
+    );
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().workflowShortcutPending).not.toBeNull(),
+    );
+    expect(toast.message).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks a draft ready through the endpoint rather than by prompt", async () => {
+    // Readying a draft puts work in front of reviewers, which decision 42
+    // keeps off the agent path for the same reason merging is. The chord for
+    // "run the next step" is what reaches it at this stage.
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: PR,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    await mountWorkspace(client);
+    const control = await screen.findByTestId("workspace-workflow-control");
+    await waitFor(() => expect(control).toHaveTextContent("Draft"));
+
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "next"));
+
+    await waitFor(() =>
+      expect(client.markCodePrReady).toHaveBeenCalledWith("ws-1"),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+  });
+
+  it("arms auto-merge when the pull request is landable but not yet green", async () => {
+    // One chord, one intent: the reader means "get this in" whether or not the
+    // checks have finished. The confirmation is what names which of the two is
+    // about to happen.
+    const pending: PullRequestDigest = {
+      ...PR,
+      draft: false,
+      mergeable: "mergeable",
+      merge_state_status: "blocked",
+      checks: [{ name: "ci / rust", bucket: "pending" as const }],
+    };
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: pending });
+    client.getCodeWorkspacePr.mockResolvedValue({
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      pr: pending,
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+    await screen.findByTestId("workspace-workflow-control");
+
+    act(() => useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"));
+
+    const confirmation = await screen.findByRole("alertdialog");
+    expect(confirmation).toHaveTextContent("Auto-merge #41?");
+    expect(confirmation).toHaveTextContent(
+      "once the remaining requirements pass",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Enable auto-merge" }),
+    );
+
+    await waitFor(() =>
+      expect(client.mergeCodePr).toHaveBeenCalledWith("ws-1", {
+        method: "squash",
+        auto: true,
+      }),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+  });
+
+  it("archives from a chord through the same confirmation the menu uses", async () => {
+    // Archiving removes a worktree. The keyboard path must not be the one that
+    // skips the dialog.
+    const client = makeClient();
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+    await screen.findByRole("heading", { name: /Fix login/ });
+
+    act(() => useCodeUiStore.getState().requestArchiveWorkspace());
+    const confirmation = await screen.findByRole("alertdialog");
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Archive" }),
+    );
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/r/repo-1"),
+    );
+    expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
   });
 
   it("opens Source control for local changes without crowding the composer", async () => {

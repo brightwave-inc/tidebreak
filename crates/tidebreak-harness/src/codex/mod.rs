@@ -377,6 +377,30 @@ mod tests {
             .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
     }
 
+    /// `tokenUsage` reports `total` (the turn) beside `last` (the call that
+    /// just finished). The spend counts read `total`; occupancy reads `last`,
+    /// whose raw `inputTokens` is the whole prompt that call sent.
+    #[test]
+    fn context_tokens_come_from_the_last_call() {
+        let (events, _) = replay("approval-approve");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 14_466);
+        let spend =
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        assert_eq!(spend, 28_794);
+        assert!(usage.context_tokens < spend);
+    }
+
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+        events
+            .iter()
+            .find_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("the fixture completes its turn")
+    }
+
     #[test]
     fn fixture_replay_hook_lifecycle() {
         let (events, unrecognized) = replay("hook-lifecycle");

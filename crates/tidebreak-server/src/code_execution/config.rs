@@ -8,10 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_code_execution::{
-    CodeExecutionError, CodeExecutionProviderKind, CodeExecutionUnavailableReason,
     DaytonaCredential, DaytonaExecutionProvider, DockerExecutionProvider, E2BCredential,
-    E2BExecutionProvider, LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY,
-    E2B_CREDENTIAL_KEY, PACKAGE_MANAGER_DOMAINS,
+    E2BExecutionProvider, ExecError, ExecProviderKind, ExecUnavailableReason,
+    LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
+    PACKAGE_MANAGER_DOMAINS,
 };
 use tidebreak_core::{ChatId, HostRootId, NetworkPolicy, ProjectId, Result, SecretProvider, Store};
 use tidebreak_egress::{
@@ -160,20 +160,18 @@ pub trait ExecFolderGrantResolver: Send + Sync {
 /// The fixed managed providers this host can hold a credential for. Local needs
 /// none. Keeping the allow-list here means a local API route can never turn an
 /// arbitrary path segment into a keychain key.
-pub(super) const CREDENTIAL_PROVIDERS: [CodeExecutionProviderKind; 2] = [
-    CodeExecutionProviderKind::E2b,
-    CodeExecutionProviderKind::Daytona,
-];
+pub(super) const CREDENTIAL_PROVIDERS: [ExecProviderKind; 2] =
+    [ExecProviderKind::E2b, ExecProviderKind::Daytona];
 
 /// Every execution provider this build ships, in the order the settings
 /// surface reports them. Availability is computed per row, so a host with no
 /// usable provider says so with a reason for each rather than presenting a
 /// selection that cannot run.
-pub(super) const EXECUTION_PROVIDERS: [CodeExecutionProviderKind; 4] = [
-    CodeExecutionProviderKind::Local,
-    CodeExecutionProviderKind::E2b,
-    CodeExecutionProviderKind::Daytona,
-    CodeExecutionProviderKind::Docker,
+pub(super) const EXECUTION_PROVIDERS: [ExecProviderKind; 4] = [
+    ExecProviderKind::Local,
+    ExecProviderKind::E2b,
+    ExecProviderKind::Daytona,
+    ExecProviderKind::Docker,
 ];
 
 /// Host-owned, non-secret egress policy for the managed exec sandboxes.
@@ -237,9 +235,9 @@ impl EgressConfig {
 /// chat's network policy outside the workload. `None` explicitly removes
 /// execution from service without changing the stable tool contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeExecutionConfig {
+pub struct ExecConfig {
     #[serde(default)]
-    pub provider: Option<CodeExecutionProviderKind>,
+    pub provider: Option<ExecProviderKind>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Egress policy for the managed adapters. Absent in configs written
@@ -265,7 +263,7 @@ pub struct CodeExecutionConfig {
     pub daytona_snapshot: Option<String>,
 }
 
-impl Default for CodeExecutionConfig {
+impl Default for ExecConfig {
     fn default() -> Self {
         Self {
             // Local is the default only on hosts where it can actually run.
@@ -276,7 +274,7 @@ impl Default for CodeExecutionConfig {
             // why.
             provider: LocalExecutionProvider::availability()
                 .is_ok()
-                .then_some(CodeExecutionProviderKind::Local),
+                .then_some(ExecProviderKind::Local),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             egress: EgressConfig::Open,
             e2b_template: None,
@@ -285,7 +283,7 @@ impl Default for CodeExecutionConfig {
     }
 }
 
-impl CodeExecutionConfig {
+impl ExecConfig {
     pub(super) fn disabled() -> Self {
         Self {
             provider: None,
@@ -319,10 +317,10 @@ pub(super) const fn default_timeout_ms() -> u64 {
 /// refusing execution rather than degrading to open egress.
 pub(super) fn resolve_egress_policy(
     egress: &EgressConfig,
-) -> std::result::Result<Option<EgressPolicy>, CodeExecutionError> {
-    egress.to_policy().map_err(|error| {
-        CodeExecutionError::InvalidRequest(format!("invalid egress policy: {error}"))
-    })
+) -> std::result::Result<Option<EgressPolicy>, ExecError> {
+    egress
+        .to_policy()
+        .map_err(|error| ExecError::InvalidRequest(format!("invalid egress policy: {error}")))
 }
 
 /// Build the E2B adapter with the configured egress policy applied.
@@ -337,7 +335,7 @@ pub(super) fn configured_e2b(
     pool: RemoteSessionPool,
     egress: &EgressConfig,
     template: Option<&str>,
-) -> std::result::Result<E2BExecutionProvider, CodeExecutionError> {
+) -> std::result::Result<E2BExecutionProvider, ExecError> {
     let mut provider = E2BExecutionProvider::with_session_pool(credential, timeout, pool)?;
     if let Some(template) = template {
         provider = provider.with_template(template);
@@ -358,7 +356,7 @@ pub(super) fn configured_daytona(
     egress: &EgressConfig,
     snapshot: Option<&str>,
     preparation: Option<Arc<dyn tidebreak_code_execution::SandboxPreparationSink>>,
-) -> std::result::Result<DaytonaExecutionProvider, CodeExecutionError> {
+) -> std::result::Result<DaytonaExecutionProvider, ExecError> {
     let mut provider = DaytonaExecutionProvider::with_session_pool(credential, timeout, pool)?;
     if let Some(snapshot) = snapshot {
         provider = provider.with_snapshot(snapshot);
@@ -384,7 +382,7 @@ pub(super) fn configured_docker(
     timeout: Duration,
     pool: RemoteSessionPool,
     egress: &EgressConfig,
-) -> std::result::Result<DockerExecutionProvider, CodeExecutionError> {
+) -> std::result::Result<DockerExecutionProvider, ExecError> {
     let provider = DockerExecutionProvider::with_session_pool(timeout, pool)?;
     Ok(match resolve_egress_policy(egress)? {
         Some(policy) => provider.with_egress_policy(policy),
@@ -394,27 +392,27 @@ pub(super) fn configured_docker(
 
 /// Renderer-safe configuration and readiness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct CodeExecutionConfigInfo {
+pub struct ExecConfigInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub provider: Option<CodeExecutionProviderKind>,
+    pub provider: Option<ExecProviderKind>,
     pub timeout_ms: u64,
     pub available: bool,
     /// Why the *selected* provider cannot run, when it cannot. Absent while
     /// execution is available or no provider is selected at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub unavailable_reason: Option<CodeExecutionUnavailableReason>,
+    pub unavailable_reason: Option<ExecUnavailableReason>,
     pub has_credential: bool,
     /// One row per shipped provider: whether it could run here at all, and the
     /// reason it could not. This is what makes an unusable host legible —
     /// "paste an E2B key" is visible instead of being inferred from a generic
     /// execution failure.
-    pub providers: Vec<CodeExecutionProviderAvailability>,
+    pub providers: Vec<ExecProviderAvailability>,
     /// The configured egress policy and each managed provider's enforcement
     /// status, so the renderer can present the policy and disclose which
     /// providers actually restrict egress today.
-    pub egress: CodeExecutionEgressInfo,
+    pub egress: ExecEgressInfo,
     /// Per-provider detached-admission evaluation: for each execution
     /// provider, whether the fail-closed gate (issue #824) would admit a
     /// detached run it hosted, and every named precondition it fails. Derived
@@ -425,14 +423,14 @@ pub struct CodeExecutionConfigInfo {
 
 /// Renderer-safe egress policy plus per-provider enforcement disclosure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct CodeExecutionEgressInfo {
+pub struct ExecEgressInfo {
     /// The configured host policy. `Open` is the default: managed sandboxes are
     /// created with open internet access. An allowlist restricts every managed
     /// sandbox created afterwards.
     pub policy: EgressConfig,
     /// One row per managed provider, stating whether its egress restriction is
     /// confirmed against the live vendor API or still pending confirmation.
-    pub enforcement: Vec<CodeExecutionEgressEnforcement>,
+    pub enforcement: Vec<ExecEgressEnforcement>,
 }
 
 /// The honest state of a managed provider's egress enforcement.
@@ -473,8 +471,8 @@ pub enum EgressEnforcementStatus {
 /// A managed provider's egress-enforcement status, as host knowledge rather
 /// than a claim the backend makes about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct CodeExecutionEgressEnforcement {
-    pub provider: CodeExecutionProviderKind,
+pub struct ExecEgressEnforcement {
+    pub provider: ExecProviderKind,
     pub status: EgressEnforcementStatus,
     /// Destinations the vendor's mechanism keeps reachable regardless of the
     /// configured policy — each a short purpose string straight from the
@@ -499,7 +497,7 @@ pub struct CodeExecutionEgressEnforcement {
 /// simply unestablished for them, and the fail-closed evaluation names each.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct DetachedAdmissionProviderInfo {
-    pub provider: CodeExecutionProviderKind,
+    pub provider: ExecProviderKind,
     /// Whether the gate would admit a detached run hosted by this provider.
     pub admitted: bool,
     /// Every unmet precondition, named — not just the first.
@@ -584,18 +582,16 @@ pub(super) const DAYTONA_TIER_REQUIREMENT: &str = "Daytona org tier 3+";
 /// policy rather than only on the backend, so the policy the row describes is
 /// an argument: a policy that permits nothing is a real boundary there
 /// (`--network none`), and every other class is enforced by nothing at all.
-pub(super) fn egress_enforcement_status(
-    policy: &EgressConfig,
-) -> Vec<CodeExecutionEgressEnforcement> {
+pub(super) fn egress_enforcement_status(policy: &EgressConfig) -> Vec<ExecEgressEnforcement> {
     vec![
         enforcement_row(
-            CodeExecutionProviderKind::E2b,
+            ExecProviderKind::E2b,
             &E2BExecutionProvider::egress_enforcement(),
             true,
             None,
         ),
         enforcement_row(
-            CodeExecutionProviderKind::Daytona,
+            ExecProviderKind::Daytona,
             &DaytonaExecutionProvider::egress_enforcement(),
             true,
             Some(DAYTONA_TIER_REQUIREMENT),
@@ -616,14 +612,12 @@ pub(super) fn egress_enforcement_status(
 /// A policy that does not parse is treated as unenforced. It cannot create a
 /// sandbox at all ([`resolve_egress_policy`] fails closed), so the honest
 /// disclosure is the one that claims nothing.
-fn docker_enforcement_row(policy: &EgressConfig) -> CodeExecutionEgressEnforcement {
+fn docker_enforcement_row(policy: &EgressConfig) -> ExecEgressEnforcement {
     let compiled = policy.to_policy().ok().flatten();
     match DockerExecutionProvider::egress_enforcement(compiled.as_ref()) {
-        Some(enforcement) => {
-            enforcement_row(CodeExecutionProviderKind::Docker, &enforcement, true, None)
-        }
-        None => CodeExecutionEgressEnforcement {
-            provider: CodeExecutionProviderKind::Docker,
+        Some(enforcement) => enforcement_row(ExecProviderKind::Docker, &enforcement, true, None),
+        None => ExecEgressEnforcement {
+            provider: ExecProviderKind::Docker,
             status: EgressEnforcementStatus::NotEnforced,
             gaps: vec![DOCKER_OPEN_EGRESS_GAP.to_owned()],
             requirement: None,
@@ -650,11 +644,11 @@ pub(super) const DOCKER_OPEN_EGRESS_GAP: &str =
 /// present it as an unconditional boundary. Every declared exception is
 /// surfaced as a gap so nothing the vendor leaves open is hidden from the user.
 pub(super) fn enforcement_row(
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
     enforcement: &EgressEnforcement,
     confirmed: bool,
     requirement: Option<&'static str>,
-) -> CodeExecutionEgressEnforcement {
+) -> ExecEgressEnforcement {
     let status = if !confirmed {
         EgressEnforcementStatus::Unconfirmed
     } else if enforcement.is_credential_boundary() {
@@ -671,7 +665,7 @@ pub(super) fn enforcement_row(
         .iter()
         .map(|exception| exception.purpose.to_owned())
         .collect();
-    CodeExecutionEgressEnforcement {
+    ExecEgressEnforcement {
         provider,
         status,
         gaps,
@@ -679,7 +673,7 @@ pub(super) fn enforcement_row(
     }
 }
 
-impl CodeExecutionEgressInfo {
+impl ExecEgressInfo {
     fn from_config(policy: EgressConfig) -> Self {
         Self {
             enforcement: egress_enforcement_status(&policy),
@@ -690,8 +684,8 @@ impl CodeExecutionEgressInfo {
 
 /// Renderer-safe readiness for one managed provider's fixed credential slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct CodeExecutionCredentialReadiness {
-    pub provider: CodeExecutionProviderKind,
+pub struct ExecCredentialReadiness {
+    pub provider: ExecProviderKind,
     pub has_credential: bool,
 }
 
@@ -701,19 +695,16 @@ pub struct CodeExecutionCredentialReadiness {
 /// [`provider_availability`], so no surface has to re-derive whether a platform
 /// supports a provider or whether a key is saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub struct CodeExecutionProviderAvailability {
-    pub provider: CodeExecutionProviderKind,
+pub struct ExecProviderAvailability {
+    pub provider: ExecProviderKind,
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub unavailable_reason: Option<CodeExecutionUnavailableReason>,
+    pub unavailable_reason: Option<ExecUnavailableReason>,
 }
 
-impl CodeExecutionProviderAvailability {
-    fn new(
-        provider: CodeExecutionProviderKind,
-        unavailable_reason: Option<CodeExecutionUnavailableReason>,
-    ) -> Self {
+impl ExecProviderAvailability {
+    fn new(provider: ExecProviderKind, unavailable_reason: Option<ExecUnavailableReason>) -> Self {
         Self {
             provider,
             available: unavailable_reason.is_none(),
@@ -730,35 +721,35 @@ impl CodeExecutionProviderAvailability {
 /// reads this, so they cannot disagree.
 pub(super) async fn provider_availability(
     secrets: &dyn SecretProvider,
-    provider: CodeExecutionProviderKind,
-) -> CodeExecutionProviderAvailability {
+    provider: ExecProviderKind,
+) -> ExecProviderAvailability {
     let reason = match provider {
-        CodeExecutionProviderKind::Local => LocalExecutionProvider::availability().err(),
+        ExecProviderKind::Local => LocalExecutionProvider::availability().err(),
         // The container backend needs no credential; what it needs is a
         // runtime that answers. The probe distinguishes an absent runtime
         // from an installed one whose daemon is down, and caches its answer,
         // so rendering this surface costs at most one probe.
-        CodeExecutionProviderKind::Docker => DockerExecutionProvider::availability().await.err(),
+        ExecProviderKind::Docker => DockerExecutionProvider::availability().await.err(),
         _ => (!has_credential(secrets, provider).await)
-            .then_some(CodeExecutionUnavailableReason::MissingCredential),
+            .then_some(ExecUnavailableReason::MissingCredential),
     };
-    CodeExecutionProviderAvailability::new(provider, reason)
+    ExecProviderAvailability::new(provider, reason)
 }
 
 /// Credential readiness for every managed provider this host supports, so the
 /// renderer can offer a key field per provider without selecting one first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CodeExecutionCredentialsInfo {
-    pub credentials: Vec<CodeExecutionCredentialReadiness>,
+pub struct ExecCredentialsInfo {
+    pub credentials: Vec<ExecCredentialReadiness>,
 }
 
 /// Partial update accepted by `PUT /code-execution`. An explicit null disables
 /// all providers; an absent field leaves the current value unchanged.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CodeExecutionConfigUpdate {
+pub struct ExecConfigUpdate {
     #[serde(default, deserialize_with = "double_option")]
-    pub provider: Option<Option<CodeExecutionProviderKind>>,
+    pub provider: Option<Option<ExecProviderKind>>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     /// Replace the egress policy. Absent leaves the current policy unchanged;
@@ -787,20 +778,20 @@ where
 }
 
 /// Read configured host policy. Invalid hand-edited state fails closed.
-pub async fn read_config(store: &dyn Store) -> Result<CodeExecutionConfig> {
+pub async fn read_config(store: &dyn Store) -> Result<ExecConfig> {
     let Some(value) = store.get_setting(CODE_EXECUTION_SETTING).await? else {
-        return Ok(CodeExecutionConfig::default());
+        return Ok(ExecConfig::default());
     };
-    let Ok(config) = serde_json::from_value::<CodeExecutionConfig>(value) else {
-        return Ok(CodeExecutionConfig::disabled());
+    let Ok(config) = serde_json::from_value::<ExecConfig>(value) else {
+        return Ok(ExecConfig::disabled());
     };
     if config.validate().is_err() {
-        return Ok(CodeExecutionConfig::disabled());
+        return Ok(ExecConfig::disabled());
     }
     Ok(config)
 }
 
-pub(super) async fn write_config(store: &dyn Store, config: &CodeExecutionConfig) -> Result<()> {
+pub(super) async fn write_config(store: &dyn Store, config: &ExecConfig) -> Result<()> {
     store
         .set_setting(CODE_EXECUTION_SETTING, &serde_json::to_value(config)?)
         .await
@@ -810,7 +801,7 @@ pub async fn config_info(
     host_config: &tidebreak_core::Config,
     store: &dyn Store,
     secrets: &dyn SecretProvider,
-) -> Result<CodeExecutionConfigInfo> {
+) -> Result<ExecConfigInfo> {
     let config = read_config(store).await?;
     let has_credential = match config.provider {
         Some(provider) => has_credential(secrets, provider).await,
@@ -828,37 +819,37 @@ pub async fn config_info(
             .find(|candidate| candidate.provider == provider)
             .copied()
     });
-    Ok(CodeExecutionConfigInfo {
+    Ok(ExecConfigInfo {
         provider: config.provider,
         timeout_ms: config.timeout_ms,
         available: selected.is_some_and(|row| row.available),
         unavailable_reason: selected.and_then(|row| row.unavailable_reason),
         has_credential,
         providers,
-        egress: CodeExecutionEgressInfo::from_config(config.egress),
+        egress: ExecEgressInfo::from_config(config.egress),
         detached_admission: detached_admission_info(host_config),
     })
 }
 
 /// Report readiness for every managed provider without reading or returning any
 /// key material.
-pub async fn credentials_info(secrets: &dyn SecretProvider) -> CodeExecutionCredentialsInfo {
+pub async fn credentials_info(secrets: &dyn SecretProvider) -> ExecCredentialsInfo {
     let mut credentials = Vec::with_capacity(CREDENTIAL_PROVIDERS.len());
     for provider in CREDENTIAL_PROVIDERS {
-        credentials.push(CodeExecutionCredentialReadiness {
+        credentials.push(ExecCredentialReadiness {
             provider,
             has_credential: has_credential(secrets, provider).await,
         });
     }
-    CodeExecutionCredentialsInfo { credentials }
+    ExecCredentialsInfo { credentials }
 }
 
 pub async fn update_config(
     host_config: &tidebreak_core::Config,
     store: &dyn Store,
     secrets: &dyn SecretProvider,
-    update: CodeExecutionConfigUpdate,
-) -> std::result::Result<CodeExecutionConfigInfo, ServerError> {
+    update: ExecConfigUpdate,
+) -> std::result::Result<ExecConfigInfo, ServerError> {
     let mut config = read_config(store).await?;
     if let Some(provider) = update.provider {
         config.provider = provider;
@@ -884,15 +875,15 @@ pub async fn update_config(
 
 pub async fn write_credential(
     secrets: &dyn SecretProvider,
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
     api_key: &str,
-) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+) -> std::result::Result<ExecCredentialReadiness, ServerError> {
     let (key, label) = credential_spec(provider)?;
     secrets
         .set_secret(key, api_key)
         .await
         .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
-    Ok(CodeExecutionCredentialReadiness {
+    Ok(ExecCredentialReadiness {
         provider,
         has_credential: true,
     })
@@ -900,22 +891,20 @@ pub async fn write_credential(
 
 pub async fn delete_credential(
     secrets: &dyn SecretProvider,
-    provider: CodeExecutionProviderKind,
-) -> std::result::Result<CodeExecutionCredentialReadiness, ServerError> {
+    provider: ExecProviderKind,
+) -> std::result::Result<ExecCredentialReadiness, ServerError> {
     let (key, label) = credential_spec(provider)?;
     secrets
         .delete_secret(key)
         .await
         .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
-    Ok(CodeExecutionCredentialReadiness {
+    Ok(ExecCredentialReadiness {
         provider,
         has_credential: false,
     })
 }
 
-pub fn credential_provider(
-    value: &str,
-) -> std::result::Result<CodeExecutionProviderKind, ServerError> {
+pub fn credential_provider(value: &str) -> std::result::Result<ExecProviderKind, ServerError> {
     CREDENTIAL_PROVIDERS
         .into_iter()
         .find(|provider| provider.as_str() == value)
@@ -928,28 +917,26 @@ pub fn credential_provider(
 
 pub(super) async fn has_credential(
     secrets: &dyn SecretProvider,
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
 ) -> bool {
     match provider {
-        CodeExecutionProviderKind::E2b => {
-            E2BCredential::load(secrets).await.ok().flatten().is_some()
-        }
-        CodeExecutionProviderKind::Daytona => DaytonaCredential::load(secrets)
+        ExecProviderKind::E2b => E2BCredential::load(secrets).await.ok().flatten().is_some(),
+        ExecProviderKind::Daytona => DaytonaCredential::load(secrets)
             .await
             .ok()
             .flatten()
             .is_some(),
-        CodeExecutionProviderKind::Local | CodeExecutionProviderKind::Docker => false,
+        ExecProviderKind::Local | ExecProviderKind::Docker => false,
         _ => false,
     }
 }
 
 pub(super) fn credential_spec(
-    provider: CodeExecutionProviderKind,
+    provider: ExecProviderKind,
 ) -> std::result::Result<(&'static str, &'static str), ServerError> {
     match provider {
-        CodeExecutionProviderKind::E2b => Ok((E2B_CREDENTIAL_KEY, "E2B")),
-        CodeExecutionProviderKind::Daytona => Ok((DAYTONA_CREDENTIAL_KEY, "Daytona")),
+        ExecProviderKind::E2b => Ok((E2B_CREDENTIAL_KEY, "E2B")),
+        ExecProviderKind::Daytona => Ok((DAYTONA_CREDENTIAL_KEY, "Daytona")),
         _ => Err(ServerError::not_found(format!(
             "unknown credentialed code execution provider kind: {provider}"
         ))),

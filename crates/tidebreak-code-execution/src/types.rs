@@ -32,7 +32,7 @@ const MAX_ID_BYTES: usize = 128;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum CodeExecutionProviderKind {
+pub enum ExecProviderKind {
     /// The host's native process sandbox.
     Local,
     /// A managed E2B cloud sandbox.
@@ -43,7 +43,7 @@ pub enum CodeExecutionProviderKind {
     Docker,
 }
 
-impl CodeExecutionProviderKind {
+impl ExecProviderKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -55,7 +55,7 @@ impl CodeExecutionProviderKind {
     }
 }
 
-impl std::fmt::Display for CodeExecutionProviderKind {
+impl std::fmt::Display for ExecProviderKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -70,7 +70,7 @@ impl std::fmt::Display for CodeExecutionProviderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum CodeExecutionUnavailableReason {
+pub enum ExecUnavailableReason {
     /// The provider's confinement primitive does not exist for this operating
     /// system at all. Nothing the user installs or pastes changes this.
     UnsupportedPlatform,
@@ -88,7 +88,7 @@ pub enum CodeExecutionUnavailableReason {
     ContainerRuntimeUnreachable,
 }
 
-impl CodeExecutionUnavailableReason {
+impl ExecUnavailableReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -118,7 +118,7 @@ impl CodeExecutionUnavailableReason {
     }
 }
 
-impl std::fmt::Display for CodeExecutionUnavailableReason {
+impl std::fmt::Display for ExecUnavailableReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -130,7 +130,7 @@ impl std::fmt::Display for CodeExecutionUnavailableReason {
 pub struct ExecutionId(String);
 
 impl ExecutionId {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExecError> {
         let value = value.into();
         validate_id(&value, "execution id")?;
         Ok(Self(value))
@@ -148,7 +148,7 @@ impl ExecutionId {
 pub struct ExecutionWorkspaceId(String);
 
 impl ExecutionWorkspaceId {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExecError> {
         let value = value.into();
         validate_id(&value, "workspace id")?;
         Ok(Self(value))
@@ -170,9 +170,9 @@ impl ExecutionWorkspaceId {
 pub struct WorkspaceFilePath(String);
 
 impl WorkspaceFilePath {
-    pub fn parse(value: impl Into<String>) -> Result<Self, CodeExecutionError> {
+    pub fn parse(value: impl Into<String>) -> Result<Self, ExecError> {
         let value = value.into();
-        let invalid = || CodeExecutionError::InvalidRequest("invalid workspace path".into());
+        let invalid = || ExecError::InvalidRequest("invalid workspace path".into());
         if value.is_empty()
             || value.len() > MAX_WORKSPACE_PATH_BYTES
             || value.chars().any(char::is_control)
@@ -237,7 +237,7 @@ pub enum StagedUpload {
     AlreadyCurrent,
 }
 
-/// Optional durable-workspace capability beside [`CodeExecutionProvider::execute`].
+/// Optional durable-workspace capability beside [`ExecProvider::execute`].
 ///
 /// This is a host-internal surface: nothing here is model-facing, and no
 /// credential or absolute host path crosses it. File transfers are bounded by
@@ -245,23 +245,14 @@ pub enum StagedUpload {
 #[async_trait]
 pub trait WorkspaceLifecycle: Send + Sync {
     /// Ensure the durable workspace exists, connecting when it already does.
-    async fn create_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError>;
+    async fn create_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError>;
 
     /// Connect to an existing workspace without creating one. `Ok(false)`
     /// means no durable workspace is currently reachable.
-    async fn connect_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<bool, CodeExecutionError>;
+    async fn connect_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<bool, ExecError>;
 
     /// Destroy the workspace. Destroying one that no longer exists succeeds.
-    async fn destroy_workspace(
-        &self,
-        workspace: &ExecutionWorkspaceId,
-    ) -> Result<(), CodeExecutionError>;
+    async fn destroy_workspace(&self, workspace: &ExecutionWorkspaceId) -> Result<(), ExecError>;
 
     /// Write one bounded file, creating parent directories inside the
     /// workspace and the workspace itself when needed.
@@ -270,7 +261,7 @@ pub trait WorkspaceLifecycle: Send + Sync {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<(), CodeExecutionError>;
+    ) -> Result<(), ExecError>;
 
     /// Stage one bounded file for the next command.
     ///
@@ -283,7 +274,7 @@ pub trait WorkspaceLifecycle: Send + Sync {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> Result<StagedUpload, CodeExecutionError> {
+    ) -> Result<StagedUpload, ExecError> {
         self.put_workspace_file(workspace, path, content).await?;
         Ok(StagedUpload::Uploaded)
     }
@@ -293,26 +284,24 @@ pub trait WorkspaceLifecycle: Send + Sync {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> Result<Vec<u8>, CodeExecutionError>;
+    ) -> Result<Vec<u8>, ExecError>;
 
     /// List one directory (the workspace root when `path` is `None`).
     async fn list_workspace_files(
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> Result<WorkspaceListing, CodeExecutionError>;
+    ) -> Result<WorkspaceListing, ExecError>;
 }
 
-fn validate_id(value: &str, label: &str) -> Result<(), CodeExecutionError> {
+fn validate_id(value: &str, label: &str) -> Result<(), ExecError> {
     if value.is_empty()
         || value.len() > MAX_ID_BYTES
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(CodeExecutionError::InvalidRequest(format!(
-            "invalid {label}"
-        )));
+        return Err(ExecError::InvalidRequest(format!("invalid {label}")));
     }
     Ok(())
 }
@@ -323,7 +312,7 @@ fn validate_id(value: &str, label: &str) -> Result<(), CodeExecutionError> {
 /// that deliberately needs a shell must name it explicitly (for example,
 /// `command: "/bin/sh", arguments: ["-c", "…"]`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeExecutionRequest {
+pub struct ExecRequest {
     pub execution_id: ExecutionId,
     pub workspace_id: ExecutionWorkspaceId,
     pub command: String,
@@ -373,10 +362,7 @@ pub struct ExecFolderGrant {
 }
 
 impl ExecFolderGrant {
-    pub fn new(
-        path: impl Into<PathBuf>,
-        access: ExecFolderAccess,
-    ) -> Result<Self, CodeExecutionError> {
+    pub fn new(path: impl Into<PathBuf>, access: ExecFolderAccess) -> Result<Self, ExecError> {
         let grant = Self {
             path: path.into(),
             access,
@@ -387,7 +373,7 @@ impl ExecFolderGrant {
     }
 
     /// Stage this grant's writes at `overlay`. Host-set, like the grant itself.
-    pub fn staged_at(mut self, overlay: impl Into<PathBuf>) -> Result<Self, CodeExecutionError> {
+    pub fn staged_at(mut self, overlay: impl Into<PathBuf>) -> Result<Self, ExecError> {
         self.overlay = Some(overlay.into());
         validate_folder_grant(&self)?;
         Ok(self)
@@ -403,14 +389,14 @@ impl ExecFolderGrant {
     }
 }
 
-impl CodeExecutionRequest {
+impl ExecRequest {
     pub fn new(
         execution_id: ExecutionId,
         workspace_id: ExecutionWorkspaceId,
         command: impl Into<String>,
         arguments: Vec<String>,
         cwd: impl Into<String>,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         let request = Self {
             execution_id,
             workspace_id,
@@ -426,12 +412,12 @@ impl CodeExecutionRequest {
 
     /// Install the model-listed staged paths, validating each and naming the
     /// first offender rather than reporting a bare "invalid".
-    pub fn with_staged_files(mut self, files: Vec<String>) -> Result<Self, CodeExecutionError> {
+    pub fn with_staged_files(mut self, files: Vec<String>) -> Result<Self, ExecError> {
         self.files = files
             .into_iter()
             .map(|path| {
                 WorkspaceFilePath::parse(&path).map_err(|_| {
-                    CodeExecutionError::InvalidRequest(format!(
+                    ExecError::InvalidRequest(format!(
                         "invalid staged path '{path}': paths must be scratch-relative with no traversal"
                     ))
                 })
@@ -442,16 +428,14 @@ impl CodeExecutionRequest {
     }
 
     /// Revalidate public/deserialized fields at the provider boundary.
-    pub fn validate(&self) -> Result<(), CodeExecutionError> {
+    pub fn validate(&self) -> Result<(), ExecError> {
         validate_id(self.execution_id.as_str(), "execution id")?;
         validate_id(self.workspace_id.as_str(), "workspace id")?;
         if self.command.is_empty()
             || self.command.len() > MAX_COMMAND_BYTES
             || self.command.as_bytes().contains(&0)
         {
-            return Err(CodeExecutionError::InvalidRequest(
-                "invalid executable".into(),
-            ));
+            return Err(ExecError::InvalidRequest("invalid executable".into()));
         }
         if self.arguments.len() > MAX_ARGUMENTS
             || self
@@ -464,7 +448,7 @@ impl CodeExecutionRequest {
                 .try_fold(0_usize, |total, argument| total.checked_add(argument.len()))
                 .is_none_or(|total| total > MAX_ARGUMENT_BYTES)
         {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "invalid command arguments".into(),
             ));
         }
@@ -473,12 +457,12 @@ impl CodeExecutionRequest {
             || self.cwd.as_bytes().contains(&0)
             || !is_safe_relative_path(Path::new(&self.cwd))
         {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "invalid working directory".into(),
             ));
         }
         if self.files.len() > MAX_STAGED_PATHS {
-            return Err(CodeExecutionError::InvalidRequest(format!(
+            return Err(ExecError::InvalidRequest(format!(
                 "too many staged paths: {} listed, at most {MAX_STAGED_PATHS} allowed",
                 self.files.len()
             )));
@@ -487,14 +471,14 @@ impl CodeExecutionRequest {
             // Transparent deserialization bypasses the parse-time checks, so
             // the boundary re-proves each path is its own normalized form.
             if !WorkspaceFilePath::parse(file.as_str()).is_ok_and(|parsed| &parsed == file) {
-                return Err(CodeExecutionError::InvalidRequest(format!(
+                return Err(ExecError::InvalidRequest(format!(
                     "invalid staged path '{}'",
                     file.as_str()
                 )));
             }
         }
         if self.folder_grants.len() > MAX_EXEC_FOLDER_GRANTS {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "too many execution folder grants".into(),
             ));
         }
@@ -502,7 +486,7 @@ impl CodeExecutionRequest {
         for grant in &self.folder_grants {
             validate_folder_grant(grant)?;
             if !unique_paths.insert(&grant.path) {
-                return Err(CodeExecutionError::InvalidRequest(
+                return Err(ExecError::InvalidRequest(
                     "duplicate execution folder grant".into(),
                 ));
             }
@@ -515,7 +499,7 @@ impl CodeExecutionRequest {
     pub fn with_folder_grants(
         mut self,
         folder_grants: Vec<ExecFolderGrant>,
-    ) -> Result<Self, CodeExecutionError> {
+    ) -> Result<Self, ExecError> {
         self.folder_grants = folder_grants;
         self.validate()?;
         Ok(self)
@@ -526,24 +510,22 @@ fn default_cwd() -> String {
     ".".into()
 }
 
-fn validate_folder_grant(grant: &ExecFolderGrant) -> Result<(), CodeExecutionError> {
+fn validate_folder_grant(grant: &ExecFolderGrant) -> Result<(), ExecError> {
     validate_folder_path(&grant.path)?;
     match &grant.overlay {
         None => Ok(()),
         // A read-only folder with a write overlay would be a contradiction the
         // profile builder would have to resolve, so it is rejected here.
-        Some(_) if grant.access != ExecFolderAccess::ReadWrite => {
-            Err(CodeExecutionError::InvalidRequest(
-                "a read-only execution folder cannot stage writes".into(),
-            ))
-        }
+        Some(_) if grant.access != ExecFolderAccess::ReadWrite => Err(ExecError::InvalidRequest(
+            "a read-only execution folder cannot stage writes".into(),
+        )),
         Some(overlay) => validate_folder_path(overlay),
     }
 }
 
-fn validate_folder_path(path: &Path) -> Result<(), CodeExecutionError> {
+fn validate_folder_path(path: &Path) -> Result<(), ExecError> {
     let Some(rendered) = path.to_str() else {
-        return Err(CodeExecutionError::InvalidRequest(
+        return Err(ExecError::InvalidRequest(
             "execution folder path must be valid UTF-8".into(),
         ));
     };
@@ -551,7 +533,7 @@ fn validate_folder_path(path: &Path) -> Result<(), CodeExecutionError> {
         || rendered.len() > MAX_EXEC_FOLDER_PATH_BYTES
         || rendered.chars().any(char::is_control)
     {
-        return Err(CodeExecutionError::InvalidRequest(
+        return Err(ExecError::InvalidRequest(
             "invalid execution folder path".into(),
         ));
     }
@@ -567,8 +549,8 @@ fn is_safe_relative_path(path: &Path) -> bool {
 
 /// Normalized, bounded result returned by every provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeExecutionResponse {
-    pub provider: CodeExecutionProviderKind,
+pub struct ExecResponse {
+    pub provider: ExecProviderKind,
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -654,11 +636,8 @@ pub struct OutputArtifactScan {
 /// `request.execution_id` as an idempotency key and reject an identity reused
 /// with different canonical arguments.
 #[async_trait]
-pub trait CodeExecutionProvider: Send + Sync {
-    async fn execute(
-        &self,
-        request: CodeExecutionRequest,
-    ) -> Result<CodeExecutionResponse, CodeExecutionError>;
+pub trait ExecProvider: Send + Sync {
+    async fn execute(&self, request: ExecRequest) -> Result<ExecResponse, ExecError>;
 
     /// Collect bounded visual previews after a successful execution.
     ///
@@ -668,7 +647,7 @@ pub trait CodeExecutionProvider: Send + Sync {
     async fn collect_preview_images(
         &self,
         _workspace: &ExecutionWorkspaceId,
-    ) -> Result<crate::PreviewScan, CodeExecutionError> {
+    ) -> Result<crate::PreviewScan, ExecError> {
         Ok(crate::PreviewScan::default())
     }
 
@@ -684,7 +663,7 @@ pub trait CodeExecutionProvider: Send + Sync {
         &self,
         _workspace: &ExecutionWorkspaceId,
         _execution: &ExecutionId,
-    ) -> Result<OutputArtifactScan, CodeExecutionError> {
+    ) -> Result<OutputArtifactScan, ExecError> {
         Ok(OutputArtifactScan::default())
     }
 
@@ -697,7 +676,7 @@ pub trait CodeExecutionProvider: Send + Sync {
 }
 
 #[derive(Debug, Error)]
-pub enum CodeExecutionError {
+pub enum ExecError {
     #[error("invalid code execution request: {0}")]
     InvalidRequest(String),
     #[error(
@@ -735,7 +714,7 @@ mod tests {
     #[test]
     fn validates_bounded_direct_command_requests() {
         let (execution, workspace) = ids();
-        assert!(CodeExecutionRequest::new(
+        assert!(ExecRequest::new(
             execution.clone(),
             workspace.clone(),
             "/usr/bin/python3",
@@ -743,7 +722,7 @@ mod tests {
             ".",
         )
         .is_ok());
-        assert!(CodeExecutionRequest::new(
+        assert!(ExecRequest::new(
             execution.clone(),
             workspace.clone(),
             "/bin/sh",
@@ -751,7 +730,7 @@ mod tests {
             "../outside",
         )
         .is_err());
-        assert!(CodeExecutionRequest::new(
+        assert!(ExecRequest::new(
             execution,
             workspace,
             "x".repeat(MAX_COMMAND_BYTES + 1),

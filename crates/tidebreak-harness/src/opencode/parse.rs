@@ -546,17 +546,28 @@ impl OpencodeStreamParser {
         if tokens.get("input").is_none() && tokens.get("output").is_none() {
             return;
         }
+        let input_tokens = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
+        let cache_read_input_tokens = tokens
+            .pointer("/cache/read")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache_creation_input_tokens = tokens
+            .pointer("/cache/write")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         self.last_usage = CodeUsage {
-            input_tokens: tokens.get("input").and_then(Value::as_u64).unwrap_or(0),
+            input_tokens,
             output_tokens: tokens.get("output").and_then(Value::as_u64).unwrap_or(0),
-            cache_read_input_tokens: tokens
-                .pointer("/cache/read")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            cache_creation_input_tokens: tokens
-                .pointer("/cache/write")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            // `step-finish` and `message.updated` both report one model call
+            // — `approval-approve.ndjson` shows 5267 then 123 fresh input,
+            // and the session-level `session.updated` row carries their 5390
+            // sum, which this parser does not read. So the snapshot standing
+            // when the turn ends is the last call's prompt.
+            context_tokens: input_tokens
+                .saturating_add(cache_read_input_tokens)
+                .saturating_add(cache_creation_input_tokens),
         };
     }
 

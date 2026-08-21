@@ -5,11 +5,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use tidebreak_code_execution::{
-    CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
-    CodeExecutionUnavailableReason, DaytonaCredential, DaytonaExecutionProvider,
-    DockerExecutionProvider, E2BCredential, E2BExecutionProvider, ExecFolderAccess, ExecutionId,
-    ExecutionWorkspaceId, LocalExecutionProvider, OutputArtifactStatus, RemoteSessionPool,
-    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES, PACKAGE_MANAGER_DOMAINS,
+    DaytonaCredential, DaytonaExecutionProvider, DockerExecutionProvider, E2BCredential,
+    E2BExecutionProvider, ExecError, ExecFolderAccess, ExecProvider, ExecProviderKind,
+    ExecUnavailableReason, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
+    OutputArtifactStatus, RemoteSessionPool, DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
+    PACKAGE_MANAGER_DOMAINS,
 };
 use tidebreak_core::{
     exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, NetworkPolicy, Result,
@@ -151,13 +151,12 @@ fn coalesced_population_pins_are_one_sorted_union() {
 
 #[test]
 fn only_unresolvable_pip_failures_are_deterministic() {
-    let unavailable = CodeExecutionError::Sandbox(
+    let unavailable = ExecError::Sandbox(
         "package cache acquisition failed: No matching distribution found for pillow==12.3.0"
             .into(),
     );
-    let network = CodeExecutionError::Sandbox(
-        "package cache acquisition failed: connection reset by peer".into(),
-    );
+    let network =
+        ExecError::Sandbox("package cache acquisition failed: connection reset by peer".into());
     assert!(deterministic_package_cache_failure(&unavailable));
     assert!(!deterministic_package_cache_failure(&network));
 }
@@ -178,7 +177,7 @@ async fn folder_resolution_is_fenced_to_the_chat_projection() {
             staging_unavailable: false,
         }],
     });
-    let provider = ConfiguredCodeExecutionProvider::new(
+    let provider = ConfiguredExecProvider::new(
         Arc::new(store),
         Arc::new(NoSecrets),
         tempfile::tempdir().unwrap().path(),
@@ -215,7 +214,7 @@ async fn folder_resolution_is_fenced_to_the_chat_projection() {
         }],
     });
     let (store, _database) = test_store().await;
-    let bad_provider = ConfiguredCodeExecutionProvider::new(
+    let bad_provider = ConfiguredExecProvider::new(
         Arc::new(store),
         Arc::new(NoSecrets),
         tempfile::tempdir().unwrap().path(),
@@ -241,7 +240,7 @@ async fn a_folder_that_cannot_be_staged_fails_closed_and_stays_visible() {
     }
     let root_id = HostRootId::from_uuid(Uuid::new_v4()).unwrap();
     let provider =
-        ConfiguredCodeExecutionProvider::new(Arc::new(store), Arc::new(NoSecrets), scratch.path());
+        ConfiguredExecProvider::new(Arc::new(store), Arc::new(NoSecrets), scratch.path());
     let mut grants = vec![ResolvedExecFolderGrant {
         root_id,
         path: folder.path().to_path_buf(),
@@ -321,11 +320,8 @@ async fn output_files_publish_as_turn_attributed_outputs() {
     std::fs::create_dir_all(&output_dir).unwrap();
     std::fs::write(output_dir.join("report.md"), b"# Draft").unwrap();
 
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    );
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path());
     let workspace = ExecutionWorkspaceId::parse(chat.id.to_string()).unwrap();
     let execution = ExecutionId::parse(call_id.to_string()).unwrap();
 
@@ -581,13 +577,10 @@ async fn turn_start_staging_makes_skills_readable_before_any_exec() {
     std::fs::create_dir(&scripts_dir).unwrap();
     std::fs::write(scripts_dir.join("build_deck.py"), "print('deck')\n").unwrap();
 
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    )
-    .with_skills(Some(source.path().to_owned()))
-    .with_user_skills(Some(scratch_root.path().join("user-skills")));
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
+            .with_skills(Some(source.path().to_owned()))
+            .with_user_skills(Some(scratch_root.path().join("user-skills")));
     let chat_id = ChatId::new();
 
     provider.stage_turn_workspace(chat_id).await;
@@ -656,8 +649,7 @@ async fn turn_start_staging_makes_skills_readable_before_any_exec() {
     );
 
     // A skill-less configuration (headless embeddings) stages nothing.
-    let bare =
-        ConfiguredCodeExecutionProvider::new(store, Arc::new(NoSecrets), scratch_root.path());
+    let bare = ConfiguredExecProvider::new(store, Arc::new(NoSecrets), scratch_root.path());
     let bare_chat = ChatId::new();
     bare.stage_turn_workspace(bare_chat).await;
     assert!(!scratch_root.path().join(bare_chat.to_string()).exists());
@@ -692,13 +684,10 @@ async fn disabling_drops_a_component_from_staging_and_the_catalog() {
     )
     .unwrap();
 
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    )
-    .with_skills(Some(skills_dir.path().to_owned()))
-    .with_plugins(Some(plugins_dir.path().to_owned()));
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
+            .with_skills(Some(skills_dir.path().to_owned()))
+            .with_plugins(Some(plugins_dir.path().to_owned()));
     let chat_id = ChatId::new();
     let staged = |name: &str| {
         scratch_root
@@ -803,13 +792,10 @@ async fn staged_skills_warm_their_host_tools_and_gate_the_capability_lines() {
         ensured: Mutex::new(Vec::new()),
         available: true,
     });
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    )
-    .with_skills(Some(source.path().to_owned()))
-    .with_host_tool_broker(Some(broker.clone()));
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
+            .with_skills(Some(source.path().to_owned()))
+            .with_host_tool_broker(Some(broker.clone()));
 
     provider.stage_turn_workspace(ChatId::new()).await;
     assert_eq!(
@@ -832,13 +818,10 @@ async fn staged_skills_warm_their_host_tools_and_gate_the_capability_lines() {
         ensured: Mutex::new(Vec::new()),
         available: false,
     });
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    )
-    .with_skills(Some(source.path().to_owned()))
-    .with_host_tool_broker(Some(unavailable));
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
+            .with_skills(Some(source.path().to_owned()))
+            .with_host_tool_broker(Some(unavailable));
     assert_eq!(provider.office_rendering_available().await, Some(false));
     assert!(matches!(
         provider.node_runtime_status().await,
@@ -854,18 +837,14 @@ async fn staged_skills_warm_their_host_tools_and_gate_the_capability_lines() {
         "---\nname: charts\ndescription: Plots.\n---\nBody.\n",
     )
     .unwrap();
-    let provider = ConfiguredCodeExecutionProvider::new(
-        store.clone(),
-        Arc::new(NoSecrets),
-        scratch_root.path(),
-    )
-    .with_skills(Some(no_deps.path().to_owned()));
+    let provider =
+        ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
+            .with_skills(Some(no_deps.path().to_owned()));
     assert_eq!(provider.office_rendering_available().await, None);
     assert_eq!(provider.node_runtime_status().await, None);
 
-    let brokerless =
-        ConfiguredCodeExecutionProvider::new(store, Arc::new(NoSecrets), scratch_root.path())
-            .with_skills(Some(source.path().to_owned()));
+    let brokerless = ConfiguredExecProvider::new(store, Arc::new(NoSecrets), scratch_root.path())
+        .with_skills(Some(source.path().to_owned()));
     assert_eq!(brokerless.office_rendering_available().await, Some(false));
     assert!(matches!(
         brokerless.node_runtime_status().await,
@@ -921,7 +900,7 @@ async fn preparation_does_not_write_through_a_planted_symlink() {
 
 #[test]
 fn the_default_selection_is_never_a_provider_that_cannot_run() {
-    let config = CodeExecutionConfig::default();
+    let config = ExecConfig::default();
     // Local is the only unattended default, and only where its sandbox
     // exists: on any other host the honest default is no provider, so the
     // surface reports "not configured" instead of a selection that fails
@@ -930,12 +909,12 @@ fn the_default_selection_is_never_a_provider_that_cannot_run() {
         config.provider,
         LocalExecutionProvider::availability()
             .is_ok()
-            .then_some(CodeExecutionProviderKind::Local)
+            .then_some(ExecProviderKind::Local)
     );
     assert_eq!(config.timeout_ms, DEFAULT_TIMEOUT_MS);
     assert!(config.validate().is_ok());
-    assert!(CodeExecutionConfig {
-        provider: Some(CodeExecutionProviderKind::Local),
+    assert!(ExecConfig {
+        provider: Some(ExecProviderKind::Local),
         timeout_ms: MIN_TIMEOUT_MS - 1,
         egress: EgressConfig::Open,
         e2b_template: None,
@@ -947,9 +926,9 @@ fn the_default_selection_is_never_a_provider_that_cannot_run() {
 
 #[test]
 fn selection_contains_no_endpoint_or_credential_reference() {
-    let json = serde_json::to_value(CodeExecutionConfig {
-        provider: Some(CodeExecutionProviderKind::Local),
-        ..CodeExecutionConfig::default()
+    let json = serde_json::to_value(ExecConfig {
+        provider: Some(ExecProviderKind::Local),
+        ..ExecConfig::default()
     })
     .unwrap();
     assert_eq!(json["provider"], "local");
@@ -959,7 +938,7 @@ fn selection_contains_no_endpoint_or_credential_reference() {
 
 #[test]
 fn egress_defaults_to_open_and_compiles_no_policy() {
-    let config = CodeExecutionConfig::default();
+    let config = ExecConfig::default();
     assert_eq!(config.egress, EgressConfig::Open);
     // Open must leave the managed adapters on today's open-internet
     // creation: no policy is threaded into the create path.
@@ -998,8 +977,8 @@ fn egress_allowlist_compiles_to_a_deny_by_default_decision_policy() {
         cidrs: vec![],
     };
     assert!(bad.to_policy().is_err());
-    assert!(CodeExecutionConfig {
-        provider: Some(CodeExecutionProviderKind::E2b),
+    assert!(ExecConfig {
+        provider: Some(ExecProviderKind::E2b),
         timeout_ms: DEFAULT_TIMEOUT_MS,
         egress: bad,
         e2b_template: None,
@@ -1051,8 +1030,8 @@ fn egress_enforcement_never_oversells_a_provider_past_its_model() {
             .find(|row| row.provider == provider)
             .unwrap_or_else(|| panic!("{provider} enforcement is disclosed"))
     };
-    let e2b = row(CodeExecutionProviderKind::E2b);
-    let daytona = row(CodeExecutionProviderKind::Daytona);
+    let e2b = row(ExecProviderKind::E2b);
+    let daytona = row(ExecProviderKind::Daytona);
 
     // E2B is confirmed, but its own enforcement model says it is not a full
     // boundary — domain rules cover only HTTP/HTTPS and DNS stays open — so
@@ -1102,7 +1081,7 @@ fn egress_enforcement_never_oversells_a_provider_past_its_model() {
     // borrow a status for the rest. Under an allowlist it compiles nothing
     // into container networking, so the row stays at the absence of a
     // boundary rather than the `unconfirmed` of a policy that was sent.
-    let docker = row(CodeExecutionProviderKind::Docker);
+    let docker = row(ExecProviderKind::Docker);
     assert_eq!(docker.status, EgressEnforcementStatus::NotEnforced);
     assert_eq!(docker.gaps, [DOCKER_OPEN_EGRESS_GAP]);
     assert!(docker.requirement.is_none());
@@ -1118,7 +1097,7 @@ fn container_egress_disclosure_splits_by_policy_class() {
     let row = |policy: &EgressConfig| {
         egress_enforcement_status(policy)
             .into_iter()
-            .find(|row| row.provider == CodeExecutionProviderKind::Docker)
+            .find(|row| row.provider == ExecProviderKind::Docker)
             .expect("the container backend's enforcement is disclosed")
     };
 
@@ -1257,7 +1236,7 @@ async fn configuration_can_disable_and_reenable_local_execution() {
         &host_config,
         &store,
         &secrets,
-        CodeExecutionConfigUpdate {
+        ExecConfigUpdate {
             provider: Some(None),
             timeout_ms: Some(MIN_TIMEOUT_MS),
             egress: None,
@@ -1277,8 +1256,8 @@ async fn configuration_can_disable_and_reenable_local_execution() {
         &host_config,
         &store,
         &secrets,
-        CodeExecutionConfigUpdate {
-            provider: Some(Some(CodeExecutionProviderKind::Local)),
+        ExecConfigUpdate {
+            provider: Some(Some(ExecProviderKind::Local)),
             timeout_ms: Some(MAX_TIMEOUT_MS),
             egress: None,
             e2b_template: None,
@@ -1290,7 +1269,7 @@ async fn configuration_can_disable_and_reenable_local_execution() {
         Ok(info) => info,
         Err(_) => panic!("valid local code-execution configuration was rejected"),
     };
-    assert_eq!(local.provider, Some(CodeExecutionProviderKind::Local));
+    assert_eq!(local.provider, Some(ExecProviderKind::Local));
     assert_eq!(local.timeout_ms, MAX_TIMEOUT_MS);
 }
 
@@ -1313,10 +1292,10 @@ async fn unavailable_providers_report_an_actionable_reason() {
         assert!(!row.available);
         assert_eq!(
             row.unavailable_reason,
-            Some(CodeExecutionUnavailableReason::MissingCredential)
+            Some(ExecUnavailableReason::MissingCredential)
         );
     }
-    let local = rows[&CodeExecutionProviderKind::Local];
+    let local = rows[&ExecProviderKind::Local];
     assert_eq!(
         local.unavailable_reason,
         LocalExecutionProvider::availability().err()
@@ -1332,7 +1311,7 @@ async fn unavailable_providers_report_an_actionable_reason() {
 #[tokio::test]
 async fn workspace_capability_degrades_to_none_instead_of_failing() {
     let (store, dir) = test_store().await;
-    let provider = ConfiguredCodeExecutionProvider::new(
+    let provider = ConfiguredExecProvider::new(
         Arc::new(store),
         Arc::new(NoSecrets),
         dir.path().join("scratch"),
@@ -1386,8 +1365,5 @@ async fn invalid_persisted_policy_fails_closed() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        read_config(&store).await.unwrap(),
-        CodeExecutionConfig::disabled()
-    );
+    assert_eq!(read_config(&store).await.unwrap(), ExecConfig::disabled());
 }

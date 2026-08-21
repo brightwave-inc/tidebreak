@@ -147,10 +147,10 @@ export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, t
 /**
  * Active host code-execution backend for `exec`, not the run-loop seat.
  *
- * See [`CodeExecutionProviderSnapshot`]. Read from the current host
+ * See [`ExecProviderSnapshot`]. Read from the current host
  * setting at list time — the same selection the next `exec` would use.
  */
-code_execution_provider: CodeExecutionProviderSnapshot, status: AgentRunStatus, 
+code_execution_provider: ExecProviderSnapshot, status: AgentRunStatus, 
 /**
  * Completed provider calls accumulated across every attempt.
  */
@@ -488,13 +488,13 @@ export type AppViewSession = { frame_path: string, };
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
- * Decision recorded on [`CodeEvent::ApprovalResolved`].
+ * Outcome recorded on [`CodeEvent::ApprovalResolved`].
  */
 export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny", 
 /**
  * Feedback returned to the engine, when any.
  */
-feedback?: string, };
+feedback?: string, } | { "type": "abandoned" };
 
 /**
  * How wide a standing grant the human chose, narrowest first.
@@ -860,7 +860,7 @@ harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested
 /**
  * State of a persisted approval.
  */
-export type CodeApprovalState = "pending" | "approved" | "denied";
+export type CodeApprovalState = "pending" | "approved" | "denied" | "abandoned";
 
 /**
  * Remembered clone destination plus observed `gh` status.
@@ -1154,114 +1154,6 @@ state: AttentionState,
 source: AttentionSource, };
 
 /**
- * Renderer-safe configuration and readiness.
- */
-export type CodeExecutionConfigInfo = { provider?: CodeExecutionProviderKind, timeout_ms: number, available: boolean, 
-/**
- * Why the *selected* provider cannot run, when it cannot. Absent while
- * execution is available or no provider is selected at all.
- */
-unavailable_reason?: CodeExecutionUnavailableReason, has_credential: boolean, 
-/**
- * One row per shipped provider: whether it could run here at all, and the
- * reason it could not. This is what makes an unusable host legible —
- * "paste an E2B key" is visible instead of being inferred from a generic
- * execution failure.
- */
-providers: Array<CodeExecutionProviderAvailability>, 
-/**
- * The configured egress policy and each managed provider's enforcement
- * status, so the renderer can present the policy and disclose which
- * providers actually restrict egress today.
- */
-egress: CodeExecutionEgressInfo, 
-/**
- * Per-provider detached-admission evaluation: for each execution
- * provider, whether the fail-closed gate (issue #824) would admit a
- * detached run it hosted, and every named precondition it fails. Derived
- * by running the real admission evaluator over each provider's declared
- * capabilities — the settings surface and the gate cannot disagree.
- */
-detached_admission: Array<DetachedAdmissionProviderInfo>, };
-
-/**
- * Renderer-safe readiness for one managed provider's fixed credential slot.
- */
-export type CodeExecutionCredentialReadiness = { provider: CodeExecutionProviderKind, has_credential: boolean, };
-
-/**
- * A managed provider's egress-enforcement status, as host knowledge rather
- * than a claim the backend makes about itself.
- */
-export type CodeExecutionEgressEnforcement = { provider: CodeExecutionProviderKind, status: EgressEnforcementStatus, 
-/**
- * Destinations the vendor's mechanism keeps reachable regardless of the
- * configured policy — each a short purpose string straight from the
- * enforcement model, so the settings surface can show the caveat inline
- * instead of burying it in prose the user skims past.
- */
-gaps: Array<string>, 
-/**
- * A precondition the boundary is gated on that the host cannot verify
- * statically ("Daytona org tier 3+"). Present only for a
- * [`EgressEnforcementStatus::ConditionalBoundary`], so the surface can
- * state the condition inline rather than implying an unconditional
- * boundary.
- */
-requirement?: string, };
-
-/**
- * Renderer-safe egress policy plus per-provider enforcement disclosure.
- */
-export type CodeExecutionEgressInfo = { 
-/**
- * The configured host policy. `Open` is the default: managed sandboxes are
- * created with open internet access. An allowlist restricts every managed
- * sandbox created afterwards.
- */
-policy: EgressConfig, 
-/**
- * One row per managed provider, stating whether its egress restriction is
- * confirmed against the live vendor API or still pending confirmation.
- */
-enforcement: Array<CodeExecutionEgressEnforcement>, };
-
-/**
- * Structured capability report for one execution provider on this host.
- *
- * `available` and `unavailable_reason` are two views of one decision, made in
- * [`provider_availability`], so no surface has to re-derive whether a platform
- * supports a provider or whether a key is saved.
- */
-export type CodeExecutionProviderAvailability = { provider: CodeExecutionProviderKind, available: boolean, unavailable_reason?: CodeExecutionUnavailableReason, };
-
-/**
- * A configured code-execution backend.
- */
-export type CodeExecutionProviderKind = "local" | "e2b" | "daytona" | "docker";
-
-/**
- * Host-selected backend that runs `exec` tool calls.
- *
- * Distinct from [`AgentRunExecutionLocation`], which names where the agent
- * *run loop* itself executes (`in_process` vs `container`). A background run
- * can be in-process while its shell work still lands on e2b, docker, or
- * daytona — this field is that backend, or `off` when code execution is
- * disabled.
- */
-export type CodeExecutionProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off";
-
-/**
- * Why a provider cannot execute anything on this host right now.
- *
- * A stable machine-readable code, not a sentence: the reason is decided where
- * the fact is known (the platform probe, the credential slot) and every
- * surface renders its own copy from the code. Reasons are what the user can
- * act on — install a key, switch provider — never an internal failure detail.
- */
-export type CodeExecutionUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
-
-/**
  * One changed path in a workspace or turn file list.
  */
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
@@ -1532,6 +1424,11 @@ subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", works
  * the prompt an engine actually sent is the sum of all three. Missing fields
  * stay zero, which is not the same as "the engine sent zero" — an engine that
  * does not surface cache counts reports nothing rather than a real zero.
+ *
+ * None of the four answers "how full is the window". Summing turn totals
+ * counts the same transcript once per model call, so a long turn reads as a
+ * multiple of the prompt that was actually resident. That reading has its own
+ * field: [`CodeUsage::context_tokens`].
  */
 export type CodeUsage = { 
 /**
@@ -1549,7 +1446,20 @@ cache_read_input_tokens: number,
 /**
  * Cache-write input tokens, when the engine reports them.
  */
-cache_creation_input_tokens: number, };
+cache_creation_input_tokens: number, 
+/**
+ * Prompt tokens resident on the turn's final model call — what actually
+ * occupied the context window at the end of the turn.
+ *
+ * Distinct from the four counts above, which are the turn's *spend*
+ * summed across every model call. On a six-call turn those sum to
+ * roughly six prompts; this is the one prompt that was live when the
+ * turn ended, and it is the only honest numerator for "how full is the
+ * window".
+ *
+ * Zero when the engine does not publish enough to compute it.
+ */
+context_tokens: number, };
 
 /**
  * Identifies one durable watch task on a workspace's pull request.
@@ -1888,7 +1798,7 @@ export type DetachedAdmissionDenialReason = "no_scoped_model_token" | "no_extern
  * providers that cannot host background runs at all — every precondition is
  * simply unestablished for them, and the fail-closed evaluation names each.
  */
-export type DetachedAdmissionProviderInfo = { provider: CodeExecutionProviderKind, 
+export type DetachedAdmissionProviderInfo = { provider: ExecProviderKind, 
 /**
  * Whether the gate would admit a detached run hosted by this provider.
  */
@@ -1966,6 +1876,42 @@ export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "app
 export type ExecBackend = "local" | "e2b" | "daytona" | "docker";
 
 /**
+ * Renderer-safe configuration and readiness.
+ */
+export type ExecConfigInfo = { provider?: ExecProviderKind, timeout_ms: number, available: boolean, 
+/**
+ * Why the *selected* provider cannot run, when it cannot. Absent while
+ * execution is available or no provider is selected at all.
+ */
+unavailable_reason?: ExecUnavailableReason, has_credential: boolean, 
+/**
+ * One row per shipped provider: whether it could run here at all, and the
+ * reason it could not. This is what makes an unusable host legible —
+ * "paste an E2B key" is visible instead of being inferred from a generic
+ * execution failure.
+ */
+providers: Array<ExecProviderAvailability>, 
+/**
+ * The configured egress policy and each managed provider's enforcement
+ * status, so the renderer can present the policy and disclose which
+ * providers actually restrict egress today.
+ */
+egress: ExecEgressInfo, 
+/**
+ * Per-provider detached-admission evaluation: for each execution
+ * provider, whether the fail-closed gate (issue #824) would admit a
+ * detached run it hosted, and every named precondition it fails. Derived
+ * by running the real admission evaluator over each provider's declared
+ * capabilities — the settings surface and the gate cannot disagree.
+ */
+detached_admission: Array<DetachedAdmissionProviderInfo>, };
+
+/**
+ * Renderer-safe readiness for one managed provider's fixed credential slot.
+ */
+export type ExecCredentialReadiness = { provider: ExecProviderKind, has_credential: boolean, };
+
+/**
  * A way the execution backend ran with less than its intended setup.
  *
  * Closed, and deliberately coarse: what a reader needs is what happened and
@@ -1974,6 +1920,43 @@ export type ExecBackend = "local" | "e2b" | "daytona" | "docker";
  * string, because the sentence the card shows is written on this side.
  */
 export type ExecDegradation = "sandbox_image_unavailable";
+
+/**
+ * A managed provider's egress-enforcement status, as host knowledge rather
+ * than a claim the backend makes about itself.
+ */
+export type ExecEgressEnforcement = { provider: ExecProviderKind, status: EgressEnforcementStatus, 
+/**
+ * Destinations the vendor's mechanism keeps reachable regardless of the
+ * configured policy — each a short purpose string straight from the
+ * enforcement model, so the settings surface can show the caveat inline
+ * instead of burying it in prose the user skims past.
+ */
+gaps: Array<string>, 
+/**
+ * A precondition the boundary is gated on that the host cannot verify
+ * statically ("Daytona org tier 3+"). Present only for a
+ * [`EgressEnforcementStatus::ConditionalBoundary`], so the surface can
+ * state the condition inline rather than implying an unconditional
+ * boundary.
+ */
+requirement?: string, };
+
+/**
+ * Renderer-safe egress policy plus per-provider enforcement disclosure.
+ */
+export type ExecEgressInfo = { 
+/**
+ * The configured host policy. `Open` is the default: managed sandboxes are
+ * created with open internet access. An allowlist restricts every managed
+ * sandbox created afterwards.
+ */
+policy: EgressConfig, 
+/**
+ * One row per managed provider, stating whether its egress restriction is
+ * confirmed against the live vendor API or still pending confirmation.
+ */
+enforcement: Array<ExecEgressEnforcement>, };
 
 /**
  * Renderer-safe selection metadata; bytes remain behind the scoped endpoint.
@@ -2016,6 +1999,41 @@ export type ExecFileRejectionReason = "stale" | "snapshot_unavailable" | "staged
  * Whether an applied file can still be safely reverted now.
  */
 export type ExecFileUndoAvailability = "available" | "already_undone" | "stale" | "not_available";
+
+/**
+ * Structured capability report for one execution provider on this host.
+ *
+ * `available` and `unavailable_reason` are two views of one decision, made in
+ * [`provider_availability`], so no surface has to re-derive whether a platform
+ * supports a provider or whether a key is saved.
+ */
+export type ExecProviderAvailability = { provider: ExecProviderKind, available: boolean, unavailable_reason?: ExecUnavailableReason, };
+
+/**
+ * A configured code-execution backend.
+ */
+export type ExecProviderKind = "local" | "e2b" | "daytona" | "docker";
+
+/**
+ * Host-selected backend that runs `exec` tool calls.
+ *
+ * Distinct from [`AgentRunExecutionLocation`], which names where the agent
+ * *run loop* itself executes (`in_process` vs `container`). A background run
+ * can be in-process while its shell work still lands on e2b, docker, or
+ * daytona — this field is that backend, or `off` when code execution is
+ * disabled.
+ */
+export type ExecProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off";
+
+/**
+ * Why a provider cannot execute anything on this host right now.
+ *
+ * A stable machine-readable code, not a sentence: the reason is decided where
+ * the fact is known (the platform probe, the credential slot) and every
+ * surface renders its own copy from the code. Reasons are what the user can
+ * act on — install a key, switch provider — never an internal failure detail.
+ */
+export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
  * Why a session is fenced: observed but not controlled, until an explicit

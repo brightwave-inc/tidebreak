@@ -1064,6 +1064,28 @@ impl CodeRuntime {
         self.workspace_pr(owner, id).await
     }
 
+    /// Take the workspace's pull request out of draft and return a fresh
+    /// status. Decision 42 keeps pull-request state changes on a user-initiated
+    /// endpoint rather than on any agent or automation path, so this is the
+    /// only route to `gh pr ready` for a workspace.
+    pub(crate) async fn mark_workspace_pr_ready(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        let workspace = self.require_live_workspace(owner, id).await?;
+        let gh_path = self.gh_search_path_owned();
+        gh::mark_workspace_pull_request_ready(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            &self.pr_cache,
+            gh_path.as_deref(),
+        )
+        .await
+        .map_err(map_gh)?;
+        self.workspace_pr(owner, id).await
+    }
+
     pub(crate) async fn create_workspace_pr(
         &self,
         owner: &OwnerId,
@@ -1696,6 +1718,14 @@ impl CodeRuntime {
                 "the session did not stay ended after the worker stopped",
             ));
         }
+        super::approval_sweep::abandon_for_ended_session(
+            &self.db,
+            &self.bus,
+            owner,
+            current.id,
+            current.spawn_epoch,
+        )
+        .await;
         Ok(())
     }
 
@@ -1949,6 +1979,14 @@ impl CodeRuntime {
                     "the session did not stay ended after the worker stopped",
                 ));
             }
+            super::approval_sweep::abandon_for_ended_session(
+                &self.db,
+                &self.bus,
+                owner,
+                current.id,
+                current.spawn_epoch,
+            )
+            .await;
         }
         Ok(all_stopped)
     }
@@ -2218,10 +2256,17 @@ impl CodeRuntime {
         decision: ApprovalDecision,
     ) -> Result<CodeApproval, ServerError> {
         let mut approval = self.get_approval(owner, id).await?;
-        if approval.state != CodeApprovalState::Pending {
+        // A terminal row is the only thing standing between the user and a
+        // decision that reaches nothing: the parked MCP call may be long gone
+        // — after a restart, for one — and the bridge accepts a decision with
+        // no waiter on purpose. So the row's state, not the park, decides.
+        if !approval.state.is_pending() {
             return Err(ServerError::conflict_kind(
-                "approval_already_decided",
-                format!("approval {id} is {}", approval.state.as_str()),
+                "approval_not_pending",
+                format!(
+                    "approval {id} is no longer awaiting a decision: it is {}",
+                    approval.state.as_str()
+                ),
             ));
         }
         let call_id = approval
