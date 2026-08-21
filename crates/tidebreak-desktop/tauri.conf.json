@@ -78,7 +78,8 @@
       "../../legal/THIRD-PARTY-NOTICES.md": "legal/THIRD-PARTY-NOTICES.md"
     },
     "externalBin": [
-      "binaries/tidebreak-host-broker"
+      "binaries/tidebreak-host-broker",
+      "binaries/tidebreak"
     ],
     "icon": [
       "icons/32x32.png",

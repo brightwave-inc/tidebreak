@@ -29,6 +29,7 @@ mod browser_control;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_semantics;
+mod browser_runtime_adapter;
 mod channel;
 mod chat_debug;
 mod client_execution;
@@ -586,6 +587,49 @@ fn cargo_dev_resource_dir_from(exe_dir: &Path) -> Option<PathBuf> {
         .then(|| exe_dir.to_path_buf())
 }
 
+/// Derive the absolute path to a named sibling executable beside the running
+/// desktop binary. The sibling must exist, be a regular file, and (on Unix)
+/// have an executable permission bit.
+///
+/// The browser runtime resolves the `tidebreak` CLI sidecar through this
+/// boundary before code-session recovery, so provider harnesses never depend
+/// on an ambient `PATH` lookup.
+pub(crate) fn desktop_sibling_exe(name: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+    desktop_sibling_exe_from(&exe, name)
+}
+
+fn desktop_sibling_exe_from(exe: &Path, name: &str) -> Result<PathBuf, String> {
+    let candidate = Path::new(name);
+    if candidate.components().count() != 1
+        || candidate.file_name().and_then(|value| value.to_str()) != Some(name)
+    {
+        return Err("sibling exe name must be a single file name".to_string());
+    }
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| "current exe has no parent directory".to_string())?;
+    let extension = cfg!(target_os = "windows").then_some(".exe").unwrap_or("");
+    let path = exe_dir.join(format!("{name}{extension}"));
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        format!(
+            "sibling exe {name} not found at {} ({error})",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("sibling exe {name} is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!("sibling exe {name} is not executable"));
+        }
+    }
+    Ok(path)
+}
+
 fn exec_scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     const REQUIRED_HELPERS: [&str; 13] = [
         "_tidebreak_preview.py",
@@ -897,7 +941,19 @@ async fn boot_server(
     let local_voice = Arc::new(voice_transcription::DesktopLocalVoiceRunner::new(
         data_dir.clone(),
     ));
-    let server = tidebreak_server::bind_configured_with_desktop_executor_and_folder_grants(
+    let browser_runtime: Arc<dyn tidebreak_server::BrowserRuntime> = Arc::new(
+        browser_runtime_adapter::DesktopBrowserRuntime::new(
+            app.clone(),
+            app.state::<browser_control::BrowserRegistry>()
+                .inner()
+                .clone(),
+        ),
+    );
+    let browser_binding = tidebreak_server::BrowserChannelBinding::new(
+        browser_runtime,
+        desktop_sibling_exe("tidebreak")?,
+    );
+    let server = tidebreak_server::bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
         config,
         client_executor_id,
         folder_grants,
@@ -905,6 +961,7 @@ async fn boot_server(
         Some(host_tool_broker),
         Some(local_voice),
         Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
+        Some(browser_binding),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -973,8 +1030,10 @@ async fn boot_server(
 
 #[cfg(test)]
 mod resource_dir_tests {
-    use super::cargo_dev_resource_dir_from;
+    use super::{cargo_dev_resource_dir_from, desktop_sibling_exe_from};
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
@@ -985,6 +1044,16 @@ mod resource_dir_tests {
         let dir = std::env::temp_dir().join(format!("tidebreak-resource-dir-{label}-{nanos}"));
         fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    fn desktop_path(dir: &std::path::Path) -> std::path::PathBuf {
+        let extension = cfg!(target_os = "windows").then_some(".exe").unwrap_or("");
+        dir.join(format!("tidebreak-desktop{extension}"))
+    }
+
+    fn sibling_path(dir: &std::path::Path) -> std::path::PathBuf {
+        let extension = cfg!(target_os = "windows").then_some(".exe").unwrap_or("");
+        dir.join(format!("tidebreak{extension}"))
     }
 
     #[test]
@@ -1002,6 +1071,68 @@ mod resource_dir_tests {
     fn cargo_dev_fallback_rejects_directories_without_cargo_lock() {
         let dir = temp_dir("without-lock");
         assert_eq!(cargo_dev_resource_dir_from(&dir), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn desktop_sibling_exe_rejects_missing_file() {
+        let dir = temp_dir("sibling-missing");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
+        assert!(
+            err.contains("not found"),
+            "error should mention not found: {err}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn desktop_sibling_exe_rejects_path_traversal() {
+        let dir = temp_dir("sibling-traversal");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "../tidebreak").expect_err("should fail");
+        assert!(err.contains("single file name"), "error: {err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_sibling_exe_rejects_non_executable_on_unix() {
+        let dir = temp_dir("sibling-noexec");
+        let exe_path = sibling_path(&dir);
+        fs::write(&exe_path, []).expect("write");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
+        assert!(err.contains("not executable"), "error: {err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_sibling_exe_accepts_executable_on_unix() {
+        let dir = temp_dir("sibling-exec");
+        let exe_path = sibling_path(&dir);
+        fs::write(&exe_path, []).expect("write");
+        let mut perms = fs::metadata(&exe_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&exe_path, perms).expect("chmod");
+        assert_eq!(
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").unwrap(),
+            exe_path
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn desktop_sibling_exe_accepts_regular_file() {
+        let dir = temp_dir("sibling-file");
+        let exe_path = sibling_path(&dir);
+        fs::write(&exe_path, []).expect("write");
+        assert_eq!(
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").unwrap(),
+            exe_path
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

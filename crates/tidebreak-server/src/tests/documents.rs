@@ -1586,7 +1586,16 @@ async fn agent_deps_for_test(
     let store_for_gateway = store.clone();
     agent_deps(
         Arc::new(UnavailableCodeExecution),
-        web_search::foreground_tool(store.clone(), Arc::new(MemSecrets::default())),
+        web_search::foreground_tool(
+            store.clone(),
+            Arc::new(MemSecrets::default()),
+            // This suite exercises extraction and document capture, never a
+            // search: an unconfigured route is the honest stand-in.
+            Arc::new(FixedResolver(Arc::new(
+                crate::provider::UnconfiguredProvider,
+            ))),
+            "claude-opus-5".to_string(),
+        ),
         web_search::foreground_extract_tool(extract_store, Arc::new(MemSecrets::default())),
         store,
         dir.join("profile-data"),

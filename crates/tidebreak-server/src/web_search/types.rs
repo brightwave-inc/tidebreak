@@ -58,6 +58,16 @@ pub enum WebSearchProviderKind {
     Tavily,
     Brave,
     Searxng,
+    /// The chat's own model provider, searched through one dedicated
+    /// sub-request rather than a third-party engine.
+    ///
+    /// Unlike every other kind, this one names no fixed vendor: which provider
+    /// runs the search depends on the model the chat is on. That is exactly why
+    /// it is never operator-selectable — a fixed "active provider" choice
+    /// cannot express a backend that changes per chat — so it is absent from
+    /// the settings dropdown and from `CREDENTIAL_PROVIDERS`. It is here so a
+    /// response can still say who searched.
+    ModelProvider,
 }
 
 impl WebSearchProviderKind {
@@ -65,7 +75,13 @@ impl WebSearchProviderKind {
     ///
     /// Anything that has to enumerate providers reads this rather than
     /// spelling out a list that a new variant would silently fall out of.
-    pub const ALL: [Self; 4] = [Self::Exa, Self::Tavily, Self::Brave, Self::Searxng];
+    pub const ALL: [Self; 5] = [
+        Self::Exa,
+        Self::Tavily,
+        Self::Brave,
+        Self::Searxng,
+        Self::ModelProvider,
+    ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -74,6 +90,7 @@ impl WebSearchProviderKind {
             Self::Tavily => "tavily",
             Self::Brave => "brave",
             Self::Searxng => "searxng",
+            Self::ModelProvider => "model_provider",
         }
     }
 
@@ -93,17 +110,26 @@ impl WebSearchProviderKind {
             // A self-hosted instance the operator runs. There is no vendor
             // account behind it and so no key.
             Self::Searxng => None,
+            // Authenticated as the chat's model provider already is, by that
+            // provider's own credential or subscription. There is no separate
+            // web-search account to hold a key for.
+            Self::ModelProvider => None,
         }
     }
 
-    /// Fixed search endpoint, or `None` for a provider whose address is host
-    /// configuration because it has no single hosted address to pin.
+    /// Fixed search endpoint, or `None` for a provider this host does not dial
+    /// at a constant address of its own.
     pub(crate) const fn search_url(self) -> Option<&'static str> {
         match self {
             Self::Exa => Some("https://api.exa.ai/search"),
             Self::Tavily => Some("https://api.tavily.com/search"),
             Self::Brave => Some("https://api.search.brave.com/res/v1/web/search"),
+            // Self-hosted: the operator supplies the address.
             Self::Searxng => None,
+            // Not an endpoint this module dials at all. The request goes out
+            // through the model router, on the route that provider already
+            // owns.
+            Self::ModelProvider => None,
         }
     }
 
@@ -117,7 +143,7 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => Some("https://api.exa.ai/contents"),
             Self::Tavily => Some("https://api.tavily.com/extract"),
-            Self::Brave | Self::Searxng => None,
+            Self::Brave | Self::Searxng | Self::ModelProvider => None,
         }
     }
 
@@ -132,13 +158,17 @@ impl WebSearchProviderKind {
     /// [`OutboundOrigin`](crate::web_search::OutboundOrigin) — it is just an origin fixed
     /// at construction from validated host configuration rather than a
     /// constant.
+    ///
+    /// Also `None` for the model-provider backend, which makes no egress of its
+    /// own: it hands the search to the model router, whose routes are bound
+    /// where provider credentials are.
     #[must_use]
     pub const fn outbound_domain(self) -> Option<&'static str> {
         match self {
             Self::Exa => Some("api.exa.ai"),
             Self::Tavily => Some("api.tavily.com"),
             Self::Brave => Some("api.search.brave.com"),
-            Self::Searxng => None,
+            Self::Searxng | Self::ModelProvider => None,
         }
     }
 }
