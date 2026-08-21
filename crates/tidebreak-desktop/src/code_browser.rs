@@ -9,17 +9,31 @@ use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Rect, Webview, WebviewUrl,
 };
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
+use tidebreak_core::{BrowserGrantCapability, BrowserOrigin, BrowserOriginScope};
+use tokio::sync::oneshot;
 use url::Url;
+
+#[cfg(target_os = "macos")]
+use crate::browser_control::BROWSER_DATA_STORE_IDENTIFIER;
+use crate::browser_control::{
+    BrowserAgentAccess, BrowserController, BrowserLoadState, BrowserNavigationDecision,
+    BrowserRegistry, BrowserSnapshot,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
 const CODE_BROWSER_EVENT: &str = "code-browser:event";
 const MAX_BROWSER_ID_CHARS: usize = 80;
+const MAX_WORKSPACE_ID_CHARS: usize = 200;
 const MAX_BROWSER_URL_CHARS: usize = 8_192;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeBrowserCommandRequest {
-    session_id: String,
+    workspace_id: String,
+    browser_id: String,
     action: CodeBrowserAction,
 }
 
@@ -45,6 +59,10 @@ enum CodeBrowserAction {
         visible: bool,
     },
     Snapshot,
+    ShareWithAgent,
+    RevokeAgentAccess,
+    StopAgentControl,
+    TakeHumanControl,
     Close,
 }
 
@@ -56,18 +74,11 @@ struct CodeBrowserBounds {
     height: f64,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CodeBrowserSnapshot {
-    exists: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeBrowserEvent {
-    session_id: String,
+    workspace_id: String,
+    browser_id: String,
     #[serde(rename = "type")]
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,15 +87,28 @@ struct CodeBrowserEvent {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    load_state: Option<BrowserLoadState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controller: Option<BrowserController>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_access: Option<BrowserAgentAccess>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
 }
 
 #[tauri::command]
 pub(crate) async fn code_browser_command(
     app: AppHandle,
+    registry: tauri::State<'_, BrowserRegistry>,
     request: CodeBrowserCommandRequest,
-) -> Result<CodeBrowserSnapshot, String> {
-    let label = browser_label(&request.session_id)?;
+) -> Result<BrowserSnapshot, String> {
+    validated_workspace_id(&request.workspace_id)?;
+    let label = browser_label(&request.browser_id)?;
     let existing = app.get_webview(&label);
+    let registry = registry.inner().clone();
 
     match request.action {
         CodeBrowserAction::Create {
@@ -93,44 +117,138 @@ pub(crate) async fn code_browser_command(
             visible,
         } => {
             if let Some(webview) = existing {
+                registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 set_bounds(&webview, bounds)?;
                 set_visible(&webview, visible)?;
-                return snapshot(&webview);
+                registry.set_visible(&request.browser_id, &request.workspace_id, visible)?;
+                return registry.snapshot(&request.browser_id, &request.workspace_id);
             }
-            create_browser(&app, &request.session_id, &label, &url, bounds, visible)
+            // A platform webview can disappear independently after a native
+            // failure. Remove that same-workspace stale record before
+            // allocating a fresh native instance; a cross-workspace record is
+            // deliberately rejected rather than rebound.
+            registry.remove(&request.browser_id, &request.workspace_id)?;
+            create_browser(
+                &app,
+                &registry,
+                &request.workspace_id,
+                &request.browser_id,
+                &label,
+                &url,
+                bounds,
+                visible,
+            )
         }
         CodeBrowserAction::Snapshot => match existing {
-            Some(webview) => snapshot(&webview),
-            None => Ok(CodeBrowserSnapshot {
-                exists: false,
-                url: None,
-            }),
+            Some(_) => registry.snapshot(&request.browser_id, &request.workspace_id),
+            None => {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                Ok(BrowserSnapshot::missing(
+                    &request.browser_id,
+                    &request.workspace_id,
+                ))
+            }
         },
         CodeBrowserAction::Close => {
             if let Some(webview) = existing {
+                registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 webview.close().map_err(browser_error)?;
             }
-            Ok(CodeBrowserSnapshot {
-                exists: false,
-                url: None,
-            })
+            registry.remove(&request.browser_id, &request.workspace_id)?;
+            Ok(BrowserSnapshot::missing(
+                &request.browser_id,
+                &request.workspace_id,
+            ))
+        }
+        CodeBrowserAction::ShareWithAgent => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let snapshot = share_browser_with_agent(
+                &app,
+                &registry,
+                &request.browser_id,
+                &request.workspace_id,
+            )
+            .await?;
+            emit_access_event(&app, "agent_access_changed", &snapshot, None);
+            Ok(snapshot)
+        }
+        CodeBrowserAction::RevokeAgentAccess => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let snapshot =
+                registry.revoke_browser_access(&request.browser_id, &request.workspace_id)?;
+            emit_access_event(&app, "agent_access_changed", &snapshot, None);
+            Ok(snapshot)
+        }
+        CodeBrowserAction::StopAgentControl => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let snapshot = registry
+                .stop_agent_control(&request.browser_id, &request.workspace_id)
+                .await?;
+            emit_controller_event(&app, &snapshot);
+            Ok(snapshot)
+        }
+        CodeBrowserAction::TakeHumanControl => {
+            if existing.is_none() {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            }
+            let snapshot = registry
+                .take_human_control(&request.browser_id, &request.workspace_id)
+                .await?;
+            emit_controller_event(&app, &snapshot);
+            Ok(snapshot)
         }
         action => {
-            let webview = existing.ok_or_else(|| "browser session is not open".to_owned())?;
-            run_action(&app, &request.session_id, &webview, action)?;
-            snapshot(&webview)
+            registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
+            let Some(webview) = existing else {
+                registry.remove(&request.browser_id, &request.workspace_id)?;
+                return Err("browser session is not open".to_owned());
+            };
+            let visible = match &action {
+                CodeBrowserAction::SetVisible { visible } => Some(*visible),
+                _ => None,
+            };
+            if matches!(
+                &action,
+                CodeBrowserAction::Navigate { .. }
+                    | CodeBrowserAction::Reload
+                    | CodeBrowserAction::Stop
+                    | CodeBrowserAction::Back
+                    | CodeBrowserAction::Forward
+            ) {
+                let snapshot = registry
+                    .take_human_control(&request.browser_id, &request.workspace_id)
+                    .await?;
+                emit_controller_event(&app, &snapshot);
+            }
+            run_action(&app, &request.browser_id, &webview, action)?;
+            if let Some(visible) = visible {
+                registry.set_visible(&request.browser_id, &request.workspace_id, visible)?;
+            }
+            registry.snapshot(&request.browser_id, &request.workspace_id)
         }
     }
 }
 
 fn create_browser(
     app: &AppHandle,
-    session_id: &str,
+    registry: &BrowserRegistry,
+    workspace_id: &str,
+    browser_id: &str,
     label: &str,
     url: &str,
     bounds: CodeBrowserBounds,
     visible: bool,
-) -> Result<CodeBrowserSnapshot, String> {
+) -> Result<BrowserSnapshot, String> {
     let main = app
         .get_webview("main")
         .ok_or_else(|| "main webview is not available".to_owned())?;
@@ -141,75 +259,171 @@ fn create_browser(
     let target = validated_url(url, renderer_url.as_ref())?;
     let safe_bounds = validated_bounds(bounds)?;
 
-    let navigation_main = main.clone();
-    let navigation_session = session_id.to_owned();
-    let navigation_renderer_url = renderer_url.clone();
-    let popup_main = main.clone();
-    let popup_session = session_id.to_owned();
-    let load_main = main.clone();
-    let load_session = session_id.to_owned();
-    let title_main = main.clone();
-    let title_session = session_id.to_owned();
-    let download_main = main.clone();
-    let download_session = session_id.to_owned();
+    let instance_id = registry.register(browser_id, workspace_id, target.to_string(), visible)?;
 
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(target))
+    let navigation_main = main.clone();
+    let navigation_browser = browser_id.to_owned();
+    let navigation_workspace = workspace_id.to_owned();
+    let navigation_renderer_url = renderer_url.clone();
+    let navigation_registry = registry.clone();
+    let popup_main = main.clone();
+    let popup_browser = browser_id.to_owned();
+    let popup_workspace = workspace_id.to_owned();
+    let load_main = main.clone();
+    let load_browser = browser_id.to_owned();
+    let load_workspace = workspace_id.to_owned();
+    let load_registry = registry.clone();
+    let title_main = main.clone();
+    let title_browser = browser_id.to_owned();
+    let title_workspace = workspace_id.to_owned();
+    let title_registry = registry.clone();
+    let download_main = main.clone();
+    let download_browser = browser_id.to_owned();
+    let download_workspace = workspace_id.to_owned();
+
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(BROWSER_DATA_STORE_IDENTIFIER);
+    let builder = builder
         .on_navigation(move |url| {
-            if validated_url(url.as_str(), navigation_renderer_url.as_ref()).is_ok() {
-                true
-            } else {
+            let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {
                 emit_event(
                     &navigation_main,
                     CodeBrowserEvent {
-                        session_id: navigation_session.clone(),
+                        workspace_id: navigation_workspace.clone(),
+                        browser_id: navigation_browser.clone(),
                         kind: "navigation_blocked",
                         url: Some(url.to_string()),
                         title: None,
                         message: Some(
                             "This address is not allowed in the in-app browser".to_owned(),
                         ),
+                        load_state: None,
+                        document_epoch: None,
+                        controller: None,
+                        agent_access: None,
+                        origin: None,
                     },
                 );
-                false
+                return false;
+            };
+            let Some(origin) = BrowserOrigin::from_url(safe_url.as_str()) else {
+                return false;
+            };
+            match navigation_registry.authorize_navigation(
+                &navigation_browser,
+                &navigation_workspace,
+                instance_id,
+                &origin,
+            ) {
+                BrowserNavigationDecision::Allow => true,
+                BrowserNavigationDecision::Pause { origin, snapshot } => {
+                    emit_event(
+                        &navigation_main,
+                        CodeBrowserEvent {
+                            workspace_id: navigation_workspace.clone(),
+                            browser_id: navigation_browser.clone(),
+                            kind: "agent_navigation_paused",
+                            url: None,
+                            title: snapshot.title,
+                            message: Some(format!(
+                                "Agent navigation paused before opening {origin}"
+                            )),
+                            load_state: snapshot.load_state,
+                            document_epoch: snapshot.document_epoch,
+                            controller: snapshot.controller,
+                            agent_access: snapshot.agent_access,
+                            origin: Some(origin),
+                        },
+                    );
+                    false
+                }
+                BrowserNavigationDecision::Deny => false,
             }
         })
         .on_new_window(move |url, _features| {
             emit_event(
                 &popup_main,
                 CodeBrowserEvent {
-                    session_id: popup_session.clone(),
+                    workspace_id: popup_workspace.clone(),
+                    browser_id: popup_browser.clone(),
                     kind: "popup_blocked",
                     url: Some(url.to_string()),
                     title: None,
                     message: None,
+                    load_state: None,
+                    document_epoch: None,
+                    controller: None,
+                    agent_access: None,
+                    origin: None,
                 },
             );
             NewWindowResponse::Deny
         })
         .on_page_load(move |_webview, payload| {
+            let snapshot = match payload.event() {
+                PageLoadEvent::Started => load_registry.page_started(
+                    &load_browser,
+                    &load_workspace,
+                    instance_id,
+                    payload.url().to_string(),
+                ),
+                PageLoadEvent::Finished => load_registry.page_finished(
+                    &load_browser,
+                    &load_workspace,
+                    instance_id,
+                    payload.url().to_string(),
+                ),
+            };
+            let Some(snapshot) = snapshot else {
+                return;
+            };
             emit_event(
                 &load_main,
                 CodeBrowserEvent {
-                    session_id: load_session.clone(),
+                    workspace_id: load_workspace.clone(),
+                    browser_id: load_browser.clone(),
                     kind: match payload.event() {
                         PageLoadEvent::Started => "navigation_started",
                         PageLoadEvent::Finished => "navigation_finished",
                     },
-                    url: Some(payload.url().to_string()),
-                    title: None,
+                    url: snapshot.url,
+                    title: snapshot.title,
                     message: None,
+                    load_state: snapshot.load_state,
+                    document_epoch: snapshot.document_epoch,
+                    controller: snapshot.controller,
+                    agent_access: snapshot.agent_access,
+                    origin: None,
                 },
             );
         })
         .on_document_title_changed(move |webview, title| {
+            let url = webview.url().ok().map(|url| url.to_string());
+            let title: String = title.chars().take(160).collect();
+            let Some(snapshot) = title_registry.title_changed(
+                &title_browser,
+                &title_workspace,
+                instance_id,
+                url,
+                title,
+            ) else {
+                return;
+            };
             emit_event(
                 &title_main,
                 CodeBrowserEvent {
-                    session_id: title_session.clone(),
+                    workspace_id: title_workspace.clone(),
+                    browser_id: title_browser.clone(),
                     kind: "title_changed",
-                    url: webview.url().ok().map(|url| url.to_string()),
-                    title: Some(title.chars().take(160).collect()),
+                    url: snapshot.url,
+                    title: snapshot.title,
                     message: None,
+                    load_state: snapshot.load_state,
+                    document_epoch: snapshot.document_epoch,
+                    controller: snapshot.controller,
+                    agent_access: snapshot.agent_access,
+                    origin: None,
                 },
             );
         })
@@ -218,33 +432,147 @@ fn create_browser(
                 emit_event(
                     &download_main,
                     CodeBrowserEvent {
-                        session_id: download_session.clone(),
+                        workspace_id: download_workspace.clone(),
+                        browser_id: download_browser.clone(),
                         kind: "download_blocked",
                         url: Some(url.to_string()),
                         title: None,
                         message: None,
+                        load_state: None,
+                        document_epoch: None,
+                        controller: None,
+                        agent_access: None,
+                        origin: None,
                     },
                 );
             }
             false
         });
 
-    let webview = window
-        .add_child(
-            builder,
-            LogicalPosition::new(safe_bounds.x, safe_bounds.y),
-            LogicalSize::new(safe_bounds.width, safe_bounds.height),
-        )
-        .map_err(browser_error)?;
+    let webview = match window.add_child(
+        builder,
+        LogicalPosition::new(safe_bounds.x, safe_bounds.y),
+        LogicalSize::new(safe_bounds.width, safe_bounds.height),
+    ) {
+        Ok(webview) => webview,
+        Err(error) => {
+            registry.remove_instance(browser_id, workspace_id, instance_id);
+            return Err(browser_error(error));
+        }
+    };
     if !visible {
-        webview.hide().map_err(browser_error)?;
+        if let Err(error) = webview.hide() {
+            let _ = webview.close();
+            registry.remove_instance(browser_id, workspace_id, instance_id);
+            return Err(browser_error(error));
+        }
     }
-    snapshot(&webview)
+    registry.snapshot(browser_id, workspace_id)
+}
+
+async fn share_browser_with_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    browser_id: &str,
+    workspace_id: &str,
+) -> Result<BrowserSnapshot, String> {
+    let origin = registry.share_target_origin(browser_id, workspace_id)?;
+    let scope = if origin.is_loopback() {
+        native_loopback_share_choice(app, &origin).await?
+    } else if native_public_share_choice(app, &origin).await? {
+        Some(BrowserOriginScope::Origin {
+            origin: origin.clone(),
+        })
+    } else {
+        None
+    };
+    let Some(scope) = scope else {
+        return registry.snapshot(browser_id, workspace_id);
+    };
+    registry.grant_browser_access(
+        browser_id,
+        workspace_id,
+        &origin,
+        scope,
+        &[BrowserGrantCapability::BrowserControlOrigin],
+    )
+}
+
+async fn native_public_share_choice(
+    app: &AppHandle,
+    origin: &BrowserOrigin,
+) -> Result<bool, String> {
+    let origin = crate::native_security_label(origin.as_str());
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password and verification-code values stay private and require human takeover."
+        ))
+        .title("Share this site with agents?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Share this site".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native browser permission prompt closed unexpectedly".to_owned())
+}
+
+async fn native_loopback_share_choice(
+    app: &AppHandle,
+    origin: &BrowserOrigin,
+) -> Result<Option<BrowserOriginScope>, String> {
+    let origin_label = crate::native_security_label(origin.as_str());
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nChoose only this origin, or all loopback sites in this workspace so development ports can change without another prompt."
+        ))
+        .title("Share a local site with agents?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            "Only this origin".to_owned(),
+            "All local sites".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show_with_result(move |answer| {
+        let _ = sender.send(answer);
+    });
+    let answer = receiver
+        .await
+        .map_err(|_| "the native browser permission prompt closed unexpectedly".to_owned())?;
+    match answer {
+        MessageDialogResult::Yes => Ok(Some(BrowserOriginScope::Origin {
+            origin: origin.clone(),
+        })),
+        MessageDialogResult::Custom(label) if label == "Only this origin" => {
+            Ok(Some(BrowserOriginScope::Origin {
+                origin: origin.clone(),
+            }))
+        }
+        MessageDialogResult::No => Ok(Some(BrowserOriginScope::LoopbackWorkspace)),
+        MessageDialogResult::Custom(label) if label == "All local sites" => {
+            Ok(Some(BrowserOriginScope::LoopbackWorkspace))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn run_action(
     app: &AppHandle,
-    session_id: &str,
+    browser_id: &str,
     webview: &Webview,
     action: CodeBrowserAction,
 ) -> Result<(), String> {
@@ -265,8 +593,12 @@ fn run_action(
         CodeBrowserAction::SetVisible { visible } => set_visible(webview, visible),
         CodeBrowserAction::Create { .. }
         | CodeBrowserAction::Snapshot
+        | CodeBrowserAction::ShareWithAgent
+        | CodeBrowserAction::RevokeAgentAccess
+        | CodeBrowserAction::StopAgentControl
+        | CodeBrowserAction::TakeHumanControl
         | CodeBrowserAction::Close => Err(format!(
-            "browser action is not valid for the open session {session_id}"
+            "browser action is not valid for the open session {browser_id}"
         )),
     }
 }
@@ -287,13 +619,6 @@ fn set_visible(webview: &Webview, visible: bool) -> Result<(), String> {
     } else {
         webview.hide().map_err(browser_error)
     }
-}
-
-fn snapshot(webview: &Webview) -> Result<CodeBrowserSnapshot, String> {
-    Ok(CodeBrowserSnapshot {
-        exists: true,
-        url: Some(webview.url().map_err(browser_error)?.to_string()),
-    })
 }
 
 fn validated_url(value: &str, renderer_url: Option<&Url>) -> Result<Url, String> {
@@ -352,7 +677,7 @@ fn validated_bounds(bounds: CodeBrowserBounds) -> Result<CodeBrowserBounds, Stri
     Ok(bounds)
 }
 
-fn browser_label(session_id: &str) -> Result<String, String> {
+pub(crate) fn browser_label(session_id: &str) -> Result<String, String> {
     if session_id.is_empty()
         || session_id.chars().count() > MAX_BROWSER_ID_CHARS
         || !session_id
@@ -364,8 +689,73 @@ fn browser_label(session_id: &str) -> Result<String, String> {
     Ok(format!("{BROWSER_LABEL_PREFIX}{session_id}"))
 }
 
+pub(crate) fn validated_workspace_id(workspace_id: &str) -> Result<(), String> {
+    if workspace_id.is_empty()
+        || workspace_id.chars().count() > MAX_WORKSPACE_ID_CHARS
+        || workspace_id.chars().any(char::is_control)
+    {
+        return Err("browser workspace id is not valid".to_owned());
+    }
+    Ok(())
+}
+
 fn emit_event(main: &Webview, event: CodeBrowserEvent) {
     let _ = main.emit(CODE_BROWSER_EVENT, event);
+}
+
+fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: snapshot.workspace_id.clone(),
+            browser_id: snapshot.browser_id.clone(),
+            kind: "controller_changed",
+            url: snapshot.url.clone(),
+            title: snapshot.title.clone(),
+            message: None,
+            load_state: snapshot.load_state,
+            document_epoch: snapshot.document_epoch,
+            controller: snapshot.controller.clone(),
+            agent_access: snapshot.agent_access.clone(),
+            origin: snapshot
+                .agent_access
+                .as_ref()
+                .and_then(|access| access.origin.clone()),
+        },
+    );
+}
+
+fn emit_access_event(
+    app: &AppHandle,
+    kind: &'static str,
+    snapshot: &BrowserSnapshot,
+    message: Option<String>,
+) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: snapshot.workspace_id.clone(),
+            browser_id: snapshot.browser_id.clone(),
+            kind,
+            url: snapshot.url.clone(),
+            title: snapshot.title.clone(),
+            message,
+            load_state: snapshot.load_state,
+            document_epoch: snapshot.document_epoch,
+            controller: snapshot.controller.clone(),
+            agent_access: snapshot.agent_access.clone(),
+            origin: snapshot
+                .agent_access
+                .as_ref()
+                .and_then(|access| access.origin.clone()),
+        },
+    );
 }
 
 fn browser_error(error: impl std::fmt::Display) -> String {
@@ -385,6 +775,14 @@ mod tests {
         assert!(browser_label("").is_err());
         assert!(browser_label("has/slash").is_err());
         assert!(browser_label(&"a".repeat(MAX_BROWSER_ID_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn workspace_ids_are_required_and_bounded() {
+        assert!(validated_workspace_id("workspace-123").is_ok());
+        assert!(validated_workspace_id("").is_err());
+        assert!(validated_workspace_id("workspace\nother").is_err());
+        assert!(validated_workspace_id(&"w".repeat(MAX_WORKSPACE_ID_CHARS + 1)).is_err());
     }
 
     #[test]

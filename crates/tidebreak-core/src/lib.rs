@@ -48,6 +48,7 @@ pub mod agent_tools;
 pub mod approval;
 #[cfg(feature = "blob-fs")]
 pub mod blob;
+pub mod browser;
 pub mod cancel;
 pub mod citation;
 pub mod client_tools;
@@ -119,6 +120,19 @@ pub use approval::{
 };
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
+pub use browser::{
+    browser_list_tool_spec, browser_navigate_tool_spec, browser_snapshot_tool_spec,
+    is_browser_tool, valid_browser_id, valid_browser_url, validate_browser_list_arguments,
+    validate_browser_navigate_arguments, validate_browser_snapshot_arguments, BrowserContentTrust,
+    BrowserControllerKind, BrowserControllerState, BrowserElementBounds, BrowserEngineCapabilities,
+    BrowserEngineDescriptor, BrowserEngineName, BrowserFrameStatus, BrowserGrantCapability,
+    BrowserListArgs, BrowserListResult, BrowserLoadState, BrowserNavigateArgs,
+    BrowserNavigateResult, BrowserOrigin, BrowserOriginScope, BrowserPageSnapshot,
+    BrowserSemanticFrame, BrowserSemanticNode, BrowserSemanticNodeKind, BrowserSessionSummary,
+    BrowserSnapshotArgs, BrowserViewport, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL,
+    BROWSER_SNAPSHOT_TOOL, BROWSER_TOOLS, DEFAULT_BROWSER_SNAPSHOT_NODES, MAX_BROWSER_ID_CHARS,
+    MAX_BROWSER_SNAPSHOT_NODES, MAX_BROWSER_URL_CHARS,
+};
 pub use cancel::{CancelToken, Cancelled};
 pub use citation::{
     citation_authoring_instruction, format_citation_directive, parse_assistant_citations,

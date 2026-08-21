@@ -71,4 +71,8 @@ tauri-plugin-single-instance = { version = "=2.4.3", features = ["deep-link"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
 libc.workspace = true
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSError", "NSString"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKWebView", "block2"] }

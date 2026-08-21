@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cross-origin frame</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 18px;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #eef3f0;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Cross-origin frame</h1>
+    <p>The top document cannot inspect this frame through ordinary page JavaScript.</p>
+    <label>
+      Cross-origin note
+      <input id="cross-frame-note" value="Opaque on the WKWebView v1 adapter" />
+    </label>
+    <button id="cross-frame-action" type="button">Run cross-origin action</button>
+  </body>
+</html>

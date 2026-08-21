@@ -1434,7 +1434,10 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Close Browser" }));
     await waitFor(() =>
-      expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith("browser-1"),
+      expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith(
+        "ws-1",
+        "browser-1",
+      ),
     );
   });
 
@@ -1449,7 +1452,10 @@ describe("CodeWorkspacePage", () => {
 
     mounted.unmount();
 
-    expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith("browser-1");
+    expect(browserMocks.close).toHaveBeenCalledExactlyOnceWith(
+      "ws-1",
+      "browser-1",
+    );
   });
 
   it("moves and drags file tabs into a reloadable split group from the transfer payload", async () => {

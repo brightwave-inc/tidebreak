@@ -18,6 +18,33 @@ export type BrowserBounds = {
   height: number;
 };
 
+export type BrowserController =
+  | {
+      kind: "human";
+      label?: string;
+      action?: string;
+      halted?: boolean;
+      takeoverRequired?: boolean;
+    }
+  | {
+      kind: "agent";
+      label?: string;
+      action?: string;
+      halted?: boolean;
+      takeoverRequired?: boolean;
+    };
+
+export type BrowserAgentAccess = {
+  shared: boolean;
+  paused: boolean;
+  halted: boolean;
+  origin?: string;
+  scope?: "origin" | "loopback_workspace";
+  canObserve: boolean;
+  canControl: boolean;
+  canTransferFiles: boolean;
+};
+
 export type BrowserHostAction =
   | { type: "create"; url: string; bounds: BrowserBounds; visible: boolean }
   | { type: "navigate"; url: string }
@@ -28,31 +55,66 @@ export type BrowserHostAction =
   | { type: "set_bounds"; bounds: BrowserBounds }
   | { type: "set_visible"; visible: boolean }
   | { type: "snapshot" }
+  | { type: "share_with_agent" }
+  | { type: "revoke_agent_access" }
+  | { type: "stop_agent_control" }
+  | { type: "take_human_control" }
   | { type: "close" };
 
 export type BrowserHostSnapshot = {
   exists: boolean;
+  browserId: string;
+  workspaceId: string;
+  profileId?: string;
   url?: string;
+  title?: string;
+  loadState?: "loading" | "ready" | "failed";
+  documentEpoch?: number;
+  visible?: boolean;
+  engine?: {
+    name: "wk_webview" | "webview2" | "webkitgtk" | "unsupported";
+    capabilities: {
+      lifecycle: boolean;
+      persistentProfile: boolean;
+      semanticSnapshot: boolean;
+      semanticActions: boolean;
+      screenshot: boolean;
+      crossOriginFrames: boolean;
+      profileReset: boolean;
+    };
+  };
+  controller?: BrowserController;
+  agentAccess?: BrowserAgentAccess;
 };
 
 export type BrowserHostEvent = {
-  sessionId: string;
+  workspaceId: string;
+  browserId: string;
   type:
     | "navigation_started"
     | "navigation_finished"
     | "title_changed"
     | "popup_blocked"
     | "download_blocked"
-    | "navigation_blocked";
+    | "navigation_blocked"
+    | "controller_changed"
+    | "agent_navigation_paused"
+    | "agent_access_changed";
   url?: string;
   title?: string;
   message?: string;
+  loadState?: "loading" | "ready" | "failed";
+  documentEpoch?: number;
+  controller?: BrowserController;
+  agentAccess?: BrowserAgentAccess;
+  origin?: string;
 };
 
 export type CodeBrowserHost = {
   available: () => boolean;
   command: (
-    sessionId: string,
+    workspaceId: string,
+    browserId: string,
     action: BrowserHostAction,
   ) => Promise<BrowserHostSnapshot>;
   subscribe: (
@@ -63,10 +125,10 @@ export type CodeBrowserHost = {
 
 export const nativeCodeBrowserHost: CodeBrowserHost = {
   available: isTauri,
-  command: async (sessionId, action) => {
+  command: async (workspaceId, browserId, action) => {
     const normalized = await logicalBrowserAction(action);
     return invoke<BrowserHostSnapshot>("code_browser_command", {
-      request: { sessionId, action: normalized },
+      request: { workspaceId, browserId, action: normalized },
     });
   },
   subscribe: async (handler) =>
@@ -121,10 +183,13 @@ async function logicalBrowserAction(
 
 /** Explicit tab close. Tab switches only hide the native child webview. */
 export async function closeCodeBrowser(
+  workspaceId: string,
   browserId: string,
   host: CodeBrowserHost = nativeCodeBrowserHost,
 ): Promise<void> {
   removeStoredBrowserSession(browserId);
   if (!host.available()) return;
-  await host.command(browserId, { type: "close" }).catch(() => undefined);
+  await host
+    .command(workspaceId, browserId, { type: "close" })
+    .catch(() => undefined);
 }

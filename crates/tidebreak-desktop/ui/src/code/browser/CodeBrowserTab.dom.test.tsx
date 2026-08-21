@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  BrowserAgentAccess,
   BrowserHostAction,
   BrowserHostEvent,
   BrowserHostSnapshot,
@@ -23,12 +24,45 @@ import {
 } from "./browserSession";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
-type CommandCall = { sessionId: string; action: BrowserHostAction };
+type CommandCall = {
+  workspaceId: string;
+  browserId: string;
+  action: BrowserHostAction;
+};
+
+const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
+  name: "wk_webview",
+  capabilities: {
+    lifecycle: true,
+    persistentProfile: true,
+    semanticSnapshot: true,
+    semanticActions: false,
+    screenshot: false,
+    crossOriginFrames: false,
+    profileReset: false,
+  },
+};
+
+function agentAccess(
+  update: Partial<BrowserAgentAccess> = {},
+): BrowserAgentAccess {
+  return {
+    shared: false,
+    paused: false,
+    halted: false,
+    origin: "https://example.com",
+    canObserve: false,
+    canControl: false,
+    canTransferFiles: false,
+    ...update,
+  };
+}
 
 function browserHost(options?: {
   createGate?: Promise<void>;
   createError?: string;
   existing?: boolean;
+  runtime?: Partial<BrowserHostSnapshot>;
 }): {
   host: CodeBrowserHost;
   calls: CommandCall[];
@@ -46,12 +80,20 @@ function browserHost(options?: {
         handler = null;
       };
     }),
-    command: vi.fn(async (sessionId, action) => {
-      calls.push({ sessionId, action });
+    command: vi.fn(async (workspaceId, browserId, action) => {
+      calls.push({ workspaceId, browserId, action });
       if (action.type === "snapshot") {
         return options?.existing
-          ? { exists: true, url: "https://example.com/restored" }
-          : { exists: false };
+          ? {
+              exists: true,
+              ...options.runtime,
+              workspaceId,
+              browserId,
+              url: "https://example.com/restored",
+              title: "Restored page",
+              loadState: "ready" as const,
+            }
+          : { exists: false, workspaceId, browserId };
       }
       if (action.type === "create" && options?.createError) {
         throw new Error(options.createError);
@@ -61,7 +103,10 @@ function browserHost(options?: {
       }
       return {
         exists: true,
-        url: "url" in action ? action.url : undefined,
+        ...options?.runtime,
+        workspaceId,
+        browserId,
+        url: "url" in action ? action.url : options?.runtime?.url,
       } satisfies BrowserHostSnapshot;
     }),
     openExternal,
@@ -112,12 +157,14 @@ describe("CodeBrowserTab", () => {
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "navigation_finished",
       url: "http://localhost:3000/dashboard",
     });
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "title_changed",
       title: "Local dashboard",
     });
@@ -133,7 +180,8 @@ describe("CodeBrowserTab", () => {
     await userEvent.type(input, "docs.rs/tauri{enter}");
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "navigate", url: "https://docs.rs/tauri" },
       }),
     );
@@ -144,7 +192,8 @@ describe("CodeBrowserTab", () => {
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "back" },
       }),
     );
@@ -195,7 +244,8 @@ describe("CodeBrowserTab", () => {
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "set_visible", visible: false },
       }),
     );
@@ -210,7 +260,8 @@ describe("CodeBrowserTab", () => {
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "set_visible", visible: true },
       }),
     );
@@ -239,7 +290,8 @@ describe("CodeBrowserTab", () => {
 
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "set_visible", visible: false },
       }),
     );
@@ -257,7 +309,8 @@ describe("CodeBrowserTab", () => {
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: expect.objectContaining({
           type: "create",
           url: "https://example.com/one",
@@ -276,7 +329,8 @@ describe("CodeBrowserTab", () => {
 
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-2",
+        workspaceId: "workspace-1",
+        browserId: "browser-2",
         action: expect.objectContaining({
           type: "create",
           url: "https://example.com/two",
@@ -308,7 +362,8 @@ describe("CodeBrowserTab", () => {
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: expect.objectContaining({
           type: "create",
           url: "https://example.com/two",
@@ -320,12 +375,14 @@ describe("CodeBrowserTab", () => {
 
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "navigate", url: "https://example.com/one" },
       }),
     );
     expect(runtime.calls).not.toContainEqual({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       action: { type: "back" },
     });
   });
@@ -345,12 +402,14 @@ describe("CodeBrowserTab", () => {
     );
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "navigation_finished",
       url: "https://example.com/two",
     });
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "title_changed",
       url: "https://example.com/one",
       title: "Old page",
@@ -358,7 +417,8 @@ describe("CodeBrowserTab", () => {
     expect(screen.queryByLabelText("Browser: Old page")).toBeNull();
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "title_changed",
       url: "https://example.com/two",
       title: "Current page",
@@ -383,7 +443,8 @@ describe("CodeBrowserTab", () => {
     );
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "popup_blocked",
       url: "https://example.com/sign-in",
     });
@@ -391,7 +452,8 @@ describe("CodeBrowserTab", () => {
     await userEvent.click(screen.getByRole("button", { name: "Open here" }));
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
-        sessionId: "browser-1",
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
         action: { type: "navigate", url: "https://example.com/sign-in" },
       }),
     );
@@ -412,7 +474,8 @@ describe("CodeBrowserTab", () => {
     );
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "download_blocked",
       url: "https://example.com/archive.zip",
     });
@@ -429,7 +492,8 @@ describe("CodeBrowserTab", () => {
     );
 
     runtime.emit({
-      sessionId: "browser-1",
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
       type: "navigation_blocked",
       url: "file:///tmp/secret",
     });
@@ -437,6 +501,182 @@ describe("CodeBrowserTab", () => {
       await screen.findByText("This address cannot open in the in-app browser"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open here" })).toBeNull();
+  });
+
+  it("offers native sharing for an unshared origin without claiming ambient access", async () => {
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Share with agent" }),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "share_with_agent" },
+      }),
+    );
+    expect(screen.queryByText("Agent can inspect")).toBeNull();
+  });
+
+  it("shows the exact shared origin and lets the user revoke access", async () => {
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess({
+          shared: true,
+          scope: "origin",
+          canObserve: true,
+          canControl: true,
+        }),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    expect(await screen.findByText("example.com shared")).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Stop sharing" }),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "revoke_agent_access" },
+      }),
+    );
+  });
+
+  it("updates a paused origin from an access-only event and offers native resume", async () => {
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    runtime.emit({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      type: "agent_navigation_paused",
+      origin: "https://accounts.example.org",
+      agentAccess: agentAccess({
+        paused: true,
+        halted: true,
+        origin: "https://accounts.example.org",
+      }),
+    });
+
+    expect(await screen.findByText("Agent paused")).toBeInTheDocument();
+    expect(screen.getByLabelText(
+      "Agent paused before https://accounts.example.org",
+    )).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Review & resume" }),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "share_with_agent" },
+      }),
+    );
+  });
+
+  it("shows live agent control and wires Stop and Take over to the native host", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    runtime.emit({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      type: "controller_changed",
+      controller: {
+        kind: "agent",
+        label: "Review agent",
+        action: "Checking the preview form",
+      },
+    });
+
+    const activeControl = await screen.findByRole("status");
+    expect(activeControl).toHaveTextContent("Review agent is using this tab");
+    expect(activeControl).toHaveTextContent("Checking the preview form");
+    await userEvent.click(
+      within(activeControl).getByRole("button", { name: "Stop" }),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "stop_agent_control" },
+      }),
+    );
+
+    runtime.emit({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      type: "controller_changed",
+      controller: {
+        kind: "agent",
+        label: "Review agent",
+        action: "Enter the one-time code",
+        takeoverRequired: true,
+      },
+    });
+
+    const takeover = await screen.findByRole("status");
+    expect(takeover).toHaveTextContent("Waiting for you");
+    expect(takeover).toHaveTextContent("Enter the one-time code");
+    await userEvent.click(
+      within(takeover).getByRole("button", { name: "Take over" }),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "take_human_control" },
+      }),
+    );
   });
 
   it("renders a retryable failure without losing the requested address", async () => {
@@ -450,7 +690,7 @@ describe("CodeBrowserTab", () => {
       />,
     );
 
-    expect(await screen.findByText("Could not open this page")).toBeInTheDocument();
+    expect(await screen.findByText("This page did not open")).toBeInTheDocument();
     expect(screen.getByText("native view failed")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Address or search" })).toHaveValue(
       "example.com/docs",
