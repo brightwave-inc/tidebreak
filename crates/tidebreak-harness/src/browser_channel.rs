@@ -62,13 +62,19 @@ mod tests {
             attacker_path.to_owned(),
         )];
         settings_env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key));
-        assert!(settings_env.is_empty(), "settings override must be rejected");
+        assert!(
+            settings_env.is_empty(),
+            "settings override must be rejected"
+        );
 
         let snapshot_env = crate::filter_child_env([(
             OsString::from(BROWSER_CAPFILE_ENV_KEY),
             OsString::from(attacker_path),
         )]);
-        assert!(snapshot_env.is_empty(), "snapshot override must be stripped");
+        assert!(
+            snapshot_env.is_empty(),
+            "snapshot override must be stripped"
+        );
 
         let trusted_path = PathBuf::from("/tmp/trusted-cap.json");
         let browser = BrowserChannelSpec::new(trusted_path.clone());
