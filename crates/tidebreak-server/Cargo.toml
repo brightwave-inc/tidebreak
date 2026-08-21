@@ -81,7 +81,7 @@ tracing = { workspace = true }
 # install via [`logging::init_logging`]. Default features stay off: `ansi` and
 # `tracing-log` would pull crates the lockfile doesn't already resolve, and a
 # plain profile log file wants neither.
-tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter", "json"] }
 # Bounded unified diffs for the post-turn connected-folder change summary.
 similar = "=3.1.2"
 # Private, automatically removed inputs and outputs for ephemeral document previews.

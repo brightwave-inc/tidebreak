@@ -114,6 +114,8 @@ impl LocalVoiceRunner for UnavailableLocalVoiceRunner {
 pub struct AppState {
     /// Boot configuration for this launch.
     pub config: Arc<Config>,
+    /// Bounded in-memory request and operation measurements for export.
+    pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
     /// Durable raw bytes and generated artifacts under the configured data directory.
@@ -397,8 +399,13 @@ impl AppState {
             gateway.clone(),
             gateway_drafts.clone(),
         );
+        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
+        let resolver: Arc<dyn ProviderResolver> = Arc::new(
+            crate::diagnostics::DiagnosticProviderResolver::new(resolver, diagnostics.clone()),
+        );
         Ok(Self {
             config: Arc::new(config),
+            diagnostics,
             store: store.clone(),
             blobs,
             resolver,

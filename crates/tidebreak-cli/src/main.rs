@@ -42,6 +42,11 @@
 //! `/code/*` routes the desktop uses. `--json` (or `--output-format json`)
 //! writes one object, or NDJSON for `code run` and `code watch`. See [`code`].
 //!
+//! `tidebreak diagnostics snapshot|metrics|export` reads bounded process
+//! measurements and local log tails from the same server. The export is a ZIP
+//! for performance investigations; the exporter does not read conversations,
+//! databases, blobs, attachments, or credential stores.
+//!
 //! `tidebreak folder connect|list|disconnect` is the headless equivalent of the
 //! desktop's folder picker: an operator records standing consent for a host
 //! folder, which the broker stamps as operator configuration. It is deliberate
@@ -87,6 +92,7 @@ mod api;
 mod browser;
 mod code;
 mod connect;
+mod diagnostics;
 mod folder;
 mod folder_executor;
 mod outputs;
@@ -149,6 +155,10 @@ usage: tidebreak serve
        tidebreak agent-run show <chat> <run>
        tidebreak agent-run cancel <chat> <run>
 
+       tidebreak diagnostics snapshot
+       tidebreak diagnostics metrics
+       tidebreak diagnostics export <path>
+
        tidebreak browser list --json
        tidebreak browser navigate --browser-id <id> --url <url> --json
        tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
@@ -197,7 +207,7 @@ A key is read from stdin, or from the environment variable named by
 --from-env — never from an argument, which every process on the machine
 can read.
 
--p, output, attach, the setup commands, and the code family also take
+-p, output, attach, diagnostics, the setup commands, and the code family also take
 --server <url> [--server-token-env <var>] or --attach, which talks to a
 server that is already running instead of embedding one. --attach reads
 {TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop). With
@@ -380,6 +390,35 @@ async fn run() -> Result<i32> {
                 Ok(command) => folder::run(command).await.map(|()| 0),
                 Err(message) => usage_error(&message),
             }
+        }
+        Some(command) if command == OsStr::new("diagnostics") => {
+            let subcommand = args.next().unwrap_or_default();
+            let command = if subcommand == OsStr::new("snapshot") {
+                if args.next().is_some() {
+                    usage_error("diagnostics snapshot does not accept arguments");
+                }
+                diagnostics::Command::Snapshot
+            } else if subcommand == OsStr::new("metrics") {
+                if args.next().is_some() {
+                    usage_error("diagnostics metrics does not accept arguments");
+                }
+                diagnostics::Command::Metrics
+            } else if subcommand == OsStr::new("export") {
+                let Some(destination) = args.next() else {
+                    usage_error("diagnostics export requires a destination path");
+                };
+                if args.next().is_some() {
+                    usage_error("diagnostics export accepts one destination path");
+                }
+                diagnostics::Command::Export {
+                    destination: destination.into(),
+                }
+            } else {
+                usage_error("diagnostics accepts snapshot, metrics, or export");
+            };
+            diagnostics::run(command, server_flags.resolve()?)
+                .await
+                .map(|()| 0)
         }
         Some(command) if command == OsStr::new("browser") => {
             server_flags.refuse("browser");

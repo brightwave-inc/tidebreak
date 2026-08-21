@@ -13,14 +13,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
-use tracing::warn;
+use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
     append_event, bump_spawn_epoch, get_open_turn, get_session, get_session_all_owners,
@@ -690,6 +690,59 @@ async fn drive_turn(
     blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     worktree: WorktreeTurn<'_>,
+    follow_up: QueuedFollowUp,
+) -> Result<CodeTurn, WorkerError> {
+    let session_id = session.id;
+    let wait = match worktree.wait {
+        TurnWait::Send => "send",
+        TurnWait::Queued => "queued",
+    };
+    let span = tracing::info_span!(
+        target: crate::diagnostics::EVENT_TARGET,
+        "tidebreak.code_turn",
+        otel.name = "tidebreak.code_turn",
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
+        tidebreak.code.session_id = %session_id,
+        tidebreak.code.wait = wait,
+        tidebreak.outcome = tracing::field::Empty,
+        tidebreak.duration_ms = tracing::field::Empty,
+    );
+    let started = Instant::now();
+    let result = drive_turn_inner(session, engine, sink, blobs, commands, worktree, follow_up)
+        .instrument(span.clone())
+        .await;
+    let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let outcome = code_turn_outcome(&result);
+    span.record("tidebreak.outcome", outcome);
+    span.record("tidebreak.duration_ms", duration_ms);
+    span.record(
+        "otel.status_code",
+        if code_turn_is_error(&result) {
+            "ERROR"
+        } else {
+            "OK"
+        },
+    );
+    span.in_scope(|| {
+        tracing::info!(
+            target: crate::diagnostics::EVENT_TARGET,
+            event_name = "tidebreak.code_turn.completed",
+            outcome,
+            duration_ms,
+            "code turn completed"
+        );
+    });
+    result
+}
+
+async fn drive_turn_inner(
+    session: &mut CodeSession,
+    engine: &dyn HarnessSession,
+    sink: &LiveSink,
+    blobs: Option<&dyn BlobStore>,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+    worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
         model,
@@ -1028,6 +1081,29 @@ async fn drive_turn(
     session.lifecycle = CodeSessionLifecycle::Idle;
     let _ = super::attention::persist_session(db, bus, session).await;
     Ok(turn)
+}
+
+fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
+    match result {
+        Ok(turn) => turn.status.as_str(),
+        Err(WorkerError::Conflict(_)) => "conflict",
+        Err(WorkerError::NoActiveTurn(_)) => "no_active_turn",
+        Err(WorkerError::StaleTurn(_)) => "stale_turn",
+        Err(WorkerError::SteeringUnavailable(_)) => "steering_unavailable",
+        Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
+        Err(WorkerError::Failed(_)) => "error",
+        Err(WorkerError::WorktreeBusy) => "worktree_busy",
+    }
+}
+
+fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
+    matches!(
+        result,
+        Ok(CodeTurn {
+            status: CodeTurnStatus::Failed,
+            ..
+        }) | Err(WorkerError::Failed(_))
+    )
 }
 
 async fn hydrate_turn_images(

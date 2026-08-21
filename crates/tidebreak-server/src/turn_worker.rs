@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs::{DirBuilderExt as StdDirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, DirBuilder};
@@ -24,6 +24,7 @@ use tidebreak_core::{
     TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 
 use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
@@ -112,6 +113,7 @@ pub(crate) struct TurnWorker {
     agent_config: AgentConfig,
     exec_folder_context: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     private_scratch_root: Option<PathBuf>,
+    diagnostics: Arc<crate::diagnostics::Diagnostics>,
     config: TurnWorkerConfig,
     #[cfg(test)]
     post_drive_pause: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -418,6 +420,7 @@ impl TurnWorker {
             agent_config,
             exec_folder_context: None,
             private_scratch_root,
+            diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
             config,
             #[cfg(test)]
             post_drive_pause: None,
@@ -480,6 +483,15 @@ impl TurnWorker {
         provider: Arc<crate::code_execution::ConfiguredExecProvider>,
     ) -> Self {
         self.exec_folder_context = Some(provider);
+        self
+    }
+
+    /// Record turn-segment timings in the server instance's diagnostics.
+    pub(crate) fn with_diagnostics(
+        mut self,
+        diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    ) -> Self {
+        self.diagnostics = diagnostics;
         self
     }
 
@@ -589,15 +601,60 @@ impl TurnWorker {
     /// separate function rather than an early return in this one.
     async fn process(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<TurnWorkerOutcome> {
         let chat_id = turn.chat_id;
-        let outcome = self.run_turn(turn, lease_token).await;
-        if let Some(provider) = self.exec_folder_context.as_ref() {
-            if let Some(turn_id) = provider.close_write_overlay(chat_id).await {
-                self.events.publish_metadata(
-                    chat_id,
-                    crate::bus::ChatMetadataNotice::FileChangesRecorded { turn_id },
-                );
+        let turn_id = turn.id;
+        let attempt_count = turn.attempt_count;
+        let span = tracing::info_span!(
+            target: crate::diagnostics::EVENT_TARGET,
+            "tidebreak.foreground_turn_segment",
+            otel.name = "tidebreak.foreground_turn_segment",
+            otel.kind = "internal",
+            otel.status_code = tracing::field::Empty,
+            tidebreak.turn.id = %turn_id,
+            tidebreak.turn.attempt = attempt_count,
+            tidebreak.outcome = tracing::field::Empty,
+            tidebreak.duration_ms = tracing::field::Empty,
+        );
+        let started = Instant::now();
+        let outcome = async {
+            let outcome = self.run_turn(turn, lease_token).await;
+            if let Some(provider) = self.exec_folder_context.as_ref() {
+                if let Some(turn_id) = provider.close_write_overlay(chat_id).await {
+                    self.events.publish_metadata(
+                        chat_id,
+                        crate::bus::ChatMetadataNotice::FileChangesRecorded { turn_id },
+                    );
+                }
             }
+            outcome
         }
+        .instrument(span.clone())
+        .await;
+        let duration = started.elapsed();
+        let label = turn_worker_outcome_label(&outcome);
+        self.diagnostics
+            .observe_operation("foreground_turn_segment", label, duration);
+        span.record("tidebreak.outcome", label);
+        span.record(
+            "tidebreak.duration_ms",
+            duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        );
+        span.record(
+            "otel.status_code",
+            if turn_worker_outcome_is_error(&outcome) {
+                "ERROR"
+            } else {
+                "OK"
+            },
+        );
+        span.in_scope(|| {
+            tracing::info!(
+                target: crate::diagnostics::EVENT_TARGET,
+                event_name = "tidebreak.foreground_turn_segment.completed",
+                outcome = label,
+                duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64,
+                "foreground turn segment completed"
+            );
+        });
         outcome
     }
 
@@ -2897,6 +2954,23 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
         Ok(Err(error)) => eprintln!("tidebreak: turn worker execution failed: {error}"),
         Err(error) => eprintln!("tidebreak: turn worker task stopped: {error}"),
     }
+}
+
+fn turn_worker_outcome_label(outcome: &Result<TurnWorkerOutcome>) -> &'static str {
+    match outcome {
+        Ok(TurnWorkerOutcome::Completed(_)) => "completed",
+        Ok(TurnWorkerOutcome::WaitingForClient(_)) => "waiting_for_client",
+        Ok(TurnWorkerOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
+        Ok(TurnWorkerOutcome::Resuming(_)) => "resuming",
+        Ok(TurnWorkerOutcome::Cancelled(_)) => "cancelled",
+        Ok(TurnWorkerOutcome::Failed(_)) => "failed",
+        Ok(TurnWorkerOutcome::LeaseLost(_)) => "lease_lost",
+        Err(_) => "error",
+    }
+}
+
+fn turn_worker_outcome_is_error(outcome: &Result<TurnWorkerOutcome>) -> bool {
+    matches!(outcome, Ok(TurnWorkerOutcome::Failed(_)) | Err(_))
 }
 
 #[cfg(test)]

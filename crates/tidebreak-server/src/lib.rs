@@ -36,6 +36,7 @@ pub mod connectors;
 /// capability grants as one renderer-facing statement shape.
 pub mod consent;
 mod desktop_schema;
+mod diagnostics;
 mod document_decode;
 mod durable_oplog;
 mod error;
@@ -531,6 +532,9 @@ pub fn app(state: AppState) -> Router {
             "/code/worktree-root",
             get(routes::code::get_worktree_root).put(routes::code::set_worktree_root),
         )
+        .route("/diagnostics/snapshot", get(diagnostics::get_snapshot))
+        .route("/diagnostics/metrics", get(diagnostics::get_metrics))
+        .route("/diagnostics/export", get(diagnostics::get_export))
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
     // The engine-facing browser channel. Authenticated per request by the
@@ -1055,10 +1059,14 @@ pub fn app(state: AppState) -> Router {
         // Inside CORS, so a foreign preflight is answered by the CORS layer's
         // own rejection rather than by a bare 403.
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            state.clone(),
             auth::require_app_origin,
         ))
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            diagnostics::observe_http_request,
+        ))
         // A liveness probe with no auth, added after both layers so it carries
         // neither: nothing reads it cross-origin, and answering preflights for
         // it only helps a page confirm the app is on a guessed port.
@@ -1861,7 +1869,8 @@ async fn bind_inner(
     .with_blobs(state.blobs.clone())
     .with_blob_write_locks(state.blob_writes.clone())
     .with_mcp_runtime(state.mcp.clone())
-    .with_exec_folder_context(code_execution.clone());
+    .with_exec_folder_context(code_execution.clone())
+    .with_diagnostics(state.diagnostics.clone());
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
