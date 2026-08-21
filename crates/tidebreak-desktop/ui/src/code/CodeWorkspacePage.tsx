@@ -223,7 +223,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   /**
    * Every session the server knows about here, conversations and watches alike.
    *
-   * A workspace runs several agents (record 54), so the page holds the list and
+   * A workspace runs several agents (record 55), so the page holds the list and
    * picks one to show rather than tracking a single session.
    */
   const [sessions, setSessions] = useState<CodeSessionSnapshot[]>(() => {

@@ -1632,7 +1632,7 @@ export function parseCodeSessionList(
 /**
  * The conversations a workspace page should offer, oldest first.
  *
- * A workspace runs several agents (record 54). The list arrives newest first,
+ * A workspace runs several agents (record 55). The list arrives newest first,
  * but the tab strip reads left to right in the order the agents were started,
  * so the first one keeps its place and a new one appends to the right.
  */
