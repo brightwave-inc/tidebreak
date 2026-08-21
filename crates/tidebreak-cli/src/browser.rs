@@ -910,9 +910,7 @@ mod tests {
     /// `Result::unwrap_err` (which requires `T: Debug`) cannot be used.
     fn capfile_load_err(path: &std::path::Path) -> AgentError {
         match BrowserCapfile::load(path) {
-            Ok(_) => panic!(
-                "expected BrowserCapfile::load to fail, but it succeeded"
-            ),
+            Ok(_) => panic!("expected BrowserCapfile::load to fail, but it succeeded"),
             Err(error) => error,
         }
     }
