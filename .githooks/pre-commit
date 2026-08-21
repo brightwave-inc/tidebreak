@@ -9,6 +9,9 @@ fi
 
 if ! git diff --cached --quiet --diff-filter=ACMR -- \
   ':(glob)crates/tidebreak-desktop/ui/**/*.ts' \
-  ':(glob)crates/tidebreak-desktop/ui/**/*.tsx'; then
+  ':(glob)crates/tidebreak-desktop/ui/**/*.tsx' \
+  ':(glob)crates/tidebreak-desktop/ui/**/*.css'; then
+  pnpm --dir crates/tidebreak-desktop/ui exec biome format src
+  pnpm --dir crates/tidebreak-desktop/ui lint
   pnpm --dir crates/tidebreak-desktop/ui exec tsc --noEmit
 fi

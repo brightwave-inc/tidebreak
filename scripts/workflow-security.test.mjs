@@ -605,6 +605,8 @@ test("UI tests and production build each gate the UI lane", () => {
   // Sequential steps, one command each: a backgrounded `a & b & wait` swallows
   // the children's exit codes, so a failing test or build reported success
   // (#1376). Each step's status must reach the job directly.
+  assert.match(ui, /run: pnpm exec biome format src/);
+  assert.match(ui, /run: pnpm lint/);
   assert.match(ui, /run: pnpm test/);
   assert.match(ui, /run: pnpm build/);
   assert.doesNotMatch(ui, /& wait/);
