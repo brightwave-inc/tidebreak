@@ -5,8 +5,11 @@ fn main() {
     } else {
         ""
     };
-    let sidecar = format!("binaries/tidebreak-host-broker-{target}{extension}");
-    println!("cargo:rerun-if-changed={sidecar}");
+    let host_broker = format!("binaries/tidebreak-host-broker-{target}{extension}");
+    let cli = format!("binaries/tidebreak-{target}{extension}");
+
+    println!("cargo:rerun-if-changed={host_broker}");
+    println!("cargo:rerun-if-changed={cli}");
     println!("cargo:rerun-if-changed=../../scripts/exec-documents");
 
     println!("cargo:rerun-if-env-changed=TIDEBREAK_CHANNEL");
@@ -26,13 +29,25 @@ fn main() {
     // Plain `cargo check` and `cargo test` do not run Tauri's before-build
     // hook. Keep those workflows usable from a clean checkout; Tauri dev/build
     // runs prepare-sidecar first, so the default config always packages the
-    // real target-specific executable.
-    if !std::path::Path::new(&sidecar).is_file() {
-        if release {
-            panic!(
-                "release sidecar is missing at {sidecar}; build the desktop through `cargo tauri build`"
-            );
-        }
+    // real target-specific executables.
+    let host_broker_present = std::path::Path::new(&host_broker).is_file();
+    let cli_present = std::path::Path::new(&cli).is_file();
+
+    if release && (!host_broker_present || !cli_present) {
+        let missing: Vec<&str> = [
+            (!host_broker_present).then_some(host_broker.as_str()),
+            (!cli_present).then_some(cli.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        panic!(
+            "release sidecar(s) missing: {}; build the desktop through `cargo tauri build`",
+            missing.join(", ")
+        );
+    }
+
+    if !host_broker_present || !cli_present {
         overlay["bundle"]["externalBin"] = serde_json::Value::Null;
         overlaid = true;
     }

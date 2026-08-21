@@ -194,7 +194,6 @@ impl BrowserChannelBinding {
         &self.bridge_command
     }
 }
-
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
@@ -1325,7 +1324,6 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
 /// New callers should use
 /// [`bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding`]
 /// directly.
-
 #[allow(clippy::too_many_arguments)]
 pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
     config: Config,
@@ -2140,7 +2138,6 @@ fn agent_deps_with_cancellation_acceleration(
 fn boot_default_model() -> String {
     std::env::var("TIDEBREAK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
-
 /// Register the computer-use contracts as validated client tools.
 ///
 /// Registered only when the caller determined the host can honor them (the
