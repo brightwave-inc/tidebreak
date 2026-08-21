@@ -4,14 +4,24 @@ import {
   useRef,
   useState,
 } from "react";
-import { ExternalLink, Globe2, RefreshCw } from "lucide-react";
+import {
+  Bot,
+  Braces,
+  ExternalLink,
+  Globe2,
+  Link2,
+  RefreshCw,
+  TriangleAlert,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
 import {
   type BrowserBounds,
+  type BrowserHostAction,
   type BrowserHostEvent,
+  type BrowserHostSnapshot,
   type CodeBrowserHost,
   nativeCodeBrowserHost,
 } from "./browserHost";
@@ -40,6 +50,17 @@ import {
 
 const SLOW_LOAD_MS = 15_000;
 const PERSIST_DELAY_MS = 150;
+
+type BrowserAgentHostAction = Extract<
+  BrowserHostAction,
+  {
+    type:
+      | "share_with_agent"
+      | "revoke_agent_access"
+      | "stop_agent_control"
+      | "take_human_control";
+  }
+>;
 
 export type CodeBrowserTabProps = {
   workspaceId: string;
@@ -75,6 +96,7 @@ function CodeBrowserTabSession({
   const [addressError, setAddressError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [slow, setSlow] = useState(false);
+  const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const nativeReady = useRef(false);
@@ -99,18 +121,32 @@ function CodeBrowserTabSession({
     [],
   );
 
+  const recordRuntime = useCallback(
+    (snapshot: BrowserHostSnapshot) => {
+      if (
+        snapshot.browserId === browserId &&
+        snapshot.workspaceId === workspaceId
+      ) {
+        setRuntime(snapshot);
+      }
+    },
+    [browserId, workspaceId],
+  );
+
   const settleCreatedNativeView = useCallback(async () => {
     nativeReady.current = true;
-    await host.command(browserId, {
+    recordRuntime(await host.command(workspaceId, browserId, {
       type: "set_visible",
       visible: mountedRef.current && visibleRef.current,
-    });
+    }));
     const bounds = readBrowserBounds(surfaceRef.current);
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
       lastNativeBounds.current = bounds;
-      await host.command(browserId, { type: "set_bounds", bounds });
+      recordRuntime(
+        await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
+      );
     }
-  }, [browserId, host]);
+  }, [browserId, host, recordRuntime, workspaceId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -179,7 +215,11 @@ function CodeBrowserTabSession({
       }
       try {
         const stop = await host.subscribe((event) => {
-          if (!cancelled && event.sessionId === browserId) {
+          if (
+            !cancelled &&
+            event.browserId === browserId &&
+            event.workspaceId === workspaceId
+          ) {
             handleHostEvent(event);
           }
         });
@@ -205,30 +245,43 @@ function CodeBrowserTabSession({
       if (!bounds) return;
 
       try {
-        const snapshot = await host.command(browserId, { type: "snapshot" });
+        const snapshot = await host.command(workspaceId, browserId, { type: "snapshot" });
         if (cancelled) return;
+        if (
+          snapshot.browserId !== browserId ||
+          snapshot.workspaceId !== workspaceId
+        ) {
+          throw new Error("The browser host returned a session from another workspace");
+        }
+        recordRuntime(snapshot);
         if (snapshot.exists) {
           nativeReady.current = true;
           nativeHistoryAvailable.current = true;
           if (snapshot.url) {
-            updateSession((value) =>
-              finishBrowserNavigation(value, snapshot.url!),
-            );
+            updateSession((value) => {
+              let next = snapshot.loadState === "loading"
+                ? observeBrowserNavigation(value, snapshot.url!, "loading")
+                : finishBrowserNavigation(value, snapshot.url!);
+              if (snapshot.title) next = setBrowserTitle(next, snapshot.title);
+              return next;
+            });
             setAddress(browserDisplayAddress(snapshot.url));
           }
-          await host.command(browserId, { type: "set_bounds", bounds });
+          recordRuntime(
+            await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
+          );
           lastNativeBounds.current = bounds;
-          await host.command(browserId, {
+          recordRuntime(await host.command(workspaceId, browserId, {
             type: "set_visible",
             visible: visibleRef.current,
-          });
+          }));
         } else {
-          await host.command(browserId, {
+          recordRuntime(await host.command(workspaceId, browserId, {
             type: "create",
             url: current.url,
             bounds,
             visible: visibleRef.current,
-          });
+          }));
           lastNativeBounds.current = bounds;
           await settleCreatedNativeView();
           nativeHistoryAvailable.current = current.history.length <= 1;
@@ -288,6 +341,29 @@ function CodeBrowserTabSession({
           }),
         );
       }
+      if (event.controller !== undefined || event.agentAccess !== undefined) {
+        setRuntime((current) => ({
+          ...(current || {
+            exists: true,
+            workspaceId,
+            browserId,
+          }),
+          ...(event.controller !== undefined
+            ? { controller: event.controller }
+            : {}),
+          ...(event.agentAccess !== undefined
+            ? { agentAccess: event.agentAccess }
+            : {}),
+          ...(event.url !== undefined ? { url: event.url } : {}),
+          ...(event.title !== undefined ? { title: event.title } : {}),
+          ...(event.loadState !== undefined
+            ? { loadState: event.loadState }
+            : {}),
+          ...(event.documentEpoch !== undefined
+            ? { documentEpoch: event.documentEpoch }
+            : {}),
+        }));
+      }
     }
 
     void boot();
@@ -296,11 +372,11 @@ function CodeBrowserTabSession({
       unsubscribe?.();
       if (nativeReady.current && host.available()) {
         void host
-          .command(browserId, { type: "set_visible", visible: false })
+          .command(workspaceId, browserId, { type: "set_visible", visible: false })
           .catch(() => undefined);
       }
     };
-  }, [browserId, host, settleCreatedNativeView, updateSession]);
+  }, [browserId, host, recordRuntime, settleCreatedNativeView, updateSession, workspaceId]);
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -321,7 +397,7 @@ function CodeBrowserTabSession({
         }
         lastNativeBounds.current = bounds;
         void host
-          .command(browserId, { type: "set_bounds", bounds })
+          .command(workspaceId, browserId, { type: "set_bounds", bounds })
           .catch(() => {
             if (sameBrowserBounds(lastNativeBounds.current, bounds)) {
               lastNativeBounds.current = null;
@@ -339,14 +415,14 @@ function CodeBrowserTabSession({
       window.removeEventListener("resize", sync);
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [browserId, host]);
+  }, [browserId, host, workspaceId]);
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
     void host
-      .command(browserId, { type: "set_visible", visible })
+      .command(workspaceId, browserId, { type: "set_visible", visible })
       .catch(() => undefined);
-  }, [browserId, host, visible]);
+  }, [browserId, host, visible, workspaceId]);
 
   async function navigate(input = address) {
     const target = browserTarget(input);
@@ -369,17 +445,22 @@ function CodeBrowserTabSession({
     }
     try {
       if (nativeReady.current) {
-        await host.command(browserId, { type: "navigate", url: target.url });
+        recordRuntime(
+          await host.command(workspaceId, browserId, {
+            type: "navigate",
+            url: target.url,
+          }),
+        );
         return;
       }
       const bounds = readBrowserBounds(surfaceRef.current);
       if (!bounds) throw new Error("The browser surface is not ready");
-      await host.command(browserId, {
+      recordRuntime(await host.command(workspaceId, browserId, {
         type: "create",
         url: target.url,
         bounds,
         visible,
-      });
+      }));
       lastNativeBounds.current = bounds;
       await settleCreatedNativeView();
       nativeHistoryAvailable.current = sessionRef.current.history.length <= 1;
@@ -421,20 +502,34 @@ function CodeBrowserTabSession({
     await runHostAction({ type });
   }
 
-  async function runHostAction(
-    action:
-      | { type: "reload" | "stop" | "back" | "forward" }
-      | { type: "navigate"; url: string },
-  ) {
+  async function runHostAction(action: BrowserHostAction) {
     if (!host.available() || !nativeReady.current) return;
     try {
-      await host.command(browserId, action);
+      recordRuntime(await host.command(workspaceId, browserId, action));
     } catch (error) {
       updateSession((current) =>
         failBrowserSession(
           current,
           friendlyErrorMessage(error, "The browser command failed"),
         ),
+      );
+    }
+  }
+
+  async function runAgentHostAction(action: BrowserAgentHostAction) {
+    if (!host.available() || !nativeReady.current) return;
+    try {
+      recordRuntime(await host.command(workspaceId, browserId, action));
+    } catch (error) {
+      const fallback = action.type === "share_with_agent" ||
+          action.type === "revoke_agent_access"
+        ? "Could not update agent access"
+        : "Could not change browser control";
+      updateSession((current) =>
+        setBrowserNotice(current, {
+          kind: "blocked",
+          message: friendlyErrorMessage(error, fallback),
+        })
       );
     }
   }
@@ -497,6 +592,9 @@ function CodeBrowserTabSession({
         addressError={addressError}
         canGoBack={canBrowserGoBack(session)}
         canGoForward={canBrowserGoForward(session)}
+        controller={runtime?.controller}
+        agentAccess={runtime?.agentAccess}
+        engine={runtime?.engine}
         onAddressChange={(value) => {
           setAddress(value);
           if (addressError) setAddressError(null);
@@ -506,6 +604,14 @@ function CodeBrowserTabSession({
         onForward={() => void history(1)}
         onReload={() => void reload()}
         onStop={() => void stop()}
+        onStopAgent={() =>
+          void runAgentHostAction({ type: "stop_agent_control" })}
+        onTakeOver={() =>
+          void runAgentHostAction({ type: "take_human_control" })}
+        onShareAgent={() =>
+          void runAgentHostAction({ type: "share_with_agent" })}
+        onRevokeAgent={() =>
+          void runAgentHostAction({ type: "revoke_agent_access" })}
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
         onOverlayOpenChange={setHistoryOpen}
@@ -513,6 +619,7 @@ function CodeBrowserTabSession({
       {notice && (
         <BrowserNoticeRow
           message={notice.message}
+          tone={notice.kind === "blocked" ? "critical" : "warning"}
           actionLabel={noticeAction?.label}
           onAction={noticeAction?.run}
           onDismiss={() =>
@@ -523,6 +630,7 @@ function CodeBrowserTabSession({
       {!notice && slow && session.loadState === "loading" && (
         <BrowserNoticeRow
           message="This page is taking longer than expected"
+          tone="info"
           actionLabel="Open externally"
           onAction={() => void openExternal()}
           onDismiss={() => setSlow(false)}
@@ -542,7 +650,7 @@ function CodeBrowserTabSession({
   );
 }
 
-function BrowserFallback({
+export function BrowserFallback({
   error,
   hasUrl,
   onRetry,
@@ -553,19 +661,52 @@ function BrowserFallback({
   onRetry?: () => void;
   onOpenExternal?: () => void;
 }) {
+  const Icon = error ? TriangleAlert : Globe2;
   return (
-    <div className="grid h-full min-h-72 place-items-center px-6 py-10">
-      <div className="max-w-sm text-center">
-        <Globe2 className="mx-auto size-7 text-muted-foreground" />
-        <h2 className="mt-4 text-sm font-medium">
-          {error ? "Could not open this page" : "Open a page in this workspace"}
-        </h2>
-        <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
-          {error ||
-            "Use the address bar for a local development server, documentation, or a pull request."}
+    <div className="relative isolate grid h-full min-h-72 place-items-center overflow-hidden bg-page-background/35 px-6 py-12">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 opacity-45 [background-image:linear-gradient(to_right,color-mix(in_oklch,var(--border-subtle)_42%,transparent)_1px,transparent_1px),linear-gradient(to_bottom,color-mix(in_oklch,var(--border-subtle)_42%,transparent)_1px,transparent_1px)] [background-size:32px_32px] [mask-image:linear-gradient(to_bottom,transparent,black_24%,black_74%,transparent)]"
+      />
+      <div className="w-full max-w-lg text-left">
+        <div
+          className={cn(
+            "grid size-10 place-items-center rounded-xl border bg-background shadow-[0_8px_28px_color-mix(in_oklch,var(--foreground)_7%,transparent)]",
+            error
+              ? "border-critical-border text-critical"
+              : "border-border-subtle text-foreground",
+          )}
+        >
+          <Icon className="size-4.5" />
+        </div>
+        <p className="mt-5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
+          Workspace browser
         </p>
+        <h2 className="mt-1.5 max-w-md text-xl font-semibold tracking-[-0.025em] text-balance">
+          {error ? "This page did not open" : "Bring the live work into the workspace"}
+        </h2>
+        <p className="mt-2 max-w-md text-sm leading-6 text-pretty text-muted-foreground">
+          {error ||
+            "Open a local preview, documentation, or a pull request here. The browser stays attached to this workspace so you and its agents can work from the same page."}
+        </p>
+        {!error && (
+          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5">
+              <Braces className="size-3.5 text-foreground/70" />
+              Local previews
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <Link2 className="size-3.5 text-foreground/70" />
+              Docs and reviews
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <Bot className="size-3.5 text-foreground/70" />
+              Agent inspection
+            </span>
+          </div>
+        )}
         {hasUrl && (onRetry || onOpenExternal) && (
-          <div className="mt-4 flex items-center justify-center gap-2">
+          <div className="mt-5 flex flex-wrap items-center gap-2">
             {onRetry && (
               <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
                 <RefreshCw />

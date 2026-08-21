@@ -238,13 +238,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   layoutRef.current = layout;
 
-  const closeBrowserPanels = useCallback((browserIds: readonly string[]) => {
-    for (const browserId of browserIds) {
-      if (closedBrowserIdsRef.current.has(browserId)) continue;
-      closedBrowserIdsRef.current.add(browserId);
-      void closeCodeBrowser(browserId);
-    }
-  }, []);
+  const closeBrowserPanels = useCallback(
+    (browserIds: readonly string[]) => {
+      for (const browserId of browserIds) {
+        if (closedBrowserIdsRef.current.has(browserId)) continue;
+        closedBrowserIdsRef.current.add(browserId);
+        void closeCodeBrowser(workspaceId, browserId);
+      }
+    },
+    [workspaceId],
+  );
 
   function setWorkspaceLayout(next: LayoutState) {
     setLayout(next);

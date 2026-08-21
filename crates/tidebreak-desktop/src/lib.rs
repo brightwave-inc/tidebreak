@@ -19,6 +19,16 @@ use tidebreak_core::Config;
 
 mod attachments;
 mod broker;
+#[allow(
+    dead_code,
+    reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
+)]
+mod browser_control;
+#[allow(
+    dead_code,
+    reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
+)]
+mod browser_semantics;
 mod channel;
 mod chat_debug;
 mod client_execution;
@@ -784,6 +794,9 @@ pub fn run() {
             // events land in `logs/tidebreak.log` under the profile data dir
             // (stderr-only if that file cannot be created).
             tidebreak_server::logging::init_logging(&data);
+            let browser_registry = browser_control::BrowserRegistry::default();
+            browser_registry.initialize_private_state(&data)?;
+            app.manage(browser_registry);
             let home = home_dir(&handle)?;
             // Built before anything that reaches the host: `server_info`
             // consults the attachment first, because a remote client must not

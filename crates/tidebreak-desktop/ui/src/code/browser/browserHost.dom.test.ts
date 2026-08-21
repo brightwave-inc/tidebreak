@@ -22,7 +22,11 @@ describe("browser host lifecycle", () => {
         initialUrl: "https://example.com",
       }),
     );
-    const command = vi.fn().mockResolvedValue({ exists: false });
+    const command = vi.fn().mockResolvedValue({
+      exists: false,
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+    });
     const host: CodeBrowserHost = {
       available: () => true,
       command,
@@ -30,10 +34,14 @@ describe("browser host lifecycle", () => {
       openExternal: vi.fn(async () => undefined),
     };
 
-    await closeCodeBrowser("browser-1", host);
+    await closeCodeBrowser("workspace-1", "browser-1", host);
 
     expect(readStoredBrowserSession("browser-1")).toBeNull();
-    expect(command).toHaveBeenCalledWith("browser-1", { type: "close" });
+    expect(command).toHaveBeenCalledWith(
+      "workspace-1",
+      "browser-1",
+      { type: "close" },
+    );
   });
 
   it("still removes persisted state when no native desktop host exists", async () => {
@@ -48,7 +56,7 @@ describe("browser host lifecycle", () => {
       openExternal: vi.fn(async () => undefined),
     };
 
-    await closeCodeBrowser("browser-1", host);
+    await closeCodeBrowser("workspace-1", "browser-1", host);
 
     expect(readStoredBrowserSession("browser-1")).toBeNull();
     expect(command).not.toHaveBeenCalled();
