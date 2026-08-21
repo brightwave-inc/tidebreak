@@ -1134,6 +1134,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1144,7 +1145,18 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None, None).await
+    bind_inner(
+        config,
+        None,
+        mcp_servers,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -1162,6 +1174,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
         None,
         None,
         None,
@@ -1185,6 +1198,7 @@ pub async fn bind_configured_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_servers,
+        None,
         None,
         None,
         None,
@@ -1221,6 +1235,10 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
+        // The desktop's browser engine adapter arrives with the native
+        // driver slice; until then every embedding binds without one and
+        // the browser routes answer 501.
+        None,
     )
     .await
 }
@@ -1274,6 +1292,7 @@ async fn bind_inner(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1501,6 +1520,9 @@ async fn bind_inner(
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
+    if let Some(browser_runtime) = browser_runtime {
+        state.set_browser_runtime(browser_runtime);
+    }
     // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
     // everything else instead of after a second reconcile.

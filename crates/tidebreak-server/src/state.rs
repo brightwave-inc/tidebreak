@@ -234,6 +234,12 @@ pub struct AppState {
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
     pub approvals: Arc<ApprovalBroker>,
     pub(crate) local_voice: Arc<dyn LocalVoiceRunner>,
+    /// The embedding's agent-driveable in-app browser, when it has one.
+    ///
+    /// Mirrors [`Self::local_voice`]'s posture: the desktop injects its
+    /// engine adapter at bind time; absent everywhere else, where every
+    /// `/code/browser/*` route answers `501 Not Implemented`.
+    pub(crate) browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     /// The configured code-execution provider, when this embedding has one.
     ///
     /// Installed after assembly, like the blob store: the provider is built
@@ -433,6 +439,7 @@ impl AppState {
             events: Arc::new(EventBus::default()),
             approvals: Arc::new(ApprovalBroker::new(store)),
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
+            browser_runtime: None,
             code_execution: None,
             host_folders: None,
             code: None,
@@ -442,6 +449,13 @@ impl AppState {
 
     pub fn set_local_voice_runner(&mut self, runner: Arc<dyn LocalVoiceRunner>) {
         self.local_voice = runner;
+    }
+
+    pub(crate) fn set_browser_runtime(
+        &mut self,
+        runtime: Arc<dyn crate::code::browser_runtime::BrowserRuntime>,
+    ) {
+        self.browser_runtime = Some(runtime);
     }
 
     /// Resolve model credentials per caller through `inference` (decision 51).
