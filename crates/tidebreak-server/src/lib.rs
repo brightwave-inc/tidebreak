@@ -143,13 +143,11 @@ use tidebreak_core::{
     ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 
-pub use durable_oplog::DurableOperationStore;
 /// Public contract for desktop browser adapters. The desktop implements
 /// [`BrowserRuntime`] behind an `Arc` and installs it with
 /// [`bind`] or one of its desktop variants.
-pub use crate::code::browser_runtime::{
-    BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope,
-};
+pub use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
+pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
     deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
@@ -1173,7 +1171,18 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None, None, None).await
+    bind_inner(
+        config,
+        None,
+        mcp_servers,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Bind the API with a stable app-private native executor identity.

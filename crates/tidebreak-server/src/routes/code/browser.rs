@@ -11,8 +11,8 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 
 use tidebreak_core::{
-    db, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult,
-    BrowserPageSnapshot, BrowserSnapshotArgs, CodeSessionLifecycle, CodeWorkspaceStatus,
+    db, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
+    BrowserSnapshotArgs, CodeSessionLifecycle, CodeWorkspaceStatus,
 };
 
 use crate::code::browser_channel::BrowserSubject;
@@ -142,11 +142,9 @@ fn map_runtime_error(error: BrowserRuntimeError) -> ServerError {
         BrowserRuntimeError::SessionEnded => {
             ServerError::forbidden("the browser session has ended")
         }
-        BrowserRuntimeError::Unsupported(operation) => {
-            ServerError::not_implemented(format!(
-                "this browser engine does not support {operation}"
-            ))
-        }
+        BrowserRuntimeError::Unsupported(operation) => ServerError::not_implemented(format!(
+            "this browser engine does not support {operation}"
+        )),
         BrowserRuntimeError::StaleTarget => ServerError::conflict_kind(
             "stale_browser_target",
             "the page changed since that snapshot; take a new browser_snapshot",
