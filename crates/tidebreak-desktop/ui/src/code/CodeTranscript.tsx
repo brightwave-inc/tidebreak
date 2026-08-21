@@ -150,33 +150,45 @@ export function CodeTranscript({
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
       <div className="messages-column" ref={contentRef}>
-        {items.map((item, index) =>
-          isolatedCard(
-            item.id,
-            itemSignature(item, decidingId, approvalError),
-            <TranscriptItem
-              item={item}
-              animateStreaming={animateStreaming}
-              approval={
-                item.kind === "approval"
-                  ? approvals[item.approvalId]
-                  : undefined
-              }
-              attached={parksTheCallAbove(items, index)}
-              deciding={
-                item.kind === "approval" && decidingId === item.approvalId
-              }
-              approvalError={
-                item.kind === "approval" && decidingId === item.approvalId
-                  ? approvalError
-                  : undefined
-              }
-              onDecide={onDecide}
-              onOpenTurnDiff={onOpenTurnDiff}
-              sessionId={sessionId}
-              onReveal={onReveal}
-            />,
-          ),
+        {groupCodeTranscriptRows(items).map((row) =>
+          row.kind === "group"
+            ? isolatedCard(
+                row.id,
+                row.signature,
+                <CodeActivityGroup
+                  tools={row.tools}
+                  signature={row.signature}
+                  onReveal={onReveal}
+                />,
+              )
+            : isolatedCard(
+                row.item.id,
+                itemSignature(row.item, decidingId, approvalError),
+                <TranscriptItem
+                  item={row.item}
+                  animateStreaming={animateStreaming}
+                  approval={
+                    row.item.kind === "approval"
+                      ? approvals[row.item.approvalId]
+                      : undefined
+                  }
+                  attached={row.attached}
+                  deciding={
+                    row.item.kind === "approval" &&
+                    decidingId === row.item.approvalId
+                  }
+                  approvalError={
+                    row.item.kind === "approval" &&
+                    decidingId === row.item.approvalId
+                      ? approvalError
+                      : undefined
+                  }
+                  onDecide={onDecide}
+                  onOpenTurnDiff={onOpenTurnDiff}
+                  sessionId={sessionId}
+                  onReveal={onReveal}
+                />,
+              ),
         )}
         {shouldShowCodeWorking(items, busy, streamStalled) && (
           <AssistantWorkingIndicator />
@@ -283,6 +295,87 @@ function parksTheCallAbove(
   if (item?.kind !== "approval") return false;
   const previous = items[index - 1];
   return previous?.kind === "tool" && previous.status === "running";
+}
+
+type CodeToolItem = Extract<CodeTranscriptItem, { kind: "tool" }>;
+
+/** One thing the column draws: an item on its own, or a run behind one line. */
+export type CodeTranscriptRow =
+  | {
+      kind: "item";
+      item: CodeTranscriptItem;
+      /** This approval parks the tool line drawn directly above it. */
+      attached: boolean;
+    }
+  | {
+      kind: "group";
+      id: string;
+      tools: CodeToolItem[];
+      /** What the group draws on, for its key and its memo. */
+      signature: string;
+    };
+
+/**
+ * The transcript's items, with each run of tool calls folded behind one line.
+ *
+ * An engine works in bursts — search, read, read, search — and drawn one row
+ * per call those bursts are the whole viewport, with the prose the reader is
+ * waiting for pushed off the bottom. A run collapses to a single line naming
+ * its newest call, which is the one worth watching, and opens to the same rows
+ * it always drew.
+ *
+ * Only tool calls join a run. Reasoning breaks one, because a folded "Thought"
+ * line between two groups is where the engine actually paused, and hiding that
+ * inside a group would put the model's own account of the work two clicks away.
+ */
+export function groupCodeTranscriptRows(
+  items: readonly CodeTranscriptItem[],
+): CodeTranscriptRow[] {
+  const rows: CodeTranscriptRow[] = [];
+  let run: CodeToolItem[] = [];
+
+  // `detach` holds the run's last call out of the group: an approval hangs its
+  // card off the row directly above it, and a card hanging off a collapsed
+  // group would point at a line that no longer shows the command it repeats.
+  function flush(detach: boolean) {
+    const parked = detach ? run.pop() : undefined;
+    if (run.length > 1) {
+      rows.push({
+        kind: "group",
+        id: `group:${run[0]!.id}`,
+        tools: run,
+        signature: run.map(toolSignature).join("|"),
+      });
+    } else {
+      // A group of one is just a row.
+      for (const tool of run)
+        rows.push({ kind: "item", item: tool, attached: false });
+    }
+    if (parked) rows.push({ kind: "item", item: parked, attached: false });
+    run = [];
+  }
+
+  items.forEach((item, index) => {
+    if (item.kind === "tool") {
+      run.push(item);
+      return;
+    }
+    const attached = parksTheCallAbove(items, index);
+    flush(attached);
+    rows.push({ kind: "item", item, attached });
+  });
+  flush(false);
+  return rows;
+}
+
+/**
+ * What a grouped call draws on, so a streamed byte re-renders the group it
+ * changed rather than every group in the transcript. The subject is in it
+ * because a harness that starts a call before its arguments finish streaming
+ * fills the detail in on completion.
+ */
+function toolSignature(tool: CodeToolItem): string {
+  return `${tool.id}:${tool.status}:${tool.preview.length}:${toolSubject(tool.detail, tool.name)}`;
 }
 
 /**
@@ -397,7 +490,15 @@ const TranscriptItem = memo(function TranscriptItem({
         </article>
       );
     case "reasoning":
-      return <ThinkingAccordion text={item.text} streaming={item.streaming} />;
+      return (
+        <ThinkingAccordion
+          text={item.text}
+          streaming={item.streaming}
+          // An engine pauses to think between every pair of calls here. Left to
+          // open themselves, those blocks stack until they are the whole turn.
+          expandWhileStreaming={false}
+        />
+      );
     case "tool":
       return (
         <CodeToolCard
@@ -449,6 +550,141 @@ const TranscriptItem = memo(function TranscriptItem({
       return <TurnReviewCard turn={item} onOpenTurnDiff={onOpenTurnDiff} />;
   }
 });
+
+/**
+ * A run of tool calls behind one line.
+ *
+ * The line is the run's newest call drawn the way its own row would draw it,
+ * plus a count of what came before — so a live phase still says what the engine
+ * is doing right now, and a settled one says what it last did and how much work
+ * that took. Opening it gives back the rows, unchanged, on a rail dropped from
+ * the group's own icon column.
+ *
+ * Closed by default, because the reason to group at all is that a burst of
+ * calls is not what the reader came for. A run holding a failure is the
+ * exception: it opens itself, the same way a failed row does.
+ */
+export const CodeActivityGroup = memo(
+  function CodeActivityGroup({
+    tools,
+    onReveal,
+  }: {
+    tools: readonly CodeToolItem[];
+    /** What the group draws on. The memo compares this and nothing else. */
+    signature: string;
+    onReveal?: () => void;
+  }) {
+    const unresolved = tools.some(
+      (tool) => tool.status === "failed" || tool.status === "denied",
+    );
+    const [expanded, setExpanded] = useState(unresolved);
+    useEffect(() => {
+      // A failure inside a closed group is a failure the reader has to go
+      // looking for. Opening is one-way: once they close it, it stays closed.
+      if (unresolved) setExpanded(true);
+    }, [unresolved]);
+
+    const lead = leadingCall(tools);
+    const status = groupStatus(tools);
+    const verb = toolVerb(lead.detail, lead.status);
+    const subject = toolSubject(lead.detail, lead.name);
+    const rest = tools.length - 1;
+    const elapsed = useElapsedLabel(lead.startedAt, status === "running");
+    const duration =
+      status === "running"
+        ? elapsed
+        : formatTurnDuration(totalDurationMs(tools));
+
+    return (
+      <ToolCardShell
+        icon={toolIcon(lead.detail)}
+        title={
+          <>
+            <span className="shrink-0 font-semibold">{verb}</span>
+            <MiddleTruncate
+              text={subject}
+              className="text-muted-foreground min-w-[6ch] flex-1 font-mono"
+            />
+            {/* Hidden and said again below, because "plus 2 more" lands
+                mid-command when it is read out where it is drawn. */}
+            <span className="text-muted-foreground shrink-0" aria-hidden="true">
+              +{rest} more
+            </span>
+          </>
+        }
+        titleClassName="flex items-center gap-2"
+        trailing={
+          <>
+            <span className="sr-only">and {rest} more</span>
+            {duration}
+            <span className="sr-only">{status}</span>
+            <StatusGlyph status={status} />
+          </>
+        }
+        expanded={expanded}
+        onExpandedChange={(next) => {
+          onReveal?.();
+          setExpanded(next);
+        }}
+        label={`${verb} ${subject} and ${rest} more ${status}`}
+        announce={false}
+        bodyClassName="border-border ml-[7px] flex flex-col gap-1 border-l pl-4"
+      >
+        {tools.map((tool) => (
+          <CodeToolCard
+            key={tool.id}
+            name={tool.name}
+            detail={tool.detail}
+            status={tool.status}
+            preview={tool.preview}
+            startedAt={tool.startedAt}
+            durationMs={tool.durationMs}
+            onReveal={onReveal}
+          />
+        ))}
+      </ToolCardShell>
+    );
+  },
+  (previous, next) =>
+    previous.signature === next.signature &&
+    previous.onReveal === next.onReveal,
+);
+
+/**
+ * The call the group's one line speaks for: whatever is running now, or the
+ * last thing that ran. Harnesses batch calls, so "running" is not always the
+ * one at the end.
+ */
+function leadingCall(tools: readonly CodeToolItem[]): CodeToolItem {
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    const tool = tools[index]!;
+    if (tool.status === "running") return tool;
+  }
+  return tools[tools.length - 1]!;
+}
+
+/** The run's outcome: still working, else the worst thing in it. */
+function groupStatus(
+  tools: readonly CodeToolItem[],
+): "running" | "succeeded" | "failed" | "denied" {
+  if (tools.some((tool) => tool.status === "running")) return "running";
+  if (tools.some((tool) => tool.status === "failed")) return "failed";
+  if (tools.some((tool) => tool.status === "denied")) return "denied";
+  return "succeeded";
+}
+
+/**
+ * How long the run took, or nothing. A replayed call carries no duration, and
+ * a total that silently skips those would undercount the phase.
+ */
+function totalDurationMs(tools: readonly CodeToolItem[]): number | null {
+  let total = 0;
+  for (const tool of tools) {
+    if (tool.durationMs === null) return null;
+    total += tool.durationMs;
+  }
+  return total;
+}
 
 /**
  * One engine action as a boxless line. The verb is a constant; the muted mono

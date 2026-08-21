@@ -377,7 +377,10 @@ export function reduceCodeSessionEvent(
           ...state,
           assistantBuffer,
           items: upsertStreaming(
-            state.items,
+            // Prose starting means the thinking behind it ended. Left live, an
+            // earlier block keeps pulsing and keeps saying "Thinking" while the
+            // answer it produced is already being written underneath it.
+            finalizeStreaming(state.items, "reasoning"),
             "assistant",
             assistantBuffer,
             state.activeTurnId,
@@ -437,28 +440,32 @@ export function reduceCodeSessionEvent(
 
     case "tool_started": {
       const parentCallId = event.parent_call_id ?? null;
+      const settled = finalizeStreaming(state.items, "assistant", parentCallId);
+      // The reasoning that led to this call is done, the same way the prose
+      // before it is. A subagent's call settles nothing of the parent's: its
+      // own work is not what the parent was thinking about.
+      const opened =
+        parentCallId === null
+          ? finalizeStreaming(settled, "reasoning")
+          : settled;
       return {
         state: {
           ...state,
           assistantBuffer: parentCallId === null ? "" : state.assistantBuffer,
           reasoningBuffer: parentCallId === null ? "" : state.reasoningBuffer,
-          items: insertBeforeTurnBoundary(
-            finalizeStreaming(state.items, "assistant", parentCallId),
-            state.activeTurnId,
-            {
-              kind: "tool",
-              id: deps.nextId(),
-              turnId: state.activeTurnId,
-              callId: event.call_id,
-              parentCallId,
-              name: event.name,
-              detail: event.detail,
-              status: "running",
-              preview: "",
-              startedAt: framed.replayed ? null : deps.now(),
-              durationMs: null,
-            },
-          ),
+          items: insertBeforeTurnBoundary(opened, state.activeTurnId, {
+            kind: "tool",
+            id: deps.nextId(),
+            turnId: state.activeTurnId,
+            callId: event.call_id,
+            parentCallId,
+            name: event.name,
+            detail: event.detail,
+            status: "running",
+            preview: "",
+            startedAt: framed.replayed ? null : deps.now(),
+            durationMs: null,
+          }),
         },
         effects,
       };

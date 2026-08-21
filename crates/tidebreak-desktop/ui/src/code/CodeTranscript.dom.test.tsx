@@ -66,6 +66,58 @@ const items: CodeTranscriptItem[] = [
   },
 ];
 
+type CodeToolItem = Extract<CodeTranscriptItem, { kind: "tool" }>;
+
+/**
+ * A burst of three calls, the way an engine actually works: search, read,
+ * read. The last one carries the run's status.
+ */
+function run(last: "running" | "succeeded"): CodeToolItem[] {
+  return [
+    {
+      kind: "tool",
+      id: "run-1",
+      turnId: "t1",
+      callId: "r1",
+      parentCallId: null,
+      name: "Grep",
+      detail: { kind: "search", query: "Fenced|reap" },
+      status: "succeeded",
+      preview: "3 matches",
+      startedAt: null,
+      durationMs: 400,
+    },
+    {
+      kind: "tool",
+      id: "run-2",
+      turnId: "t1",
+      callId: "r2",
+      parentCallId: null,
+      name: "Read",
+      detail: { kind: "file_read", path: "docs/code-mode.md" },
+      status: "succeeded",
+      preview: "",
+      startedAt: null,
+      durationMs: 600,
+    },
+    {
+      kind: "tool",
+      id: "run-3",
+      turnId: "t1",
+      callId: "r3",
+      parentCallId: null,
+      name: "Read",
+      detail: { kind: "file_read", path: "src/code/recovery.rs" },
+      status: last,
+      preview: "",
+      // Null so a running row draws no elapsed label: the transcript reads
+      // the real clock, and a fixed fixture timestamp would age into nonsense.
+      startedAt: null,
+      durationMs: last === "running" ? null : 1_200,
+    },
+  ];
+}
+
 describe("CodeTranscript", () => {
   it("renders assistant text, a tool card, and a harness notice", () => {
     render(<CodeTranscript items={items} />);
@@ -467,5 +519,142 @@ describe("CodeTranscript", () => {
     expect(
       document.querySelector('[data-code-approval-attached="true"]'),
     ).toBeNull();
+  });
+
+  it("folds a run of calls behind its newest line and opens to the rows", async () => {
+    // A burst of calls is not what the reader came for, and one row per call
+    // is the whole viewport. The line names the call still running, because
+    // that is the one worth watching.
+    render(<CodeTranscript items={[...run("running")]} />);
+
+    expect(screen.getByText("+2 more")).toBeInTheDocument();
+    const line = screen.getByRole("button", {
+      name: /File read.*recovery\.rs.*and 2 more.*running/,
+    });
+    expect(line).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Fenced|reap")).toBeNull();
+
+    await userEvent.click(line);
+    expect(line).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Fenced|reap")).toBeInTheDocument();
+    expect(screen.getByText("docs/code-mode.md")).toBeInTheDocument();
+  });
+
+  it("names the last call and totals the run once it settles", () => {
+    render(<CodeTranscript items={[...run("succeeded")]} />);
+
+    expect(
+      screen.getByRole("button", {
+        name: /File read.*recovery\.rs.*and 2 more.*succeeded/,
+      }),
+    ).toBeInTheDocument();
+    // 400ms + 600ms + 1200ms of sequential work, said once.
+    expect(screen.getByText("2.2s")).toBeInTheDocument();
+  });
+
+  it("opens a run that holds a failure", () => {
+    const middle = run("succeeded")[1]!;
+    const items: CodeToolItem[] = [
+      run("succeeded")[0]!,
+      { ...middle, status: "failed", preview: "no such file" },
+      run("succeeded")[2]!,
+    ];
+    render(<CodeTranscript items={items} />);
+
+    // A failure inside a closed group is a failure the reader has to go
+    // looking for.
+    expect(
+      screen.getByRole("button", { name: /and 2 more.*failed/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("no such file")).toBeInTheDocument();
+  });
+
+  it("holds a parked call out of the group it would end", () => {
+    const parked: CodeTranscriptItem[] = [
+      ...run("succeeded").slice(0, 2),
+      {
+        kind: "tool",
+        id: "tool-parked",
+        turnId: "t1",
+        callId: "c9",
+        parentCallId: null,
+        name: "Bash",
+        detail: { kind: "command", cmd: "rm -rf /tmp/scratch", cwd: "/tmp" },
+        status: "running",
+        preview: "",
+        startedAt: "2026-08-15T12:00:00.000Z",
+        durationMs: null,
+      },
+      {
+        kind: "approval",
+        id: "approval:a9",
+        approvalId: "a9",
+        state: "pending",
+      },
+    ];
+    render(
+      <CodeTranscript
+        items={parked}
+        approvals={{
+          a9: {
+            id: "a9",
+            session_id: "s1",
+            turn_id: "t1",
+            kind: { type: "command", cmd: "rm -rf /tmp/scratch", cwd: "/tmp" },
+            harness_raw_json: "{}",
+            state: "pending",
+            requested_at: "2026-08-15T12:00:00.000Z",
+          },
+        }}
+      />,
+    );
+
+    // The two settled calls still group; the parked one is held out of it,
+    // because the card below repeats the command that row shows.
+    expect(screen.getByText("+1 more")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /Command run.*rm -rf \/tmp\/scratch.*running/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-code-approval-attached="true"]'),
+    ).not.toBeNull();
+  });
+
+  it("keeps a folded thought line between the groups it separates", async () => {
+    // Where the engine paused is part of the story, so reasoning breaks a run
+    // rather than disappearing into one. It arrives folded: this surface
+    // thinks between every pair of calls, and blocks that open themselves
+    // stack until they are the whole turn.
+    render(
+      <CodeTranscript
+        items={[
+          ...run("succeeded").slice(0, 2),
+          {
+            kind: "reasoning",
+            id: "think-1",
+            turnId: "t1",
+            text: "Now check what identity we store for the child.",
+            streaming: true,
+          },
+          ...run("succeeded")
+            .slice(0, 2)
+            .map((tool, index) => ({ ...tool, id: `late-${index}` })),
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByText("+1 more")).toHaveLength(2);
+    const thought = screen.getByRole("button", { name: /Thinking/i });
+    expect(thought).toHaveAttribute("data-state", "closed");
+    expect(
+      screen.queryByText("Now check what identity we store for the child."),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(thought);
+    expect(
+      screen.getByText("Now check what identity we store for the child."),
+    ).toBeInTheDocument();
   });
 });

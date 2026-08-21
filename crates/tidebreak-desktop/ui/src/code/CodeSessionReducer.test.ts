@@ -803,3 +803,58 @@ describe("user item createdAt", () => {
     });
   });
 });
+
+describe("reasoning lifecycle", () => {
+  it("settles a reasoning block when the next call or the answer starts", () => {
+    // An engine thinks between every pair of calls. Left live until the turn
+    // ends, every block in the turn pulses and every one claims to be the one
+    // the engine is in right now.
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "reasoning_delta", text: "Check how fencing works." },
+      {
+        type: "tool_started",
+        call_id: "c1",
+        name: "Grep",
+        detail: { kind: "search", query: "Fenced" },
+      },
+      {
+        type: "tool_completed",
+        call_id: "c1",
+        outcome: "succeeded",
+        preview: "recovery.rs",
+      },
+      { type: "reasoning_delta", text: "Now the identity we store." },
+      { type: "assistant_delta", text: "Auto-reap is safe because" },
+    ]);
+
+    const reasoning = state.items.filter((item) => item.kind === "reasoning");
+    expect(reasoning).toHaveLength(2);
+    expect(reasoning.every((item) => item.streaming === false)).toBe(true);
+  });
+
+  it("leaves the parent's reasoning live while a subagent works", () => {
+    // A subagent's call says nothing about what its parent was thinking, so it
+    // must not settle a block the parent is still writing.
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "tool_started",
+        call_id: "task-1",
+        name: "Task",
+        detail: { kind: "other", summary: "Audit the parser" },
+      },
+      { type: "reasoning_delta", text: "While that runs, consider fencing." },
+      {
+        type: "tool_started",
+        call_id: "child-read",
+        name: "Read",
+        detail: { kind: "file_read", path: "src/parser.rs" },
+        parent_call_id: "task-1",
+      },
+    ]);
+
+    const reasoning = state.items.find((item) => item.kind === "reasoning");
+    expect(reasoning).toMatchObject({ kind: "reasoning", streaming: true });
+  });
+});

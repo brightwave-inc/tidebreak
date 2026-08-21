@@ -35,7 +35,10 @@ export function MiddleTruncate({
   return (
     <span className={cn("flex min-w-0", className)} title={text}>
       <span className="truncate">{text.slice(0, -tail)}</span>
-      <span className="shrink-0">{text.slice(-tail)}</span>
+      {/* `whitespace-pre` because the split can land on a space, and a flex
+          item drops the whitespace it starts with — which reads as a command
+          with two of its words run together. */}
+      <span className="shrink-0 whitespace-pre">{text.slice(-tail)}</span>
     </span>
   );
 }
