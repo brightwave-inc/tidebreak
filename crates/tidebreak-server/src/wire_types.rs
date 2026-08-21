@@ -465,6 +465,7 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeCloneDefaults>(&cfg, &mut out);
         // Where new worktrees land, and the body that moves it.
         generate::collect_from::<crate::routes::code::CodeWorktreeRoot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeForkTranscript>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SetCodeWorktreeRootBody>(&cfg, &mut out);
         out
     }

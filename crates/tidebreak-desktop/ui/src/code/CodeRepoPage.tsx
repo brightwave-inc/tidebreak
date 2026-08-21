@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { RouteFrame } from "@/RouteFrame";
 import { AttentionBadge } from "./AttentionBadge";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useWorkspaceDigests } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
@@ -41,7 +41,7 @@ function CodeRepoBody({ repoId }: { repoId: string }) {
   const repos = useCodeCatalogStore((state) => state.repos);
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const refresh = useCodeCatalogStore((state) => state.refresh);
-  const digests = useCodeUpdatesStore((state) => state.byWorkspace);
+  const digests = useWorkspaceDigests();
   // The dialog itself is mounted once, by the rail this page renders beside
   // it, so that Cmd+N and the buttons all drive the same one.
   const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);

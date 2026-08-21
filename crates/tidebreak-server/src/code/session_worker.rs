@@ -98,7 +98,7 @@ pub(crate) struct WorkerHandle {
 /// `pending` and `wake` are this session's own single follow-up slot
 /// (record 9). `worktree` is shared with every other session in the
 /// workspace, and holding it is what keeps two agents from editing one
-/// checkout at the same time (record 54).
+/// checkout at the same time (record 55).
 #[derive(Clone)]
 pub(crate) struct TurnQueue {
     pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
@@ -379,7 +379,7 @@ impl HarnessEventSink for LiveSink {
 /// `worktree_turn` is the workspace's turn lock, shared with every other
 /// session in the same checkout. The worker holds it for the length of a
 /// turn, which is what keeps two agents from editing one worktree at once;
-/// see record 54.
+/// see record 55.
 pub(crate) fn spawn_session_worker(
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
@@ -695,7 +695,7 @@ async fn drive_turn(
     }
     let images = hydrate_turn_images(blobs, &attachments).await?;
 
-    // The workspace's checkout takes one turn at a time (record 54). Taking
+    // The workspace's checkout takes one turn at a time (record 55). Taking
     // the lock *is* the reservation: a pre-flight database read cannot be,
     // because two idle siblings both pass it before either marks itself
     // running. Blobs are hydrated first so a decode never holds the tree.

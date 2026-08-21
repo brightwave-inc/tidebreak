@@ -924,6 +924,7 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::interrupt_session),
         )
         .route("/code/sessions/{id}/reap", post(routes::code::reap_session))
+        .route("/code/sessions/{id}/fork", post(routes::code::fork_session))
         .route(
             "/code/sessions/{id}/debug",
             get(routes::code::get_session_debug),

@@ -1,4 +1,4 @@
-# 54. Multiple Agent Sessions Share One Workspace
+# 55. Multiple Agent Sessions Share One Workspace
 
 - Status: Accepted
 - Date: 2026-08-20
