@@ -17,10 +17,11 @@ use crate::child::{turn_outcome, ChildPid};
 use crate::grok::parse::GrokStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
     HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
     StreamLineBuffer, TurnInput, TurnOutcome,
 };
+use crate::browser_channel::apply_child_env_tokio;
 use tidebreak_core::CodePermissionMode;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
@@ -229,17 +230,13 @@ impl GrokSession {
             .current_dir(&plan.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear();
-        for (key, value) in filter_child_env(self.spec.env.iter().cloned()) {
-            command.env(key, value);
-        }
-        for (key, value) in &plan.env {
-            command.env(key, value);
-        }
-        if let Some(ref browser) = self.spec.browser {
-            browser.inject_env_tokio(&mut command);
-        }
+            .stderr(Stdio::piped());
+        apply_child_env_tokio(
+            &mut command,
+            self.spec.env.iter().cloned(),
+            &plan.env,
+            self.spec.browser.as_ref(),
+        );
         let mut child = spawn_process_tree(&mut command)?;
         let stdout = child
             .take_stdout()
