@@ -67,6 +67,7 @@ pub mod deliverable;
 // Host-side acceptance writes bytes into private scratch, so it depends on the
 // capability filesystem and async runtime that only the `tools` feature pulls
 // in. The persisted contract and migration below stay available without it.
+pub mod attention;
 pub mod compaction;
 #[cfg(feature = "tools")]
 pub mod deliverable_acceptance;
@@ -125,6 +126,10 @@ pub use approval::{
     AutoJudgeStatus, GrantLevel, GrantScope, RefuseGate, StandingGrant, StandingGrantRecord,
     StandingGrants, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
 };
+pub use attention::{
+    should_replace, Attention, AttentionSource, AttentionState, FenceReason, MAX_ATTENTION_NOTE,
+    MAX_ATTENTION_PROMPT,
+};
 #[cfg(feature = "blob-fs")]
 pub use blob::FsBlobStore;
 pub use browser::{
@@ -168,17 +173,16 @@ pub use client_tools::{
     READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 pub use code::{
-    bound_subagents, should_replace, ApprovalDecisionKind, Attention, AttentionSource,
-    AttentionState, BoundedError, CapLevel, CheckpointHint, CodeApproval, CodeApprovalId,
-    CodeApprovalKind, CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionActivity,
-    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary,
-    CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatch,
-    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
-    FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier,
-    PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
-    PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome,
-    WorkspaceId, MAX_ATTENTION_NOTE, MAX_ATTENTION_PROMPT, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
-    MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    bound_subagents, ApprovalDecisionKind, BoundedError, CapLevel, CheckpointHint, CodeApproval,
+    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeRepo, CodeSession,
+    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
+    CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
+    CodeUsage, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus,
+    Diffstat, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
+    HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestComment,
+    PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail,
+    ToolOutcome, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

@@ -7,14 +7,9 @@
 //! Id types are structurally identical to chat ids (UUID newtypes, transparent
 //! serde) but distinct so the two surfaces cannot be confused at compile time.
 
-mod attention;
 mod caps;
 mod event;
 
-pub use attention::{
-    should_replace, Attention, AttentionSource, AttentionState, FenceReason, MAX_ATTENTION_NOTE,
-    MAX_ATTENTION_PROMPT,
-};
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
@@ -22,6 +17,7 @@ pub use event::{
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
+use crate::attention::{Attention, FenceReason};
 use crate::PermissionMode;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

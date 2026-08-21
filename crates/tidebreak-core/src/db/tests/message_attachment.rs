@@ -1,6 +1,7 @@
 //! Image attachment persistence and its effect on blob retention.
 
 use super::*;
+use crate::attention::{Attention, AttentionSource};
 use crate::image::{ImageMediaType, ImageRef};
 use crate::model::{DocumentBlob, MAX_MESSAGE_ATTACHMENTS};
 
@@ -708,9 +709,9 @@ impl ReferenceClass {
 
 async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     use crate::code::{
-        Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-        CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
-        CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+        CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTurn,
+        CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
+        HarnessKind, RepoId, WorkspaceId,
     };
     use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
 

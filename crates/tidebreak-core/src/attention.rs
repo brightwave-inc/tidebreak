@@ -1,7 +1,15 @@
 //! Attention for a unit of supervised work.
 //!
 //! The vocabulary is defined over "a unit of supervised work", not over a
-//! coding session specifically, so chat can adopt it later without renaming.
+//! coding session specifically. Decision 30 wrote it that way on purpose so
+//! chat could adopt it without renaming, and decision 48 step 3 is where that
+//! happens: this module moved out of `code` to a home neither surface owns,
+//! ahead of chat conversations carrying an [`Attention`] of their own.
+//!
+//! Not every engine produces every state. [`AttentionState::Fenced`] belongs
+//! to supervising a process the server does not control, and the internal
+//! engine has nothing to fence. A shared vocabulary does not oblige every
+//! engine to use all of it.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
