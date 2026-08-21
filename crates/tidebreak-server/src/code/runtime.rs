@@ -28,6 +28,7 @@ use tidebreak_harness::{
 };
 
 use super::approval_bridge::ApprovalBridge;
+use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
@@ -132,6 +133,10 @@ pub(crate) struct CodeRuntime {
     pub(crate) worktree_root_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
+    pub(crate) browser_tokens: BrowserTokenRegistry,
+    /// The desktop browser adapter, installed before recovery starts. Absent
+    /// in headless deployments and tests that do not register one.
+    browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -165,7 +170,16 @@ impl CodeRuntime {
         data_dir: PathBuf,
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     ) -> Self {
+        let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            // Panic on construction failure: the data dir is trusted/absolute
+            // at this point (set from config and validated by the host). The
+            // only failure is an OS-level path resolution error such as a
+            // dangling CWD, which is a startup bug, not a runtime condition.
+            .expect("browser capfile directory must be resolvable to an absolute path");
+        #[cfg(test)]
+        browser_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -174,6 +188,8 @@ impl CodeRuntime {
             data_dir: data_dir.clone(),
             worktree_root_default,
             approvals: ApprovalBridge::new(),
+            browser_tokens,
+            browser_runtime,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -199,6 +215,7 @@ impl CodeRuntime {
 
     /// Bound after listen so Claude can be pointed at the loopback MCP route.
     fn set_loopback_base(&self, base: String) {
+        self.browser_tokens.set_loopback_base(&base);
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
     }
@@ -218,17 +235,23 @@ impl CodeRuntime {
     pub(crate) fn start(
         self: &Arc<Self>,
         loopback_base: String,
-    ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> + Send>,
+    > {
         self.set_loopback_base(loopback_base);
+        // Synchronously delete stale capfiles before the returned future is
+        // pollable so issue() cannot race an unpolled startup cleanup.
+        let cleanup = self.browser_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
-        async move {
+        Box::pin(async move {
+            cleanup.map_err(ServerError::internal)?;
             let actions = runtime.recover().await;
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so
             // active watches resume with no extra state.
             runtime.ensure_watch_sweep();
             actions
-        }
+        })
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -237,6 +260,24 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
+        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None)
+    }
+
+    #[cfg(any(test, feature = "scripted-harness"))]
+    pub(crate) fn with_registry_and_browser_runtime(
+        db: Arc<DbStore>,
+        data_dir: PathBuf,
+        adapters: AdapterRegistry,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+    ) -> Self {
+        let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            // Panic on construction failure: the data dir is trusted/absolute
+            // at this point (set from config and validated by the host). The
+            // only failure is an OS-level path resolution error such as a
+            // dangling CWD, which is a startup bug, not a runtime condition.
+            .expect("browser capfile directory must be resolvable to an absolute path");
+        #[cfg(test)]
+        browser_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -245,6 +286,8 @@ impl CodeRuntime {
             data_dir,
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
+            browser_tokens,
+            browser_runtime,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -268,6 +311,29 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
         *self.gh_search_path.lock().expect("gh search path") = path;
+    }
+
+    /// Return the installed browser adapter, if any.
+    pub(crate) fn browser_runtime(
+        &self,
+    ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
+        self.browser_runtime.clone()
+    }
+
+    /// Revoke the session browser token AND the desktop adapter
+    /// capability. Idempotent — safe to call multiple times.
+    ///
+    /// The token registry is invalidated first and the adapter scope is
+    /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
+    /// The adapter call happens after the registry lock is released.
+    fn revoke_browser_session(&self, session_id: CodeSessionId) {
+        let subject = self.browser_tokens.revoke(session_id);
+        if let Some(subject) = subject {
+            if let Some(runtime) = &self.browser_runtime {
+                let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
+                runtime.revoke_session(&scope);
+            }
+        }
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -1267,6 +1333,9 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        // Invalidate the session browser token so in-flight browser route
+        // calls are rejected immediately, then revoke the native scope.
+        self.revoke_browser_session(id);
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
@@ -1350,6 +1419,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
+        self.revoke_browser_session(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1428,6 +1498,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
+        self.revoke_browser_session(session.id);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1641,6 +1712,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
+            self.revoke_browser_session(session.id);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1737,6 +1809,16 @@ impl CodeRuntime {
             attached.subagents.clone(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
+        let browser_subject = BrowserSubject {
+            owner: session.owner.clone(),
+            workspace: session.workspace_id,
+            session: session.id,
+        };
+        let browser = self
+            .browser_tokens
+            .issue(browser_subject)
+            .map_err(ServerError::internal)?;
+
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             permission_mode: session.permission_mode,
@@ -1748,12 +1830,13 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser: None,
+            browser: Some(browser),
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
+                self.revoke_browser_session(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -1772,6 +1855,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
+                self.revoke_browser_session(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
@@ -2322,7 +2406,13 @@ mod managed_node_wait_tests {
         ))
         .await
         .expect("db");
-        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None, None);
+        let runtime = CodeRuntime::new(
+            Arc::new(db),
+            data_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(
             runtime.managed_node_root(false).await.expect("node root"),

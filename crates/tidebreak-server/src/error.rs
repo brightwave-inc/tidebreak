@@ -41,6 +41,30 @@ impl ServerError {
         }
     }
 
+    /// A `403 Forbidden` for a caller whose token is real but whose authority
+    /// no longer covers the request (for example, an ended session).
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            info: AgentErrorInfo {
+                kind: "forbidden".to_string(),
+                message: message.into(),
+            },
+        }
+    }
+
+    /// A `501 Not Implemented` for a capability this embedding does not
+    /// provide (for example, browser routes with no runtime attached).
+    pub(crate) fn not_implemented(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            info: AgentErrorInfo {
+                kind: "not_implemented".to_string(),
+                message: message.into(),
+            },
+        }
+    }
+
     /// A `400 Bad Request` for a malformed request (bad path segment, or an
     /// unparseable / wrong-typed / wrong-content-type body). Used to map axum's
     /// built-in extractor rejections into the same `{ kind, message }` shape as
