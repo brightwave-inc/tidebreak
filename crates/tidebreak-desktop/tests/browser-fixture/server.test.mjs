@@ -49,10 +49,21 @@ test("redirect, delay, frame, upload, and download endpoints expose stable contr
   assert.equal(redirect.status, 302);
   assert.equal(redirect.headers.get("location"), "/redirected?from=redirect");
 
+  const redirected = await fetch(
+    `${fixture.origin}/redirected?from=%3Cscript%3Ealert(1)%3C%2Fscript%3E`,
+  ).then((response) => response.text());
+  assert.match(redirected, /Source: redirect/);
+  assert.doesNotMatch(redirected, /<script>alert\(1\)<\/script>/);
+
   const delayed = await fetch(`${fixture.origin}/slow?ms=5`).then((response) =>
     response.json(),
   );
   assert.deepEqual(delayed, { status: "ready", waitedMs: 5 });
+
+  const boundedDelay = await fetch(`${fixture.origin}/slow?ms=999999`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(boundedDelay, { status: "ready", waitedMs: 250 });
 
   const crossFrame = await fetch(`${fixture.crossOrigin}/cross-frame`);
   assert.equal(crossFrame.status, 200);

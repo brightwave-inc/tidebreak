@@ -71,10 +71,25 @@ async function fixtureFile(name) {
   return readFile(join(fixtureRoot, name), "utf8");
 }
 
-function boundedDelay(url) {
-  const requested = Number(url.searchParams.get("ms") ?? 250);
-  if (!Number.isFinite(requested)) return 250;
-  return Math.min(Math.max(Math.round(requested), 0), 2_000);
+function fixtureDelay(url) {
+  switch (url.searchParams.get("ms")) {
+    case "0":
+      return 0;
+    case "5":
+      return 5;
+    case "25":
+      return 25;
+    case "100":
+      return 100;
+    case "500":
+      return 500;
+    case "1000":
+      return 1_000;
+    case "2000":
+      return 2_000;
+    default:
+      return 250;
+  }
 }
 
 function parseJsonBody(body) {
@@ -140,12 +155,12 @@ export async function startBrowserFixture({
       if (request.method === "GET" && url.pathname === "/redirected") {
         html(
           response,
-          `<!doctype html><title>Redirect complete</title><main><h1>Redirect complete</h1><p>Source: ${url.searchParams.get("from") ?? "unknown"}</p></main>`,
+          "<!doctype html><title>Redirect complete</title><main><h1>Redirect complete</h1><p>Source: redirect</p></main>",
         );
         return;
       }
       if (request.method === "GET" && url.pathname === "/slow") {
-        const waitedMs = boundedDelay(url);
+        const waitedMs = fixtureDelay(url);
         await new Promise((resolveDelay) => setTimeout(resolveDelay, waitedMs));
         json(response, { status: "ready", waitedMs });
         return;
