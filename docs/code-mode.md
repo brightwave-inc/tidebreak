@@ -307,7 +307,7 @@ POST            /code/sessions/{id}/interrupt | /permission-mode | /attention | 
 WS              /code/sessions/{id}/events?after=    snapshot → replay → live
                                                      (replay is capped and flags truncation;
                                                      assistant deltas ride the same socket
-                                                     as live-only frames — record 0057)
+                                                     as live-only frames — record 0058)
 WS              /code/updates                        digests, restated on connect
 
 GET             /code/approvals?state=pending

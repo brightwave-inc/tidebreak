@@ -1,4 +1,4 @@
-# 57. Assistant Deltas Are Live-Only, and Journal Replay Is Bounded
+# 58. Assistant Deltas Are Live-Only, and Journal Replay Is Bounded
 
 - Status: Accepted
 - Date: 2026-08-21
