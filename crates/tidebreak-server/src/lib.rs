@@ -143,6 +143,10 @@ use tidebreak_core::{
     ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
 };
 
+/// Public contract for desktop browser adapters. The desktop implements
+/// [`BrowserRuntime`] behind an `Arc` and installs it with
+/// [`bind`] or one of its desktop variants.
+pub use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
@@ -475,6 +479,22 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_worktree_root).put(routes::code::set_worktree_root),
         )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
+
+    // The engine-facing browser channel. Authenticated per request by the
+    // session-scoped capability bearer (see `routes::code::browser`), so this
+    // router is kept out of `require_token` below; the token never appears in
+    // a path or query, which is why navigate and snapshot are POST.
+    let browser_api = Router::new()
+        .route("/code/browser/list", get(routes::code::browser_list))
+        .route(
+            "/code/browser/navigate",
+            post(routes::code::browser_navigate),
+        )
+        .route(
+            "/code/browser/snapshot",
+            post(routes::code::browser_snapshot),
+        )
+        .with_state(state.clone());
 
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
@@ -907,7 +927,13 @@ pub fn app(state: AppState) -> Router {
             state.clone(),
             auth::require_token,
         ))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // The engine-facing browser channel authenticates each request with
+        // the per-session capability bearer its capfile carries, never the
+        // launch token, so its routes merge after `route_layer` wrapped the
+        // routes above and stay outside `require_token`. They still sit
+        // inside `require_app_origin` and CORS with the rest of the API.
+        .merge(browser_api);
     let frame_state = state.clone();
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
@@ -1134,6 +1160,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1144,7 +1171,18 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None, None).await
+    bind_inner(
+        config,
+        None,
+        mcp_servers,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -1162,6 +1200,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
         None,
         None,
         None,
@@ -1190,6 +1229,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1208,6 +1248,32 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
 ) -> Result<Server> {
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        None,
+    )
+    .await
+}
+
+/// Desktop binding with the native host bridges plus a browser runtime that
+/// must be available before code-session recovery starts.
+#[allow(clippy::too_many_arguments)]
+pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
+) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
     }
@@ -1221,6 +1287,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
+        browser_runtime,
     )
     .await
 }
@@ -1274,6 +1341,7 @@ async fn bind_inner(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1502,6 +1570,7 @@ async fn bind_inner(
         state.config.data_dir.clone(),
         state.config.code_worktree_root_default.clone(),
         code_host_tool_broker,
+        browser_runtime,
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

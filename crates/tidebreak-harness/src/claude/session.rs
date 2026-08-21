@@ -12,11 +12,12 @@ use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
+use crate::browser_channel::apply_child_env_tokio;
 use crate::child::{turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
@@ -119,7 +120,7 @@ impl ClaudeSession {
         }
         argv.extend(self.spec.extra_argv.iter().cloned());
         let mut env = self.spec.extra_env.clone();
-        env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+        env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
         let plan = LaunchPlan {
             argv,
             cwd: self.spec.worktree.clone(),
@@ -152,14 +153,13 @@ impl HarnessSession for ClaudeSession {
             .current_dir(&plan.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear();
-        for (key, value) in filter_child_env(self.spec.env.iter().cloned()) {
-            command.env(key, value);
-        }
-        for (key, value) in &plan.env {
-            command.env(key, value);
-        }
+            .stderr(Stdio::piped());
+        apply_child_env_tokio(
+            &mut command,
+            self.spec.env.iter().cloned(),
+            &plan.env,
+            self.spec.browser.as_ref(),
+        );
         let mut child = spawn_process_tree(&mut command)?;
         let mut stdin = child
             .take_stdin()
@@ -455,6 +455,7 @@ mod tests {
             approval: None,
             binary,
             sink: Arc::new(Discard),
+            browser: None,
         });
         assert!(
             session.child_pid_changes().is_some(),

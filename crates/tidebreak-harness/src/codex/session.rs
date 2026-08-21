@@ -14,10 +14,11 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
 use tokio::time::{timeout, Instant};
 use tracing::warn;
 
+use crate::browser_channel::apply_child_env_tokio;
 use crate::codex::parse::CodexStreamParser;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
+    spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef, HarnessError,
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
@@ -449,7 +450,7 @@ pub(crate) fn compose_app_server_plan(
     ];
     argv.extend(extra_argv.iter().cloned());
     let mut env = extra_env.to_vec();
-    env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
@@ -485,14 +486,13 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
         .current_dir(&plan.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear();
-    for (key, value) in filter_child_env(session.spec.env.iter().cloned()) {
-        command.env(key, value);
-    }
-    for (key, value) in &plan.env {
-        command.env(key, value);
-    }
+        .stderr(Stdio::piped());
+    apply_child_env_tokio(
+        &mut command,
+        session.spec.env.iter().cloned(),
+        &plan.env,
+        session.spec.browser.as_ref(),
+    );
     let mut child = spawn_process_tree(&mut command)?;
     let stdin = child
         .take_stdin()
@@ -1299,6 +1299,7 @@ done
             approval: None,
             binary: PathBuf::from("codex"),
             sink,
+            browser: None,
         })
     }
 
@@ -1350,6 +1351,7 @@ done
             approval: None,
             binary: binary.to_path_buf(),
             sink: Arc::new(SilentSink),
+            browser: None,
         }
     }
 

@@ -628,6 +628,7 @@ mod tests {
             approval: None,
             binary: std::path::PathBuf::from("/scripted/engine"),
             sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+            browser: None,
         })
         .await
         .unwrap();
