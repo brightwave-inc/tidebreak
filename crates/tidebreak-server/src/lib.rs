@@ -476,28 +476,6 @@ pub fn app(state: AppState) -> Router {
         )
         .route_layer(axum::middleware::from_fn(auth::require_admin));
 
-    // The engine-facing browser channel. Authenticated per request by the
-    // session-scoped capability bearer (see `routes::code::browser`), so this
-    // router is kept out of `require_token` below; the token never appears in
-    // a path or query, which is why every operation is a POST.
-    let browser_api = Router::new()
-        .route("/code/browser/list", post(routes::code::browser_list))
-        .route(
-            "/code/browser/navigate",
-            post(routes::code::browser_navigate),
-        )
-        .route(
-            "/code/browser/snapshot",
-            post(routes::code::browser_snapshot),
-        )
-        .route("/code/browser/wait", post(routes::code::browser_wait))
-        .route(
-            "/code/browser/screenshot",
-            post(routes::code::browser_screenshot),
-        )
-        .route("/code/browser/act", post(routes::code::browser_act))
-        .with_state(state.clone());
-
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
         .route(
@@ -929,13 +907,7 @@ pub fn app(state: AppState) -> Router {
             state.clone(),
             auth::require_token,
         ))
-        .with_state(state.clone())
-        // The engine-facing browser channel authenticates each request with
-        // the per-session capability bearer its capfile carries, never the
-        // launch token, so its routes merge after `route_layer` wrapped the
-        // routes above and stay outside `require_token`. They still sit
-        // inside `require_app_origin` and CORS with the rest of the API.
-        .merge(browser_api);
+        .with_state(state.clone());
     let frame_state = state.clone();
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
@@ -1162,7 +1134,6 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
-        None,
     )
     .await
 }
@@ -1173,7 +1144,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None, None, None).await
+    bind_inner(config, None, mcp_servers, None, None, None, None, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -1191,7 +1162,6 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
-        None,
         None,
         None,
         None,
@@ -1215,7 +1185,6 @@ pub async fn bind_configured_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_servers,
-        None,
         None,
         None,
         None,
@@ -1252,10 +1221,6 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
-        // The desktop's browser engine adapter arrives with the native
-        // driver slice; until then every embedding binds without one and
-        // the browser routes answer 501.
-        None,
     )
     .await
 }
@@ -1309,7 +1274,6 @@ async fn bind_inner(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
-    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1537,18 +1501,6 @@ async fn bind_inner(
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());
-    // The in-app browser adapter, where the embedding supplies one. The
-    // revocation hook makes session end synchronous end-to-end: the same
-    // `browser_tokens.revoke` that invalidates the session's bearer tells
-    // the native side to drop its capability before the end call returns.
-    if let Some(browser_runtime) = browser_runtime {
-        let revoked_runtime = browser_runtime.clone();
-        let hook: code::browser_channel::RevocationHook = Arc::new(move |session| {
-            revoked_runtime.revoke_session(session);
-        });
-        code.browser_tokens.set_revocation_hook(hook);
-        state.set_browser_runtime(browser_runtime);
-    }
     // Before `initialize`: a boot-file or persisted replacement derives the
     // plugin slice in the same pass, so bundled servers come up with
     // everything else instead of after a second reconcile.
