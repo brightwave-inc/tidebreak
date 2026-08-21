@@ -914,7 +914,8 @@ mod tests {
         } = map_native_error(
             Some("copied-browser-id"),
             "browser session belongs to a different workspace: secret-scope".to_owned(),
-        ) else {
+        )
+        else {
             panic!("a scope mismatch must fail");
         };
         assert_eq!(error_code, "unknown_browser");
@@ -924,8 +925,7 @@ mod tests {
         let StoredResolution::Failed { error_code, .. } = map_native_error(
             Some("browser-1"),
             "browser is controlled by another agent".to_owned(),
-        )
-        else {
+        ) else {
             panic!("another controller must fail");
         };
         assert_eq!(error_code, "browser_busy");
