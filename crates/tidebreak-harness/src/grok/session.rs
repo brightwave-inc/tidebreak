@@ -498,9 +498,15 @@ mod tests {
             !instructions.contains("TIDEBREAK_BROWSER_CAPFILE"),
             "capfile env key must not leak into prompt"
         );
+        // The word "capability" appears in the instructions as a normal
+        // English word; only the capfile path and env key must be absent.
         assert!(
-            !instructions.contains("cap"),
-            "no capfile-related substring in instructions"
+            !instructions.contains("cap.json"),
+            "capfile filename must not leak into prompt"
+        );
+        assert!(
+            !instructions.contains("capfile"),
+            "capfile term must not leak into prompt"
         );
     }
 
