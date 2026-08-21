@@ -348,9 +348,24 @@ pub(crate) fn build_request_json_for(
     req: &ChatRequest,
     profile: ResponsesProfile,
 ) -> Result<Value> {
-    if profile == ResponsesProfile::OpenAi && req.vendor_web_search.is_some() {
+    // Responses has no wire field for `VendorWebSearch::max_uses`, so a request
+    // that hands the model a hosted search alongside its own tools spends an
+    // unbounded number of searches inside one agent turn. That shape stays
+    // refused.
+    //
+    // A request carrying no tools of its own is the other case: it is one
+    // dedicated search the host issued and will not continue, so the host counts
+    // the calls and the budget is enforced before egress rather than on the
+    // wire. This is the same predicate the Gemini adapter already applies in
+    // `declares_search_grounding`, for the same reason.
+    if profile == ResponsesProfile::OpenAi
+        && req.vendor_web_search.is_some()
+        && !req.tools.is_empty()
+    {
         return Err(AgentError::Provider(
-            "Responses API cannot enforce the vendor web-search max_uses budget".into(),
+            "Responses API cannot enforce the vendor web-search max_uses budget \
+             alongside host tools"
+                .into(),
         ));
     }
 
@@ -388,9 +403,9 @@ pub(crate) fn build_request_json_for(
     }
     // xAI's vendor search is a hosted tool, declared alongside the function
     // tools rather than instead of them: the model may still call anything the
-    // host advertised in the same response. OpenAI requests carrying this
-    // capability are rejected above because that endpoint cannot enforce the
-    // mandatory per-turn `max_uses` budget before provider egress.
+    // host advertised in the same response. An OpenAI request reaches here only
+    // when it carries no tools of its own — the guard above refused the mixed
+    // shape — so on that profile this is the sole tool on the request.
     if req.vendor_web_search.is_some() {
         let vendor_tool = json!({ "type": VENDOR_WEB_SEARCH_TOOL });
         match body["tools"].as_array_mut() {
@@ -1364,6 +1379,35 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item["name"] == "web_search"));
+    }
+
+    /// The dedicated search sub-request the host issues on the model's behalf.
+    ///
+    /// It is the mixed shape that Responses cannot bound, not the hosted tool
+    /// itself: with no other tool on the request there is nothing for the model
+    /// to continue into, so the host's own call count is the budget. Refusing
+    /// this shape too would leave OpenAI models unable to search at all.
+    #[test]
+    fn openai_accepts_a_hosted_search_on_a_request_carrying_no_other_tools() {
+        let req = ChatRequest {
+            model: "gpt-5.6-sol".into(),
+            messages: vec![ChatMessage::text(Role::User, "who won the match")],
+            tools: Vec::new(),
+            vendor_web_search: Some(VendorWebSearch { max_uses: 1 }),
+            ..Default::default()
+        };
+
+        let body = build_request_json(&req)
+            .expect("a tool-free search sub-request is the shape the host can bound");
+        assert_eq!(body["tools"], json!([{"type":"web_search"}]));
+
+        // Nothing to collide with: the rename only exists to keep one request
+        // from carrying two different tools named `web_search`.
+        assert!(!body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "web_search_prior"));
     }
 
     #[test]

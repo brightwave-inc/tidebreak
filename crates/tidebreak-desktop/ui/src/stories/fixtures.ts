@@ -19,6 +19,8 @@ import type {
   PendingUserQuestions,
   TaskPlan,
   ToolActionPreview,
+  WebSearchConfigInfo,
+  WebSearchCredentialReadiness,
 } from "@/api";
 import type { CodeDeliveryNotification } from "@/code/CodeDeliveryStore";
 
@@ -871,4 +873,53 @@ export const deliveryNotifications: CodeDeliveryNotification[] = [
       number: 2247,
     },
   },
+];
+
+/**
+ * Web-search settings, one entry per verdict the panel can reach.
+ *
+ * The interesting axis is not "configured or not" but who ends up searching:
+ * an engine on this host, or the model the chat is already running on. Every
+ * entry below is a state a reader can actually land in.
+ */
+export const webSearchNoProvider: WebSearchConfigInfo = {
+  mode: "automatic",
+  timeout_ms: 20000,
+  has_credential: false,
+  available: false,
+};
+
+export const webSearchKeyMissing: WebSearchConfigInfo = {
+  ...webSearchNoProvider,
+  provider: "brave",
+};
+
+export const webSearchReady: WebSearchConfigInfo = {
+  mode: "automatic",
+  provider: "brave",
+  timeout_ms: 20000,
+  has_credential: true,
+  available: true,
+};
+
+export const webSearchVendorOnly: WebSearchConfigInfo = {
+  ...webSearchNoProvider,
+  mode: "vendor",
+};
+
+export const webSearchHostOnlyUnconfigured: WebSearchConfigInfo = {
+  ...webSearchNoProvider,
+  mode: "host",
+  provider: "exa",
+};
+
+export const webSearchOff: WebSearchConfigInfo = {
+  ...webSearchNoProvider,
+  mode: "off",
+};
+
+export const webSearchCredentials: WebSearchCredentialReadiness[] = [
+  { provider: "exa", has_credential: false },
+  { provider: "tavily", has_credential: false },
+  { provider: "brave", has_credential: true },
 ];
