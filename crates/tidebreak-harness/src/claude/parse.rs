@@ -18,6 +18,12 @@ use crate::HarnessEvent;
 /// Longest unrecognized payload kept for the debug log.
 const MAX_UNRECOGNIZED_LOG: usize = 512;
 
+/// Longest assembled tool-argument JSON held while a call streams in.
+///
+/// A `Write` streams a whole file through this channel, and none of it is
+/// needed to name the call, so the buffer stops rather than grows.
+const MAX_TOOL_INPUT_JSON: usize = 16 * 1024;
+
 /// Incremental parser for one Claude Code print-mode stream.
 #[derive(Debug, Default)]
 pub struct ClaudeStreamParser {
@@ -28,7 +34,29 @@ pub struct ClaudeStreamParser {
     started_tools: HashMap<String, ToolDetail>,
     /// call id → detail to correct the started call with, once it resolves.
     late_details: HashMap<String, ToolDetail>,
+    /// open block → a call opened with no arguments yet, held until they
+    /// assemble.
+    open_blocks: HashMap<BlockKey, OpenToolCall>,
     emitted_session: bool,
+}
+
+/// Which content block a stream event belongs to.
+///
+/// Two subagents stream at once (decision 52) and each numbers its blocks
+/// from zero, so the index alone does not identify one. The `Task` call the
+/// lines run inside separates them.
+type BlockKey = (Option<String>, u64);
+
+/// A tool call the engine has opened but not yet described.
+#[derive(Debug)]
+struct OpenToolCall {
+    call_id: String,
+    name: String,
+    parent_call_id: Option<String>,
+    /// `input_json_delta` fragments, joined in arrival order.
+    input_json: String,
+    /// The fragments outgrew [`MAX_TOOL_INPUT_JSON`] and were dropped.
+    overflowed: bool,
 }
 
 /// Result of parsing a whole fixture or a finished stream.
@@ -189,7 +217,16 @@ impl ClaudeStreamParser {
                             }]
                         }
                     }
-                    Some("input_json_delta") | Some("signature_delta") => Vec::new(),
+                    Some("input_json_delta") => {
+                        if let (Some(key), Some(fragment)) = (
+                            block_key(value, event),
+                            delta.get("partial_json").and_then(Value::as_str),
+                        ) {
+                            self.accumulate_tool_input(&key, fragment);
+                        }
+                        Vec::new()
+                    }
+                    Some("signature_delta") => Vec::new(),
                     Some(other) => {
                         self.count_unrecognized(&format!("stream_event/delta/{other}"), &delta);
                         Vec::new()
@@ -201,11 +238,15 @@ impl ClaudeStreamParser {
                 let block = event.get("content_block").cloned().unwrap_or(Value::Null);
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let parent = parent_call_id(value);
-                    return self.emit_tool_started(&block, parent);
+                    return self.open_tool_call(&block, parent, block_key(value, event));
                 }
                 Vec::new()
             }
-            "message_start" | "message_delta" | "message_stop" | "content_block_stop" => Vec::new(),
+            "content_block_stop" => match block_key(value, event) {
+                Some(key) => self.close_tool_block(&key),
+                None => Vec::new(),
+            },
+            "message_start" | "message_delta" | "message_stop" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("stream_event/{other}"), event);
                 Vec::new()
@@ -272,6 +313,10 @@ impl ClaudeStreamParser {
                     let preview = tool_result_preview(&block);
                     if !call_id.is_empty() {
                         let detail = self.late_details.remove(&call_id);
+                        // A call whose arguments never assembled is still
+                        // held. Its start has to reach the transcript before
+                        // its completion does.
+                        events.extend(self.flush_open_call(&call_id));
                         events.push(HarnessEvent::ToolCompleted {
                             call_id,
                             outcome: if is_error {
@@ -333,29 +378,118 @@ impl ClaudeStreamParser {
         }]
     }
 
+    /// Take one view of a tool-use block from an `assistant` message.
     fn emit_tool_started(&mut self, block: &Value, parent: Option<String>) -> Vec<HarnessEvent> {
-        let call_id = block
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+        let call_id = tool_call_id(block);
         if call_id.is_empty() {
             return Vec::new();
         }
-        let name = block
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
+        let name = tool_name(block);
         let input = block.get("input").cloned().unwrap_or(Value::Null);
         let detail = tool_detail(&name, &input);
-        // `content_block_start` opens the call with `input: {}` and the
-        // arguments stream in after it, so the first view of a call names
-        // nothing. The `assistant` message repeats the same block with the
-        // assembled input; that later view is the correction, and it rides
-        // the call's `ToolCompleted`. A `Task` detail stays `Other` at both
-        // views (equal specificity), so it upgrades on any change: the
-        // assembled description is the subagent's display name (decision 52).
+        self.record_tool_view(call_id, &name, parent, detail)
+    }
+
+    /// Hold a call the engine just opened until its arguments assemble.
+    ///
+    /// `content_block_start` opens the call with `input: {}` and the
+    /// arguments stream in after it as `input_json_delta`, so the opening
+    /// view names nothing. Starting the call there leaves a supervising UI
+    /// showing a nameless card for as long as the tool runs — a `Bash` call
+    /// that times out after 60s spends all 60s unlabelled. The call waits
+    /// instead for the first view that carries its arguments: whichever of
+    /// `content_block_stop` and the `assistant` message repeating the block
+    /// arrives first. Both land before the engine runs the tool.
+    fn open_tool_call(
+        &mut self,
+        block: &Value,
+        parent: Option<String>,
+        key: Option<BlockKey>,
+    ) -> Vec<HarnessEvent> {
+        let call_id = tool_call_id(block);
+        if call_id.is_empty() {
+            return Vec::new();
+        }
+        let name = tool_name(block);
+        let input = block.get("input").cloned().unwrap_or(Value::Null);
+        let holdable =
+            key.filter(|_| arguments_pending(&input) && !self.started_tools.contains_key(&call_id));
+        let Some(key) = holdable else {
+            let detail = tool_detail(&name, &input);
+            return self.record_tool_view(call_id, &name, parent, detail);
+        };
+        self.open_blocks.insert(
+            key,
+            OpenToolCall {
+                call_id,
+                name,
+                parent_call_id: parent,
+                input_json: String::new(),
+                overflowed: false,
+            },
+        );
+        Vec::new()
+    }
+
+    /// Buffer one `input_json_delta` fragment for the call held at `key`.
+    fn accumulate_tool_input(&mut self, key: &BlockKey, fragment: &str) {
+        let Some(open) = self.open_blocks.get_mut(key) else {
+            return;
+        };
+        if open.overflowed {
+            return;
+        }
+        if open.input_json.len() + fragment.len() > MAX_TOOL_INPUT_JSON {
+            open.overflowed = true;
+            open.input_json = String::new();
+            return;
+        }
+        open.input_json.push_str(fragment);
+    }
+
+    /// Start the call held at `key`, named by the arguments it streamed.
+    fn close_tool_block(&mut self, key: &BlockKey) -> Vec<HarnessEvent> {
+        let Some(open) = self.open_blocks.remove(key) else {
+            return Vec::new();
+        };
+        // Arguments that overran the buffer, or that never parsed, leave the
+        // call as unnamed as it was when it opened. The correction on
+        // `ToolCompleted` still applies.
+        let input = if open.overflowed {
+            Value::Null
+        } else {
+            serde_json::from_str::<Value>(&open.input_json).unwrap_or(Value::Null)
+        };
+        let detail = tool_detail(&open.name, &input);
+        self.record_tool_view(open.call_id, &open.name, open.parent_call_id, detail)
+    }
+
+    /// Start a held call early, when something downstream needs it started.
+    fn flush_open_call(&mut self, call_id: &str) -> Vec<HarnessEvent> {
+        let held = self
+            .open_blocks
+            .iter()
+            .find_map(|(key, open)| (open.call_id == call_id).then(|| key.clone()));
+        match held {
+            Some(key) => self.close_tool_block(&key),
+            None => Vec::new(),
+        }
+    }
+
+    /// Fold one view of a call into the stream.
+    ///
+    /// The first view starts the call. A later, more specific one is a
+    /// correction and rides the call's `ToolCompleted`. A `Task` detail
+    /// stays `Other` at every view (equal specificity), so it upgrades on
+    /// any change: the assembled description is the subagent's display name
+    /// (decision 52).
+    fn record_tool_view(
+        &mut self,
+        call_id: String,
+        name: &str,
+        parent: Option<String>,
+        detail: ToolDetail,
+    ) -> Vec<HarnessEvent> {
         if let Some(started) = self.started_tools.get(&call_id) {
             let corrected = detail.specificity() > started.specificity()
                 || (name == "Task"
@@ -367,10 +501,11 @@ impl ClaudeStreamParser {
             }
             return Vec::new();
         }
+        self.open_blocks.retain(|_, open| open.call_id != call_id);
         self.started_tools.insert(call_id.clone(), detail.clone());
         vec![HarnessEvent::ToolStarted {
             call_id,
-            name,
+            name: name.to_owned(),
             detail,
             parent_call_id: parent,
         }]
@@ -396,6 +531,36 @@ impl ClaudeStreamParser {
             "unrecognized engine event payload"
         );
     }
+}
+
+/// The block a stream event belongs to: its index, under the `Task` call the
+/// line runs inside.
+fn block_key(value: &Value, event: &Value) -> Option<BlockKey> {
+    let index = event.get("index").and_then(Value::as_u64)?;
+    Some((parent_call_id(value), index))
+}
+
+/// Engine-native id of a `tool_use` block.
+fn tool_call_id(block: &Value) -> String {
+    block
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Tool name of a `tool_use` block.
+fn tool_name(block: &Value) -> String {
+    block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// Whether a view of a call still says nothing about its arguments.
+fn arguments_pending(input: &Value) -> bool {
+    input.as_object().is_none_or(serde_json::Map::is_empty)
 }
 
 /// The top-level `parent_tool_use_id` a subagent's lines carry. The parent's
@@ -599,5 +764,53 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    /// The captured streams repeat a finished block on an `assistant` line
+    /// just before its `content_block_stop`, so that view is what names a
+    /// call in practice. The arguments are the engine's own guarantee
+    /// though: they stream in as `input_json_delta` and are complete at the
+    /// stop. Without the `assistant` line the call still starts named.
+    #[test]
+    fn a_call_starts_named_from_the_streamed_arguments_alone() {
+        let input = r#"
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"comm"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"and\": \"ls -R\"}"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+"#;
+        let out = ClaudeStreamParser::parse_ndjson(input);
+        assert_eq!(
+            out.events,
+            vec![HarnessEvent::ToolStarted {
+                call_id: "toolu_1".into(),
+                name: "Bash".into(),
+                detail: ToolDetail::Command {
+                    cmd: "ls -R".into(),
+                    cwd: String::new(),
+                },
+                parent_call_id: None,
+            }]
+        );
+    }
+
+    /// Holding a call until its arguments assemble must not lose it. A
+    /// result for a call still in flight starts it first, so no completion
+    /// ever lands on a call the transcript never opened.
+    #[test]
+    fn a_result_starts_a_call_whose_arguments_never_assembled() {
+        let input = r#"
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}}
+"#;
+        let out = ClaudeStreamParser::parse_ndjson(input);
+        assert!(matches!(
+            out.events.first(),
+            Some(HarnessEvent::ToolStarted { call_id, .. }) if call_id == "toolu_1"
+        ));
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::ToolCompleted { call_id, .. }) if call_id == "toolu_1"
+        ));
     }
 }

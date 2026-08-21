@@ -258,13 +258,16 @@ bounded):
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `AttentionChanged` | state, source |
 
-Engines open a tool call before its arguments finish streaming, so the
-`ToolDetail` on `ToolStarted` can name nothing and the transcript line falls
-back to the tool's name. `ToolCompleted` carries the detail rebuilt from the
-complete arguments as a correction, and the renderer takes it unless it says
-less than what the line already shows. An adapter whose completion payload
-carries no arguments leaves it unset — Grok's `tool_call` frame already
-carries the whole `rawInput`, so it has nothing to correct.
+Engines open a tool call before its arguments finish streaming. A supervisor
+reads the call while it runs, so an adapter waits for the first view that
+carries the arguments and starts the call there — still before the engine
+runs the tool. Claude Code assembles them at `content_block_stop`, and
+opencode publishes them on the tool part's `running` state.
+
+`ToolCompleted` carries the detail rebuilt from the complete arguments as a
+correction for a call that started with nothing to say, and the renderer
+takes it unless it says less than what the line already shows. An adapter
+whose completion payload carries no arguments leaves it unset.
 
 ## Server API surface
 

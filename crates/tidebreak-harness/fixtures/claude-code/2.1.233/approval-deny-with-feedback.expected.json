@@ -11,18 +11,14 @@
     "name": "Write",
     "detail": {
       "kind": "file_edit",
-      "path": ""
+      "path": "/workspace/probe.txt"
     }
   },
   {
     "type": "tool_completed",
     "call_id": "toolu_01Pwo7nMXPQZWnBMyeTuL8ts",
     "outcome": "failed",
-    "preview": "no — use the fixtures directory instead",
-    "detail": {
-      "kind": "file_edit",
-      "path": "/workspace/probe.txt"
-    }
+    "preview": "no — use the fixtures directory instead"
   },
   {
     "type": "assistant_delta",

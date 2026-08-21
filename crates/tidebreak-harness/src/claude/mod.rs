@@ -201,22 +201,25 @@ mod tests {
     #[test]
     fn fixture_replay_tool_use() {
         let (events, _) = replay("tool-use");
-        // `content_block_start` opens the call with `input: {}`, so the
-        // started detail names nothing. The complete arguments arrive on the
-        // `assistant` message and ride the completion as a correction —
-        // without it the transcript line falls back to "Read".
+        // `content_block_start` opens the call with `input: {}` and the
+        // arguments stream in after it, so the call is held until they
+        // assemble. The start names the file it reads while the read is
+        // still running, and the completion needs no correction.
         assert!(events.iter().any(|event| matches!(
             event,
-            HarnessEvent::ToolStarted { name, detail, .. }
-                if name == "Read" && detail.specificity() == 0
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            HarnessEvent::ToolCompleted {
-                detail: Some(tidebreak_core::ToolDetail::FileRead { path }),
+            HarnessEvent::ToolStarted {
+                name,
+                detail: tidebreak_core::ToolDetail::FileRead { path },
                 ..
-            } if path == "/workspace/README.md"
+            } if name == "Read" && path == "/workspace/README.md"
         )));
+        let read_start = events.iter().position(
+            |event| matches!(event, HarnessEvent::ToolStarted { name, .. } if name == "Read"),
+        );
+        let read_end = events
+            .iter()
+            .position(|event| matches!(event, HarnessEvent::ToolCompleted { detail: None, .. }));
+        assert!(read_start < read_end, "the call starts before it resolves");
     }
 
     /// The ring's numerator is one prompt, not the turn's summed spend.

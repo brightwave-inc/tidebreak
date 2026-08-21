@@ -11,7 +11,7 @@
     "name": "Write",
     "detail": {
       "kind": "file_edit",
-      "path": ""
+      "path": "/workspace/probe.txt"
     }
   },
   {
@@ -23,11 +23,7 @@
     "type": "tool_completed",
     "call_id": "toolu_01NHAnSCW3oCoKt9Y5yijZtC",
     "outcome": "failed",
-    "preview": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet.",
-    "detail": {
-      "kind": "file_edit",
-      "path": "/workspace/probe.txt"
-    }
+    "preview": "Claude requested permissions to write to /workspace/probe.txt, but you haven't granted it yet."
   },
   {
     "type": "assistant_delta",

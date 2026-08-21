@@ -378,9 +378,20 @@ impl OpencodeStreamParser {
         let input = state.get("input").cloned().unwrap_or(Value::Null);
         match status {
             "pending" | "running" => {
-                if !self.started_tools.insert(call_id.clone()) {
+                if self.started_tools.contains(&call_id) {
                     return Vec::new();
                 }
+                // The `pending` part opens the call with `input: {}` and no
+                // `time.start`: the model is still writing the arguments and
+                // the tool has not run yet. Starting the call there leaves a
+                // supervising UI showing a nameless card for as long as the
+                // tool runs. The `running` part carries the assembled
+                // arguments and the start time, so the call waits for it.
+                // A call that resolves without one still starts below.
+                if status == "pending" && arguments_pending(&input) {
+                    return Vec::new();
+                }
+                self.started_tools.insert(call_id.clone());
                 vec![HarnessEvent::ToolStarted {
                     call_id,
                     name: name.clone(),
@@ -418,9 +429,10 @@ impl OpencodeStreamParser {
                     .or(if error.is_empty() { None } else { Some(error) })
                     .unwrap_or("");
                 // The `pending` part that opens the call carries `input: {}`;
-                // the arguments land on the `running` and terminal parts. The
-                // terminal part is the correction for the call already
-                // started, and the detail above for one that was not.
+                // the arguments land on the `running` and terminal parts.
+                // The terminal part starts a call that never reported a
+                // `running` part, and corrects one whose start still names
+                // nothing.
                 let detail = tool_detail(&name, &input);
                 events.push(HarnessEvent::ToolCompleted {
                     call_id,
@@ -618,6 +630,11 @@ fn permission_id_from_path(path: &str) -> Option<String> {
         return None;
     }
     Some(id.to_owned())
+}
+
+/// Whether a view of a call still says nothing about its arguments.
+fn arguments_pending(input: &Value) -> bool {
+    input.as_object().is_none_or(serde_json::Map::is_empty)
 }
 
 fn tool_detail(name: &str, input: &Value) -> ToolDetail {
