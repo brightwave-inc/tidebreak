@@ -822,30 +822,11 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
         // NSPNGFileType = 4
         let png_type: usize = 4;
 
-        // [NSNumber numberWithFloat: 1.0] for compression property
-        let num_cls = get_class(b"NSNumber ");
-        let num = objc_msgSend(
-            num_cls,
-            sel("numberWithFloat:").as_ptr().cast(),
-            1.0f64,
-        );
-
-        // NSImageCompressionFactor key
         let bmp_cls = get_class(b"NSBitmapImageRep ");
-        let key = objc_msgSend(bmp_cls, sel("NSImageCompressionFactor").as_ptr().cast());
-
-        // [NSDictionary dictionaryWithObject:num forKey:key]
-        let dict_cls = get_class(b"NSDictionary ");
-        let props = objc_msgSend(
-            dict_cls,
-            sel("dictionaryWithObject:forKey:").as_ptr().cast(),
-            num,
-            key,
-        );
 
         // [NSBitmapImageRep representationOfImageRepsInArray:reps
         //                                      usingType:png_type
-        //                                    properties:props]
+        //                                    properties:nil]
         let png_data = objc_msgSend(
             bmp_cls,
             sel("representationOfImageRepsInArray:usingType:properties:")
@@ -853,7 +834,7 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
                 .cast(),
             reps,
             png_type,
-            props,
+            std::ptr::null_mut::<c_void>(),
         );
         if png_data.is_null() {
             return Err("screenshot PNG conversion failed".to_owned());
