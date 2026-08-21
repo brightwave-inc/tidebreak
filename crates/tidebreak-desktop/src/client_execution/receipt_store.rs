@@ -33,6 +33,7 @@ const MANUAL_FOLDER_CONNECT_PREFIX: &str = "manual-folder-connect-";
 const OUTPUT_EXPORT_PREFIX: &str = "output-export-";
 const OUTPUT_WRITEBACK_PREFIX: &str = "output-writeback-";
 const COMPUTER_USE_PREFIX: &str = "computer-use-";
+const FOREGROUND_BROWSER_PREFIX: &str = "foreground-browser-";
 const MAX_SAFE_ROOT_DISPLAY_BYTES: usize = 1_024;
 const OUTPUT_EXPORT_RECEIPT_VERSION: u32 = 1;
 const OUTPUT_WRITEBACK_RECEIPT_VERSION: u32 = 1;
@@ -119,6 +120,27 @@ pub(super) enum DispatchRecovery {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct ComputerUseReceipt {
+    version: u32,
+    pub(super) chat_id: ChatId,
+    pub(super) call_id: CallId,
+    pub(super) executor_id: Uuid,
+    pub(super) lease_token: Uuid,
+    #[serde(default)]
+    pub(super) phase: FolderOperationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution: Option<StoredResolution>,
+}
+
+/// Durable receipt for one foreground browser tool call.
+///
+/// The receipt deliberately stores neither a browser workspace nor a native
+/// capability. Recovery derives `foreground-chat:<chat_id>` from the current
+/// persisted chat before every claim and dispatch. An interrupted dispatch is
+/// always terminalized because navigation may already have started and an
+/// observation may already have disclosed page data.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) struct ForegroundBrowserReceipt {
     version: u32,
     pub(super) chat_id: ChatId,
     pub(super) call_id: CallId,
@@ -393,6 +415,21 @@ impl std::fmt::Debug for ComputerUseReceipt {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ComputerUseReceipt")
+            .field("version", &self.version)
+            .field("chat_id", &self.chat_id)
+            .field("call_id", &self.call_id)
+            .field("executor_id", &self.executor_id)
+            .field("lease_token", &"[redacted]")
+            .field("phase", &self.phase)
+            .field("resolution", &self.resolution)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ForegroundBrowserReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ForegroundBrowserReceipt")
             .field("version", &self.version)
             .field("chat_id", &self.chat_id)
             .field("call_id", &self.call_id)
@@ -810,6 +847,33 @@ impl ComputerUseReceipt {
     }
 }
 
+impl ForegroundBrowserReceipt {
+    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+        Self {
+            version: RECEIPT_VERSION,
+            chat_id,
+            call_id,
+            executor_id,
+            lease_token: Uuid::new_v4(),
+            phase: FolderOperationPhase::NotStarted,
+            resolution: None,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != RECEIPT_VERSION
+            || self.chat_id.0.is_nil()
+            || self.call_id.0.is_nil()
+            || self.executor_id.is_nil()
+            || self.lease_token.is_nil()
+            || (self.resolution.is_some() && self.phase != FolderOperationPhase::DispatchStarted)
+        {
+            return Err(invalid_data("invalid foreground-browser receipt"));
+        }
+        Ok(())
+    }
+}
+
 impl DelegatedFileReadReceipt {
     pub(super) fn new(call_id: CallId, executor_id: Uuid) -> Self {
         Self {
@@ -906,6 +970,7 @@ impl ReceiptStore {
         store.load_output_exports()?;
         store.load_output_writebacks()?;
         store.load_computer_uses()?;
+        store.load_foreground_browsers()?;
         Ok(store)
     }
 
@@ -1000,6 +1065,22 @@ impl ReceiptStore {
         )
     }
 
+    pub(super) fn save_foreground_browser(
+        &self,
+        receipt: &ForegroundBrowserReceipt,
+    ) -> io::Result<()> {
+        receipt.validate()?;
+        let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(invalid_data("foreground-browser receipt is too large"));
+        }
+        write_atomically(
+            &self.directory,
+            &self.foreground_browser_receipt_path(receipt.call_id),
+            &bytes,
+        )
+    }
+
     pub(super) fn save_output_writeback(&self, receipt: &OutputWritebackReceipt) -> io::Result<()> {
         receipt.validate()?;
         let bytes = serde_json::to_vec(receipt).map_err(invalid_data)?;
@@ -1064,6 +1145,14 @@ impl ReceiptStore {
         }
     }
 
+    pub(super) fn remove_foreground_browser(&self, call_id: CallId) -> io::Result<()> {
+        match fs::remove_file(self.foreground_browser_receipt_path(call_id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn remove_manual_connect(
         &self,
         change_id: RootAttachmentChangeId,
@@ -1099,6 +1188,12 @@ impl ReceiptStore {
                 continue;
             }
             if file_name.starts_with(OUTPUT_WRITEBACK_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(COMPUTER_USE_PREFIX) {
+                continue;
+            }
+            if file_name.starts_with(FOREGROUND_BROWSER_PREFIX) {
                 continue;
             }
             if file_name.starts_with('.') && file_name.ends_with(".tmp") {
@@ -1369,6 +1464,50 @@ impl ReceiptStore {
         Ok(receipts)
     }
 
+    pub(super) fn load_foreground_browsers(&self) -> io::Result<Vec<ForegroundBrowserReceipt>> {
+        let mut receipts = Vec::new();
+        let mut call_ids = HashSet::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return Err(invalid_data("invalid client-execution receipt name"));
+            };
+            let Some(call_id) = file_name
+                .strip_prefix(FOREGROUND_BROWSER_PREFIX)
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if receipts.len() >= MAX_RECEIPTS {
+                return Err(invalid_data("too many pending foreground-browser receipts"));
+            }
+            let call_id = call_id
+                .parse::<Uuid>()
+                .map(CallId::from)
+                .map_err(invalid_data)?;
+            validate_private_file(&entry.path(), MAX_RECEIPT_BYTES)?;
+            let mut bytes = Vec::new();
+            File::open(entry.path())?
+                .take((MAX_RECEIPT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_RECEIPT_BYTES {
+                return Err(invalid_data("foreground-browser receipt is too large"));
+            }
+            let receipt: ForegroundBrowserReceipt =
+                serde_json::from_slice(&bytes).map_err(invalid_data)?;
+            receipt.validate()?;
+            if receipt.call_id != call_id || !call_ids.insert(call_id) {
+                return Err(invalid_data(
+                    "foreground-browser receipt identity mismatch",
+                ));
+            }
+            receipts.push(receipt);
+        }
+        receipts.sort_by_key(|receipt| receipt.call_id.to_string());
+        Ok(receipts)
+    }
+
     pub(super) fn load_output_writebacks(&self) -> io::Result<Vec<OutputWritebackReceipt>> {
         let mut receipts = Vec::new();
         let mut call_ids = HashSet::new();
@@ -1442,6 +1581,11 @@ impl ReceiptStore {
     fn computer_use_receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory
             .join(format!("{COMPUTER_USE_PREFIX}{call_id}.json"))
+    }
+
+    fn foreground_browser_receipt_path(&self, call_id: CallId) -> PathBuf {
+        self.directory
+            .join(format!("{FOREGROUND_BROWSER_PREFIX}{call_id}.json"))
     }
 }
 

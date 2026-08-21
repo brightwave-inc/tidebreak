@@ -25,6 +25,7 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 use self::folder_operations::granted_folder_capabilities;
 
+pub(crate) mod browser;
 pub(crate) mod computer_use;
 mod control_plane;
 pub(crate) mod delegated_file_read;
@@ -41,8 +42,8 @@ pub(crate) use receipt_store::ReceiptStore;
 use receipt_store::{
     delegated_file_content_fits_server, ComputerUseReceipt, DelegatedFileFailureReason,
     DelegatedFileReadReceipt, DelegatedFileResolution, DispatchRecovery, FolderAccessIntent,
-    FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt, ManualFolderConnectReceipt,
-    ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
+    FolderAccessReceipt, FolderOperationPhase, FolderOperationReceipt, ForegroundBrowserReceipt,
+    ManualFolderConnectReceipt, ProductRootAttachmentSync, RegistrationPhase, StoredResolution,
 };
 pub(crate) use receipt_store::{
     OutputExportFailureReason, OutputExportPhase, OutputExportReceipt, OutputExportTerminal,
