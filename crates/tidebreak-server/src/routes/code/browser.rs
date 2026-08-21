@@ -37,6 +37,95 @@ use crate::error::ServerError;
 use crate::extract::Json;
 use crate::state::AppState;
 
+pub async fn browser_list(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserListArgs>,
+) -> Result<Json<BrowserListResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .list(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_navigate(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserNavigateArgs>,
+) -> Result<Json<BrowserNavigateResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .navigate(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_snapshot(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserSnapshotArgs>,
+) -> Result<Json<BrowserPageSnapshot>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .snapshot(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_wait(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserWaitArgs>,
+) -> Result<Json<BrowserWaitResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .wait_for(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_screenshot(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserScreenshotArgs>,
+) -> Result<Json<BrowserScreenshotResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .screenshot(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_act(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserActArgs>,
+) -> Result<Json<BrowserActResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .act(&subject, args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
 // ── shared refusal ladder ───────────────────────────────────────────────────
 
 /// Resolve the capability bearer to a live, in-scope [`BrowserSubject`].
