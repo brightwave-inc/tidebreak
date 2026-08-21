@@ -4,7 +4,7 @@
 //! the same flag the approval channel already uses. A stdio MCP server is:
 //!
 //! ```json
-//! {"type":"stdio","command":"tidebreak","args":["browser-mcp"]}
+//! {"type":"stdio","command":"/abs/path/to/tidebreak","args":["browser-mcp"]}
 //! ```
 //!
 //! The child process inherits `TIDEBREAK_BROWSER_CAPFILE` from the engine
@@ -23,13 +23,14 @@ pub const BROWSER_MCP_SERVER: &str = "tb-browser";
 
 /// The `--mcp-config` JSON entry for the browser stdio MCP server.
 ///
+/// `bridge_command` is the absolute path from [`BrowserChannelSpec::bridge_command`].
 /// The child inherits `TIDEBREAK_BROWSER_CAPFILE` from the engine process
 /// environment; no env block is needed in the config.
 #[must_use]
-pub fn browser_mcp_config_entry() -> serde_json::Value {
+pub fn browser_mcp_config_entry(bridge_command: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
         "type": "stdio",
-        "command": "tidebreak",
+        "command": bridge_command.to_string_lossy(),
         "args": ["browser-mcp"],
     })
 }
@@ -53,12 +54,15 @@ pub fn merged_mcp_config_json(
             // Existing behavior: approval-only config.
             Some(channel.mcp_config_json(crate::claude::approvals::APPROVAL_MCP_SERVER))
         }
-        (None, Some(_)) => {
+        (None, Some(spec)) => {
             let mut servers = serde_json::Map::new();
-            servers.insert(BROWSER_MCP_SERVER.into(), browser_mcp_config_entry());
+            servers.insert(
+                BROWSER_MCP_SERVER.into(),
+                browser_mcp_config_entry(spec.bridge_command()),
+            );
             Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
-        (Some(channel), Some(_)) => {
+        (Some(channel), Some(spec)) => {
             // Merge both into one config object.
             let mut servers = serde_json::Map::new();
             // Approval entry (HTTP with bearer).
@@ -73,7 +77,10 @@ pub fn merged_mcp_config_json(
                 }),
             );
             // Browser entry (stdio, inherits env).
-            servers.insert(BROWSER_MCP_SERVER.into(), browser_mcp_config_entry());
+            servers.insert(
+                BROWSER_MCP_SERVER.into(),
+                browser_mcp_config_entry(spec.bridge_command()),
+            );
             Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
     }
@@ -131,7 +138,10 @@ mod tests {
     }
 
     fn browser_channel() -> BrowserChannelSpec {
-        BrowserChannelSpec::new(PathBuf::from("/tmp/tidebreak-browser-cap.json"))
+        BrowserChannelSpec::new(
+            PathBuf::from("/tmp/tidebreak-browser-cap.json"),
+            PathBuf::from("/usr/local/bin/tidebreak"),
+        )
     }
 
     #[test]
@@ -155,7 +165,10 @@ mod tests {
         assert_eq!(flags[0], "--mcp-config");
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert_eq!(config["mcpServers"]["tb-browser"]["type"], "stdio");
-        assert_eq!(config["mcpServers"]["tb-browser"]["command"], "tidebreak");
+        assert_eq!(
+            config["mcpServers"]["tb-browser"]["command"],
+            "/usr/local/bin/tidebreak"
+        );
         assert_eq!(config["mcpServers"]["tb-browser"]["args"][0], "browser-mcp");
         // No --permission-prompt-tool when approval is absent.
         assert!(!flags.iter().any(|f| f == "--permission-prompt-tool"));
@@ -206,5 +219,29 @@ mod tests {
                 "browser entry must not carry an env block or secret"
             );
         }
+    }
+
+    #[test]
+    fn bridge_command_with_spaces_remains_one_command_value() {
+        let browser = BrowserChannelSpec::new(
+            PathBuf::from("/tmp/with spaces/cap.json"),
+            PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
+        );
+        let flags = launch_args_for_mcp_channels(None, Some(&browser)).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
+        let command = config["mcpServers"]["tb-browser"]["command"]
+            .as_str()
+            .unwrap();
+        // The command must be one JSON string value, not split on spaces.
+        assert_eq!(
+            command,
+            "/Applications/Tidebreak.app/Contents/bin/tidebreak"
+        );
+        // args must still be exactly ["browser-mcp"].
+        let args = config["mcpServers"]["tb-browser"]["args"]
+            .as_array()
+            .unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], "browser-mcp");
     }
 }

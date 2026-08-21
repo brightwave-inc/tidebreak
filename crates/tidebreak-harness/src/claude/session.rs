@@ -454,7 +454,10 @@ mod tests {
             token: "session-token".into(),
             completer: Arc::new(NoopCompleter),
         };
-        let browser = BrowserChannelSpec::new(PathBuf::from("/tmp/session-browser-cap.json"));
+        let browser = BrowserChannelSpec::new(
+            PathBuf::from("/tmp/session-browser-cap.json"),
+            PathBuf::from("/usr/local/bin/tidebreak"),
+        );
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
