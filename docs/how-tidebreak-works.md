@@ -119,8 +119,9 @@ and fails closed when their old conversation no longer exists.
 
 When the baseline changes incompatibly during pre-v1 development, bump
 `DESKTOP_SCHEMA_EPOCH` in `crates/tidebreak-server/src/desktop_schema.rs` in the
-same change. The epoch is a deliberate reset boundary, not a replacement for
-migrations after the schema stabilizes for v1.
+same change. `the_schema_baseline_is_pinned` fails until you do, and names the
+bump in its message. The epoch is a deliberate reset boundary, not a
+replacement for migrations after the schema stabilizes for v1.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those

@@ -8,7 +8,9 @@
   [`crates/tidebreak-server/src/desktop_schema.rs`](../../crates/tidebreak-server/src/desktop_schema.rs)
   (`DESKTOP_SCHEMA_EPOCH` and the reset it drives),
   [`crates/tidebreak-core/src/event.rs`](../../crates/tidebreak-core/src/event.rs)
-  (the journal payload and its shape fixture)
+  (the journal payload and its shape fixture),
+  [`crates/tidebreak-core/fixtures/schema-baseline.sql`](../../crates/tidebreak-core/fixtures/schema-baseline.sql)
+  (the rendered baseline and its drift test)
 
 ## Context
 
@@ -110,17 +112,20 @@ epoch bump deletes local chats — for contributors, that is the cost of the
 window being open, and it is why the window closes at v1.
 
 The suspension has a hard boundary and one failure mode: a persisted-format
-change that lands *without* an epoch bump. The fixture catches it for the
-journal payload. Nothing catches it for the tables — a baseline edit with no
-bump is caught only in review. That gap is accepted for now because the symptom
-(a schema mismatch on boot) is loud and immediate, where the journal's symptom
-is silent and deferred.
+change that lands *without* an epoch bump. Fixtures now catch it on both sides.
+`journal-events.json` and `code-journal-events.json` pin the payloads;
+`schema-baseline.sql` pins the rendered SQLite DDL for every baseline table,
+index, and seed row. Each one fails with a message naming the epoch.
+
+The table fixture closes the gap this record originally accepted, and retires
+the review instruction that stood in for it. What it still does not see is a
+Postgres-only difference: it renders one backend, because the epoch it points
+at guards one profile.
 
 Anything relying on local data surviving across builds cannot be built pre-v1.
 
 Revisit this when `1.0.0` approaches — the inversion above is the work — or
-earlier if journal reads become lossy, or if a table-level equivalent of the
-shape fixture is added, which would let the same reasoning cover the tables.
+earlier if journal reads become lossy.
 
 ## Validation
 
@@ -133,6 +138,11 @@ else asserts on the payload's shape. A green suite is therefore not evidence
 this record is being followed — the presence of `fixtures/journal-events.json`
 and a failure message naming the epoch is.
 
-Similarly, no test fails if a baseline edit ships without an epoch bump. Reviewers
-of a change touching `db/migration/baseline/` should confirm
-`DESKTOP_SCHEMA_EPOCH` moved in the same diff.
+`the_schema_baseline_is_pinned` fails on any change to the rendered baseline —
+a column, an index, a check, a seed row — and its message names the epoch bump
+as the fix. A baseline edit that ships without one is now a red test rather
+than something a reviewer has to remember to look for.
+
+The case a plausible wrong implementation still passes here too: regenerating
+the fixture with `UPDATE_SCHEMA_FIXTURE=1` and leaving the epoch alone is
+green. The fixture makes the change visible; it cannot make the decision.
