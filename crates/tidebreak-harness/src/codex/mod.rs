@@ -560,6 +560,7 @@ mod tests {
             &[],
             Path::new("/workspace"),
             &[],
+            None,
         )
         .unwrap();
         assert!(!plan
