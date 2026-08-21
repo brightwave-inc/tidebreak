@@ -16,9 +16,9 @@ use tidebreak_core::{
     db, Attention, AttentionSource, AttentionState, BrowserContentTrust, BrowserControllerState,
     BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
     BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
+    BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport, CodePermissionMode, CodeSession,
+    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus,
+    DbStore, HarnessKind, OwnerId, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
