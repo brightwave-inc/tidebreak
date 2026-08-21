@@ -107,8 +107,8 @@ export function BrowserViewportControl({
           <Button
             type="button"
             variant="ghost"
-            size={compact ? "icon-sm" : "xs"}
-            className={compact ? "h-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"}
+            size={compact ? "icon-xs" : "xs"}
+            className={compact ? "size-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"}
             disabled={disabled}
             aria-label={triggerAriaLabel}
           >

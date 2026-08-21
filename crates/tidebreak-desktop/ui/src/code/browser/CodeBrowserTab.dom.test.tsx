@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -62,6 +63,7 @@ function browserHost(options?: {
   createGate?: Promise<void>;
   createError?: string;
   existing?: boolean;
+  snapshotGate?: Promise<void>;
   runtime?: Partial<BrowserHostSnapshot>;
 }): {
   host: CodeBrowserHost;
@@ -83,6 +85,7 @@ function browserHost(options?: {
     command: vi.fn(async (workspaceId, browserId, action) => {
       calls.push({ workspaceId, browserId, action });
       if (action.type === "snapshot") {
+        if (options?.snapshotGate) await options.snapshotGate;
         return options?.existing
           ? {
               exists: true,
@@ -119,8 +122,14 @@ function browserHost(options?: {
   };
 }
 
+let mockedClientWidth = 1024;
+
 beforeEach(() => {
   window.localStorage.clear();
+  mockedClientWidth = 1024;
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
+    () => mockedClientWidth,
+  );
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
     x: 120,
     y: 180,
@@ -364,6 +373,89 @@ describe("CodeBrowserTab", () => {
       }),
     );
   });
+
+  it.each([
+    { label: "newly created", existing: false },
+    { label: "restored", existing: true },
+  ])(
+    "does not reveal a $label native view after its queued reveal is unmounted",
+    async ({ existing }) => {
+      let releaseReady: (() => void) | undefined;
+      const readyGate = new Promise<void>((resolve) => {
+        releaseReady = resolve;
+      });
+      const queuedFrames: Array<{
+        callback: FrameRequestCallback;
+        id: number;
+      }> = [];
+      const cancelledFrames = new Set<number>();
+      let nextFrame = 1;
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+        const id = nextFrame++;
+        queuedFrames.push({ callback, id });
+        return id;
+      });
+      vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+        cancelledFrames.add(id);
+      });
+
+      const runtime = browserHost({
+        existing,
+        ...(existing
+          ? { snapshotGate: readyGate }
+          : { createGate: readyGate }),
+      });
+      const view = render(
+        <CodeBrowserTab
+          workspaceId="workspace-1"
+          browserId="browser-1"
+          initialUrl="https://example.com"
+          host={runtime.host}
+        />,
+      );
+      await waitFor(() =>
+        expect(runtime.calls.some(({ action }) =>
+          action.type === (existing ? "snapshot" : "create")
+        )).toBe(true),
+      );
+
+      const framesBeforeReady = queuedFrames.length;
+      await act(async () => releaseReady?.());
+      await waitFor(() =>
+        expect(queuedFrames.length).toBeGreaterThan(framesBeforeReady),
+      );
+      const revealFrame = queuedFrames.at(-1);
+      expect(revealFrame).toBeDefined();
+      expect(runtime.calls).not.toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      });
+
+      view.unmount();
+      await waitFor(() =>
+        expect(runtime.calls).toContainEqual({
+          workspaceId: "workspace-1",
+          browserId: "browser-1",
+          action: { type: "set_visible", visible: false },
+        }),
+      );
+      expect(cancelledFrames).toContain(revealFrame!.id);
+      const finalHideIndex = runtime.calls
+        .map(({ action }) =>
+          action.type === "set_visible" && action.visible === false
+        )
+        .lastIndexOf(true);
+
+      await act(async () => revealFrame!.callback(16));
+
+      expect(runtime.calls.slice(finalHideIndex + 1)).not.toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      });
+    },
+  );
 
   it("keeps a native view hidden when an overlay opens while creation is in flight", async () => {
     let releaseCreate: (() => void) | undefined;
@@ -1037,63 +1129,144 @@ describe("CodeBrowserTab", () => {
   });
 });
 
-
 describe("BrowserToolbar compact", () => {
-  it("keeps all controls visible and keyboard-reachable at 320 px", async () => {
-    const { host, calls } = browserHost();
-
+  it("keeps the unshared action and essential controls keyboard-reachable at 320 px", async () => {
+    mockedClientWidth = 320;
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+      },
+    });
+    const user = userEvent.setup();
     const { container } = render(
-      <div style={{ width: 320 }}>
-        <CodeBrowserTab
-          workspaceId="workspace-1"
-          browserId="browser-1"
-          initialUrl="https://example.com"
-          host={host}
-        />
-      </div>,
-    );
-    await waitFor(() =>
-      expect(calls.some(({ action }) => action.type === "create")).toBe(true),
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
     );
 
-    // The inner flex row should not overflow.
-    const row = container.querySelector('.flex.min-w-0.items-center') as HTMLElement | null;
-    expect(row).not.toBeNull();
-    if (row) {
-      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
-    }
-
-    // Every essential control must be present.
+    const share = await screen.findByRole("button", { name: "Share with agent" });
+    expect(container.querySelector('[data-compact="true"]')).not.toBeNull();
     expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Forward" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "Address or search" })).toBeVisible();
     expect(screen.getByRole("button", { name: /Viewport:/i })).toBeVisible();
     expect(screen.getByRole("button", { name: "History" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Open externally" })).toBeVisible();
+
+    share.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "share_with_agent" },
+      }),
+    );
   });
 
-  it("keeps all controls visible and keyboard-reachable at 390 px", async () => {
-    const { host, calls } = browserHost();
+  it("exposes shared status and revoke through one keyboard-operated control at 320 px", async () => {
+    mockedClientWidth = 320;
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess({
+          shared: true,
+          scope: "origin",
+          canObserve: true,
+          canControl: true,
+        }),
+      },
+    });
+    const user = userEvent.setup();
     render(
-      <div style={{ width: 390 }}>
-        <CodeBrowserTab
-          workspaceId="workspace-1"
-          browserId="browser-1"
-          initialUrl="https://example.com"
-          host={host}
-        />
-      </div>,
-    );
-    await waitFor(() =>
-      expect(calls.some(({ action }) => action.type === "create")).toBe(true),
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
     );
 
-    // Every essential control must be present.
-    expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Forward" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Address or search" })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Viewport:/i })).toBeVisible();
-    expect(screen.getByRole("button", { name: "History" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Open externally" })).toBeVisible();
+    const access = await screen.findByRole("button", {
+      name: "Shared with agent: https://example.com",
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Shared with agent: https://example.com",
+    );
+    access.focus();
+    await user.keyboard("{Enter}");
+    const revoke = screen.getByRole("menuitem", { name: "Stop sharing" });
+    expect(revoke).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "revoke_agent_access" },
+      }),
+    );
+  });
+
+  it("exposes paused status, resume, and revoke through one keyboard-operated control at 390 px", async () => {
+    mockedClientWidth = 390;
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess({
+          shared: true,
+          paused: true,
+          halted: true,
+          origin: "https://accounts.example.org",
+          scope: "origin",
+        }),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    const access = await screen.findByRole("button", {
+      name: "Agent paused before https://accounts.example.org",
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Agent paused before https://accounts.example.org",
+    );
+    access.focus();
+    await user.keyboard("{Enter}");
+    const resume = screen.getByRole("menuitem", { name: "Review & resume" });
+    expect(resume).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "share_with_agent" },
+      }),
+    );
+
+    access.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}");
+    const revoke = screen.getByRole("menuitem", { name: "Stop sharing" });
+    expect(revoke).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "revoke_agent_access" },
+      }),
+    );
   });
 });

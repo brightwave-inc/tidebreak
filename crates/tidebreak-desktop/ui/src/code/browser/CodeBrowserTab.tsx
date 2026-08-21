@@ -154,6 +154,42 @@ function CodeBrowserTabSession({
     [browserId, workspaceId],
   );
 
+  const cancelNativeReveal = useCallback(() => {
+    if (nativeRevealFrame.current === null) return;
+    const frame = nativeRevealFrame.current;
+    nativeRevealFrame.current = null;
+    window.cancelAnimationFrame(frame);
+  }, []);
+
+  const scheduleNativeReveal = useCallback(() => {
+    cancelNativeReveal();
+    if (
+      !mountedRef.current ||
+      !nativeReady.current ||
+      !visibleRef.current ||
+      !host.available()
+    ) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (nativeRevealFrame.current !== frame) return;
+      nativeRevealFrame.current = null;
+      if (
+        !mountedRef.current ||
+        !nativeReady.current ||
+        !visibleRef.current ||
+        !host.available()
+      ) {
+        return;
+      }
+      void host
+        .command(workspaceId, browserId, { type: "set_visible", visible: true })
+        .catch(() => undefined);
+    });
+    nativeRevealFrame.current = frame;
+  }, [browserId, cancelNativeReveal, host, workspaceId]);
+
   /**
    * Shared post-ready reconciliation for create and existing-view paths.
    *
@@ -164,6 +200,15 @@ function CodeBrowserTabSession({
    * unmounted or obscured.
    */
   const reconcileAfterNativeReady = useCallback(async () => {
+    if (!mountedRef.current) {
+      nativeReady.current = false;
+      cancelNativeReveal();
+      await host.command(workspaceId, browserId, {
+        type: "set_visible",
+        visible: false,
+      });
+      return;
+    }
     nativeReady.current = true;
     const bounds = readBrowserBounds(viewportSurfaceRef.current);
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
@@ -173,31 +218,37 @@ function CodeBrowserTabSession({
       );
     }
     if (!mountedRef.current || !visibleRef.current) {
+      if (!mountedRef.current) nativeReady.current = false;
+      cancelNativeReveal();
       recordRuntime(await host.command(workspaceId, browserId, {
         type: "set_visible",
         visible: false,
       }));
       return;
     }
-    // Reveal through the same cancellable one-frame path used by the
-    // visibility effect so a click that hands off between two app overlays
-    // cannot briefly repaint the native WKWebView above the new one.
-    nativeRevealFrame.current = window.requestAnimationFrame(() => {
-      nativeRevealFrame.current = null;
-      if (!nativeReady.current || !visibleRef.current || !host.available()) {
-        return;
-      }
-      void host.command(workspaceId, browserId, { type: "set_visible", visible: true })
-        .catch(() => undefined);
-    });
-  }, [browserId, host, recordRuntime, workspaceId]);
+    scheduleNativeReveal();
+  }, [
+    browserId,
+    cancelNativeReveal,
+    host,
+    recordRuntime,
+    scheduleNativeReveal,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      cancelNativeReveal();
+      nativeReady.current = false;
+      if (host.available()) {
+        void host
+          .command(workspaceId, browserId, { type: "set_visible", visible: false })
+          .catch(() => undefined);
+      }
     };
-  }, []);
+  }, [browserId, cancelNativeReveal, host, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.(session.title);
@@ -411,11 +462,6 @@ function CodeBrowserTabSession({
     return () => {
       cancelled = true;
       unsubscribe?.();
-      if (nativeReady.current && host.available()) {
-        void host
-          .command(workspaceId, browserId, { type: "set_visible", visible: false })
-          .catch(() => undefined);
-      }
     };
   }, [browserId, host, recordRuntime, reconcileAfterNativeReady, updateSession, workspaceId]);
 
@@ -460,33 +506,17 @@ function CodeBrowserTabSession({
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
-    if (nativeRevealFrame.current !== null) {
-      window.cancelAnimationFrame(nativeRevealFrame.current);
-      nativeRevealFrame.current = null;
-    }
     if (!visible) {
+      cancelNativeReveal();
       void host
         .command(workspaceId, browserId, { type: "set_visible", visible: false })
         .catch(() => undefined);
       return;
     }
 
-    // Delay reveals by one frame so a click that hands off between two app
-    // overlays cannot briefly repaint the native WKWebView above the new one.
-    nativeRevealFrame.current = window.requestAnimationFrame(() => {
-      nativeRevealFrame.current = null;
-      if (!nativeReady.current || !visibleRef.current || !host.available()) return;
-      void host
-        .command(workspaceId, browserId, { type: "set_visible", visible: true })
-        .catch(() => undefined);
-    });
-    return () => {
-      if (nativeRevealFrame.current !== null) {
-        window.cancelAnimationFrame(nativeRevealFrame.current);
-        nativeRevealFrame.current = null;
-      }
-    };
-  }, [browserId, host, visible, workspaceId]);
+    scheduleNativeReveal();
+    return cancelNativeReveal;
+  }, [cancelNativeReveal, host, scheduleNativeReveal, visible]);
 
   async function navigate(input = address) {
     const target = browserTarget(input);
