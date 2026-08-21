@@ -228,8 +228,9 @@ impl CodeRuntime {
     pub(crate) fn start(
         self: &Arc<Self>,
         loopback_base: String,
-    ) -> Box<dyn std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> + Send>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> + Send>,
+    > {
         self.set_loopback_base(loopback_base);
         // Synchronously delete stale capfiles before the returned future is
         // pollable so issue() cannot race an unpolled startup cleanup.
