@@ -206,10 +206,14 @@ a partly-read transcript is otherwise indistinguishable from a complete one.
 
 Process models the trait absorbs:
 
-- **Claude Code** — one print-mode child per turn: streamed JSON output and
-  input, partial-message deltas on, resuming by the session id the stream
-  reports. Approvals via the permission-prompt tool over a loopback MCP
-  endpoint with a session-scoped token.
+- **Claude Code** — one long-lived print-mode child per session
+  ([`0057`](decisions/0057-one-claude-child-per-session.md)): streamed JSON
+  output and input, stdin held open so each turn is one user line, partial
+  message deltas on, resuming by the session id the stream reports whenever a
+  child has to be replaced. A turn ends on the stream's `result` line, and a
+  stop is a `control_request` the engine answers rather than a signal.
+  Approvals via the permission-prompt tool over a loopback MCP endpoint with a
+  session-scoped token.
 - **Codex CLI** — a long-lived JSON-RPC server child (preferred; its
   approval methods are the richer channel) or the JSONL exec mode with
   resume, whichever the fixture spike proves stable on the installed

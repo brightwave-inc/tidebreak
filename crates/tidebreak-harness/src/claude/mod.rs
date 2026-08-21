@@ -395,6 +395,45 @@ mod tests {
     }
 
     #[test]
+    fn fixture_replay_two_turn() {
+        // One session-long child answers turn after turn (decision 57). The
+        // engine reprints `system/init` for every user message, so the guard
+        // against a second `SessionStarted` is what keeps one process reading
+        // as one session.
+        let (events, unrecognized) = replay("two-turn");
+        assert_eq!(unrecognized, 0);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::SessionStarted { .. }))
+                .count(),
+            1,
+            "a repeated init on one child must not mint a second session"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+                .count(),
+            2,
+            "each turn still ends on its own result"
+        );
+        // The second turn reads the first turn's prefix back instead of
+        // rewriting it. That saving is the reason for the decision.
+        let cache: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage.cache_creation_input_tokens),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            cache[1] < cache[0] / 100,
+            "the follow-up turn must not rewrite the cached prefix: {cache:?}"
+        );
+    }
+
+    #[test]
     fn adapter_has_a_fixtures_directory_with_a_manifest() {
         assert!(fixture_dir().join("manifest.toml").is_file());
     }

@@ -24,6 +24,11 @@ scenarios = [
   # tagging every stream line carries: a `Task` call spans a subagent and its
   # nested events name the spanning call (decision 52).
   "subagent-task",
+  # Synthesized from the plain-text capture: two turns on one session-long
+  # child (decision 57). The shape it fixes — the engine reprinting
+  # `system/init` for every user message, with the session id unchanged — was
+  # verified live on 2.1.238 before the fixture was written.
+  "two-turn",
 ]
 
 [redaction]
@@ -46,6 +51,21 @@ verified = [
   "prompt response: single MCP text block {behavior: allow} | {behavior: deny, message}",
   "deny message is the tool_result the model reads (non_execution_kind: permission-rule)",
   "Ask maps to --permission-mode manual; Auto to acceptEdits; Plan to plan; Allow to --dangerously-skip-permissions",
+]
+# Observed live on 2.1.238 while writing decision 57. Recorded here rather
+# than as a second fixture tree: the stream shapes above are unchanged, and
+# these are facts about the process model, not about the wire format.
+verified_2_1_238 = [
+  "--input-format stream-json with stdin held open serves turn after turn on one child",
+  "the child exits 0 on stdin EOF, so a session ends by closing stdin or stopping the process",
+  "system/init is reprinted for every user message; the session id does not change",
+  "system/init is not printed until the first user message arrives",
+  "a text-only user message is not echoed back on stdout",
+  "control_request {subtype: interrupt} on stdin aborts the turn: control_response success, a `[Request interrupted by user]` user line, then result terminal_reason=aborted_streaming",
+  "the child stays up after an interrupt and runs the next turn",
+  "an interrupt with no turn running is answered success and changes nothing",
+  "--resume <id> together with --input-format stream-json keeps the same session id",
+  "new system subtype: session_state_changed, twice per turn",
 ]
 not_verified = [
   "mid-turn steering input",

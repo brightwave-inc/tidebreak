@@ -172,9 +172,15 @@ impl ClaudeStreamParser {
                     message: bound(&message, MAX_NOTICE_CHARS),
                 }]
             }
-            "hook_started" | "hook_response" | "status" | "thinking_tokens" => {
+            "hook_started"
+            | "hook_response"
+            | "status"
+            | "thinking_tokens"
+            | "session_state_changed" => {
                 // Known lifecycle/telemetry frames that carry no transcript
                 // state. They are recognized no-ops, not protocol drift.
+                // `session_state_changed` brackets every turn on a
+                // session-long child (observed on 2.1.238).
                 Vec::new()
             }
             other => {
