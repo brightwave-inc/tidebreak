@@ -588,7 +588,9 @@ mod tests {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         // 0xC0 0x80 is an overlong encoding that is not valid UTF-8.
-        let raw: &[u8] = &[b'/', b't', b'm', b'p', 0xC0, 0x80, b'/', b't', b'i', b'd', b'e'];
+        let raw: &[u8] = &[
+            b'/', b't', b'm', b'p', 0xC0, 0x80, b'/', b't', b'i', b'd', b'e',
+        ];
         let os = OsStr::from_bytes(raw);
         let path = PathBuf::from(os);
         let result = shell_quote_path(&path);
@@ -608,14 +610,13 @@ mod tests {
     fn browser_instructions_fails_on_non_utf8_bridge() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
-        let raw: &[u8] = &[b'/', b't', b'm', b'p', 0xC0, 0x80, b'/', b't', b'i', b'd', b'e'];
+        let raw: &[u8] = &[
+            b'/', b't', b'm', b'p', 0xC0, 0x80, b'/', b't', b'i', b'd', b'e',
+        ];
         let os = OsStr::from_bytes(raw);
         let p = PathBuf::from(os);
         // Create a spec with a non-UTF-8 bridge path.
-        let browser = BrowserChannelSpec::new(
-            PathBuf::from("/tmp/tidebreak-browser-cap.json"),
-            p,
-        );
+        let browser = BrowserChannelSpec::new(PathBuf::from("/tmp/tidebreak-browser-cap.json"), p);
         assert!(browser_instructions(&browser).is_err());
     }
 }
