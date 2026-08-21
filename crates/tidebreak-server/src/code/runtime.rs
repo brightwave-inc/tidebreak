@@ -168,6 +168,8 @@ impl CodeRuntime {
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     ) -> Self {
+        let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            .expect("browser capfile directory must be resolvable to an absolute path");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -176,7 +178,7 @@ impl CodeRuntime {
             data_dir: data_dir.clone(),
             worktree_root_default,
             approvals: ApprovalBridge::new(),
-            browser_tokens: BrowserTokenRegistry::new(&data_dir),
+            browser_tokens,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -224,9 +226,13 @@ impl CodeRuntime {
         loopback_base: String,
     ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
         self.set_loopback_base(loopback_base);
-        self.browser_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
         async move {
+            // Clean up stale capfiles before anything else. Fail closed.
+            runtime
+                .browser_tokens
+                .delete_all_stale_capfiles()
+                .map_err(|e| ServerError::internal(e))?;
             let actions = runtime.recover().await;
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so
@@ -242,6 +248,8 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
+        let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            .expect("browser capfile directory must be resolvable to an absolute path");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -250,7 +258,7 @@ impl CodeRuntime {
             data_dir,
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
-            browser_tokens: BrowserTokenRegistry::new(&data_dir),
+            browser_tokens,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -1751,7 +1759,10 @@ impl CodeRuntime {
             workspace: session.workspace_id,
             session: session.id,
         };
-        let browser = self.browser_tokens.issue(browser_subject).ok();
+        let browser = self
+            .browser_tokens
+            .issue(browser_subject)
+            .map_err(|e| ServerError::internal(e))?;
 
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),

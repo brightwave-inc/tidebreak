@@ -5,8 +5,8 @@
 //! worker, crash recovery, and the live event bus.
 
 pub(crate) mod approval_bridge;
-pub(crate) mod browser_channel;
 pub(crate) mod attention;
+pub(crate) mod browser_channel;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
 pub(crate) mod clone;
