@@ -279,7 +279,7 @@ impl ProcessTreeChild {
             let Some(process_group) = self.process_group else {
                 return Ok(());
             };
-            signal_process_group(process_group, libc::SIGKILL)?;
+            kill_process_group(process_group)?;
             self.process_group = None;
             Ok(())
         }
@@ -300,6 +300,65 @@ impl Drop for ProcessTreeChild {
         if self.child.is_some() {
             let _ = self.terminate_tree();
         }
+    }
+}
+
+/// How many times a group kill re-walks the group before giving up.
+#[cfg(unix)]
+const GROUP_KILL_ROUNDS: usize = 3;
+
+/// How long a fork that was in flight during a walk gets to become visible to
+/// the next one.
+#[cfg(unix)]
+const GROUP_KILL_SETTLE: Duration = Duration::from_millis(1);
+
+/// Kill an owned process group, then keep killing until nothing answers.
+///
+/// `kill(2)` walks the group once. A descendant that forks while that walk is
+/// in flight never receives the signal, and when its parent dies it is
+/// reparented to init — still in the group, still holding the stdout the
+/// caller is waiting on for EOF. A single group kill therefore leaks a live
+/// process and a pipe that never closes, which is exactly the hang this type
+/// exists to prevent.
+///
+/// Stopping the group first closes most of that window, because a stopped
+/// member cannot start another fork. Re-walking closes the rest: the one fork
+/// already in flight when the stop landed is an ordinary group member by the
+/// next round. The stop is best effort — only the kill decides the result.
+///
+/// This blocks for at most a couple of milliseconds, because it also runs from
+/// `Drop`, where there is no runtime to await on.
+#[cfg(unix)]
+fn kill_process_group(process_group: libc::pid_t) -> io::Result<()> {
+    for round in 0..GROUP_KILL_ROUNDS {
+        if round > 0 {
+            std::thread::sleep(GROUP_KILL_SETTLE);
+        }
+        let _ = signal_process_group(process_group, libc::SIGSTOP);
+        signal_process_group(process_group, libc::SIGKILL)?;
+        if process_group_is_gone(process_group) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `kill(2)` can still find the group.
+///
+/// A leader kept unreaped to pin the group id keeps answering, so this is an
+/// early exit rather than a decision; [`kill_process_group`] bounds the rounds.
+#[cfg(unix)]
+fn process_group_is_gone(process_group: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only probes whether the group can be signalled.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return false;
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => true,
+        // See `signal_process_group`: macOS reports EPERM for a group holding
+        // only zombies.
+        Some(libc::EPERM) => cfg!(target_os = "macos"),
+        _ => false,
     }
 }
 
@@ -348,7 +407,10 @@ impl ProcessGroupGuard {
     }
 
     fn kill(&self) -> io::Result<()> {
-        self.signal(libc::SIGKILL)
+        match self.process_group {
+            Some(process_group) => kill_process_group(process_group),
+            None => Ok(()),
+        }
     }
 
     fn disarm(&mut self) {
@@ -360,7 +422,7 @@ impl ProcessGroupGuard {
 impl Drop for ProcessGroupGuard {
     fn drop(&mut self) {
         if let Some(process_group) = self.process_group.take() {
-            let _ = signal_process_group(process_group, libc::SIGKILL);
+            let _ = kill_process_group(process_group);
         }
     }
 }
@@ -653,6 +715,23 @@ mod unix_process_tree_tests {
     }
 
     #[tokio::test]
+    async fn dropping_a_process_tree_stops_a_descendant_that_is_still_forking() {
+        // The descendant forks a burst of pipe-holding children right after it
+        // publishes its pid, so the kill below almost certainly lands while one
+        // of those forks is in flight. A fork the group walk misses outlives its
+        // killed parent, keeps stdout open, and the pipe never reaches EOF.
+        let script = r#"
+trap 'exit 130' INT
+/bin/sh -c 'trap "" INT; printf "%s\n" "$$"; i=0; while [ $i -lt 40 ]; do sleep 60 & i=$((i+1)); done; wait' &
+wait
+"#;
+        let (child, mut stdout) = spawn_tree_from(script).await;
+
+        drop(child);
+        assert_pipe_reaches_eof(&mut stdout).await;
+    }
+
+    #[tokio::test]
     async fn cancelling_interrupt_still_escalates_and_closes_descendant_pipes() {
         let (mut child, mut stdout) = spawn_shell_tree().await;
 
@@ -707,6 +786,12 @@ trap 'exit 130' INT
 /bin/sh -c 'trap "" INT; printf "%s\n" "$$"; while :; do sleep 60; done' &
 wait
 "#;
+        spawn_tree_from(script).await
+    }
+
+    /// Spawn `script` under a process tree and read the descendant's pid line,
+    /// asserting it really is a separate process inside the owned group.
+    async fn spawn_tree_from(script: &str) -> (ProcessTreeChild, BufReader<ChildStdout>) {
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", script])
