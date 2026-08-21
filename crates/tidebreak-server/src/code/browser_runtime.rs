@@ -27,6 +27,12 @@ use super::browser_channel::BrowserSubject;
 /// `UnknownBrowserId` → 404, `SessionEnded` → 403, `Unsupported` → 501,
 /// `StaleTarget` → 409, `Failed` → 500. Messages must never carry bearer
 /// tokens or another workspace's identifiers.
+///
+/// Only an embedding's runtime implementation constructs these — the routes
+/// just map them — and the desktop adapter arrives with the native-driver
+/// slice. Dead-code lint is suppressed until that implementation lands, the
+/// same staging `subject_for_token` used before the route layer existed.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BrowserRuntimeError {
     /// The opaque browser id names no tab this subject may see.

@@ -1543,10 +1543,9 @@ async fn bind_inner(
     // the native side to drop its capability before the end call returns.
     if let Some(browser_runtime) = browser_runtime {
         let revoked_runtime = browser_runtime.clone();
-        code.browser_tokens
-            .set_revocation_hook(Arc::new(move |session| {
-                revoked_runtime.revoke_session(session);
-            }));
+        code.browser_tokens.set_revocation_hook(Arc::new(move |session| {
+            revoked_runtime.revoke_session(session);
+        }));
         state.set_browser_runtime(browser_runtime);
     }
     // Before `initialize`: a boot-file or persisted replacement derives the

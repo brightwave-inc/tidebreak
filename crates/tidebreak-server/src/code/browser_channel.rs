@@ -245,7 +245,11 @@ impl BrowserTokenRegistry {
             }
         };
         if revoked {
-            let hook = self.revocation_hook.lock().expect("revocation hook").clone();
+            let hook = self
+                .revocation_hook
+                .lock()
+                .expect("revocation hook")
+                .clone();
             if let Some(hook) = hook {
                 hook(session_id);
             }
