@@ -7,6 +7,7 @@
 pub(crate) mod approval_bridge;
 pub(crate) mod attention;
 pub(crate) mod browser_channel;
+pub(crate) mod browser_runtime;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
 pub(crate) mod clone;
