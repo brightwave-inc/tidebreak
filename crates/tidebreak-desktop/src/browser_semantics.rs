@@ -297,7 +297,9 @@ async fn capture_semantic_snapshot(
             snapshot_id.clone(),
             targets,
         )
-        .map_err(|error| format!("browser document changed while it was being inspected: {error}"))?;
+        .map_err(|error| {
+            format!("browser document changed while it was being inspected: {error}")
+        })?;
 
     Ok(BrowserPageSnapshot {
         browser_id,

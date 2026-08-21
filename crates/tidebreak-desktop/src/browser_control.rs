@@ -1420,9 +1420,7 @@ impl BrowserRegistry {
             if record.workspace_id != workspace_id {
                 return Err("browser session belongs to a different workspace".to_owned());
             }
-            if record.instance_id != instance_id
-                || record.document_epoch != document_epoch
-            {
+            if record.instance_id != instance_id || record.document_epoch != document_epoch {
                 return Err(
                     "browser document changed while screenshot was being captured".to_owned(),
                 );
@@ -3066,13 +3064,7 @@ mod tests {
             .unwrap();
 
         let error = registry
-            .complete_screenshot_recording(
-                capability,
-                "browser-1",
-                instance,
-                0,
-                "snapshot-1",
-            )
+            .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-1")
             .unwrap_err();
         assert!(
             error.contains("stopped by the user") || error.contains("capability is unavailable"),
@@ -3122,13 +3114,7 @@ mod tests {
             .unwrap();
 
         let error = registry
-            .complete_screenshot_recording(
-                capability,
-                "browser-1",
-                instance,
-                0,
-                "snapshot-forged",
-            )
+            .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-forged")
             .unwrap_err();
         assert!(
             error.contains("snapshot is stale"),
@@ -3142,13 +3128,7 @@ mod tests {
         // No record_semantic_snapshot call — there is no stored snapshot.
 
         let error = registry
-            .complete_screenshot_recording(
-                capability,
-                "browser-1",
-                instance,
-                0,
-                "snapshot-1",
-            )
+            .complete_screenshot_recording(capability, "browser-1", instance, 0, "snapshot-1")
             .unwrap_err();
         assert!(
             error.contains("snapshot is stale"),
