@@ -1023,4 +1023,98 @@ mod tests {
             "capfile path must not appear in config JSON"
         );
     }
+
+    #[test]
+    fn merge_rejects_non_object_mcp_value() {
+        let existing = serde_json::json!({
+            "mcp": "not an object"
+        })
+        .to_string();
+        let result = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_preserves_unrelated_top_level_keys() {
+        let existing = serde_json::json!({
+            "theme": "dark",
+            "model": "claude-sonnet-5",
+            "mcp": {
+                "existing-server": {
+                    "type": "local",
+                    "command": ["existing"]
+                }
+            }
+        })
+        .to_string();
+        let merged = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert_eq!(config["model"], "claude-sonnet-5");
+        assert!(config["mcp"].get("existing-server").is_some());
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn merge_creates_mcp_key_when_absent() {
+        let existing = serde_json::json!({
+            "theme": "dark"
+        })
+        .to_string();
+        let merged = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn existing_config_passthrough_when_browser_none() {
+        let existing = serde_json::json!({
+            "mcp": { "other-server": { "type": "local", "command": ["foo"] } }
+        })
+        .to_string();
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing.clone())],
+            4096,
+            None,
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .expect("existing config must survive when browser is None");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert!(config["mcp"].get("other-server").is_some());
+        assert!(config["mcp"].get("tb-browser").is_none());
+    }
+
+    #[test]
+    fn bridge_command_with_windows_backslash_path() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("C:\\Temp\\browser-cap.json"),
+            std::path::PathBuf::from("C:\\Program Files\\Tidebreak\\tidebreak.exe"),
+        );
+        let entry = browser_mcp_config_json(spec.bridge_command());
+        let cmd = entry["command"].as_array().unwrap();
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], "C:\\Program Files\\Tidebreak\\tidebreak.exe");
+        assert_eq!(cmd[1], "browser-mcp");
+        assert_eq!(entry["type"], "local");
+    }
 }
