@@ -93,8 +93,9 @@ import {
   centerTabParts,
   CenterTabIcon,
   CHAT_PANEL_ID,
-  CHAT_TAB_ID,
   CodeCenterTabs,
+  type CodeConversationTab,
+  conversationTabId,
   EDITOR_PANEL_ID,
   SPLIT_EDITOR_PANEL_ID,
 } from "./CodeCenterTabs";
@@ -117,8 +118,12 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
-import { liveCodeSession } from "./parsers";
+import {
+  useCodeUpdatesStore,
+  useConversationDigests,
+  useSessionDigest,
+} from "./CodeUpdatesStore";
+import { liveCodeSessions } from "./parsers";
 import { CodeComposer } from "./CodeComposer";
 import { CodeQuickOpen } from "./CodeQuickOpen";
 import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
@@ -160,6 +165,7 @@ import {
   gatewayCodeModels,
   harnessCodeModels,
   harnessHonorsTurnModel,
+  HARNESS_LABELS,
   LIFECYCLE_LABELS,
   sessionLifecycleTooltip,
 } from "./labels";
@@ -214,9 +220,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     null,
   );
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
-  const [session, setSession] = useState<CodeSessionSnapshot | null>(
-    catalog.sessionsByWorkspace[workspaceId] ?? null,
+  /**
+   * Every session the server knows about here, conversations and watches alike.
+   *
+   * A workspace runs several agents (record 54), so the page holds the list and
+   * picks one to show rather than tracking a single session.
+   */
+  const [sessions, setSessions] = useState<CodeSessionSnapshot[]>(() => {
+    const remembered = catalog.sessionsByWorkspace[workspaceId];
+    return remembered ? [remembered] : [];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(
+    catalog.sessionsByWorkspace[workspaceId]?.id ?? null,
   );
+  /** True while the reader is filling in a new agent that has no session yet. */
+  const [draftAgent, setDraftAgent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [quickOpenRequest, setQuickOpenRequest] = useState(0);
@@ -242,7 +260,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
     () => storedBrowserTitles(layout),
   );
-  const digest = useCodeUpdatesStore((state) => state.byWorkspace[workspaceId]);
+  const conversations = useMemo(() => liveCodeSessions(sessions), [sessions]);
+  const session = useMemo(
+    () => sessions.find((entry) => entry.id === activeSessionId) ?? null,
+    [activeSessionId, sessions],
+  );
+  const digest = useSessionDigest(workspaceId, session?.id ?? null);
+  const conversationDigests = useConversationDigests(workspaceId);
   const setViewedWorkspace = useCodeUpdatesStore(
     (state) => state.setViewedWorkspace,
   );
@@ -305,10 +329,33 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     return () => setViewedWorkspace(null);
   }, [setViewedWorkspace, workspaceId]);
 
+  // A session started elsewhere — the new-workspace dialog, say — reaches the
+  // page through the catalog before the list request comes back.
   useEffect(() => {
-    if (taskParam) return;
-    if (rememberedSession) setSession(rememberedSession);
-  }, [rememberedSession, taskParam]);
+    if (!rememberedSession) return;
+    setSessions((current) =>
+      current.some((entry) => entry.id === rememberedSession.id)
+        ? current
+        : [...current, rememberedSession],
+    );
+  }, [rememberedSession]);
+
+  // `?task=` names the session to show: a sibling agent, or a watch child
+  // opened from the rail. It wins over the default selection below.
+  useEffect(() => {
+    if (!taskParam) return;
+    if (!sessions.some((entry) => entry.id === taskParam)) return;
+    setActiveSessionId(taskParam);
+    setDraftAgent(false);
+  }, [sessions, taskParam]);
+
+  // Nothing named, or the shown session ended: fall back to the first agent.
+  useEffect(() => {
+    if (taskParam || draftAgent) return;
+    const shown = sessions.some((entry) => entry.id === activeSessionId);
+    if (activeSessionId && shown) return;
+    setActiveSessionId(conversations[0]?.id ?? null);
+  }, [activeSessionId, conversations, draftAgent, sessions, taskParam]);
 
   useEffect(() => {
     return () => {
@@ -322,7 +369,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     setError(null);
     void (async () => {
       try {
-        const [next, sessions] = await Promise.all([
+        const [next, listed] = await Promise.all([
           client.getCodeWorkspace(workspaceId),
           client.listCodeWorkspaceSessions(workspaceId),
         ]);
@@ -330,23 +377,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         setWorkspace(next);
         const catalogState = useCodeCatalogStore.getState();
         catalogState.upsertWorkspace(next);
-        const live = liveCodeSession(sessions);
-        if (live) catalogState.rememberSession(live);
-        // `?task=` attaches a child task's transcript — today, the watch
-        // session — instead of the conversation.
-        const named = taskParam
-          ? sessions.find(
-              (candidate) =>
-                candidate.id === taskParam && candidate.lifecycle !== "ended",
-            )
-          : undefined;
-        if (named) {
-          setSession(named);
-        } else if (live) {
-          setSession(live);
-        } else if (!catalogState.sessionsByWorkspace[workspaceId]) {
-          setSession(null);
-        }
+        setSessions(listed);
+        // The card and the rail show one agent per workspace, so the catalog
+        // remembers the first — the one the workspace was started with.
+        const first = liveCodeSessions(listed)[0];
+        if (first) catalogState.rememberSession(first);
         const nextRepo = await client.getCodeRepo(next.repo_id);
         if (!cancelled) setRepo(nextRepo);
       } catch (err) {
@@ -358,7 +393,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceId, reloadToken, taskParam]);
+  }, [client, workspaceId, reloadToken]);
 
   async function startSession(
     harness: HarnessKind,
@@ -380,8 +415,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         permission_mode: permissionMode,
         model: posted,
       });
-      catalog.rememberSession(created);
-      setSession(created);
+      if (conversations.length === 0) catalog.rememberSession(created);
+      setSessions((current) => [...current, created]);
+      setActiveSessionId(created.id);
+      setDraftAgent(false);
+      // The first agent stays at a clean URL; a sibling names itself so a
+      // reload comes back to the tab the reader was on.
+      if (conversations.length > 0) openWorkspaceTask(created.id);
       await client.submitCodeTurn(created.id, message);
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not start a session"));
@@ -395,7 +435,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     try {
       const next = await client.reapCodeSession(session.id);
       catalog.rememberSession(next);
-      setSession(next);
+      setSessions((current) =>
+        current.map((entry) => (entry.id === next.id ? next : entry)),
+      );
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not reap the session"));
     }
@@ -489,6 +531,44 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     });
   }
 
+  /**
+   * Show one of the workspace's agents, or the unstarted draft when null.
+   *
+   * Selection lives in `?task=` so a reload or a shared link returns to the
+   * same agent. The first one is the workspace's default, so it stays unnamed.
+   */
+  function selectConversation(sessionId: string | null) {
+    setWorkspaceLayout(focusConversation(layout));
+    if (sessionId === null) {
+      setDraftAgent(true);
+      setActiveSessionId(null);
+      openWorkspaceTask(undefined);
+      return;
+    }
+    setDraftAgent(false);
+    setActiveSessionId(sessionId);
+    openWorkspaceTask(sessionId === conversations[0]?.id ? undefined : sessionId);
+  }
+
+  /** Add a tab for an agent the reader has not filled in yet. */
+  function newConversation() {
+    selectConversation(null);
+  }
+
+  /**
+   * Close a conversation tab.
+   *
+   * Only the draft closes here. A started agent holds a worktree and a running
+   * engine, so ending one is a server action rather than a tab control.
+   */
+  function closeConversation(sessionId: string | null) {
+    if (sessionId !== null) return;
+    setDraftAgent(false);
+    const first = conversations[0];
+    if (first) selectConversation(first.id);
+    else setActiveSessionId(null);
+  }
+
   /** Filter the parent transcript to one harness-owned child. */
   function openWorkspaceSubagent(callId: string | undefined) {
     void navigate({
@@ -531,6 +611,41 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       .then(() => toast.success("Copied path"))
       .catch(() => toast.error("Could not copy path"));
   }
+
+  /**
+   * The agent tab the strip should mark selected.
+   *
+   * A watch child opened from the rail is a drill-in with its own back bar, not
+   * a peer tab, so the first agent stays selected underneath it.
+   */
+  const activeConversationId = draftAgent
+    ? null
+    : (conversations.find((entry) => entry.id === session?.id)?.id ??
+      conversations[0]?.id ??
+      null);
+  const conversationTabs = useMemo<CodeConversationTab[]>(() => {
+    const tabs: CodeConversationTab[] = conversations.map((entry, index) => ({
+      id: entry.id,
+      label: conversationTabLabel(entry, index, conversations),
+      harness: entry.harness_kind,
+      attention: conversationDigests[entry.id]?.attention,
+    }));
+    // A draft has no engine yet, so it wears the generic agent glyph. It is
+    // also the one closable tab: nothing is running behind it. A workspace
+    // with no agents at all still gets one, so the strip always names the
+    // panel below it.
+    if (draftAgent || tabs.length === 0) {
+      tabs.push({
+        id: null,
+        label: tabs.length === 0 ? "Main agent" : "New agent",
+        closable: tabs.length > 0,
+      });
+    }
+    return tabs;
+  }, [conversationDigests, conversations, draftAgent]);
+
+  /** The picker shows for a first agent and for every one added after it. */
+  const startingNewAgent = draftAgent || !session;
 
   const editorTabs = chrome.editors.tabs;
   const showingChat =
@@ -633,7 +748,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         browserTitles={browserTitles}
         editorActiveIndex={chrome.editors.activeIndex}
         conversationFocused={showingChat}
-        onSelectChat={() => setWorkspaceLayout(focusConversation(layout))}
+        conversations={conversationTabs}
+        activeConversationId={activeConversationId}
+        onSelectConversation={selectConversation}
+        onNewConversation={newConversation}
+        onCloseConversation={closeConversation}
         onSelectEditor={(index) =>
           setWorkspaceLayout(focusEditorTab(layout, index, "primary"))
         }
@@ -686,7 +805,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         className={cn("min-h-0 flex-1", !showingChat && "hidden")}
         id={CHAT_PANEL_ID}
         role="tabpanel"
-        aria-labelledby={CHAT_TAB_ID}
+        aria-labelledby={conversationTabId(activeConversationId)}
       >
         <PanelLayout
           layout={chrome.panels}
@@ -711,7 +830,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   </Button>
                 </div>
               )}
-              {!session && workspace?.status === "active" && (
+              {startingNewAgent && workspace?.status === "active" && (
                 <StartSessionPrompt
                   workspaceId={workspaceId}
                   harnesses={doctorHarnesses}
@@ -726,7 +845,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   }
                 />
               )}
-              {session && (
+              {session && !draftAgent && (
                 <CodeSessionPane
                   key={session.id}
                   session={session}
@@ -775,12 +894,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     >
       <CodeCenterTabs
         region="secondary"
-        showMainAgent={false}
         editorTabs={splitEditorTabs}
         browserTitles={browserTitles}
         editorActiveIndex={chrome.splitEditors.activeIndex}
         conversationFocused={false}
-        onSelectChat={() => undefined}
         onSelectEditor={(index) =>
           setWorkspaceLayout(focusEditorTab(layout, index, "secondary"))
         }
@@ -1885,4 +2002,25 @@ function WatchTaskBar({
       </Button>
     </div>
   );
+}
+
+/**
+ * A tab label for one of a workspace's agents.
+ *
+ * The first agent is the one the workspace was started with, so it keeps the
+ * name the rest of the surface uses. The others are named by engine, numbered
+ * only when the same engine runs more than once.
+ */
+function conversationTabLabel(
+  session: CodeSessionSnapshot,
+  index: number,
+  sessions: readonly CodeSessionSnapshot[],
+): string {
+  if (index === 0) return "Main agent";
+  const label = HARNESS_LABELS[session.harness_kind];
+  const same = sessions.filter(
+    (entry, at) => at > 0 && entry.harness_kind === session.harness_kind,
+  );
+  if (same.length < 2) return label;
+  return `${label} ${same.indexOf(session) + 1}`;
 }

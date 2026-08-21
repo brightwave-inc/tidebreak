@@ -213,7 +213,7 @@ function makeClient() {
     listCodeWorkspaceSessions: vi.fn(
       async (): Promise<(typeof SESSION)[]> => [],
     ),
-    listCodeSessionTurns: vi.fn(async () => [TURN]),
+    listCodeSessionTurns: vi.fn(async (_sessionId: string) => [TURN]),
     listCodeApprovals: vi.fn(async () => []),
     openCodeEvents: vi.fn(
       (
@@ -1042,6 +1042,72 @@ describe("CodeWorkspacePage", () => {
       screen.getByRole("tablist", { name: "Workspace center" }),
     ).toBeInTheDocument();
     expect(chatTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("gives every agent in the workspace its own tab and switches between them", async () => {
+    const client = makeClient();
+    const second: CodeSessionSnapshot = {
+      ...SESSION,
+      id: "sess-2",
+      harness_kind: "codex",
+      created_at: "2026-08-15T01:00:00.000Z",
+    };
+    // The list arrives newest first; the strip reads oldest first, so the
+    // agent the workspace started with keeps the left-hand slot.
+    client.listCodeWorkspaceSessions.mockResolvedValue([second, SESSION]);
+    client.listCodeSessionTurns.mockImplementation(async (sessionId: string) =>
+      sessionId === "sess-1"
+        ? [TURN]
+        : [{ ...TURN, id: "turn-2", session_id: "sess-2", user_input: "run the tests" }],
+    );
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(client);
+
+    const main = await screen.findByRole("tab", { name: "Main agent" });
+    const codex = screen.getByRole("tab", { name: "Codex CLI" });
+    expect(main).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByRole("article", { name: "You" }),
+    ).toHaveTextContent("list the files");
+
+    await user.click(codex);
+    expect(codex).toHaveAttribute("aria-selected", "true");
+    // The URL names the sibling so a reload comes back to the same agent.
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({ task: "sess-2" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("article", { name: "You" })).toHaveTextContent(
+        "run the tests",
+      ),
+    );
+  });
+
+  it("opens a draft tab for a second agent and closes it again", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await screen.findByRole("tab", { name: "Main agent" });
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    await user.click(await screen.findByRole("menuitem", { name: "New agent" }));
+
+    const draft = await screen.findByRole("tab", { name: "New agent" });
+    expect(draft).toHaveAttribute("aria-selected", "true");
+    // Nothing is running behind a draft, so the picker takes the panel.
+    expect(
+      await screen.findByRole("button", { name: "Send message" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close New agent" }));
+    expect(
+      screen.queryByRole("tab", { name: "New agent" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Main agent" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("starts on the main-agent tab and opens a file from the visible new-tab control", async () => {

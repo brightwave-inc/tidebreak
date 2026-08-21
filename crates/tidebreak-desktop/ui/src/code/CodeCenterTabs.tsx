@@ -8,6 +8,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   ArrowRightFromLine,
+  Bot,
   ChevronLeft,
   ChevronRight,
   CircleX,
@@ -20,7 +21,6 @@ import {
   Globe2,
   SquareTerminal,
   ListX,
-  MessageSquare,
   MoveLeft,
   MoveRight,
   PanelRightClose,
@@ -40,22 +40,48 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { panelKey, type PanelContent } from "@/panel/panelTypes";
+import type { Attention, HarnessKind } from "../api/types";
+import { AttentionBadge } from "./AttentionBadge";
 import { editorStripDropId, editorTabDragId } from "./editorDrag";
+import { HARNESS_ICONS } from "./HarnessPicker";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 /** Ids the strip and the two center panels agree on, so tabs name panels. */
-export const CHAT_TAB_ID = "code-center-tab-chat";
 export const CHAT_PANEL_ID = "code-center-panel-chat";
 export const EDITOR_PANEL_ID = "code-center-panel-editor-primary";
 export const SPLIT_EDITOR_PANEL_ID = "code-center-panel-editor-secondary";
 const editorTabId = (region: CenterTabRegion, index: number) =>
   `code-center-tab-editor-${region}-${index}`;
 
+/** The tab that labels the chat panel. `null` names the unstarted agent. */
+export function conversationTabId(sessionId: string | null): string {
+  return `code-center-tab-chat-${sessionId ?? "new"}`;
+}
+
 export type CenterTabRegion = "primary" | "secondary";
+
+const NO_CONVERSATIONS: readonly CodeConversationTab[] = [];
+
+/**
+ * One agent's tab in the center strip.
+ *
+ * `id` is null for an agent the reader has asked for but not started yet, so
+ * the strip can show the draft in place before a session exists.
+ */
+export type CodeConversationTab = {
+  id: string | null;
+  label: string;
+  /** Absent on a draft, which has no engine until the reader picks one. */
+  harness?: HarnessKind;
+  attention?: Attention;
+  /** Only a draft closes here: ending a live agent is a server action. */
+  closable?: boolean;
+};
 
 /** Which tab labels the editor panel right now. */
 export function centerEditorTabId(
@@ -66,14 +92,18 @@ export function centerEditorTabId(
 }
 
 /**
- * Center strip: the main agent is always first and cannot close. File and diff
- * tabs sit beside it, and the plus control opens a new file tab.
+ * Center strip: the workspace's agents come first, then its file and diff
+ * tabs, then the plus control that opens either.
  */
 export function CodeCenterTabs({
   editorTabs,
   editorActiveIndex,
   conversationFocused,
-  onSelectChat,
+  conversations = NO_CONVERSATIONS,
+  activeConversationId = null,
+  onSelectConversation,
+  onNewConversation,
+  onCloseConversation,
   onSelectEditor,
   onCloseEditor,
   onCloseAllEditors,
@@ -89,7 +119,6 @@ export function CodeCenterTabs({
   onNewTerminal,
   browserTitles = {},
   region = "primary",
-  showMainAgent = true,
   onMoveEditorToOtherGroup,
   onMoveEditor,
   onSplitActive,
@@ -98,7 +127,13 @@ export function CodeCenterTabs({
   editorTabs: PanelContent[];
   editorActiveIndex: number;
   conversationFocused: boolean;
-  onSelectChat: () => void;
+  /** The workspace's agents, oldest first. Empty in a split group. */
+  conversations?: readonly CodeConversationTab[];
+  activeConversationId?: string | null;
+  onSelectConversation?: (sessionId: string | null) => void;
+  /** Offer "New agent" in the plus menu. */
+  onNewConversation?: () => void;
+  onCloseConversation?: (sessionId: string | null) => void;
   onSelectEditor: (index: number) => void;
   onCloseEditor: (index: number) => void;
   onCloseAllEditors: () => void;
@@ -120,7 +155,6 @@ export function CodeCenterTabs({
   onNewTerminal?: () => void;
   browserTitles?: Readonly<Record<string, string>>;
   region?: CenterTabRegion;
-  showMainAgent?: boolean;
   onMoveEditorToOtherGroup?: (index: number) => void;
   /**
    * Reorder within this strip. Dragging does the same thing, so this is the
@@ -134,9 +168,13 @@ export function CodeCenterTabs({
   const { setNodeRef: setStripRef } = useDroppable({
     id: editorStripDropId(region),
   });
-  const tabOffset = showMainAgent ? 1 : 0;
+  const tabOffset = conversations.length;
   const panelId =
     region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
+  const activeConversation = conversationFocused
+    ? (conversations.find((entry) => entry.id === activeConversationId) ??
+      conversations[0])
+    : undefined;
 
   /**
    * The tabs pattern: one tab stop for the strip, arrows to move between
@@ -146,7 +184,8 @@ export function CodeCenterTabs({
   function select(position: number) {
     const last = editorTabs.length + tabOffset - 1;
     const wrapped = position < 0 ? last : position > last ? 0 : position;
-    if (showMainAgent && wrapped === 0) onSelectChat();
+    const conversation = conversations[wrapped];
+    if (conversation) onSelectConversation?.(conversation.id);
     else onSelectEditor(wrapped - tabOffset);
     tabRefs.current[wrapped]?.focus();
   }
@@ -177,46 +216,85 @@ export function CodeCenterTabs({
       aria-label={region === "primary" ? "Workspace center" : "Workspace split"}
       data-region={region}
     >
-      {showMainAgent && (
-        <ContextMenu>
-          <ContextMenuTrigger asChild>
-            <button
-              type="button"
-              role="tab"
-              id={CHAT_TAB_ID}
-              aria-selected={conversationFocused}
-              aria-controls={CHAT_PANEL_ID}
-              tabIndex={conversationFocused ? 0 : -1}
-              ref={(node) => {
-                tabRefs.current[0] = node;
-              }}
-              className={cn(
-                "flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-[background-color,color,box-shadow,transform] duration-150 active:translate-y-px",
-                FOCUS_RING_TIGHT,
-                HOVER_TINT,
-                conversationFocused
-                  ? "bg-background text-foreground shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
-                  : "text-muted-foreground hover:bg-background/65 hover:text-foreground",
-              )}
-              onClick={onSelectChat}
-              onKeyDown={(event) => onKeyDown(event, 0)}
-            >
-              <MessageSquare className="size-3.5" />
-              Main agent
-            </button>
-          </ContextMenuTrigger>
-          <TabContextMenuContent label="Main agent">
-            <ContextMenuItem
-              className="gap-3 py-2"
-              disabled={editorTabs.length === 0}
-              onSelect={onCloseEveryEditor ?? onCloseAllEditors}
-            >
-              <ListX />
-              Close other tabs
-            </ContextMenuItem>
-          </TabContextMenuContent>
-        </ContextMenu>
-      )}
+      {conversations.map((conversation, index) => {
+        const active = conversation === activeConversation;
+        const Icon = conversation.harness
+          ? HARNESS_ICONS[conversation.harness]
+          : Bot;
+        return (
+          <ContextMenu key={conversation.id ?? "new"}>
+            <ContextMenuTrigger asChild>
+              {/* The close control is a second control on the same row, so
+                  the pair stays transparent to assistive tech. */}
+              <div
+                role="presentation"
+                className={cn(
+                  "flex h-8 min-w-0 shrink-0 items-center rounded-lg transition-[background-color,box-shadow] duration-150",
+                  conversation.closable && "pr-1",
+                  HOVER_TINT,
+                  active
+                    ? "bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]"
+                    : "hover:bg-background/65",
+                )}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  id={conversationTabId(conversation.id)}
+                  aria-selected={active}
+                  aria-controls={CHAT_PANEL_ID}
+                  tabIndex={active ? 0 : -1}
+                  ref={(node) => {
+                    tabRefs.current[index] = node;
+                  }}
+                  className={cn(
+                    "flex h-full min-w-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-[color,transform] duration-150 active:translate-y-px",
+                    FOCUS_RING_TIGHT,
+                    HOVER_TINT,
+                    active
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  onClick={() => onSelectConversation?.(conversation.id)}
+                  onKeyDown={(event) => onKeyDown(event, index)}
+                >
+                  <Icon className="size-3.5 shrink-0" />
+                  <span className="max-w-40 truncate">
+                    {conversation.label}
+                  </span>
+                  {/* The dot is the agent's own state, not the tab's, so it
+                      shows on the tabs the reader is not looking at too. */}
+                  <AttentionBadge attention={conversation.attention} compact />
+                </button>
+                {conversation.closable && (
+                  <button
+                    type="button"
+                    className={cn(
+                      "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
+                      FOCUS_RING_TIGHT,
+                      HOVER_TINT,
+                    )}
+                    onClick={() => onCloseConversation?.(conversation.id)}
+                  >
+                    <X className="size-3" />
+                    <span className="sr-only">{`Close ${conversation.label}`}</span>
+                  </button>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            <TabContextMenuContent label={conversation.label}>
+              <ContextMenuItem
+                className="gap-3 py-2"
+                disabled={editorTabs.length === 0}
+                onSelect={onCloseEveryEditor ?? onCloseAllEditors}
+              >
+                <ListX />
+                Close other tabs
+              </ContextMenuItem>
+            </TabContextMenuContent>
+          </ContextMenu>
+        );
+      })}
       <SortableContext
         items={editorTabs.map((panel) => editorTabDragId(region, panel))}
         strategy={horizontalListSortingStrategy}
@@ -266,6 +344,15 @@ export function CodeCenterTabs({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-44">
+          {onNewConversation && (
+            <>
+              <DropdownMenuItem onSelect={onNewConversation}>
+                <Bot />
+                New agent
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
           <DropdownMenuItem onSelect={onNewTab}>
             <FileCode />
             Open file…
