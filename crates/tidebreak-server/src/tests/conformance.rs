@@ -567,6 +567,9 @@ fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/providers/openai/chatgpt/sign-out"),
         ("PUT", "/voice-transcription"),
         ("POST", "/voice-transcription/install"),
+        ("GET", "/diagnostics/snapshot"),
+        ("GET", "/diagnostics/metrics"),
+        ("GET", "/diagnostics/export"),
     ]
 }
 

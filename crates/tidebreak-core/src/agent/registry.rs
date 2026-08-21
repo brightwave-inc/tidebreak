@@ -2,9 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::Instrument as _;
 
 use crate::agent_tools::{
     validate_spawn_sandbox_agent_arguments, validate_wait_for_agents_arguments,
@@ -215,17 +217,76 @@ impl Tool for SchemaValidatedTool {
     }
 
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        if let Some(mismatch) = self.registered.mismatch(&args) {
-            return Ok(ToolOutput::failed(
-                ToolErrorCategory::InvalidArguments,
-                format!(
-                    "arguments for {} do not satisfy its schema: {mismatch}; re-send the call \
-                     with arguments matching this schema: {}",
-                    self.registered.spec.name, self.registered.spec.input_schema
-                ),
-            ));
+        let tool_name = self.registered.spec.name.clone();
+        let span_name = format!("execute_tool {tool_name}");
+        let span = tracing::info_span!(
+            target: crate::DIAGNOSTICS_TRACING_TARGET,
+            "gen_ai.tool.execute",
+            otel.name = %span_name,
+            otel.kind = "internal",
+            otel.status_code = tracing::field::Empty,
+            gen_ai.operation.name = "execute_tool",
+            gen_ai.tool.name = %tool_name,
+            tidebreak.tool.approval_class = self.inner.approval_class().as_str(),
+            tidebreak.outcome = tracing::field::Empty,
+            tidebreak.duration_ms = tracing::field::Empty,
+            tidebreak.response_bytes = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        );
+        let started = Instant::now();
+        let result = async {
+            if let Some(mismatch) = self.registered.mismatch(&args) {
+                return Ok(ToolOutput::failed(
+                    ToolErrorCategory::InvalidArguments,
+                    format!(
+                        "arguments for {} do not satisfy its schema: {mismatch}; re-send the call \
+                         with arguments matching this schema: {}",
+                        self.registered.spec.name, self.registered.spec.input_schema
+                    ),
+                ));
+            }
+            self.inner.execute(ctx, args).await
         }
-        self.inner.execute(ctx, args).await
+        .instrument(span.clone())
+        .await;
+        let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let (outcome, error_type, product_failure, response_bytes) = match &result {
+            Ok(output) if !output.is_error => ("completed", None, false, output.content.len()),
+            Ok(output) => {
+                let category = output
+                    .error_category
+                    .unwrap_or(ToolErrorCategory::ToolFailed);
+                (
+                    category.as_str(),
+                    category.is_product_failure().then_some(category.as_str()),
+                    category.is_product_failure(),
+                    output.content.len(),
+                )
+            }
+            Err(error) => (error.kind(), Some(error.kind()), true, 0),
+        };
+        span.record("tidebreak.outcome", outcome);
+        span.record("tidebreak.duration_ms", duration_ms);
+        span.record("tidebreak.response_bytes", response_bytes);
+        span.record(
+            "otel.status_code",
+            if product_failure { "ERROR" } else { "OK" },
+        );
+        if let Some(error_type) = error_type {
+            span.record("error.type", error_type);
+        }
+        span.in_scope(|| {
+            tracing::info!(
+                target: crate::DIAGNOSTICS_TRACING_TARGET,
+                event_name = "gen_ai.tool.execute.completed",
+                tool_name,
+                outcome,
+                duration_ms,
+                response_bytes,
+                "tool execution completed"
+            );
+        });
+        result
     }
 }
 

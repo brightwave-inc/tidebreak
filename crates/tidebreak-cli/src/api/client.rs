@@ -599,6 +599,43 @@ impl Client {
         }
     }
 
+    /// Read the server's bounded process and request measurements.
+    pub async fn diagnostics_snapshot(&self) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/diagnostics/snapshot", self.base))
+            .await
+    }
+
+    /// Read the server's OpenMetrics snapshot.
+    pub async fn diagnostics_metrics(&self) -> Result<String> {
+        let response = self
+            .http
+            .get(format!("{}/diagnostics/metrics", self.base))
+            .send()
+            .await
+            .map_err(request_error)?;
+        Self::expect_success(response)
+            .await?
+            .text()
+            .await
+            .map_err(request_error)
+    }
+
+    /// Read a ZIP containing the snapshot, OpenMetrics text, and log tails.
+    pub async fn diagnostics_export(&self) -> Result<Vec<u8>> {
+        let response = self
+            .http
+            .get(format!("{}/diagnostics/export", self.base))
+            .send()
+            .await
+            .map_err(request_error)?;
+        Ok(Self::expect_success(response)
+            .await?
+            .bytes()
+            .await
+            .map_err(request_error)?
+            .to_vec())
+    }
+
     // ------------------------------------------------------------------
     // Conversation outputs. The same routes the desktop reads outputs
     // through; writing the bytes to a path is the caller's job, because only

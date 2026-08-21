@@ -68,6 +68,8 @@ an accepted boundary.
 
 ## Interfaces, deployment, and operations
 
+- [Diagnostics](diagnostics.md) — local snapshots, OpenMetrics, structured
+  events, export bundles, and privacy limits.
 - [Wire types](wire-types.md) — generating the desktop TypeScript contract from
   Rust serde types and checking it in CI.
 - [Self-hosting](self-hosting.md) — deployment profile, token roles, Compose,

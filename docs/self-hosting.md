@@ -186,6 +186,7 @@ aspirational.
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
 | `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
+| `TIDEBREAK_DIAGNOSTICS_LOG` | no | `off,tidebreak_diagnostics=info` | `tracing` filter directives for the bounded structured JSONL log. See [Diagnostics](diagnostics.md). |
 | `TIDEBREAK_MODEL` | no | built-in default | Default model name; also settable at runtime through settings or per chat. |
 | `TIDEBREAK_MCP_CONFIG` | no | unset | External stdio MCP server configuration file loaded at boot. |
 | `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` | no | `false` | Enables the container code-execution backend. The compose stack does not configure one. |

@@ -22,6 +22,10 @@ pub const VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+/// Tracing target for structured performance events that stay out of the
+/// human log by default.
+pub const DIAGNOSTICS_TRACING_TARGET: &str = "tidebreak_diagnostics";
+
 /// Upper bound on the filename lookup when matching files to existing
 /// outputs. Far above the catalog's own display cap. Shared between the
 /// output scan, the agent's filename resolution for output write-backs, and a

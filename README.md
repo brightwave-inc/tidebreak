@@ -188,7 +188,8 @@ opening a substantial change. Decisions that future work must preserve live in
 - Read the [troubleshooting guide](https://www.tidebreak.io/docs/troubleshooting/)
   for installation, provider, execution, and local-state problems.
 - [Open a bug report](https://github.com/brightwave-inc/tidebreak/issues/new?template=bug-report.yml)
-  with a reproducible case and diagnostics scrubbed of sensitive data.
+  with a reproducible case and [diagnostics](docs/diagnostics.md) scrubbed of
+  sensitive data.
 - [Request a feature](https://github.com/brightwave-inc/tidebreak/issues/new?template=feature-request.yml)
   by describing the workflow and desired outcome.
 - Follow [`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
