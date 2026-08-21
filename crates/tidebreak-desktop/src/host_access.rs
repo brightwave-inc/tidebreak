@@ -26,6 +26,7 @@ pub(crate) struct HostAccess {
     pub(super) output_writebacks: Mutex<()>,
     pub(super) root_changes: Mutex<()>,
     pub(super) computer_use: crate::client_execution::computer_use::ComputerUseState,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) foreground_browser: crate::client_execution::browser::ForegroundBrowserExecutorState,
     store: OnceCell<std::sync::Arc<dyn Store>>,
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
@@ -506,6 +507,7 @@ impl AuthoritativeContext {
     /// Browser workspace identity derived only after the persisted chat has
     /// been loaded. This namespace cannot collide with code `WorkspaceId`
     /// values, and no renderer or model field participates in its value.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn foreground_browser_scope(&self) -> String {
         format!("foreground-chat:{}", self.chat_id)
     }

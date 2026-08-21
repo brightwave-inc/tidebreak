@@ -896,7 +896,7 @@ mod tests {
         };
 
         let StoredResolution::Completed { result, images, .. } =
-            screenshot_resolution(&screenshot, vec![image.clone()])
+            screenshot_resolution(&screenshot, vec![image])
         else {
             panic!("screenshot metadata should fit");
         };

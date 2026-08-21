@@ -848,6 +848,7 @@ impl ComputerUseReceipt {
 }
 
 impl ForegroundBrowserReceipt {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
         Self {
             version: RECEIPT_VERSION,
@@ -1065,6 +1066,7 @@ impl ReceiptStore {
         )
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn save_foreground_browser(
         &self,
         receipt: &ForegroundBrowserReceipt,
@@ -1145,6 +1147,7 @@ impl ReceiptStore {
         }
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn remove_foreground_browser(&self, call_id: CallId) -> io::Result<()> {
         match fs::remove_file(self.foreground_browser_receipt_path(call_id)) {
             Ok(()) => sync_directory(&self.directory),
@@ -1581,6 +1584,7 @@ impl ReceiptStore {
             .join(format!("{COMPUTER_USE_PREFIX}{call_id}.json"))
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn foreground_browser_receipt_path(&self, call_id: CallId) -> PathBuf {
         self.directory
             .join(format!("{FOREGROUND_BROWSER_PREFIX}{call_id}.json"))

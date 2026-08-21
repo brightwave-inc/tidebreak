@@ -25,6 +25,7 @@ use crate::host_access::{pick_folder, AuthoritativeContext, HostAccess};
 
 use self::folder_operations::granted_folder_capabilities;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod browser;
 pub(crate) mod computer_use;
 mod control_plane;
