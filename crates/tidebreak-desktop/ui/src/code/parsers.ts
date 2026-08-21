@@ -217,6 +217,7 @@ const APPROVAL_STATES = new Set<CodeApprovalState>([
   "pending",
   "approved",
   "denied",
+  "abandoned",
 ]);
 const TOOL_OUTCOMES = new Set<ToolOutcome>(["succeeded", "failed", "denied"]);
 const ATTENTION_SOURCES = new Set<AttentionSource>([
@@ -2582,7 +2583,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         !onlyKeys(value, ["type", "approval_id", "decision"]) ||
         !nonEmpty(value.approval_id) ||
         !isRecord(value.decision) ||
-        (value.decision.type !== "approve" && value.decision.type !== "deny")
+        (value.decision.type !== "approve" &&
+          value.decision.type !== "deny" &&
+          value.decision.type !== "abandoned")
       ) {
         return null;
       }

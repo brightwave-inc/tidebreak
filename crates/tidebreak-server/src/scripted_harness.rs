@@ -86,6 +86,7 @@ pub(crate) struct ScriptedAdapter {
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
     lost_resume: Option<String>,
+    park_approvals: bool,
     approver: Arc<ScriptedApprover>,
     probes: Arc<AtomicU64>,
     /// Approval endpoint each launch was handed, `None` when it was handed no
@@ -110,6 +111,7 @@ impl ScriptedAdapter {
             unrecognized_per_turn: 0,
             silent_interrupt: false,
             lost_resume: None,
+            park_approvals: true,
             approver: Arc::new(ScriptedApprover::default()),
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -201,6 +203,14 @@ impl ScriptedAdapter {
         self
     }
 
+    /// Model an engine that asks for an approval and then stops waiting for
+    /// one, the way Claude Code's own 60-second permission-prompt timeout
+    /// does: the script plays straight past the request.
+    pub(crate) fn with_unattended_approvals(mut self) -> Self {
+        self.park_approvals = false;
+        self
+    }
+
     /// Stands in for a parser that could not map part of the stream: the
     /// scripted session reports this many unrecognized events per turn.
     pub(crate) fn with_unrecognized_per_turn(mut self, count: u64) -> Self {
@@ -273,6 +283,7 @@ impl HarnessAdapter for ScriptedAdapter {
             silent_interrupt: self.silent_interrupt,
             pid: ChildPid::new(),
             lost_resume: self.lost_resume.clone(),
+            park_approvals: self.park_approvals,
             interrupt: Arc::new(AtomicBool::new(false)),
             unrecognized: AtomicU64::new(0),
             unrecognized_per_turn: self.unrecognized_per_turn,
@@ -292,6 +303,7 @@ struct ScriptedSession {
     silent_interrupt: bool,
     pid: ChildPid,
     lost_resume: Option<String>,
+    park_approvals: bool,
     interrupt: Arc<AtomicBool>,
     unrecognized: AtomicU64,
     unrecognized_per_turn: u64,
@@ -310,6 +322,9 @@ impl ScriptedSession {
             }
             if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
                 self.sink.emit(event.clone()).await;
+                if !self.park_approvals {
+                    continue;
+                }
                 let rx = self.approver.park();
                 if let Ok(decision) = rx.await {
                     self.sink

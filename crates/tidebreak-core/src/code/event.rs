@@ -192,7 +192,7 @@ pub enum HarnessNoticeLevel {
     Error,
 }
 
-/// Decision recorded on [`CodeEvent::ApprovalResolved`].
+/// Outcome recorded on [`CodeEvent::ApprovalResolved`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalDecisionKind {
@@ -205,6 +205,13 @@ pub enum ApprovalDecisionKind {
         #[ts(optional)]
         feedback: Option<String>,
     },
+    /// Nobody decided: the tool call resolved first, so the request is dead.
+    ///
+    /// This rides `ApprovalResolved` rather than an event of its own so that
+    /// every consumer already listening for "this approval is settled" stops
+    /// showing the request. A separate event would let an un-updated reader
+    /// keep rendering a pending card that can never be acted on.
+    Abandoned,
 }
 
 /// One event in an external agent-engine session's journal.

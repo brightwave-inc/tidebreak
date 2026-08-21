@@ -488,13 +488,13 @@ export type AppViewSession = { frame_path: string, };
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
- * Decision recorded on [`CodeEvent::ApprovalResolved`].
+ * Outcome recorded on [`CodeEvent::ApprovalResolved`].
  */
 export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny", 
 /**
  * Feedback returned to the engine, when any.
  */
-feedback?: string, };
+feedback?: string, } | { "type": "abandoned" };
 
 /**
  * How wide a standing grant the human chose, narrowest first.
@@ -860,7 +860,7 @@ harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested
 /**
  * State of a persisted approval.
  */
-export type CodeApprovalState = "pending" | "approved" | "denied";
+export type CodeApprovalState = "pending" | "approved" | "denied" | "abandoned";
 
 /**
  * Remembered clone destination plus observed `gh` status.

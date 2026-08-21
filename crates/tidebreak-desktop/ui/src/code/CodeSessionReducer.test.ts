@@ -114,6 +114,24 @@ describe("approvals", () => {
       state: "denied",
     });
   });
+
+  it("marks an undecided request abandoned rather than denied", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "approval_requested", approval_id: "appr-1" },
+      {
+        type: "approval_resolved",
+        approval_id: "appr-1",
+        decision: { type: "abandoned" },
+      },
+    ]);
+    const card = state.items.find((item) => item.kind === "approval");
+    expect(card).toMatchObject({
+      kind: "approval",
+      approvalId: "appr-1",
+      state: "abandoned",
+    });
+  });
 });
 
 describe("turn lifecycle", () => {
