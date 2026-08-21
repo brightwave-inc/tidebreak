@@ -19,7 +19,15 @@ use tidebreak_core::Config;
 
 mod attachments;
 mod broker;
+#[allow(
+    dead_code,
+    reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
+)]
 mod browser_control;
+#[allow(
+    dead_code,
+    reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
+)]
 mod browser_semantics;
 mod channel;
 mod chat_debug;

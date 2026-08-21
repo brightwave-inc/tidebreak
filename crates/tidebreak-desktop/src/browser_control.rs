@@ -330,6 +330,10 @@ pub(crate) enum BrowserTargetError {
     BrowserHidden,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "navigation decisions are short-lived and carry the exact paused-state snapshot"
+)]
 pub(crate) enum BrowserNavigationDecision {
     Allow,
     Pause {
@@ -918,6 +922,10 @@ impl BrowserRegistry {
 
     /// Linearize one agent operation with Stop/takeover and reauthorize it at
     /// the last possible native boundary before engine dispatch.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "security-sensitive authorization inputs stay explicit at the native dispatch boundary"
+    )]
     pub(crate) async fn dispatch_agent<T, F, Fut>(
         &self,
         capability_id: Uuid,

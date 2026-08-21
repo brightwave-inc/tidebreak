@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Webview};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(test)]
+use tidebreak_core::MAX_BROWSER_SNAPSHOT_NODES;
 use tidebreak_core::{
     BrowserContentTrust, BrowserElementBounds, BrowserGrantCapability, BrowserOrigin,
     BrowserPageSnapshot, BrowserSemanticFrame, BrowserSemanticNode, BrowserSemanticNodeKind,
-    BrowserSnapshotArgs, BrowserViewport, MAX_BROWSER_SNAPSHOT_NODES,
+    BrowserSnapshotArgs, BrowserViewport,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;

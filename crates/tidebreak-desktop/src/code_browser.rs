@@ -239,6 +239,10 @@ pub(crate) async fn code_browser_command(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the single native creation boundary keeps browser identity and initial view state explicit"
+)]
 fn create_browser(
     app: &AppHandle,
     registry: &BrowserRegistry,
