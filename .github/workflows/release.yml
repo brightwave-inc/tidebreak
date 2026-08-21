@@ -621,6 +621,7 @@ jobs:
             target/aarch64-apple-darwin/release/deps
             target/aarch64-apple-darwin/release/tidebreak-desktop
             target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/tidebreak
             target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
             target/x86_64-apple-darwin/release/.cargo-lock
             target/x86_64-apple-darwin/release/.fingerprint
@@ -628,10 +629,14 @@ jobs:
             target/x86_64-apple-darwin/release/deps
             target/x86_64-apple-darwin/release/tidebreak-desktop
             target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/tidebreak
             target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
           key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -696,6 +701,7 @@ jobs:
             target/aarch64-apple-darwin/release/deps
             target/aarch64-apple-darwin/release/tidebreak-desktop
             target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/tidebreak
             target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
             target/x86_64-apple-darwin/release/.cargo-lock
             target/x86_64-apple-darwin/release/.fingerprint
@@ -703,10 +709,14 @@ jobs:
             target/x86_64-apple-darwin/release/deps
             target/x86_64-apple-darwin/release/tidebreak-desktop
             target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/tidebreak
             target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -775,6 +785,7 @@ jobs:
             target/aarch64-apple-darwin/release/deps
             target/aarch64-apple-darwin/release/tidebreak-desktop
             target/aarch64-apple-darwin/release/tidebreak-host-broker
+            target/aarch64-apple-darwin/release/tidebreak
             target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
             target/x86_64-apple-darwin/release/.cargo-lock
             target/x86_64-apple-darwin/release/.fingerprint
@@ -782,10 +793,14 @@ jobs:
             target/x86_64-apple-darwin/release/deps
             target/x86_64-apple-darwin/release/tidebreak-desktop
             target/x86_64-apple-darwin/release/tidebreak-host-broker
+            target/x86_64-apple-darwin/release/tidebreak
             target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
           key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -803,9 +818,12 @@ jobs:
           rm -rf \
             target/{aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin}/release/tidebreak-desktop \
             target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-host-broker \
+            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak \
             target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/libtidebreak_desktop_lib.* \
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-{aarch64-apple-darwin,x86_64-apple-darwin} \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
+            crates/tidebreak-desktop/binaries/tidebreak-{aarch64-apple-darwin,x86_64-apple-darwin} \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin \
+            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
 
       # sccache, rust-cache, and the UI install run before any Apple or Tauri
       # material is on disk. pnpm is pinned; lifecycle scripts stay off.
@@ -1055,12 +1073,23 @@ jobs:
 
           sidecar="$app_path/Contents/MacOS/tidebreak-host-broker"
           [[ -x "$sidecar" ]] || {
-            echo "Universal app is missing its executable host broker: $sidecar" >&2
+            echo "Universal app is missing its executable host broker sidecar: $sidecar" >&2
             exit 1
           }
           sidecar_arches="$(lipo -archs "$sidecar")"
           [[ "$sidecar_arches" = *arm64* && "$sidecar_arches" = *x86_64* ]] || {
             echo "Expected universal host broker, found Mach-O architectures: $sidecar_arches" >&2
+            exit 1
+          }
+
+          cli_sidecar="$app_path/Contents/MacOS/tidebreak"
+          [[ -x "$cli_sidecar" ]] || {
+            echo "Universal app is missing its executable CLI sidecar: $cli_sidecar" >&2
+            exit 1
+          }
+          cli_arches="$(lipo -archs "$cli_sidecar")"
+          [[ "$cli_arches" = *arm64* && "$cli_arches" = *x86_64* ]] || {
+            echo "Expected universal CLI, found Mach-O architectures: $cli_arches" >&2
             exit 1
           }
 
@@ -1157,8 +1186,10 @@ jobs:
             target/${{ matrix.target }}/release/deps
             target/${{ matrix.target }}/release/tidebreak-desktop.exe
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
@@ -1255,8 +1286,10 @@ jobs:
             target/${{ matrix.target }}/release/deps
             target/${{ matrix.target }}/release/tidebreak-desktop.exe
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -1329,8 +1362,10 @@ jobs:
             target/${{ matrix.target }}/release/deps
             target/${{ matrix.target }}/release/tidebreak-desktop.exe
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
 
       # A restore extracts the whole archive, including the linked products a
@@ -1345,8 +1380,10 @@ jobs:
           rm -rf \
             "target/$RELEASE_TARGET/release/tidebreak-desktop.exe" \
             "target/$RELEASE_TARGET/release/tidebreak-host-broker.exe" \
+            "target/$RELEASE_TARGET/release/tidebreak.exe" \
             "target/$RELEASE_TARGET/release/"tidebreak_desktop_lib.* \
-            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe" \
+            "crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
 
       # sccache, rust-cache, and the UI install run before the updater key is
       # loaded. pnpm is pinned; lifecycle scripts stay off.
@@ -1489,9 +1526,14 @@ jobs:
 
           # Tauri copies the target-named sidecar into the installer verbatim;
           # require the executable the bundling step consumed.
-          sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
-          [[ -s "$sidecar" ]] || {
-            echo "Missing target-named host broker sidecar: $sidecar" >&2
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
+          [[ -s "$broker_sidecar" ]] || {
+            echo "Missing target-named host broker sidecar: $broker_sidecar" >&2
+            exit 1
+          }
+          [[ -s "$cli_sidecar" ]] || {
+            echo "Missing target-named CLI sidecar: $cli_sidecar" >&2
             exit 1
           }
 
@@ -1661,9 +1703,14 @@ jobs:
           appimage_path="${appimage_paths[0]}"
           deb_path="${deb_paths[0]}"
 
-          sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
-          [[ -x "$sidecar" ]] || {
-            echo "Missing executable target-named host broker sidecar: $sidecar" >&2
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET"
+          [[ -x "$broker_sidecar" ]] || {
+            echo "Missing executable target-named host broker sidecar: $broker_sidecar" >&2
+            exit 1
+          }
+          [[ -x "$cli_sidecar" ]] || {
+            echo "Missing executable target-named CLI sidecar: $cli_sidecar" >&2
             exit 1
           }
 

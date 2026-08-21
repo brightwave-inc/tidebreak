@@ -12,15 +12,19 @@ use tauri::{
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
-use tidebreak_core::{BrowserGrantCapability, BrowserOrigin, BrowserOriginScope};
+use tidebreak_core::{
+    BrowserGrantCapability, BrowserNavigateArgs, BrowserNavigateResult, BrowserOrigin,
+    BrowserOriginScope,
+};
 use tokio::sync::oneshot;
 use url::Url;
+use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 use crate::browser_control::BROWSER_DATA_STORE_IDENTIFIER;
 use crate::browser_control::{
-    BrowserAgentAccess, BrowserController, BrowserLoadState, BrowserNavigationDecision,
-    BrowserRegistry, BrowserSnapshot,
+    BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
+    BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
@@ -28,6 +32,8 @@ const CODE_BROWSER_EVENT: &str = "code-browser:event";
 const MAX_BROWSER_ID_CHARS: usize = 80;
 const MAX_WORKSPACE_ID_CHARS: usize = 200;
 const MAX_BROWSER_URL_CHARS: usize = 8_192;
+const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +251,90 @@ pub(crate) async fn code_browser_command(
             registry.snapshot(&request.browser_id, &request.workspace_id)
         }
     }
+}
+
+/// Navigate one shared visible browser through the native agent-control gate.
+///
+/// The dispatch is authorized against the current origin. The child-webview's
+/// `on_navigation` hook independently authorizes the destination origin and
+/// pauses the navigation when the user's live grant does not cover it.
+pub(crate) async fn navigate_browser_for_agent(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: &BrowserNavigateArgs,
+) -> Result<BrowserNavigateResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser navigation request is not valid".to_owned());
+    }
+
+    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    let workspace_id = host_snapshot.workspace_id;
+    let current_origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let start_epoch = host_snapshot
+        .document_epoch
+        .ok_or_else(|| "browser document epoch is unavailable".to_owned())?;
+    let renderer_url = app.get_webview("main").and_then(|main| main.url().ok());
+    let destination = validated_url(&arguments.url, renderer_url.as_ref())?;
+    let destination_origin = BrowserOrigin::from_url(destination.as_str())
+        .ok_or_else(|| "browser destination has no HTTP origin".to_owned())?;
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    let browser_id = arguments.browser_id.clone();
+    let dispatch_browser_id = browser_id.clone();
+    let fallback_url = destination.to_string();
+    let dispatch_registry = registry.clone();
+
+    registry
+        .dispatch_agent(
+            capability_id,
+            &browser_id,
+            &current_origin,
+            BrowserGrantCapability::BrowserControlOrigin,
+            "navigate",
+            Some(destination_origin.as_str()),
+            BrowserDispatchEffect::Mutate,
+            None,
+            move || async move {
+                webview.navigate(destination).map_err(browser_error)?;
+                let deadline = tokio::time::Instant::now() + AGENT_NAVIGATION_START_TIMEOUT;
+                loop {
+                    let snapshot =
+                        dispatch_registry.snapshot(&dispatch_browser_id, &workspace_id)?;
+                    if snapshot
+                        .agent_access
+                        .as_ref()
+                        .is_some_and(|access| access.halted)
+                    {
+                        return Err("browser control was stopped by the user".to_owned());
+                    }
+                    if let Some(document_epoch) = snapshot
+                        .document_epoch
+                        .filter(|document_epoch| *document_epoch > start_epoch)
+                    {
+                        return Ok(BrowserNavigateResult {
+                            browser_id: dispatch_browser_id,
+                            url: snapshot.url.unwrap_or(fallback_url),
+                            load_state: snapshot.load_state.unwrap_or(BrowserLoadState::Loading),
+                            document_epoch,
+                        });
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(
+                            "browser navigation did not start before the deadline".to_owned()
+                        );
+                    }
+                    tokio::time::sleep(AGENT_NAVIGATION_POLL_INTERVAL).await;
+                }
+            },
+        )
+        .await
 }
 
 #[allow(
