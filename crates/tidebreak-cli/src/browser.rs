@@ -2334,13 +2334,19 @@ mod tests {
         let _ = proxy_handle.await;
 
         // The request must reach the listener, not the bogus proxy.
-        assert!(result.is_ok(), "request must bypass ambient proxy: {result:?}");
+        assert!(
+            result.is_ok(),
+            "request must bypass ambient proxy: {result:?}"
+        );
 
         // Authorization header must be present — the token reaches the real
         // endpoint, not an intercepted proxy.
         let has_auth = req_headers
             .iter()
             .any(|h| h.to_lowercase().starts_with("authorization"));
-        assert!(has_auth, "Authorization must reach the listener: {req_headers:?}");
+        assert!(
+            has_auth,
+            "Authorization must reach the listener: {req_headers:?}"
+        );
     }
 }
