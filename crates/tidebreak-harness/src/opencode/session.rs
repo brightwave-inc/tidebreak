@@ -96,14 +96,10 @@ fn merge_browser_mcp(
         }
         Some(raw) => {
             let mut config: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
-                HarnessError::Other(format!(
-                    "OPENCODE_CONFIG_CONTENT is not valid JSON: {err}"
-                ))
+                HarnessError::Other(format!("OPENCODE_CONFIG_CONTENT is not valid JSON: {err}"))
             })?;
             let obj = config.as_object_mut().ok_or_else(|| {
-                HarnessError::Other(
-                    "OPENCODE_CONFIG_CONTENT must be a JSON object".into(),
-                )
+                HarnessError::Other("OPENCODE_CONFIG_CONTENT must be a JSON object".into())
             })?;
             let mcp = obj
                 .entry("mcp".to_owned())
@@ -161,7 +157,11 @@ pub(crate) fn compose_serve_plan(
         .iter()
         .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
         .map(|(_, value)| value.clone());
-    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD" && key != OPENCODE_CONFIG_CONTENT);
+    env.retain(|(key, _)| {
+        !BrowserChannelSpec::is_reserved_env_key(key)
+            && key != "PWD"
+            && key != OPENCODE_CONFIG_CONTENT
+    });
     if let Some(spec) = browser {
         let merged = merge_browser_mcp(existing_config.as_deref(), spec.bridge_command())?;
         env.push((OPENCODE_CONFIG_CONTENT.to_owned(), merged));
@@ -888,9 +888,7 @@ mod tests {
             .expect("OPENCODE_CONFIG_CONTENT must be set");
         let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
         assert_eq!(config["mcp"]["tb-browser"]["type"], "local");
-        let cmd = config["mcp"]["tb-browser"]["command"]
-            .as_array()
-            .unwrap();
+        let cmd = config["mcp"]["tb-browser"]["command"].as_array().unwrap();
         assert_eq!(cmd[0], "/usr/local/bin/tidebreak");
         assert_eq!(cmd[1], "browser-mcp");
     }
@@ -907,7 +905,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !plan.env.iter().any(|(key, _)| key == OPENCODE_CONFIG_CONTENT),
+            !plan
+                .env
+                .iter()
+                .any(|(key, _)| key == OPENCODE_CONFIG_CONTENT),
             "no OPENCODE_CONFIG_CONTENT when browser is absent"
         );
     }
@@ -989,14 +990,9 @@ mod tests {
             .map(|(_, value)| value.as_str())
             .unwrap();
         let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
-        let cmd = config["mcp"]["tb-browser"]["command"]
-            .as_array()
-            .unwrap();
+        let cmd = config["mcp"]["tb-browser"]["command"].as_array().unwrap();
         assert_eq!(cmd.len(), 2);
-        assert_eq!(
-            cmd[0],
-            "/Applications/Tidebreak.app/Contents/bin/tidebreak"
-        );
+        assert_eq!(cmd[0], "/Applications/Tidebreak.app/Contents/bin/tidebreak");
         assert_eq!(cmd[1], "browser-mcp");
     }
 
