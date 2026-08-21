@@ -900,7 +900,6 @@ fn format_browser_list_summary(result: &BrowserListResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     const VALID_TOKEN: &str = "tbreak_bt_00000000-0000-0000-0000-000000000000";
 
@@ -1117,7 +1116,7 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "endpoint": "http://127.0.0.1:9876/code/browser",
-                "token": "tbreak_bt_not-a-uuid-at-all-no-really"
+                "token": "tbreak_bt_00000000-0000-0000-0000-00000000000Z"
             })
             .to_string(),
         )
@@ -1731,12 +1730,11 @@ mod tests {
             // Send a response claiming a tiny body but actually streaming a
             // huge one.
             let padding = "x".repeat(128 * 1024); // 128 KiB > 64 KiB navigate cap
-            let response = format!(
+            let response =
                 "HTTP/1.1 200 OK\r\n\
                  Content-Type: application/json\r\n\
                  Transfer-Encoding: chunked\r\n\
-                 Connection: close\r\n\r\n"
-            );
+                 Connection: close\r\n\r\n";
             let mut writer = writer;
             tokio::io::AsyncWriteExt::write_all(&mut writer, response.as_bytes())
                 .await
@@ -1821,7 +1819,7 @@ mod tests {
                     "loadState": "ready",
                     "visible": true,
                     "engine": {
-                        "name": "webkit_gtk",
+                        "name": "web_kit_gtk",
                         "capabilities": {
                             "lifecycle": true,
                             "persistentProfile": false,
@@ -2029,7 +2027,7 @@ mod tests {
                     .unwrap();
             }
             let body: Value = serde_json::from_slice(&body_bytes).unwrap();
-            assert_eq!(body["browserId"], "browser-1");
+            assert_eq!(body["browser_id"], "browser-1");
             assert_eq!(body["url"], "https://example.com/");
 
             let result = serde_json::json!({
