@@ -1,10 +1,16 @@
 //! Per-turn worktree checkpoints via a temporary git index.
 //!
-//! A completed turn records the worktree's full state — tracked changes and
-//! untracked files — as a synthetic commit created through a temporary index
-//! file. The user's index, `HEAD`, and reflog are untouched. The commit is
-//! referenced only by a hidden ref
-//! `refs/tidebreak/checkpoints/<workspace>/<session>/<ordinal>`.
+//! A turn that ends — completed, failed, or interrupted — records the
+//! worktree's full state, tracked changes and untracked files alike, as a
+//! synthetic commit created through a temporary index file. The user's index,
+//! `HEAD`, and reflog are untouched. The commit is referenced only by a hidden
+//! ref `refs/tidebreak/checkpoints/<workspace>/<session>/<ordinal>`.
+//!
+//! A failed or interrupted turn is checkpointed for the same reason a
+//! completed one is: the engine may have rewritten files before it died, and
+//! edits outside the chain are edits the per-turn diff and any future restore
+//! cannot see. They would otherwise land in the next turn's checkpoint, under
+//! the wrong turn.
 //!
 //! The session segment is load-bearing. A workspace holds several sessions
 //! (decision 0055) and `next_turn_ordinal` counts per session, so every
@@ -126,17 +132,28 @@ pub(crate) fn checkpoint_ref(
     format!("{REF_PREFIX}/{workspace_id}/{session_id}/{ordinal}")
 }
 
-/// After a turn reaches `Completed`, snapshot the worktree and journal.
+/// After a turn reaches any terminal status, snapshot the worktree and
+/// journal.
+///
+/// Completed, failed, and interrupted turns are all checkpointed: a turn that
+/// died mid-edit still changed the worktree, and only a ref of its own keeps
+/// those edits in the chain instead of folding them into the next turn. A
+/// `Running` turn is skipped — the worktree is still moving — and a turn that
+/// already holds a ref is left alone.
 ///
 /// Checkpoint failure does not fail the turn: a [`CodeEvent::HarnessNotice`]
 /// is journaled and the already-recorded work stands.
-pub(crate) async fn after_turn_completed(
+pub(crate) async fn after_turn_ended(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &CodeSession,
     turn: &mut CodeTurn,
 ) {
-    if turn.status != CodeTurnStatus::Completed || turn.checkpoint_ref.is_some() {
+    let terminal = matches!(
+        turn.status,
+        CodeTurnStatus::Completed | CodeTurnStatus::Failed | CodeTurnStatus::Interrupted
+    );
+    if !terminal || turn.checkpoint_ref.is_some() {
         return;
     }
     match record_for_turn(db, session, turn).await {
@@ -200,6 +217,7 @@ async fn record_for_turn(
         workspace.id,
         session.id,
         turn.ordinal,
+        turn.status,
         previous.as_deref(),
         &workspace.base_ref,
     )
@@ -209,11 +227,13 @@ async fn record_for_turn(
 /// Snapshot the worktree into a hidden checkpoint ref.
 ///
 /// Uses a temporary index file. The user's index and `HEAD` are not written.
+/// `status` is the turn's terminal status, recorded in the commit message.
 pub(crate) async fn record_checkpoint(
     worktree: &Path,
     workspace_id: WorkspaceId,
     session_id: CodeSessionId,
     ordinal: i64,
+    status: CodeTurnStatus,
     previous_oid: Option<&str>,
     base_ref: &str,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
@@ -225,7 +245,10 @@ pub(crate) async fn record_checkpoint(
             .await
             .map_err(CheckpointError::internal)?,
     };
-    let message = format!("checkpoint turn {ordinal}");
+    // `checkpoint turn <n>` stays the leading shape; the status is appended so
+    // `git log` on the hidden refs distinguishes a completed turn from one
+    // that failed or was interrupted. Nothing parses this message.
+    let message = format!("checkpoint turn {ordinal} ({})", status.as_str());
     let commit = git_text(
         worktree,
         &["commit-tree", &tree, "-p", &parent, "-m", &message],
@@ -848,6 +871,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
+    use tidebreak_core::db::code::{
+        insert_repo, insert_session, insert_turn, insert_workspace, list_events,
+    };
+    use tidebreak_core::{
+        Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSessionKind,
+        CodeSessionLifecycle, CodeTurnId, CodeWorkspaceStatus, HarnessKind, OwnerId, RepoId,
+    };
 
     fn init_repo() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
@@ -912,9 +942,17 @@ mod tests {
         std::fs::set_permissions(tree.join("README.md"), perms).unwrap();
 
         let before = user_git_fingerprint(&tree).await.unwrap();
-        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
-            .await
-            .unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         let after = user_git_fingerprint(&tree).await.unwrap();
         assert_eq!(before, after, "user index and HEAD must be byte-identical");
         assert!(recorded.checkpoint_ref.starts_with(REF_PREFIX));
@@ -996,9 +1034,17 @@ mod tests {
         std::fs::write(tree.join("src/beta.rs"), format!("{body}line 13\n")).unwrap();
         std::fs::write(tree.join("café.txt"), "un\ndeux\n").unwrap();
 
-        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
-            .await
-            .unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let files = list_changed_files(
             &tree,
@@ -1044,16 +1090,32 @@ mod tests {
         let id = ws();
         let session = sess();
         std::fs::write(tree.join("a.txt"), "one\n").unwrap();
-        let first = record_checkpoint(&tree, id, session, 1, None, "main")
-            .await
-            .unwrap();
+        let first = record_checkpoint(
+            &tree,
+            id,
+            session,
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         std::fs::write(tree.join("b.txt"), "two\n").unwrap();
         let first_oid = git_text(&tree, &["rev-parse", &first.checkpoint_ref], GIT_TIMEOUT)
             .await
             .unwrap();
-        let second = record_checkpoint(&tree, id, session, 2, Some(&first_oid), "main")
-            .await
-            .unwrap();
+        let second = record_checkpoint(
+            &tree,
+            id,
+            session,
+            2,
+            CodeTurnStatus::Completed,
+            Some(&first_oid),
+            "main",
+        )
+        .await
+        .unwrap();
 
         let turn2 = produce_diff(
             &tree,
@@ -1095,9 +1157,17 @@ mod tests {
             )
             .unwrap();
         }
-        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
-            .await
-            .unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let tight = DiffBounds {
             max_bytes: 40,
@@ -1125,12 +1195,28 @@ mod tests {
         let live = ws();
         let dead = ws();
         std::fs::write(tree.join("x.txt"), "x\n").unwrap();
-        record_checkpoint(&tree, live, sess(), 1, None, "main")
-            .await
-            .unwrap();
-        record_checkpoint(&tree, dead, sess(), 1, None, "main")
-            .await
-            .unwrap();
+        record_checkpoint(
+            &tree,
+            live,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        record_checkpoint(
+            &tree,
+            dead,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         let listed = list_checkpoint_refs(&repo).await.unwrap();
         assert_eq!(listed.len(), 2, "{listed:?}");
 
@@ -1159,13 +1245,29 @@ mod tests {
         let second_session = sess();
 
         std::fs::write(tree.join("first.txt"), "first\n").unwrap();
-        let first = record_checkpoint(&tree, workspace, first_session, 1, None, "main")
-            .await
-            .unwrap();
+        let first = record_checkpoint(
+            &tree,
+            workspace,
+            first_session,
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
         std::fs::write(tree.join("second.txt"), "second\n").unwrap();
-        let second = record_checkpoint(&tree, workspace, second_session, 1, None, "main")
-            .await
-            .unwrap();
+        let second = record_checkpoint(
+            &tree,
+            workspace,
+            second_session,
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
 
         assert_ne!(
             first.checkpoint_ref, second.checkpoint_ref,
@@ -1264,14 +1366,303 @@ mod tests {
         assert_ne!(path.to_string_lossy().trim(), user_index.trim());
     }
 
+    /// A database, bus, and session bound to a real worktree.
+    ///
+    /// [`after_turn_ended`] reads the workspace row to find the worktree, so
+    /// a checkpoint test needs the rows, not just the git tree.
+    async fn seed_session(
+        repo: &Path,
+        worktree: &Path,
+    ) -> (Arc<DbStore>, Arc<CodeEventBus>, CodeSession) {
+        let db = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                repo.parent().unwrap().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let owner = OwnerId::local();
+        let repo_id = RepoId::new();
+        insert_repo(
+            &db,
+            &CodeRepo {
+                id: repo_id,
+                owner: owner.clone(),
+                root_path: repo.display().to_string(),
+                display_name: "example".into(),
+                default_base_ref: "main".into(),
+                branch_prefix: "tidebreak/".into(),
+                setup_script: None,
+                archive_script: None,
+                quick_actions: Vec::new(),
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let workspace_id = WorkspaceId::new();
+        insert_workspace(
+            &db,
+            &CodeWorkspace {
+                id: workspace_id,
+                owner: owner.clone(),
+                repo_id,
+                title: "first".into(),
+                worktree_path: worktree.display().to_string(),
+                branch_name: "tidebreak/first".into(),
+                base_ref: "main".into(),
+                status: CodeWorkspaceStatus::Active,
+                pr: None,
+                created_at: chrono::Utc::now(),
+                archived_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = CodeSession {
+            id: CodeSessionId::new(),
+            owner,
+            workspace_id,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: CodePermissionMode::Plan,
+            model: None,
+            lifecycle: CodeSessionLifecycle::Running,
+            fence_reason: None,
+            child_pid: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        insert_session(&db, &session).await.unwrap();
+        (db, Arc::new(CodeEventBus::default()), session)
+    }
+
+    async fn seed_turn(
+        db: &Arc<DbStore>,
+        session: &CodeSession,
+        ordinal: i64,
+        status: CodeTurnStatus,
+    ) -> CodeTurn {
+        let turn = CodeTurn {
+            id: CodeTurnId::new(),
+            session_id: session.id,
+            ordinal,
+            status,
+            user_input: "edit the tree".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        };
+        insert_turn(db, &session.owner, &turn).await.unwrap();
+        turn
+    }
+
+    async fn recorded_events(db: &Arc<DbStore>, session: &CodeSession) -> Vec<CodeEvent> {
+        list_events(db, &session.owner, session.id, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|framed| framed.event)
+            .collect()
+    }
+
+    /// An interrupted turn had already rewritten the worktree. Without a ref
+    /// of its own those edits fall outside the chain: the turn's diff is
+    /// empty and the next turn's checkpoint absorbs them.
+    #[tokio::test]
+    async fn an_interrupted_turn_records_its_edits() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "interrupted");
+        std::fs::write(tree.join("half-done.txt"), "written before the stop\n").unwrap();
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Interrupted).await;
+
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        let r#ref = turn
+            .checkpoint_ref
+            .clone()
+            .expect("an interrupted turn must own a checkpoint");
+        let listed = git_text(&tree, &["ls-tree", "--name-only", &r#ref], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(listed.contains("half-done.txt"), "{listed}");
+        assert_eq!(turn.diffstat.as_ref().unwrap().files, 1);
+
+        let stored = get_turn(&db, &session.owner, turn.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.checkpoint_ref.as_deref(), Some(r#ref.as_str()));
+        assert!(
+            recorded_events(&db, &session)
+                .await
+                .iter()
+                .any(|event| matches!(event, CodeEvent::CheckpointRecorded { .. })),
+            "an interrupted turn must journal its checkpoint"
+        );
+
+        // The hidden ref is the only record a human has of this turn.
+        let subject = git_text(&tree, &["log", "-1", "--format=%s", &r#ref], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(subject, "checkpoint turn 1 (interrupted)");
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_records_its_edits() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "failed");
+        std::fs::write(tree.join("README.md"), "rewritten before the failure\n").unwrap();
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        let r#ref = turn
+            .checkpoint_ref
+            .clone()
+            .expect("a failed turn must own a checkpoint");
+        let diff = produce_diff(
+            &tree,
+            &merge_base(&tree, "main").await.unwrap(),
+            &r#ref,
+            None,
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            diff.diff.contains("rewritten before the failure"),
+            "{}",
+            diff.diff
+        );
+        assert!(
+            recorded_events(&db, &session)
+                .await
+                .iter()
+                .any(|event| matches!(event, CodeEvent::CheckpointRecorded { .. })),
+            "a failed turn must journal its checkpoint"
+        );
+    }
+
+    /// A running turn is still moving the worktree, so it gets nothing.
+    #[tokio::test]
+    async fn a_running_turn_is_not_checkpointed() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "running");
+        std::fs::write(tree.join("in-flight.txt"), "mid-edit\n").unwrap();
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Running).await;
+
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        assert!(turn.checkpoint_ref.is_none());
+        assert!(turn.diffstat.is_none());
+        assert!(
+            list_checkpoint_refs(&repo).await.unwrap().is_empty(),
+            "a running turn must not write a ref"
+        );
+        assert!(recorded_events(&db, &session).await.is_empty());
+    }
+
+    /// The failure posture is unchanged on the new paths: a checkpoint that
+    /// cannot be taken warns and leaves the turn as it was.
+    #[tokio::test]
+    async fn a_failed_checkpoint_keeps_a_failed_turn() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "unrecoverable");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        // Replace the checkout with a plain directory so the snapshot fails.
+        std::fs::remove_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("orphan.txt"), "still here\n").unwrap();
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        assert!(turn.checkpoint_ref.is_none());
+        assert_eq!(turn.status, CodeTurnStatus::Failed);
+        assert!(
+            recorded_events(&db, &session)
+                .await
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    CodeEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Warning,
+                        ..
+                    }
+                )),
+            "a checkpoint failure must warn instead of failing the turn"
+        );
+    }
+
+    /// A failed turn owning a ref must not break the ordinal chain: turn 2
+    /// parents off turn 1 and its diff covers only its own edits.
+    #[tokio::test]
+    async fn a_later_turn_chains_off_a_failed_turns_checkpoint() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "chain");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+
+        std::fs::write(tree.join("from-failed.txt"), "one\n").unwrap();
+        let mut failed = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+        after_turn_ended(&db, &bus, &session, &mut failed).await;
+        let first = failed.checkpoint_ref.clone().unwrap();
+
+        std::fs::write(tree.join("from-completed.txt"), "two\n").unwrap();
+        let mut completed = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut completed).await;
+        let second = completed.checkpoint_ref.clone().unwrap();
+
+        let parent = git_text(&tree, &["rev-parse", &format!("{second}^")], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        let first_oid = git_text(&tree, &["rev-parse", &first], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(parent, first_oid, "turn 2 must parent off turn 1");
+
+        assert_eq!(completed.diffstat.as_ref().unwrap().files, 1);
+        let diff = produce_diff(&tree, &first, &second, None, DiffBounds::default())
+            .await
+            .unwrap();
+        assert!(diff.diff.contains("from-completed.txt"), "{}", diff.diff);
+        assert!(
+            !diff.diff.contains("from-failed.txt"),
+            "the failed turn's edits belong to the failed turn: {}",
+            diff.diff
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_failure_does_not_write_a_ref() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("not-a-repo");
         std::fs::create_dir_all(&missing).unwrap();
-        let err = record_checkpoint(&missing, ws(), sess(), 1, None, "main")
-            .await
-            .unwrap_err();
+        let err = record_checkpoint(
+            &missing,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 }

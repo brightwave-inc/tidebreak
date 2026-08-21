@@ -936,6 +936,10 @@ async fn drive_turn(
                 )
                 .await;
             }
+            // A harness error returns from here, so this is the only place
+            // the turn's edits can still be checkpointed. The engine may have
+            // rewritten files before the stream broke.
+            super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
             if !session_was_ended(db, session).await {
                 if let HarnessError::ResumeLost(detail) = &err {
                     // The engine has lost this session: every later turn would
@@ -968,7 +972,7 @@ async fn drive_turn(
     {
         turn = current;
     }
-    super::checkpoint::after_turn_completed(db, bus, session, &mut turn).await;
+    super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
     if session_was_ended(db, session).await {
         return Ok(turn);
     }
