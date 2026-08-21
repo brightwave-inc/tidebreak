@@ -747,6 +747,8 @@ fn run_action(
         | CodeBrowserAction::RevokeAgentAccess
         | CodeBrowserAction::StopAgentControl
         | CodeBrowserAction::TakeHumanControl
+        | CodeBrowserAction::SetInspect { .. }
+        | CodeBrowserAction::RemoveInspect
         | CodeBrowserAction::Close => Err(format!(
             "browser action is not valid for the open session {browser_id}"
         )),

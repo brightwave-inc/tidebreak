@@ -1830,10 +1830,11 @@ const ACTION_SCRIPT: &str = r#"
 
 pub(crate) async fn browser_inject_inspect_overlay(
     app: &tauri::AppHandle,
-    _registry: &crate::browser_control::BrowserRegistry,
+    registry: &crate::browser_control::BrowserRegistry,
     browser_id: &str,
     workspace_id: &str,
 ) -> Result<(), String> {
+    registry.ensure_workspace(browser_id, workspace_id)?;
     let label = crate::code_browser::browser_label(browser_id)?;
     let webview = app
         .get_webview(&label)
@@ -1845,10 +1846,11 @@ pub(crate) async fn browser_inject_inspect_overlay(
 
 pub(crate) async fn browser_remove_inspect_overlay(
     app: &tauri::AppHandle,
-    _registry: &crate::browser_control::BrowserRegistry,
+    registry: &crate::browser_control::BrowserRegistry,
     browser_id: &str,
     workspace_id: &str,
 ) -> Result<(), String> {
+    registry.ensure_workspace(browser_id, workspace_id)?;
     let label = crate::code_browser::browser_label(browser_id)?;
     let webview = app
         .get_webview(&label)

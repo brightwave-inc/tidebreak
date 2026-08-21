@@ -181,6 +181,7 @@ function parseBrowserSession(
     loadState: url ? "ready" : "idle",
     error: null,
     notice: null,
+    inspectEnabled: record.inspectEnabled === true,
     history,
     historyIndex,
     updatedAt: record.updatedAt,

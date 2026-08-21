@@ -115,6 +115,7 @@ function browserSession(
     loadState,
     error: loadState === "failed" ? "The local preview stopped responding." : null,
     notice: null,
+    inspectEnabled: false,
     history: url
       ? [
           { url: "https://github.com/brightwave-inc/tidebreak/pull/2335", title: "Agent browser epic" },
@@ -193,7 +194,7 @@ function BrowserStory({
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
           onToggleInspect={fn()}
-          inspectEnabled={false}
+          inspectEnabled={inspectEnabled}
           viewportControl={
             <BrowserViewportControl
               viewport={viewportState}
