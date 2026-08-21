@@ -1269,4 +1269,133 @@ describe("BrowserToolbar compact", () => {
       }),
     );
   });
+
+  it("closes the compact Agent access menu and restores the native view when the toolbar grows past 420 px", async () => {
+    // Regression: opening the compact Agent access DropdownMenu calls the
+    // parent obscuration callback true. Resizing to >=420 switches to the
+    // wide branch and unmounts Radix without onOpenChange(false), leaving
+    // the native WKWebView hidden. This test verifies a distinct
+    // agentAccessOpen visibility source is closed explicitly on compact->wide
+    // transitions and the native view is subsequently revealed.
+
+    // Capture ResizeObserver callbacks so we can manually fire a resize event
+    // after changing the mocked clientWidth. The global stub in setup.ts fires
+    // once synchronously on observe; we replicate that and store the callback.
+    const observerCallbacks: Array<ResizeObserverCallback> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) {
+        observerCallbacks.push(callback);
+      }
+      observe(target: Element) {
+        const entry = {
+          target,
+          contentRect: { width: 1024, height: 768, top: 0, left: 0, right: 1024, bottom: 768, x: 0, y: 0 },
+          borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+          contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+          devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+        } as unknown as ResizeObserverEntry;
+        const cb = observerCallbacks.at(-1)!;
+        cb([entry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    });
+
+    mockedClientWidth = 390;
+    const runtime = browserHost({
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess({
+          shared: true,
+          scope: "origin",
+          canObserve: true,
+          canControl: true,
+        }),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    // Wait for the native surface to be created and revealed
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+
+    // Clear calls before opening the menu so we can verify the hide command
+    runtime.calls.splice(0);
+
+    // Open the compact Agent access menu
+    const access = screen.getByRole("button", {
+      name: "Shared with agent: https://example.com",
+    });
+    await user.click(access);
+    // The menu should be open
+    expect(screen.getByRole("menuitem", { name: "Stop sharing" })).toBeVisible();
+
+    // The native view should be hidden while the menu is open
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      }),
+    );
+
+    // Simulate resizing from 390px to 1024px (past the 420px breakpoint).
+    // Fire the ResizeObserver callback for the toolbar observer so
+    // useCompactToolbar re-reads clientWidth and switches to wide mode.
+    runtime.calls.splice(0);
+    mockedClientWidth = 1024;
+    const toolbarObserverCallback = observerCallbacks[0];
+    expect(toolbarObserverCallback).toBeDefined();
+    const resizeEntry = {
+      target: null as unknown as Element,
+      contentRect: { width: 1024, height: 768, top: 0, left: 0, right: 1024, bottom: 768, x: 0, y: 0 },
+      borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+      contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+      devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+    } as unknown as ResizeObserverEntry;
+    await act(async () => {
+      toolbarObserverCallback([resizeEntry], {} as ResizeObserver);
+    });
+
+    // The compact->wide effect should have closed agentAccessOpen, which
+    // makes the native view visible again. Flush the reveal frame and verify.
+    await act(async () => {
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() => resolve()),
+      );
+    });
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+
+    // The compact menu trigger should no longer be present (wide branch renders inline)
+    expect(
+      screen.queryByRole("button", { name: "Shared with agent: https://example.com" }),
+    ).toBeNull();
+    // The wide-branch inline "Stop sharing" button should be present instead
+    expect(screen.getByRole("button", { name: "Stop sharing" })).toBeVisible();
+
+    vi.unstubAllGlobals();
+  });
+
 });

@@ -188,6 +188,7 @@ function BrowserStory({
           onSelectHistory={fn()}
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
+          onAgentAccessOpenChange={fn()}
           viewportControl={
             <BrowserViewportControl
               viewport={viewportState}
@@ -322,6 +323,7 @@ function NarrowToolbarStory({
           onSelectHistory={fn()}
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
+          onAgentAccessOpenChange={fn()}
           viewportControl={
             <BrowserViewportControl
               viewport={viewport}

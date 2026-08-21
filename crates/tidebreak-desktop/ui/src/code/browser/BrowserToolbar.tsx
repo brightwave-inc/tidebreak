@@ -99,6 +99,8 @@ export function BrowserToolbar({
   onSelectHistory,
   onOpenExternal,
   onOverlayOpenChange,
+  onAgentAccessOpenChange,
+  agentAccessOpen = false,
   viewportControl,
 }: {
   session: BrowserSession;
@@ -122,6 +124,8 @@ export function BrowserToolbar({
   onSelectHistory: (index: number) => void;
   onOpenExternal: () => void;
   onOverlayOpenChange: (open: boolean) => void;
+  onAgentAccessOpenChange?: (open: boolean) => void;
+  agentAccessOpen?: boolean;
   viewportControl?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -247,7 +251,8 @@ export function BrowserToolbar({
           compact={compactToolbar}
           onShare={onShareAgent}
           onRevoke={onRevokeAgent}
-          onOverlayOpenChange={onOverlayOpenChange}
+          onAgentAccessOpenChange={onAgentAccessOpenChange}
+          agentAccessOpen={agentAccessOpen}
         />
 
         {viewportControl && (
@@ -350,15 +355,27 @@ function BrowserAgentAccessControl({
   compact = false,
   onShare,
   onRevoke,
-  onOverlayOpenChange,
+  onAgentAccessOpenChange,
+  agentAccessOpen = false,
 }: {
   engine?: BrowserEngine;
   access?: BrowserAgentAccess;
   compact?: boolean;
   onShare?: () => void;
   onRevoke?: () => void;
-  onOverlayOpenChange?: (open: boolean) => void;
+  onAgentAccessOpenChange?: (open: boolean) => void;
+  agentAccessOpen?: boolean;
 }) {
+  // Close the compact Agent access menu when the toolbar grows past the
+  // compact breakpoint. Radix does not call onOpenChange(false) when its
+  // root is conditionally unmounted, so without this the parent visibility
+  // source would stay latched true and the native view would stay hidden.
+  useEffect(() => {
+    if (!compact && agentAccessOpen) {
+      onAgentAccessOpenChange?.(false);
+    }
+  }, [compact, agentAccessOpen, onAgentAccessOpenChange]);
+
   if (!engine?.capabilities.semanticSnapshot || !access?.origin) return null;
   const originLabel = browserOriginLabel(access.origin);
 
@@ -369,7 +386,8 @@ function BrowserAgentAccessControl({
         originLabel={originLabel}
         onShare={onShare}
         onRevoke={onRevoke}
-        onOpenChange={onOverlayOpenChange}
+        open={agentAccessOpen}
+        onOpenChangeControlled={onAgentAccessOpenChange}
       />
     );
   }
@@ -459,13 +477,15 @@ function CompactAgentAccessControl({
   originLabel,
   onShare,
   onRevoke,
-  onOpenChange,
+  open = false,
+  onOpenChangeControlled,
 }: {
   access: BrowserAgentAccess;
   originLabel: string;
   onShare?: () => void;
   onRevoke?: () => void;
-  onOpenChange?: (open: boolean) => void;
+  open?: boolean;
+  onOpenChangeControlled?: (open: boolean) => void;
 }) {
   const paused = access.paused;
   const statusLabel = paused
@@ -483,7 +503,10 @@ function CompactAgentAccessControl({
       <span className="sr-only" role="status">
         {statusLabel}
       </span>
-      <DropdownMenu onOpenChange={onOpenChange}>
+      <DropdownMenu
+        open={open}
+        onOpenChange={onOpenChangeControlled}
+      >
         <WithTooltip label={displayLabel}>
           <DropdownMenuTrigger asChild>
             <Button

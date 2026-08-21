@@ -105,6 +105,7 @@ function CodeBrowserTabSession({
   const [address, setAddress] = useState(session.address);
   const [addressError, setAddressError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [agentAccessOpen, setAgentAccessOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
@@ -124,6 +125,7 @@ function CodeBrowserTabSession({
   const visible =
     !obscured &&
     !historyOpen &&
+    !agentAccessOpen &&
     !viewportOpen &&
     session.loadState !== "failed";
   const visibleRef = useRef(visible);
@@ -709,6 +711,8 @@ function CodeBrowserTabSession({
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
         onOverlayOpenChange={setHistoryOpen}
+        onAgentAccessOpenChange={setAgentAccessOpen}
+        agentAccessOpen={agentAccessOpen}
         viewportControl={
           <BrowserViewportControl
             viewport={viewport}
