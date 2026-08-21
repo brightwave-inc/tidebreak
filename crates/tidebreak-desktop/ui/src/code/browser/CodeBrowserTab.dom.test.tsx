@@ -1474,9 +1474,13 @@ describe("BrowserToolbar compact", () => {
       }),
     );
 
-    // Emit a host event that revokes agent access — origin becomes undefined.
-    // The event handler merges agentAccess into runtime state, and
-    // BrowserAgentAccessControl returns null when origin is falsy.
+    // Emit a host event that revokes agent access. The real host keeps the
+    // current HTTP origin (origin stays https://example.com) while paused
+    // and shared both become false. The compact Agent access dropdown is
+    // mounted only while compact && (paused || shared); with both false it
+    // unmounts without Radix calling onOpenChange(false). The mounted
+    // predicate effect in BrowserAgentAccessControl must close
+    // agentAccessOpen, restoring native visibility.
     runtime.calls.splice(0);
     await act(async () => {
       runtime.emit({
@@ -1484,11 +1488,19 @@ describe("BrowserToolbar compact", () => {
         url: "https://example.com",
         browserId: "browser-1",
         workspaceId: "workspace-1",
-        agentAccess: { ...agentAccess(), shared: false, origin: undefined },
+        agentAccess: { ...agentAccess(), shared: false, paused: false },
       });
     });
 
-    // The effect should close agentAccessOpen, restoring native visibility.
+    // The compact menu trigger should no longer be present; the wide-branch
+    // "Share with agent" button renders instead since neither paused nor
+    // shared is true.
+    expect(
+      screen.queryByRole("button", { name: "Shared with agent: https://example.com" }),
+    ).toBeNull();
+
+    // The mounted-predicate effect should close agentAccessOpen, restoring
+    // native visibility.
     await act(async () => {
       await new Promise<void>((resolve) =>
         window.requestAnimationFrame(() => resolve()),

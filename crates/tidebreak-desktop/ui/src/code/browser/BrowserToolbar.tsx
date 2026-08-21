@@ -366,15 +366,24 @@ function BrowserAgentAccessControl({
   onAgentAccessOpenChange?: (open: boolean) => void;
   agentAccessOpen?: boolean;
 }) {
-  // Close the compact Agent access menu when the toolbar grows past the
-  // compact breakpoint. Radix does not call onOpenChange(false) when its
-  // root is conditionally unmounted, so without this the parent visibility
-  // source would stay latched true and the native view would stay hidden.
+  // Close the compact Agent access menu whenever the compact dropdown
+  // unmounts. Radix does not call onOpenChange(false) when its root is
+  // conditionally removed from the tree, so without this the parent
+  // visibility source would stay latched true and the native WKWebView
+  // would stay hidden. The dropdown is mounted only while the capability
+  // guard, an origin, compact width, and a paused-or-shared state all
+  // hold; any of those becoming false unmounts it.
+  const compactMenuMounted = Boolean(
+    engine?.capabilities.semanticSnapshot &&
+      access?.origin &&
+      compact &&
+      (access?.paused || access?.shared),
+  );
   useEffect(() => {
-    if (!compact && agentAccessOpen) {
+    if (agentAccessOpen && !compactMenuMounted) {
       onAgentAccessOpenChange?.(false);
     }
-  }, [compact, agentAccessOpen, onAgentAccessOpenChange]);
+  }, [compactMenuMounted, agentAccessOpen, onAgentAccessOpenChange]);
 
   if (!engine?.capabilities.semanticSnapshot || !access?.origin) return null;
   const originLabel = browserOriginLabel(access.origin);
