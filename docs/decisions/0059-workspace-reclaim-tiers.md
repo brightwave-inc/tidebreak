@@ -1,4 +1,4 @@
-# 56. Workspace Reclaim Tiers
+# 59. Workspace Reclaim Tiers
 
 - Status: Accepted
 - Date: 2026-08-21

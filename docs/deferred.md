@@ -228,17 +228,20 @@ purpose:
   worktree per session, which splits the branch, the diff, and the pull
   request the workspace is keyed to. Reconsider only with a reason to give
   one workspace several trees.
-- **Changing a session's permission mode after it starts.** The mode is
-  chosen at session creation, refused per harness capability there
+- **Changing a session's permission mode underneath a running turn.**
+  Changing the mode on a live session shipped in #2411. The session asks its
+  engine on the engine's own channel first — Claude Code's
+  `set_permission_mode` control request, Codex's per-turn policy fields — and
+  only an engine that fixes its posture at launch pays for a stop and
+  re-attach. The mode is still refused per harness capability
   ([record 33](decisions/0033-code-mode-approvals.md),
   [record 38](decisions/0038-auto-is-a-declared-capability.md),
-  [record 39](decisions/0039-allow-is-a-first-class-code-permission-mode.md)), and composed
-  into the engine's launch; no adapter can renegotiate it on an attached
-  session. Changing it means tearing the engine down and relaunching it on a
-  resume ref — new semantics for spawn epochs, in-flight turns, and pending
-  approvals — so the composer states the session's mode rather than offering
-  it. Revisit when relaunch-on-resume is a proven path, or when a harness
-  protocol carries a mode change directly.
+  [record 39](decisions/0039-allow-is-a-first-class-code-permission-mode.md)),
+  now at the change as well as at creation, and each change is journaled.
+  What stays excluded is moving the posture while a turn runs: a turn that
+  began under one mode must not have it changed underneath it, so the change
+  is refused with `turn_running`. Reconsider only with a reason to let a
+  running turn's approvals change shape mid-flight.
 - **An in-app code editor.** V1 reviews server-produced diffs and hands
   editing to the user's editor via the worktree path. An embedded editor is
   a heavyweight dependency with its own product surface; it needs demand
