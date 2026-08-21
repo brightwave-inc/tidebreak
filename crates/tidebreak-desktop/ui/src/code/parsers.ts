@@ -1629,16 +1629,26 @@ export function parseCodeSessionList(
   return sessions;
 }
 
-/** The one session a workspace page should attach, if any. */
-export function liveCodeSession(
+/**
+ * The conversations a workspace page should offer, oldest first.
+ *
+ * A workspace runs several agents (record 54). The list arrives newest first,
+ * but the tab strip reads left to right in the order the agents were started,
+ * so the first one keeps its place and a new one appends to the right.
+ */
+export function liveCodeSessions(
   sessions: readonly CodeSessionSnapshot[],
-): CodeSessionSnapshot | null {
-  return (
-    sessions.find(
+): CodeSessionSnapshot[] {
+  return sessions
+    .filter(
       (session) =>
         session.kind === "interactive" && session.lifecycle !== "ended",
-    ) ?? null
-  );
+    )
+    .sort(
+      (left, right) =>
+        left.created_at.localeCompare(right.created_at) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
 export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
