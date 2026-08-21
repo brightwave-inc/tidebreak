@@ -2591,6 +2591,14 @@ impl Store for DbStore {
         ops::inbox::list_inbox_items(self, owner).await
     }
 
+    async fn chat_attention_scoped(
+        &self,
+        owner: &OwnerId,
+        items: &[crate::InboxItem],
+    ) -> Result<std::collections::HashMap<crate::ChatId, crate::Attention>> {
+        ops::chat_attention::chat_attention(self, owner, items).await
+    }
+
     async fn answer_user_questions(
         &self,
         request: &crate::AnswerUserQuestionsRequest,

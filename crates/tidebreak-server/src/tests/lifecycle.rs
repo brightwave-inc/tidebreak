@@ -2003,6 +2003,61 @@ async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
     );
 }
 
+/// Decision 48 step 3: a chat carries the attention vocabulary code mode
+/// introduced, so one supervising client watches one queue.
+///
+/// Derived, not stored — the assertions below are all about rows the inbox
+/// already projects, and resolving an item through its own route is what
+/// changes the answer. A stored copy would need a write at every one of those
+/// points to say the same thing.
+#[tokio::test]
+async fn a_chat_carries_attention_derived_from_its_parked_work() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let owner = tidebreak_core::OwnerId::local();
+
+    let waiting = make_chat(&router, &bearer).await;
+    let approval_call = park_tool_approval_for_route_test(&*store, waiting.id).await;
+    let quiet = make_chat(&router, &bearer).await;
+
+    let items = store.list_inbox_items_scoped(&owner).await.unwrap();
+    let attention = store.chat_attention_scoped(&owner, &items).await.unwrap();
+
+    let state = &attention.get(&waiting.id).expect("the waiting chat").state;
+    assert!(
+        matches!(state, tidebreak_core::AttentionState::NeedsYou { .. }),
+        "a parked approval must read as needs-you, got {state:?}"
+    );
+    // The prompt names the kind and nothing else: an attention badge appears
+    // in more places than the inbox does, and the inbox deliberately never
+    // carries tool arguments or question text.
+    if let tidebreak_core::AttentionState::NeedsYou { prompt, .. } = state {
+        assert_eq!(prompt, "a tool call is waiting for approval");
+    }
+
+    // Absent means idle. Materializing a row for every settled conversation
+    // would scale the read with history instead of with what is happening.
+    assert!(
+        !attention.contains_key(&quiet.id),
+        "a chat with nothing parked must not appear"
+    );
+
+    assert_eq!(
+        decide_approval(&router, &bearer, waiting.id, approval_call, "approve").await,
+        StatusCode::NO_CONTENT
+    );
+    let items = store.list_inbox_items_scoped(&owner).await.unwrap();
+    let attention = store.chat_attention_scoped(&owner, &items).await.unwrap();
+    // Approving resumes the turn, so the chat stops waiting on the reader and
+    // starts working. Asserting it goes quiet here would be asserting that
+    // approving a call does nothing.
+    assert_eq!(
+        attention.get(&waiting.id).map(|value| &value.state),
+        Some(&tidebreak_core::AttentionState::Working),
+        "approving must hand the conversation back to the engine"
+    );
+}
+
 async fn list_inbox(router: &Router, bearer: &str) -> Vec<serde_json::Value> {
     let response = router
         .clone()

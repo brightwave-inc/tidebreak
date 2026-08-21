@@ -15,16 +15,10 @@ use super::super::{entities, store_err, DbStore};
 
 pub(in crate::db) async fn count_active_work(store: &DbStore) -> Result<ActiveWorkSnapshot> {
     let active_turns = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::Status.is_in([
-            TurnRunStatus::Queued.as_str(),
-            TurnRunStatus::Running.as_str(),
-            TurnRunStatus::Cancelling.as_str(),
-            TurnRunStatus::WaitingForClient.as_str(),
-            TurnRunStatus::WaitingForAgentRun.as_str(),
-            TurnRunStatus::CancellingClient.as_str(),
-            TurnRunStatus::Resuming.as_str(),
-            TurnRunStatus::RetryWait.as_str(),
-        ]))
+        .filter(
+            entities::turn_run::Column::Status
+                .is_in(TurnRunStatus::LIVE.iter().map(|status| status.as_str())),
+        )
         .count(&store.conn)
         .await
         .map_err(store_err)?;

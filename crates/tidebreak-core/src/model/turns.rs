@@ -148,6 +148,29 @@ pub enum TurnRunStatus {
 }
 
 impl TurnRunStatus {
+    /// Every status that means the conversation is still working.
+    ///
+    /// One definition, because "busy" must mean the same thing to the host's
+    /// quiescence check and to the reader's attention badge. A new
+    /// non-terminal status added without landing here would make a live
+    /// conversation look settled in one of them.
+    pub const LIVE: &'static [Self] = &[
+        Self::Queued,
+        Self::Running,
+        Self::Cancelling,
+        Self::WaitingForClient,
+        Self::WaitingForAgentRun,
+        Self::CancellingClient,
+        Self::Resuming,
+        Self::RetryWait,
+    ];
+
+    /// Whether this status means the conversation is still working.
+    #[must_use]
+    pub fn is_live(self) -> bool {
+        Self::LIVE.contains(&self)
+    }
+
     /// Stable database and wire representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
