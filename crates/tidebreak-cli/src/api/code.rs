@@ -430,6 +430,18 @@ impl Client {
         .await
     }
 
+    pub async fn set_session_permission_mode(
+        &self,
+        session: CodeSessionId,
+        mode: CodePermissionMode,
+    ) -> Result<CodeSessionSnapshot> {
+        self.post_json(
+            format!("{}/code/sessions/{session}/mode", self.base_url()),
+            &serde_json::json!({ "permission_mode": mode }),
+        )
+        .await
+    }
+
     pub async fn list_approvals(
         &self,
         session: Option<CodeSessionId>,

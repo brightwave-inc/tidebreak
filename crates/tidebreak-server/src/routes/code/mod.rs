@@ -26,7 +26,9 @@ mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
 pub(crate) use approvals::{decide_approval, list_approvals};
-pub(crate) use browser::{browser_list, browser_navigate, browser_snapshot};
+pub(crate) use browser::{
+    browser_list, browser_navigate, browser_screenshot, browser_snapshot, browser_wait,
+};
 pub(crate) use delivery::{
     act_on_pull_request as act_on_delivery_pull_request, act_on_run as act_on_delivery_run,
     discover_repositories as discover_delivery_repositories,
@@ -50,7 +52,7 @@ pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
     create_session, fork_session, get_session_debug, get_session_image, interrupt_session,
     list_session_turns, list_workspace_sessions, publish_session_image, reap_session,
-    set_attention, steer_session, submit_turn,
+    set_attention, set_session_permission_mode, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,

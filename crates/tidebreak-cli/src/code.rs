@@ -50,6 +50,7 @@ usage: tidebreak code doctor [--refresh]
        tidebreak code ws archive <id> [--force]
        tidebreak code session start --ws <id> --harness <kind> [--mode plan|ask|auto|allow]
        tidebreak code session show <id>
+       tidebreak code session mode <id> plan|ask|auto|allow
        tidebreak code session reap <id>
        tidebreak code run (--session <id> | --ws <id>) [<message>]
                   [--on-approval wait|fail] [--timeout <secs>]
@@ -142,6 +143,11 @@ pub enum Command {
     },
     SessionShow {
         id: CodeSessionId,
+        format: OutputFormat,
+    },
+    SessionMode {
+        id: CodeSessionId,
+        mode: CodePermissionMode,
         format: OutputFormat,
     },
     SessionReap {
@@ -462,6 +468,17 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                     print_turn_line(&turn);
                 }
             }
+            Ok(0)
+        }
+        Command::SessionMode { id, mode, format } => {
+            let session = client.set_session_permission_mode(id, mode).await?;
+            if format == OutputFormat::Json {
+                return emit_ok(&session);
+            }
+            println!(
+                "tidebreak: session {} is now in {} mode",
+                session.id, session.permission_mode
+            );
             Ok(0)
         }
         Command::SessionReap { id, format } => {
@@ -1922,6 +1939,32 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
         "reap" => {
             let (id, format) = take_id_and_format(cursor, "a session id", parse_session_id)?;
             Ok(Command::SessionReap { id, format })
+        }
+        "mode" => {
+            let id = cursor
+                .next()
+                .ok_or_else(|| "expected a session id".to_owned())
+                .and_then(|raw| parse_session_id(&raw))?;
+            let raw = cursor
+                .next()
+                .ok_or_else(|| "expected plan|ask|auto|allow".to_owned())?;
+            let mode = CodePermissionMode::from_str(&raw)
+                .ok_or_else(|| format!("unknown permission mode {raw:?}"))?;
+            let mut flags = SharedFlags {
+                format: OutputFormat::Text,
+            };
+            while let Some(arg) = cursor.next() {
+                if arg.starts_with("--") {
+                    take_format(&mut flags, cursor, &arg)?;
+                } else {
+                    return Err(format!("unexpected code session mode argument {arg:?}"));
+                }
+            }
+            Ok(Command::SessionMode {
+                id,
+                mode,
+                format: flags.format,
+            })
         }
         other => Err(format!("unknown session subcommand {other:?}")),
     }

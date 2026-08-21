@@ -951,6 +951,13 @@ pub struct CreateSessionBody {
     pub model: Option<String>,
 }
 
+/// Body of `POST /code/sessions/{id}/mode`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPermissionModeBody {
+    pub permission_mode: CodePermissionMode,
+}
+
 /// Body of `POST /code/sessions/{id}/turns`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

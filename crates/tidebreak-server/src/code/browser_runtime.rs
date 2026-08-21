@@ -16,7 +16,8 @@ use async_trait::async_trait;
 
 use tidebreak_core::{
     BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserSnapshotArgs, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
+    BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
 };
 
 // ── BrowserRuntimeScope ─────────────────────────────────────────────────────
@@ -101,6 +102,30 @@ pub trait BrowserRuntime: Send + Sync {
         scope: &BrowserRuntimeScope,
         args: &BrowserSnapshotArgs,
     ) -> Result<BrowserPageSnapshot, BrowserRuntimeError>;
+
+    /// Poll for a deterministic page condition on the tab in `args.browser_id`.
+    ///
+    /// `args.snapshot_id` and `args.document_epoch` are the caller's
+    /// last-known snapshot; the runtime must validate them before polling.
+    /// UrlChanged conditions resolve across document boundaries; every other
+    /// condition is bounded by `args.document_epoch`.
+    async fn wait(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserWaitArgs,
+    ) -> Result<BrowserWaitResult, BrowserRuntimeError>;
+
+    /// Capture a base-64 PNG screenshot bounded by `args.snapshot_id` and
+    /// `args.document_epoch`.
+    ///
+    /// The runtime must atomically fence, validate, capture, and record the
+    /// screenshot against the live controller/instance/document/snapshot
+    /// state. A changed document or replaced instance must refuse.
+    async fn screenshot(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserScreenshotArgs,
+    ) -> Result<BrowserScreenshotResult, BrowserRuntimeError>;
 
     /// Synchronously revoke all browser capability for `scope.session`.
     ///
