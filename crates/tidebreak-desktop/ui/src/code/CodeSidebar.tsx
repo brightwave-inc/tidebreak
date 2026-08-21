@@ -20,6 +20,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import {
   connectCodeUpdates,
   useCodeUpdatesStore,
+  useWorkspaceDigests,
   watchChildren,
 } from "./CodeUpdatesStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
@@ -62,7 +63,7 @@ export function CodeSidebar() {
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const refresh = useCodeCatalogStore((state) => state.refresh);
-  const digests = useCodeUpdatesStore((state) => state.byWorkspace);
+  const digests = useWorkspaceDigests();
   const childrenByWorkspace = useCodeUpdatesStore(
     (state) => state.childrenByWorkspace,
   );

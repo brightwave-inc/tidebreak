@@ -16,6 +16,7 @@ mod extract_source;
 mod fetch_policy;
 mod host;
 mod http;
+mod model_provider;
 mod native;
 mod searxng;
 mod tavily;
@@ -40,6 +41,7 @@ pub use http::{
     HttpClient, HttpGetRequest, HttpRequest, HttpResponse, OutboundOrigin, ReqwestHttpClient,
     MAX_HTTP_RESPONSE_BYTES,
 };
+pub use model_provider::{ModelProviderSearch, SearchModel};
 pub use native::{
     HostAddressResolver, NativeExtractError, NativeExtraction, NativeExtractor, PageFetchResponse,
     PageFetchTransport, ReqwestPageFetcher, TokioHostResolver, MAX_EXTRACT_CONTENT_CHARS,

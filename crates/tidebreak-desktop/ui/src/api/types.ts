@@ -167,6 +167,7 @@ import {
   type CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   type CodeWorktreeRoot as WireCodeWorktreeRoot,
+  type CodeForkTranscript as WireCodeForkTranscript,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type PullRequestDigest as WirePullRequestDigest,
   type PullRequestCheck as WirePullRequestCheck,
@@ -1165,6 +1166,8 @@ export type CodeCloneJobSnapshot = WireCodeCloneJobSnapshot;
 export type CodeHarnessInstallSnapshot = WireCodeHarnessInstallSnapshot;
 /** Where new code worktrees land, and what clearing the setting returns to. */
 export type CodeWorktreeRoot = WireCodeWorktreeRoot;
+/** The transcript file a fork wrote into the worktree, ready to hand on. */
+export type CodeForkTranscript = WireCodeForkTranscript;
 
 /** Subscription quota windows exposed by Model Gateway or a direct harness. */
 export type CodeSubscriptionUsage = {
