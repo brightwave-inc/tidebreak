@@ -130,19 +130,22 @@ function CodeBrowserTabSession({
     session.loadState !== "failed";
   const visibleRef = useRef(visible);
 
- sessionRef.current = session;
- visibleRef.current = visible;
+  sessionRef.current = session;
+  visibleRef.current = visible;
 
   // Reset agentAccessOpen when agent access is revoked or becomes unavailable
-  // while its compact menu is open. Radix does not call onOpenChange(false)
-  // when BrowserAgentAccessControl returns null due to the early exit, so
-  // without this agentAccessOpen would stay latched true and the native
-  // WKWebView would stay hidden permanently.
+  // while its compact menu is open. Mirror BrowserAgentAccessControl's render
+  // guard: Radix does not call onOpenChange(false) when the control returns
+  // null, so without this the native WKWebView would stay hidden permanently.
+  const agentAccessAvailable = Boolean(
+    runtime?.engine?.capabilities.semanticSnapshot &&
+      runtime?.agentAccess?.origin,
+  );
   useEffect(() => {
-    if (agentAccessOpen && !runtime?.agentAccess?.origin) {
+    if (agentAccessOpen && !agentAccessAvailable) {
       setAgentAccessOpen(false);
     }
-  }, [agentAccessOpen, runtime?.agentAccess?.origin]);
+  }, [agentAccessAvailable, agentAccessOpen]);
 
   const updateSession = useCallback(
     (update: (current: BrowserSession) => BrowserSession) => {
