@@ -67,7 +67,7 @@ struct RegistryState {
 
 /// Observer called synchronously when a session's browser authority is
 /// revoked, after the in-memory maps have already dropped it.
-type RevocationHook = Arc<dyn Fn(CodeSessionId) + Send + Sync>;
+pub(crate) type RevocationHook = Arc<dyn Fn(CodeSessionId) + Send + Sync>;
 
 // ── registry ────────────────────────────────────────────────────────────────
 
@@ -245,11 +245,11 @@ impl BrowserTokenRegistry {
             }
         };
         if revoked {
-            let hook = self
-                .revocation_hook
-                .lock()
-                .expect("revocation hook")
-                .clone();
+            let installed = self.revocation_hook.lock().expect("revocation hook");
+            let hook = installed.clone();
+            // Release the hook slot before the call so a hook that touches
+            // the registry again cannot deadlock on this lock.
+            drop(installed);
             if let Some(hook) = hook {
                 hook(session_id);
             }

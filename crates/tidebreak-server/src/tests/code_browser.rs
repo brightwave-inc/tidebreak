@@ -223,9 +223,10 @@ async fn browser_app(fake: Option<Arc<FakeBrowserRuntime>>) -> BrowserApp {
         // The same wiring `bind_inner` performs: runtime installed on state,
         // and revocation observed synchronously through the token registry.
         let revoked_runtime = fake.clone();
-        code.browser_tokens.set_revocation_hook(Arc::new(move |session| {
+        let hook: crate::code::browser_channel::RevocationHook = Arc::new(move |session| {
             revoked_runtime.revoke_session(session);
-        }));
+        });
+        code.browser_tokens.set_revocation_hook(hook);
         state.set_browser_runtime(fake.clone());
     }
     let addr = serve(app(state)).await;
@@ -402,10 +403,7 @@ async fn revoked_token_answers_401_and_revocation_reaches_the_runtime() {
     let response = post_browser(app.addr, "list", Some(&token), serde_json::json!({})).await;
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     let body = response.text().await.unwrap();
-    assert!(
-        !body.contains(&token),
-        "revoked-token body leaked the token"
-    );
+    assert!(!body.contains(&token), "revoked-token body leaked");
 }
 
 // ── subject scoping ──────────────────────────────────────────────────────
