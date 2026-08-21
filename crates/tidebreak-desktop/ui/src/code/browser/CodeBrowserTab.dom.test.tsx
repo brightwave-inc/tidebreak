@@ -343,9 +343,15 @@ describe("CodeBrowserTab", () => {
         host={runtime.host}
       />,
     );
-    await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
-    );
+    await waitFor(() => {
+      const createAction = runtime.calls.find(({ action }) => action.type === "create");
+      expect(createAction?.action).toEqual({
+        type: "create",
+        url: expect.stringContaining("https://example.com"),
+        bounds: expect.objectContaining({ width: 840 }),
+        visible: false,
+      });
+    });
 
     view.unmount();
     releaseCreate?.();
@@ -373,9 +379,17 @@ describe("CodeBrowserTab", () => {
         host={runtime.host}
       />,
     );
-    await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
-    );
+    await waitFor(() => {
+      const createAction = runtime.calls.find(({ action }) => action.type === "create");
+      expect(createAction).toBeDefined();
+      // The create payload itself must be hidden unconditionally.
+      expect(createAction?.action).toEqual({
+        type: "create",
+        url: expect.stringContaining("https://example.com"),
+        bounds: expect.objectContaining({ width: 840 }),
+        visible: false,
+      });
+    });
 
     view.rerender(
       <CodeBrowserTab
@@ -395,6 +409,7 @@ describe("CodeBrowserTab", () => {
         action: { type: "set_visible", visible: false },
       }),
     );
+    // No early reveal should have been issued.
     expect(runtime.calls).not.toContainEqual({
       workspaceId: "workspace-1",
       browserId: "browser-1",
@@ -784,6 +799,85 @@ describe("CodeBrowserTab", () => {
     );
   });
 
+  it("applies the current viewport bounds when a viewport change races a pending snapshot", async () => {
+    // Simulate: remount with Fit (840 px pane), fire ResizeObserver to change
+    // surface to Mobile 390 while snapshot is still pending, resolve snapshot,
+    // and assert the final set_bounds uses the centered 390 px rectangle, not
+    // the stale 840 px pre-await capture.
+    let releaseSnapshot: (() => void) | undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const runtime = browserHost({ existing: true, createGate: snapshotGate });
+    // Modify command to gate snapshot instead of create:
+    runtime.host.command = vi.fn(async (workspaceId, browserId, action) => {
+      runtime.calls.push({ workspaceId, browserId, action });
+      if (action.type === "snapshot") {
+        await snapshotGate;
+        return {
+          exists: true,
+          workspaceId,
+          browserId,
+          url: "https://example.com/restored",
+          title: "Restored page",
+          loadState: "ready" as const,
+        };
+      }
+      return {
+        exists: true,
+        workspaceId,
+        browserId,
+        url: "url" in action ? (action as { url: string }).url : "https://example.com/restored",
+      } satisfies BrowserHostSnapshot;
+    });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/one"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+    );
+
+    // Simulate ResizeObserver firing with Mobile 390 centered bounds
+    // before the snapshot resolves.
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 225,
+      y: 180,
+      width: 390,
+      height: 560,
+      top: 180,
+      right: 615,
+      bottom: 740,
+      left: 225,
+      toJSON: () => ({}),
+    });
+
+    // Let ResizeObserver run one frame (it won't set_bounds because nativeReady is still false)
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    // The resize path should have skipped — no set_bounds yet
+    expect(runtime.calls.filter(({ action }) => action.type === "set_bounds")).toHaveLength(0);
+
+    // Now release the snapshot
+    releaseSnapshot?.();
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "set_bounds")).toBe(true),
+    );
+
+    // The final set_bounds must use the live 390px centered surface, not the
+    // 840px pre-await capture.
+    const boundsCalls = runtime.calls.filter(({ action }) => action.type === "set_bounds");
+    expect(boundsCalls).toHaveLength(1);
+    expect(boundsCalls[0].action).toEqual({
+      type: "set_bounds",
+      bounds: { x: 225, y: 180, width: 390, height: 560 },
+    });
+  });
+
   it("renders a retryable failure without losing the requested address", async () => {
     const runtime = browserHost({ createError: "native view failed" });
     render(
@@ -940,5 +1034,66 @@ describe("CodeBrowserTab", () => {
         action: { type: "set_visible", visible: false },
       }),
     );
+  });
+});
+
+
+describe("BrowserToolbar compact", () => {
+  it("keeps all controls visible and keyboard-reachable at 320 px", async () => {
+    const { host, calls } = browserHost();
+
+    const { container } = render(
+      <div style={{ width: 320 }}>
+        <CodeBrowserTab
+          workspaceId="workspace-1"
+          browserId="browser-1"
+          initialUrl="https://example.com"
+          host={host}
+        />
+      </div>,
+    );
+    await waitFor(() =>
+      expect(calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    // The inner flex row should not overflow.
+    const row = container.querySelector('.flex.min-w-0.items-center') as HTMLElement | null;
+    expect(row).not.toBeNull();
+    if (row) {
+      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+    }
+
+    // Every essential control must be present.
+    expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Address or search" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /Viewport:/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: "History" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open externally" })).toBeVisible();
+  });
+
+  it("keeps all controls visible and keyboard-reachable at 390 px", async () => {
+    const { host, calls } = browserHost();
+    render(
+      <div style={{ width: 390 }}>
+        <CodeBrowserTab
+          workspaceId="workspace-1"
+          browserId="browser-1"
+          initialUrl="https://example.com"
+          host={host}
+        />
+      </div>,
+    );
+    await waitFor(() =>
+      expect(calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    // Every essential control must be present.
+    expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Address or search" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /Viewport:/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: "History" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open externally" })).toBeVisible();
   });
 });

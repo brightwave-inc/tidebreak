@@ -154,12 +154,17 @@ function CodeBrowserTabSession({
     [browserId, workspaceId],
   );
 
-  const settleCreatedNativeView = useCallback(async () => {
+  /**
+   * Shared post-ready reconciliation for create and existing-view paths.
+   *
+   * Reads the live viewport-surface bounds (not a stale pre-await capture),
+   * applies them, then reveals the native surface through the existing
+   * cancellable one-animation-frame mechanism so an in-flight overlay
+   * handoff is never overpainted.  Hides immediately when the tab is
+   * unmounted or obscured.
+   */
+  const reconcileAfterNativeReady = useCallback(async () => {
     nativeReady.current = true;
-    recordRuntime(await host.command(workspaceId, browserId, {
-      type: "set_visible",
-      visible: mountedRef.current && visibleRef.current,
-    }));
     const bounds = readBrowserBounds(viewportSurfaceRef.current);
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
       lastNativeBounds.current = bounds;
@@ -167,6 +172,24 @@ function CodeBrowserTabSession({
         await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
       );
     }
+    if (!mountedRef.current || !visibleRef.current) {
+      recordRuntime(await host.command(workspaceId, browserId, {
+        type: "set_visible",
+        visible: false,
+      }));
+      return;
+    }
+    // Reveal through the same cancellable one-frame path used by the
+    // visibility effect so a click that hands off between two app overlays
+    // cannot briefly repaint the native WKWebView above the new one.
+    nativeRevealFrame.current = window.requestAnimationFrame(() => {
+      nativeRevealFrame.current = null;
+      if (!nativeReady.current || !visibleRef.current || !host.available()) {
+        return;
+      }
+      void host.command(workspaceId, browserId, { type: "set_visible", visible: true })
+        .catch(() => undefined);
+    });
   }, [browserId, host, recordRuntime, workspaceId]);
 
   useEffect(() => {
@@ -292,23 +315,16 @@ function CodeBrowserTabSession({
             });
             setAddress(browserDisplayAddress(snapshot.url));
           }
-          recordRuntime(
-            await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
-          );
-          lastNativeBounds.current = bounds;
-          recordRuntime(await host.command(workspaceId, browserId, {
-            type: "set_visible",
-            visible: visibleRef.current,
-          }));
+          await reconcileAfterNativeReady();
         } else {
           recordRuntime(await host.command(workspaceId, browserId, {
             type: "create",
             url: current.url,
             bounds,
-            visible: visibleRef.current,
+            visible: false,
           }));
           lastNativeBounds.current = bounds;
-          await settleCreatedNativeView();
+          await reconcileAfterNativeReady();
           nativeHistoryAvailable.current = current.history.length <= 1;
         }
       } catch (error) {
@@ -401,7 +417,7 @@ function CodeBrowserTabSession({
           .catch(() => undefined);
       }
     };
-  }, [browserId, host, recordRuntime, settleCreatedNativeView, updateSession, workspaceId]);
+  }, [browserId, host, recordRuntime, reconcileAfterNativeReady, updateSession, workspaceId]);
 
   useEffect(() => {
     const surface = viewportSurfaceRef.current;
@@ -507,10 +523,10 @@ function CodeBrowserTabSession({
         type: "create",
         url: target.url,
         bounds,
-        visible,
+        visible: false,
       }));
       lastNativeBounds.current = bounds;
-      await settleCreatedNativeView();
+      await reconcileAfterNativeReady();
       nativeHistoryAvailable.current = sessionRef.current.history.length <= 1;
     } catch (error) {
       if (mountedRef.current) {

@@ -239,6 +239,16 @@ describe("BrowserViewportControl", () => {
     ).toBeVisible();
   });
 
+  it("names the open popover dialog for assistive technology", async () => {
+    renderControl();
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: /Viewport: Fit/i });
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-label", "Viewport size");
+  });
+
   it("syncs the custom width field when the viewport changes externally", async () => {
     const { rerender } = renderControl({
       viewport: { preset: "custom", customWidth: 500 },

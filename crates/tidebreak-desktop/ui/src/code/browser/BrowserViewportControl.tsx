@@ -58,6 +58,8 @@ export type BrowserViewportControlProps = {
   /** Notify the native surface while this app-owned popover covers it. */
   onOverlayOpenChange?: (open: boolean) => void;
   disabled?: boolean;
+  /** Icon-only trigger for narrow toolbar containers. */
+  compact?: boolean;
 };
 
 /**
@@ -75,6 +77,7 @@ export function BrowserViewportControl({
   onViewportChange,
   onOverlayOpenChange,
   disabled = false,
+  compact = false,
 }: BrowserViewportControlProps) {
   const [open, setOpen] = useState(false);
   const activeRadioRef = useRef<HTMLButtonElement | null>(null);
@@ -104,19 +107,23 @@ export function BrowserViewportControl({
           <Button
             type="button"
             variant="ghost"
-            size="xs"
-            className="h-7 gap-1.5 px-2 text-[10px] font-medium"
+            size={compact ? "icon-sm" : "xs"}
+            className={compact ? "h-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"}
             disabled={disabled}
             aria-label={triggerAriaLabel}
           >
             <SlidersHorizontal className="size-3.5 shrink-0 text-muted-foreground" />
-            <span id={triggerLabelId} className="max-w-24 truncate">
-              {label}
-            </span>
-            {widthText && (
-              <span className="shrink-0 text-muted-foreground/70">
-                {widthText}
-              </span>
+            {!compact && (
+              <>
+                <span id={triggerLabelId} className="max-w-24 truncate">
+                  {label}
+                </span>
+                {widthText && (
+                  <span className="shrink-0 text-muted-foreground/70">
+                    {widthText}
+                  </span>
+                )}
+              </>
             )}
           </Button>
         </PopoverTrigger>
@@ -124,6 +131,7 @@ export function BrowserViewportControl({
       <PopoverContent
         align="end"
         className="w-60 p-2"
+        aria-label="Viewport size"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           activeRadioRef.current?.focus();

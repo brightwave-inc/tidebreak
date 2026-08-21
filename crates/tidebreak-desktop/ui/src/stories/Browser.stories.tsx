@@ -482,6 +482,122 @@ export const ViewportCompact: Story = {
   },
 };
 
+export const ToolbarNarrow320: Story = {
+  args: {
+    scenario: "unshared",
+    compact: true,
+    viewport: { preset: "mobile", customWidth: 1024 },
+  },
+  render: (args) => {
+    const [address, setAddress] = useState("localhost:4173/review/browser");
+    const [viewportState, setViewportState] = useState<BrowserViewport>(
+      args.viewport ?? { preset: "mobile", customWidth: 1024 },
+    );
+    const session = browserSession("ready");
+    return (
+      <div className="grid min-h-dvh place-items-center bg-muted/45 p-4">
+        <div className="flex h-[min(760px,calc(100dvh-4rem))] w-full max-w-[320px] flex-col overflow-hidden rounded-xl border border-border-subtle bg-background shadow-lg">
+          <BrowserToolbar
+            session={session}
+            address={address}
+            addressError={null}
+            canGoBack={session.historyIndex > 0}
+            canGoForward={false}
+            controller={undefined}
+            agentAccess={unsharedAccess}
+            engine={inspectEngine}
+            onAddressChange={setAddress}
+            onNavigate={fn()}
+            onBack={fn()}
+            onForward={fn()}
+            onReload={fn()}
+            onStop={fn()}
+            onStopAgent={fn()}
+            onTakeOver={fn()}
+            onShareAgent={fn()}
+            onRevokeAgent={fn()}
+            onSelectHistory={fn()}
+            onOpenExternal={fn()}
+            onOverlayOpenChange={fn()}
+            viewportControl={
+              <BrowserViewportControl
+                viewport={viewportState}
+                renderedWidth={390}
+                onViewportChange={setViewportState}
+                disabled={false}
+              />
+            }
+          />
+          <div className="relative min-h-0 flex-1 overflow-hidden">
+            <div className="absolute inset-0 bg-muted/30" aria-hidden />
+            <div className="relative mx-auto h-full" style={{ width: 390, maxWidth: "100%" }}>
+              <DeveloperPage compact />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  },
+};
+
+export const ToolbarNarrow390: Story = {
+  args: {
+    scenario: "unshared",
+    compact: true,
+    viewport: { preset: "mobile", customWidth: 1024 },
+  },
+  render: (args) => {
+    const [address, setAddress] = useState("localhost:4173/review/browser");
+    const [viewportState, setViewportState] = useState<BrowserViewport>(
+      args.viewport ?? { preset: "mobile", customWidth: 1024 },
+    );
+    const session = browserSession("ready");
+    return (
+      <div className="grid min-h-dvh place-items-center bg-muted/45 p-4">
+        <div className="flex h-[min(760px,calc(100dvh-4rem))] w-full max-w-[390px] flex-col overflow-hidden rounded-xl border border-border-subtle bg-background shadow-lg">
+          <BrowserToolbar
+            session={session}
+            address={address}
+            addressError={null}
+            canGoBack={session.historyIndex > 0}
+            canGoForward={false}
+            controller={undefined}
+            agentAccess={unsharedAccess}
+            engine={inspectEngine}
+            onAddressChange={setAddress}
+            onNavigate={fn()}
+            onBack={fn()}
+            onForward={fn()}
+            onReload={fn()}
+            onStop={fn()}
+            onStopAgent={fn()}
+            onTakeOver={fn()}
+            onShareAgent={fn()}
+            onRevokeAgent={fn()}
+            onSelectHistory={fn()}
+            onOpenExternal={fn()}
+            onOverlayOpenChange={fn()}
+            viewportControl={
+              <BrowserViewportControl
+                viewport={viewportState}
+                renderedWidth={390}
+                onViewportChange={setViewportState}
+                disabled={false}
+              />
+            }
+          />
+          <div className="relative min-h-0 flex-1 overflow-hidden">
+            <div className="absolute inset-0 bg-muted/30" aria-hidden />
+            <div className="relative mx-auto h-full" style={{ width: 390, maxWidth: "100%" }}>
+              <DeveloperPage compact />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  },
+};
+
 export const ViewportAgentControlled: Story = {
   args: {
     scenario: "viewport-desktop",

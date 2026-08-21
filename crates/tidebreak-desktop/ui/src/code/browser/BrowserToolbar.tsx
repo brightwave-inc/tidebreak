@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type FormEvent, type ReactNode } from "react";
+import { cloneElement, isValidElement, useEffect, useId, useRef, useState, type FormEvent, type ReactElement, type ReactNode, type RefObject } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -38,6 +38,26 @@ import { browserSecurity, MAX_BROWSER_URL_CHARS } from "./browserNavigation";
 import type { BrowserSession } from "./browserSession";
 
 type BrowserEngine = NonNullable<BrowserHostSnapshot["engine"]>;
+
+const COMPACT_TOOLBAR_WIDTH = 420;
+
+/**
+ * Observes a container element and returns true while its inline-size
+ * is less than `breakpoint`.  False for zero-size or disconnected elements.
+ */
+function useCompactToolbar(ref: RefObject<HTMLDivElement | null>, breakpoint: number): boolean {
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => setCompact(el.clientWidth < breakpoint);
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    check();
+    return () => observer.disconnect();
+  }, [ref, breakpoint]);
+  return compact;
+}
 
 export function BrowserToolbar({
   session,
@@ -87,8 +107,10 @@ export function BrowserToolbar({
   viewportControl?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
   const addressErrorId = useId();
   const securityId = useId();
+  const compactToolbar = useCompactToolbar(toolbarRef, COMPACT_TOOLBAR_WIDTH);
   const security = session.url ? browserSecurity(session.url) : null;
 
   useEffect(() => {
@@ -102,7 +124,7 @@ export function BrowserToolbar({
 
   return (
     <header className="relative z-[1] shrink-0 border-b border-border-subtle bg-page-background/88 backdrop-blur-md">
-      <div className="flex min-w-0 items-center gap-1.5 px-2 py-1.5">
+      <div ref={toolbarRef} className="flex min-w-0 items-center gap-1.5 px-2 py-1.5">
         <nav
           aria-label="Browser navigation"
           className="flex shrink-0 items-center rounded-lg border border-border-subtle bg-background/72 p-0.5 shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_5%,transparent)]"
@@ -193,12 +215,17 @@ export function BrowserToolbar({
         <BrowserAgentAccessControl
           engine={engine}
           access={agentAccess}
+          compact={compactToolbar}
           onShare={onShareAgent}
           onRevoke={onRevokeAgent}
         />
 
         {viewportControl && (
-          <div className="shrink-0">{viewportControl}</div>
+          <div className="shrink-0">
+            {isValidElement(viewportControl)
+              ? cloneElement(viewportControl as ReactElement<{ compact?: boolean }>, { compact: compactToolbar })
+              : viewportControl}
+          </div>
         )}
 
         <DropdownMenu onOpenChange={onOverlayOpenChange}>
@@ -290,11 +317,13 @@ export function BrowserToolbar({
 function BrowserAgentAccessControl({
   engine,
   access,
+  compact = false,
   onShare,
   onRevoke,
 }: {
   engine?: BrowserEngine;
   access?: BrowserAgentAccess;
+  compact?: boolean;
   onShare?: () => void;
   onRevoke?: () => void;
 }) {
@@ -372,10 +401,11 @@ function BrowserAgentAccessControl({
       variant="outline"
       size="xs"
       className="h-7 bg-background/72 text-[10px]"
+      aria-label="Share with agent"
       onClick={onShare}
     >
       <Bot />
-      Share with agent
+      {!compact && "Share with agent"}
     </Button>
   ) : null;
 }
