@@ -199,11 +199,6 @@ impl BrowserTokenRegistry {
     }
 
     /// Return the subject for an inbound browser bearer token, or `None`.
-    ///
-    /// This API is intentionally staged — it is the seam the follow-up
-    /// `/code/browser/*` route layer will call. Dead-code lint is suppressed
-    /// until that layer lands.
-    #[allow(dead_code)]
     pub(crate) fn subject_for_token(&self, token: &str) -> Option<BrowserSubject> {
         self.state
             .lock()
@@ -218,11 +213,19 @@ impl BrowserTokenRegistry {
     /// In-memory authority is invalidated first under the registry lock.
     /// File deletion is best-effort because startup subtree cleanup must
     /// fail closed regardless.
-    pub(crate) fn revoke(&self, session_id: CodeSessionId) {
+    ///
+    /// Returns the [`BrowserSubject`] that was mapped to the revoked
+    /// session so the caller can derive an adapter scope, or `None` if
+    /// the session was not found (idempotent).
+    pub(crate) fn revoke(&self, session_id: CodeSessionId) -> Option<BrowserSubject> {
         let mut state = self.state.lock().expect("browser registry");
-        if let Some(entry) = state.by_session.remove(&session_id) {
-            state.tokens.remove(&entry.token);
-            let _ = std::fs::remove_file(&entry.capfile_path);
+        match state.by_session.remove(&session_id) {
+            Some(entry) => {
+                let subject = state.tokens.remove(&entry.token);
+                let _ = std::fs::remove_file(&entry.capfile_path);
+                subject
+            }
+            None => None,
         }
     }
 

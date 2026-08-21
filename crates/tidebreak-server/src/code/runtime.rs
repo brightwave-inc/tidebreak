@@ -134,6 +134,9 @@ pub(crate) struct CodeRuntime {
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     pub(crate) browser_tokens: BrowserTokenRegistry,
+    /// The desktop browser adapter, installed before recovery starts. Absent
+    /// in headless deployments and tests that do not register one.
+    browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -167,6 +170,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -185,6 +189,7 @@ impl CodeRuntime {
             worktree_root_default,
             approvals: ApprovalBridge::new(),
             browser_tokens,
+            browser_runtime,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -255,6 +260,16 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
+        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None)
+    }
+
+    #[cfg(any(test, feature = "scripted-harness"))]
+    pub(crate) fn with_registry_and_browser_runtime(
+        db: Arc<DbStore>,
+        data_dir: PathBuf,
+        adapters: AdapterRegistry,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+    ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
             // at this point (set from config and validated by the host). The
@@ -272,6 +287,7 @@ impl CodeRuntime {
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
             browser_tokens,
+            browser_runtime,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -295,6 +311,29 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
         *self.gh_search_path.lock().expect("gh search path") = path;
+    }
+
+    /// Return the installed browser adapter, if any.
+    pub(crate) fn browser_runtime(
+        &self,
+    ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
+        self.browser_runtime.clone()
+    }
+
+    /// Revoke the session browser token AND the desktop adapter
+    /// capability. Idempotent — safe to call multiple times.
+    ///
+    /// The token registry is invalidated first and the adapter scope is
+    /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
+    /// The adapter call happens after the registry lock is released.
+    fn revoke_browser_session(&self, session_id: CodeSessionId) {
+        let subject = self.browser_tokens.revoke(session_id);
+        if let Some(subject) = subject {
+            if let Some(runtime) = &self.browser_runtime {
+                let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
+                runtime.revoke_session(&scope);
+            }
+        }
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -1294,6 +1333,9 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        // Invalidate the session browser token so in-flight browser route
+        // calls are rejected immediately, then revoke the native scope.
+        self.revoke_browser_session(id);
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
@@ -1377,7 +1419,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        self.browser_tokens.revoke(id);
+        self.revoke_browser_session(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1456,7 +1498,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
-        self.browser_tokens.revoke(session.id);
+        self.revoke_browser_session(session.id);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1670,7 +1712,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            self.browser_tokens.revoke(session.id);
+            self.revoke_browser_session(session.id);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1794,7 +1836,7 @@ impl CodeRuntime {
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
-                self.browser_tokens.revoke(session.id);
+                self.revoke_browser_session(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -1813,7 +1855,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
-                self.browser_tokens.revoke(session.id);
+                self.revoke_browser_session(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
@@ -2364,7 +2406,13 @@ mod managed_node_wait_tests {
         ))
         .await
         .expect("db");
-        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None, None);
+        let runtime = CodeRuntime::new(
+            Arc::new(db),
+            data_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(
             runtime.managed_node_root(false).await.expect("node root"),
