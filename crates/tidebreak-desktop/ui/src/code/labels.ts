@@ -401,6 +401,8 @@ export function attentionLabel(attention: Attention): string {
       return "Stalled";
     case "done_unreviewed":
       return "Done";
+    case "idle":
+      return "Idle";
     case "fenced":
       return "Fenced";
     case "manual":

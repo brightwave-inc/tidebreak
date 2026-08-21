@@ -5330,14 +5330,18 @@ async fn attention_follows_approval_completion_and_view() {
             .await
             .unwrap()
             .unwrap();
-            if row.attention.state == AttentionState::Working {
+            // Idle, not Working. Viewing settles the session; it does not
+            // start an engine. This asserted `Working` while `Idle` did not
+            // exist, which is how the derivation came to claim a finished
+            // session was busy.
+            if row.attention.state == AttentionState::Idle {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("viewing the session must clear DoneUnreviewed");
+    .expect("viewing the session must settle it to Idle, not report it Working");
 }
 
 #[tokio::test]

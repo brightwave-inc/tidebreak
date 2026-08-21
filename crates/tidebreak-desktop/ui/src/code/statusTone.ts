@@ -115,6 +115,10 @@ export function attentionStatusTone(attention: Attention): StatusTone {
       return "pending";
     case "done_unreviewed":
       return "neutral";
+    // Resting, not finished: nothing for the reader to act on, and nothing
+    // that should read as a completed result they have yet to look at.
+    case "idle":
+      return "neutral";
   }
 }
 

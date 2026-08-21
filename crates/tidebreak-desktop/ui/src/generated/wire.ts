@@ -553,7 +553,7 @@ source: AttentionSource, } | { "type": "stalled",
 /**
  * Seconds of observed silence.
  */
-idle_secs: number, } | { "type": "done_unreviewed" } | { "type": "fenced", 
+idle_secs: number, } | { "type": "done_unreviewed" } | { "type": "idle" } | { "type": "fenced", 
 /**
  * Why it was fenced.
  */

@@ -158,7 +158,14 @@ pub(crate) async fn compute_attention(
         Some(turn) if turn.status == CodeTurnStatus::Completed && !opts.reviewed => Ok(
             Attention::new(AttentionState::DoneUnreviewed, AttentionSource::Lifecycle),
         ),
-        _ => Ok(Attention::working(AttentionSource::Lifecycle)),
+        // Nothing running, nothing waiting, nothing unreviewed. Reporting
+        // `Working` here — as this arm used to — claims an engine is busy
+        // when none is, and a session with no turns yet has never been busy
+        // at all.
+        _ => Ok(Attention::new(
+            AttentionState::Idle,
+            AttentionSource::Lifecycle,
+        )),
     }
 }
 
@@ -176,12 +183,16 @@ pub(crate) async fn mark_viewed(
     if !matches!(session.attention.state, AttentionState::DoneUnreviewed) {
         return Ok(());
     }
+    // The session is DoneUnreviewed, so no turn is running. Viewing it settles
+    // it; it does not start an engine. This wrote `Working` because `Idle` did
+    // not exist, which meant looking at a finished session made it claim to be
+    // busy for as long as it lived.
     let _ = apply_attention(
         db,
         bus,
         owner,
         session_id,
-        Attention::working(AttentionSource::Lifecycle),
+        Attention::new(AttentionState::Idle, AttentionSource::Lifecycle),
         false,
     )
     .await?;
