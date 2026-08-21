@@ -1351,6 +1351,93 @@ async fn a_workspace_runs_several_agents_that_take_turns_on_one_worktree() {
 }
 
 /// Create `count` interactive sessions in one workspace, returning their ids.
+/// Plan mode had no exit. The mode was settable only at creation, so once a
+/// user approved a plan the engine kept refusing the edits and the only way
+/// forward was a new session with a new conversation.
+#[tokio::test]
+async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_one() {
+    let (router, token, _runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script()).with_auto_mode(CapLevel::Supported),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let set_mode = |mode: &'static str| {
+        let client = client.clone();
+        let token = token.clone();
+        let session = session.clone();
+        async move {
+            let response = client
+                .post(format!("http://{addr}/code/sessions/{session}/mode"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "permission_mode": mode }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        }
+    };
+
+    let (status, body) = set_mode("auto").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(
+        body["permission_mode"], "auto",
+        "the change is reported on the session it returns: {body}"
+    );
+
+    // It stuck, and the engine came back up under it rather than being left
+    // stopped by the relaunch.
+    let reread: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reread["session"]["permission_mode"], "auto", "{reread}");
+    assert_ne!(
+        reread["session"]["lifecycle"], "ended",
+        "the relaunch must leave a usable session: {reread}"
+    );
+
+    // Setting the mode it already has is a no-op, not a needless relaunch.
+    let (status, body) = set_mode("auto").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["permission_mode"], "auto");
+
+    // A mode this engine cannot honor is refused here, not approximated at
+    // the next turn: the scripted adapter declares allow unsupported.
+    let (status, body) = set_mode("allow").await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "an unhonored mode must be refused: {body}"
+    );
+    let still: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        still["session"]["permission_mode"], "auto",
+        "a refused change must not move the row: {still}"
+    );
+}
+
 async fn create_sibling_sessions(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,

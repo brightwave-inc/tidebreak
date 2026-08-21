@@ -1542,6 +1542,80 @@ impl CodeRuntime {
         self.attach_and_spawn_worker(session).await
     }
 
+    /// Change a live session's permission mode.
+    ///
+    /// The mode reaches the engine through `SessionSpec`, which is built once
+    /// when the worker attaches, so a running worker keeps the posture it
+    /// started with no matter what the row says. Restarting it is what makes
+    /// the change take effect — the same stop-then-attach `reap` performs,
+    /// without the fence requirement.
+    ///
+    /// Order matters: the outgoing worker writes its own final state as it
+    /// stops, so the mode is persisted *after* the shutdown or it would be
+    /// clobbered.
+    ///
+    /// Refused while a turn is running. A turn that began under one posture
+    /// must not have it changed underneath it — that is the whole point of
+    /// the posture.
+    pub(crate) async fn set_permission_mode(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        mode: CodePermissionMode,
+    ) -> Result<CodeSession, ServerError> {
+        let session = self.get_session(owner, id).await?;
+        if session.permission_mode == mode {
+            return Ok(session);
+        }
+        match session.lifecycle {
+            CodeSessionLifecycle::Running => {
+                return Err(ServerError::conflict_kind(
+                    "turn_running",
+                    "finish or interrupt the running turn before changing the permission mode",
+                ));
+            }
+            CodeSessionLifecycle::Ended => {
+                return Err(ServerError::conflict_kind(
+                    "session_ended",
+                    "this session has ended; start a new one to pick a different mode",
+                ));
+            }
+            _ => {}
+        }
+
+        // Refuse a mode this engine cannot honor here, not at the next turn,
+        // and with the same rule session creation applies (decision 0038).
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let caps = adapter.capabilities(&probe);
+        refuse_unhonored_mode(session.harness_kind, mode, &caps)?;
+
+        let handle = self.workers.lock().expect("code workers").remove(&id);
+        if let Some(handle) = handle {
+            Self::shut_down_worker(id, handle).await;
+        }
+        self.revoke_browser_channel(id);
+
+        let mut session = self.get_session(owner, id).await?;
+        let previous = session.permission_mode;
+        session.permission_mode = mode;
+        save_session(&self.db, &session).await?;
+        let _ = super::session_worker::journal_event(
+            &self.db,
+            &self.bus,
+            owner,
+            id,
+            session.spawn_epoch,
+            CodeEvent::HarnessNotice {
+                level: tidebreak_core::HarnessNoticeLevel::Info,
+                message: format!("permission mode changed from {previous} to {mode}"),
+            },
+        )
+        .await;
+
+        self.attach_and_spawn_worker(session).await
+    }
+
     pub(crate) async fn set_attention(
         &self,
         owner: &OwnerId,
