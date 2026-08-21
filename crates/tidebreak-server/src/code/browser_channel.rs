@@ -371,16 +371,19 @@ fn write_capfile(
 
     // Each step after open must clean up the temp file on failure.
     if let Err(e) = file.write_all(&body_bytes) {
+        drop(file);
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("could not write capfile: {e}"));
     }
 
     if let Err(e) = file.flush() {
+        drop(file);
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("could not flush capfile: {e}"));
     }
 
     if let Err(e) = file.sync_all() {
+        drop(file);
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("could not sync capfile: {e}"));
     }
@@ -392,6 +395,7 @@ fn write_capfile(
         if let Err(e) =
             std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
         {
+            drop(file);
             let _ = std::fs::remove_file(&tmp_path);
             return Err(format!("could not set capfile mode: {e}"));
         }
@@ -799,33 +803,75 @@ mod tests {
     }
 
     #[test]
-    fn failed_write_does_not_leave_stale_in_memory_entry() {
+    fn revoke_and_reissue_produces_clean_slate() {
+        // After a successful issuance is revoked (simulating shutdown or
+        // error handling), a fresh issuance for the same session must
+        // produce a new token, a new capfile path, and no stale in-memory
+        // entry. Token is captured before revoke deletes the capfile.
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        let sub = subject("cleanslate");
+
+        let first = reg.issue(sub.clone()).unwrap();
+        let first_token = read_token_from_capfile(&first.capability_file);
+        let first_path = first.capability_file.clone();
+        assert!(first_path.exists());
+
+        reg.revoke(sub.session);
+        assert!(reg.subject_for_token(&first_token).is_none());
+        assert!(!first_path.exists());
+
+        let second = reg.issue(sub.clone()).unwrap();
+        let second_token = read_token_from_capfile(&second.capability_file);
+        let second_path = second.capability_file.clone();
+
+        assert_ne!(first_token, second_token);
+        assert_ne!(first_path, second_path);
+        assert_eq!(reg.subject_for_token(&second_token).as_ref(), Some(&sub));
+        assert!(second_path.exists());
+    }
+
+    #[test]
+    fn write_failure_leaves_maps_unchanged() {
         // issue() holds the registry lock across write_capfile + map commit.
-        // On any write error the lock drops with the maps unchanged, so a
-        // subsequent issuance for the same session can proceed cleanly.
-        // This test proves the happy path after an error: issue → revoke →
-        // issue, simulating the normal lifecycle where a transient write
-        // failure was already handled by the caller.
+        // A write failure drops the lock without mutating either map. On
+        // Unix we prove this by removing write permission from the capfile
+        // directory so create_new fails; then a subsequent issuance succeeds
+        // with no stale state. On non-Unix the test is a structural-invariant
+        // check: a normal issue/revoke/reissue cycle leaves clean maps.
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("writefail");
 
-        // Issue, then revoke — simulates the caller cleaning up after a
-        // successful issuance that was no longer needed (or after a transient
-        // failure that was already retried and then revoked).
-        let first = reg.issue(sub.clone()).unwrap();
-        reg.revoke(sub.session);
-        assert!(reg.subject_for_token(
-            &read_token_from_capfile(&first.capability_file)
-        ).is_none());
-        assert!(!first.capability_file.exists());
+        // Warm up: issue once so the capfile directory exists.
+        let warm = reg.issue(subject("warm")).unwrap();
+        assert!(warm.capability_file.exists());
 
-        // A fresh issuance must succeed with a clean state — no stale
-        // token or session entry survived the revoke.
+        #[cfg(unix)]
+        let did_fail = {
+            use std::os::unix::fs::PermissionsExt as _;
+            let capdir = reg.capfile_dir();
+            std::fs::set_permissions(capdir, std::fs::Permissions::from_mode(0o500))
+                .expect("remove write permission for failure injection");
+            let result = reg.issue(sub.clone());
+            // Restore permissions immediately.
+            std::fs::set_permissions(capdir, std::fs::Permissions::from_mode(0o700))
+                .expect("restore write permission");
+            assert!(result.is_err(), "issue must fail when directory is read-only");
+            true
+        };
+
+        // After failure (or on non-Unix, after the structural warm), a fresh
+        // issuance for the same session must succeed without stale entries.
         let second = reg.issue(sub.clone()).unwrap();
-        let token = read_token_from_capfile(&second.capability_file);
-        assert_eq!(reg.subject_for_token(&token).as_ref(), Some(&sub));
-        assert!(second.capability_file.exists());
+        let second_token = read_token_from_capfile(&second.capability_file);
+        assert_eq!(reg.subject_for_token(&second_token).as_ref(), Some(&sub));
+
+        #[cfg(unix)]
+        let _ = did_fail;
+
+        // The TempDir will clean up everything when dropped.
+        let _ = warm;
     }
 
     // ── sequential safety ────────────────────────────────────────────────
