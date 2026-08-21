@@ -28,6 +28,7 @@ __pycache__/
 # Tauri codegen (regenerated on build)
 crates/tidebreak-desktop/gen/
 crates/tidebreak-desktop/binaries/tidebreak-host-broker-*
+crates/tidebreak-desktop/binaries/tidebreak-*
 
 # OS / editor cruft
 .DS_Store
