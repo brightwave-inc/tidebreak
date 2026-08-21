@@ -19,6 +19,7 @@ sqlite = [
     "dep:sea-orm-migration",
     "sea-orm/sqlx-sqlite",
     "sea-orm-migration/sqlx-sqlite",
+    "dep:tokio",
 ]
 # PostgreSQL-backed Store for self-hosted deployments and cross-backend tests.
 postgres = [
@@ -26,6 +27,7 @@ postgres = [
     "dep:sea-orm-migration",
     "sea-orm/sqlx-postgres",
     "sea-orm-migration/sqlx-postgres",
+    "dep:tokio",
 ]
 # The OS-keychain-backed SecretProvider.
 keychain = ["dep:keyring", "dep:tokio"]

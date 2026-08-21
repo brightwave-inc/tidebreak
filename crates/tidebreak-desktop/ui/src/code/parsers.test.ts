@@ -7,32 +7,33 @@ import {
   parseCodeCloneDefaults,
   parseCodeCloneJob,
   parseCodeCommit,
-  parseCodeEvent,
-  parseCodePush,
-  parseCodeSession,
-  parseCodeSessionList,
-  parseCodeSubscriptionUsage,
   parseCodeDeliveryActionResult,
   parseCodeDeliveryPullRequestDetail,
   parseCodeDeliveryPullRequestsPage,
   parseCodeDeliveryRepositories,
   parseCodeDeliveryRunDetail,
   parseCodeDeliveryRunsPage,
-  parseCodeUpdateNotice,
-  parseCodeWorktreeRoot,
+  parseCodeEvent,
+  parseCodePrComments,
+  parseCodePush,
+  parseCodeSession,
+  parseCodeSessionList,
+  parseCodeSubscriptionUsage,
   parseCodeTerminal,
   parseCodeTerminalList,
   parseCodeTerminalRead,
   parseCodeTurn,
   parseCodeTurnList,
   parseCodeTurnSubmission,
+  parseCodeUpdateNotice,
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
+  parseCodeWorkspacePr,
   parseCodeWorkspaceSearch,
   parseCodeWorkspaceTree,
-  parseCodeWorkspacePr,
-  parseCodePrComments,
+  parseCodeWorktreeRoot,
+  parseFenceReason,
 } from "./parsers";
 
 const DELIVERY_CAPABILITY = {
@@ -90,8 +91,21 @@ const DELIVERY_PR = {
   attention_reasons: ["changes_requested", "checks_failed"],
   ready_to_merge: false,
   workspace_links: [DELIVERY_WORKSPACE_LINK],
+  labels: ["desktop", "ui"],
   created_at: "2026-08-19T12:00:00.000Z",
   updated_at: "2026-08-20T12:00:00.000Z",
+};
+
+const DELIVERY_MERGED_PR = {
+  ...DELIVERY_PR,
+  id: "github.com/brightwave-inc/tidebreak#2240",
+  number: 2240,
+  url: "https://github.com/brightwave-inc/tidebreak/pull/2240",
+  state: "merged",
+  review_decision: undefined,
+  attention_reasons: [],
+  merged_at: "2026-08-19T16:02:00.000Z",
+  closed_at: "2026-08-19T16:02:00.000Z",
 };
 
 const DELIVERY_RUN = {
@@ -851,9 +865,28 @@ describe("code delivery wire parsers", () => {
       body: "A cross-repository view of delivery state.",
       labels: ["desktop", "ui"],
       assignees: ["mara"],
+      requested_reviewers: ["devon"],
       changed_files: 8,
       additions: 640,
       deletions: 91,
+      commits: 4,
+      merged_by: "devon",
+      files: [
+        {
+          path: "src/code/CodeDeliveryPage.tsx",
+          status: "modified",
+          additions: 184,
+          deletions: 61,
+          patch: "@@ -1 +1 @@\n-old\n+new",
+        },
+        {
+          path: "docs/assets/delivery.png",
+          status: "added",
+          additions: 0,
+          deletions: 0,
+        },
+      ],
+      files_truncated: false,
       comments: [
         {
           kind: "inline",
@@ -869,10 +902,27 @@ describe("code delivery wire parsers", () => {
       can_mark_ready: false,
       can_merge: false,
       can_rerun_failed: true,
+      can_close: true,
+      can_reopen: false,
+      can_comment: true,
     };
 
     expect(parseCodeDeliveryPullRequestsPage(page)).toEqual(page);
     expect(parseCodeDeliveryPullRequestDetail(detail)).toEqual(detail);
+  });
+
+  it("carries the merge and close timestamps that settle a pull request", () => {
+    const page = {
+      capability: DELIVERY_CAPABILITY,
+      items: [DELIVERY_MERGED_PR],
+      errors: [],
+      fetched_at: "2026-08-20T12:10:00.000Z",
+    };
+
+    const parsed = parseCodeDeliveryPullRequestsPage(page);
+    expect(parsed?.items[0]?.merged_at).toBe("2026-08-19T16:02:00.000Z");
+    expect(parsed?.items[0]?.closed_at).toBe("2026-08-19T16:02:00.000Z");
+    expect(parsed?.items[0]?.state).toBe("merged");
   });
 
   it("accepts run pages and details for Actions and deployments", () => {
@@ -968,5 +1018,34 @@ describe("code delivery wire parsers", () => {
     expect(
       parseCodeDeliveryActionResult({ success: "yes", message: "done" }),
     ).toBeNull();
+  });
+});
+
+describe("parseFenceReason", () => {
+  it("accepts every reason the server can send", () => {
+    expect(parseFenceReason({ type: "orphan_alive" })).toEqual({
+      type: "orphan_alive",
+    });
+    expect(
+      parseFenceReason({ type: "resume_lost", detail: "gone" }),
+    ).toEqual({ type: "resume_lost", detail: "gone" });
+    // A session fenced for repeated failures used to fail this parse, and
+    // a null here drops the whole session from the list rather than just
+    // its badge.
+    expect(
+      parseFenceReason({
+        type: "repeated_turn_failures",
+        count: 3,
+        detail: "401",
+      }),
+    ).toEqual({ type: "repeated_turn_failures", count: 3, detail: "401" });
+  });
+
+  it("rejects a malformed reason", () => {
+    expect(parseFenceReason({ type: "repeated_turn_failures" })).toBeNull();
+    expect(
+      parseFenceReason({ type: "repeated_turn_failures", count: "3", detail: "x" }),
+    ).toBeNull();
+    expect(parseFenceReason({ type: "who_knows" })).toBeNull();
   });
 });

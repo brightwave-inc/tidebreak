@@ -80,6 +80,7 @@ pub mod plan_mode;
 pub mod preview;
 pub mod provider;
 mod renderer_tool;
+pub mod secret_bundle;
 pub mod secret_cache;
 pub mod semantic_checkpoint;
 pub mod steer;
@@ -273,6 +274,10 @@ pub use provider::{
     RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage, VendorWebSearch,
 };
 pub use renderer_tool::RendererToolName;
+pub use secret_bundle::{
+    AbsorbOutcome, BundledSecretProvider, RehomeItemOutcome, BUNDLE_KEY,
+    DESKTOP_REMOTE_MACHINE_TOKEN_KEY,
+};
 pub use secret_cache::CachingSecretProvider;
 pub use semantic_checkpoint::{
     ContextCheckpoint, ContextCheckpointPayloadV1, ContextCheckpointPayloadV2,

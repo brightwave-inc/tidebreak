@@ -57,6 +57,7 @@ import type {
   CodeDeliveryDeploymentStatus,
   CodeDeliveryPrAttentionReason,
   CodeDeliveryPullRequestDetail,
+  CodeDeliveryPullRequestFile,
   CodeDeliveryPullRequestSummary,
   CodeDeliveryPullRequestsPage,
   CodeDeliveryRepositoriesSnapshot,
@@ -120,6 +121,7 @@ import type {
   CodeDeliveryCheck as WireCodeDeliveryCheck,
   CodeDeliveryDeploymentStatus as WireCodeDeliveryDeploymentStatus,
   CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
+  CodeDeliveryPullRequestFile as WireCodeDeliveryPullRequestFile,
   CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
   CodeDeliveryPullRequestsPage as WireCodeDeliveryPullRequestsPage,
   CodeDeliveryRepositoriesSnapshot as WireCodeDeliveryRepositoriesSnapshot,
@@ -459,8 +461,11 @@ function parseCodeDeliveryPullRequestSummary(
       "attention_reasons",
       "ready_to_merge",
       "workspace_links",
+      "labels",
       "created_at",
       "updated_at",
+      "merged_at",
+      "closed_at",
     ]) ||
     !nonEmpty(value.id) ||
     !isPositiveInteger(value.number) ||
@@ -484,8 +489,11 @@ function parseCodeDeliveryPullRequestSummary(
     ) ||
     typeof value.ready_to_merge !== "boolean" ||
     !Array.isArray(value.workspace_links) ||
+    !isStringList(value.labels) ||
     !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at)
+    !nonEmpty(value.updated_at) ||
+    !optionalString(value.merged_at) ||
+    !optionalString(value.closed_at)
   ) {
     return null;
   }
@@ -518,8 +526,11 @@ function parseCodeDeliveryPullRequestSummary(
     attention_reasons: [...value.attention_reasons],
     ready_to_merge: value.ready_to_merge,
     workspace_links,
+    labels: [...value.labels],
     created_at: value.created_at,
     updated_at: value.updated_at,
+    ...(value.merged_at !== undefined ? { merged_at: value.merged_at } : {}),
+    ...(value.closed_at !== undefined ? { closed_at: value.closed_at } : {}),
     ...(value.author !== undefined ? { author: value.author } : {}),
     ...(value.author_avatar_url !== undefined
       ? { author_avatar_url: value.author_avatar_url }
@@ -624,26 +635,40 @@ export function parseCodeDeliveryPullRequestDetail(
       "body",
       "labels",
       "assignees",
+      "requested_reviewers",
       "changed_files",
       "additions",
       "deletions",
+      "commits",
+      "merged_by",
+      "files",
+      "files_truncated",
       "comments",
       "can_mark_ready",
       "can_merge",
       "can_rerun_failed",
+      "can_close",
+      "can_reopen",
+      "can_comment",
     ]) ||
     typeof value.body !== "string" ||
-    !Array.isArray(value.labels) ||
-    !value.labels.every((item) => typeof item === "string") ||
-    !Array.isArray(value.assignees) ||
-    !value.assignees.every((item) => typeof item === "string") ||
+    !isStringList(value.labels) ||
+    !isStringList(value.assignees) ||
+    !isStringList(value.requested_reviewers) ||
     !isNonNegativeInteger(value.changed_files) ||
     !isNonNegativeInteger(value.additions) ||
     !isNonNegativeInteger(value.deletions) ||
+    !isNonNegativeInteger(value.commits) ||
+    !optionalString(value.merged_by) ||
+    !Array.isArray(value.files) ||
+    typeof value.files_truncated !== "boolean" ||
     !Array.isArray(value.comments) ||
     typeof value.can_mark_ready !== "boolean" ||
     typeof value.can_merge !== "boolean" ||
-    typeof value.can_rerun_failed !== "boolean"
+    typeof value.can_rerun_failed !== "boolean" ||
+    typeof value.can_close !== "boolean" ||
+    typeof value.can_reopen !== "boolean" ||
+    typeof value.can_comment !== "boolean"
   ) {
     return null;
   }
@@ -655,19 +680,74 @@ export function parseCodeDeliveryPullRequestDetail(
     if (!comment) return null;
     comments.push(comment);
   }
+  const files: CodeDeliveryPullRequestFile[] = [];
+  for (const item of value.files) {
+    const file = parseCodeDeliveryPullRequestFile(item);
+    if (!file) return null;
+    files.push(file);
+  }
   return {
     summary,
     body: value.body,
     labels: [...value.labels],
     assignees: [...value.assignees],
+    requested_reviewers: [...value.requested_reviewers],
     changed_files: value.changed_files,
     additions: value.additions,
     deletions: value.deletions,
+    commits: value.commits,
+    files,
+    files_truncated: value.files_truncated,
     comments,
     can_mark_ready: value.can_mark_ready,
     can_merge: value.can_merge,
     can_rerun_failed: value.can_rerun_failed,
+    can_close: value.can_close,
+    can_reopen: value.can_reopen,
+    can_comment: value.can_comment,
+    ...(value.merged_by !== undefined ? { merged_by: value.merged_by } : {}),
   };
+}
+
+function parseCodeDeliveryPullRequestFile(
+  value: unknown,
+): CodeDeliveryPullRequestFile | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryPullRequestFile>(value, [
+      "path",
+      "status",
+      "additions",
+      "deletions",
+      "previous_path",
+      "patch",
+    ]) ||
+    !nonEmpty(value.path) ||
+    !nonEmpty(value.status) ||
+    !isNonNegativeInteger(value.additions) ||
+    !isNonNegativeInteger(value.deletions) ||
+    !optionalString(value.previous_path) ||
+    !optionalString(value.patch)
+  ) {
+    return null;
+  }
+  return {
+    path: value.path,
+    status: value.status,
+    additions: value.additions,
+    deletions: value.deletions,
+    ...(value.previous_path !== undefined
+      ? { previous_path: value.previous_path }
+      : {}),
+    ...(value.patch !== undefined ? { patch: value.patch } : {}),
+  };
+}
+
+/** Every entry is a string. Used for the PR label and login lists. */
+function isStringList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 function parseCodeDeliveryRunSummary(
@@ -2674,6 +2754,17 @@ export function parseFenceReason(value: unknown): FenceReason | null {
   }
   if (value.type === "resume_lost" && typeof value.detail === "string") {
     return { type: "resume_lost", detail: value.detail };
+  }
+  if (
+    value.type === "repeated_turn_failures" &&
+    typeof value.count === "number" &&
+    typeof value.detail === "string"
+  ) {
+    return {
+      type: "repeated_turn_failures",
+      count: value.count,
+      detail: value.detail,
+    };
   }
   return null;
 }

@@ -12,6 +12,7 @@ import { expect, userEvent, within } from "storybook/test";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type {
+  CodeDeliveryPullRequestAction,
   CodeDeliveryPullRequestActionBody,
   CodeDeliveryPullRequestTarget,
   CodeDeliveryRepositoriesSnapshot,
@@ -56,6 +57,23 @@ type DeliveryScenario =
 
 function pending<T>(): Promise<T> {
   return new Promise(() => {});
+}
+
+function prActionMessage(action: CodeDeliveryPullRequestAction): string {
+  switch (action.type) {
+    case "rerun_failed":
+      return "Failed checks queued.";
+    case "mark_ready":
+      return "Pull request marked ready.";
+    case "close":
+      return "Pull request closed.";
+    case "reopen":
+      return "Pull request reopened.";
+    case "comment":
+      return "Comment posted.";
+    case "merge":
+      return action.auto ? "Auto-merge enabled." : "Pull request merged.";
+  }
 }
 
 function storyClient(scenario: DeliveryScenario): ApiClient {
@@ -148,14 +166,7 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       action,
     }: CodeDeliveryPullRequestActionBody) => ({
       success: true,
-      message:
-        action.type === "rerun_failed"
-          ? "Failed checks queued."
-          : action.type === "mark_ready"
-            ? "Pull request marked ready."
-            : action.auto
-              ? "Auto-merge enabled."
-              : "Pull request merged.",
+      message: prActionMessage(action),
     }),
     queryCodeDeliveryRuns: async () => ({
       capability: deliveryRepositoriesSnapshot.capability,
@@ -367,6 +378,29 @@ type Story = StoryObj<typeof meta>;
 
 export const PullRequests: Story = {};
 
+/**
+ * The list carries every lifecycle at once. A merged or closed row used to
+ * read "Review Pending", because GitHub drops the review decision the moment
+ * a pull request settles.
+ */
+export const PullRequestLifecycles: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText("Cache the workspace digest between polls"),
+    ).toBeVisible();
+    // Two merged rows: one the host reports as MERGED, one it reports as
+    // CLOSED with a merge timestamp.
+    await expect(await canvas.findAllByText("Merged")).toHaveLength(2);
+    await expect(await canvas.findAllByText("Closed")).toHaveLength(1);
+    await expect(await canvas.findAllByText("Draft")).toHaveLength(1);
+    await expect(await canvas.findAllByText("Approved")).toHaveLength(1);
+    await expect(
+      await canvas.findAllByText("Changes requested"),
+    ).toHaveLength(1);
+  },
+};
+
 export const PullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -378,6 +412,111 @@ export const PullRequestDetail: Story = {
         name: "Make workspace deep links durable",
       }),
     ).toBeVisible();
+  },
+};
+
+/** The full GitHub-shaped panel: lifecycle, diffstat, reviewers, Markdown. */
+export const PullRequestDetailConversation: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await expect(
+      await canvas.findByRole("heading", { name: "Build the delivery center" }),
+    ).toBeVisible();
+    // The description renders as Markdown rather than raw "## Summary" text.
+    await expect(
+      await canvas.findByRole("heading", { name: "Summary" }),
+    ).toBeVisible();
+    await expect(await canvas.findByText("+2140")).toBeVisible();
+    await expect(
+      await canvas.findByRole("button", { name: /Comment/ }),
+    ).toBeVisible();
+  },
+};
+
+export const PullRequestDetailFiles: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await userEvent.click(await canvas.findByRole("tab", { name: /Files/ }));
+    await expect(await canvas.findByText(/19 files changed/)).toBeVisible();
+    await userEvent.click(
+      await canvas.findByTitle(
+        "crates/tidebreak-desktop/ui/src/code/pullRequestPresentation.ts",
+      ),
+    );
+    await expect(await canvas.findByText(/@@ -0,0 \+1,8 @@/)).toBeVisible();
+  },
+};
+
+export const PullRequestDetailChecks: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await userEvent.click(await canvas.findByRole("tab", { name: /Checks/ }));
+    await expect(await canvas.findByText(/1 of 2 passed/)).toBeVisible();
+  },
+};
+
+/** Merged: no merge controls, a reopen-free panel, and who merged it. */
+export const MergedPullRequestDetail: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByText("Cache the workspace digest between polls"),
+    );
+    await expect(
+      await canvas.findByRole("heading", {
+        name: "Cache the workspace digest between polls",
+      }),
+    ).toBeVisible();
+    await expect(await canvas.findByText(/merged .* by devon/)).toBeVisible();
+    await expect(
+      canvas.queryByRole("button", { name: "Merge" }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+/** Closed without merging: the only action left is to reopen it. */
+export const ClosedPullRequestDetail: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByText("Rewrite the deployment runbook"),
+    );
+    await expect(
+      await canvas.findByRole("button", { name: "Reopen" }),
+    ).toBeVisible();
+  },
+};
+
+/** Draft: mark ready is offered, merge is not. */
+export const DraftPullRequestDetail: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByText("Document managed deployments"));
+    await expect(
+      await canvas.findByRole("button", { name: "Mark ready" }),
+    ).toBeVisible();
+    await expect(
+      await canvas.findByText("No description provided."),
+    ).toBeVisible();
+  },
+};
+
+/** Conflicting: the merge button says why it is disabled. */
+export const BlockedMergePullRequestDetail: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByText("Adopt the shared status tone map"),
+    );
+    await expect(
+      await canvas.findByText(
+        "Resolve the conflicts with the base branch first.",
+      ),
+    ).toBeVisible();
+    await expect(await canvas.findByRole("button", { name: "Merge" })).toBeDisabled();
   },
 };
 

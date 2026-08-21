@@ -1766,6 +1766,7 @@ describe("code delivery API", () => {
     attention_reasons: [],
     ready_to_merge: true,
     workspace_links: [],
+    labels: ["desktop"],
     created_at: "2026-08-19T12:00:00.000Z",
     updated_at: "2026-08-20T12:00:00.000Z",
   };
@@ -1842,13 +1843,28 @@ describe("code delivery API", () => {
       body: "Delivery overview.",
       labels: [],
       assignees: [],
+      requested_reviewers: [],
       changed_files: 3,
       additions: 24,
       deletions: 6,
+      commits: 2,
+      files: [
+        {
+          path: "src/code/CodeDeliveryPage.tsx",
+          status: "modified",
+          additions: 24,
+          deletions: 6,
+          patch: "@@ -1 +1 @@",
+        },
+      ],
+      files_truncated: false,
       comments: [],
       can_mark_ready: false,
       can_merge: true,
       can_rerun_failed: false,
+      can_close: true,
+      can_reopen: false,
+      can_comment: true,
     };
     const actionResult = { success: true, message: "Merged pull request #2248." };
     const fetchMock = vi
@@ -1874,6 +1890,7 @@ describe("code delivery API", () => {
       tidebreak_linked: true,
       cursor: "next-pr-page",
       limit: 50,
+      refresh: false,
     };
     const prTarget = { repository: target, number: 2248 };
     const action = {
@@ -1947,6 +1964,7 @@ describe("code delivery API", () => {
       tidebreak_linked: false,
       created_after: "2026-08-19T12:00:00.000Z",
       limit: 100,
+      refresh: false,
     };
     const runTarget = {
       repository: target,

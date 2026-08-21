@@ -96,7 +96,7 @@ The main local data is easy to recognize:
 | `tidebreak-schema.json` | pre-v1 local SQLite schema epoch |
 | `blobs/` | retained immutable document bytes |
 | `tidebreak.lock` | proof that one process owns this data directory |
-| OS keychain | provider credentials, kept outside the database |
+| OS keychain | provider credentials, kept outside the database — one item per profile |
 
 While the app remains at version `0.0.0`, baseline migrations may be rewritten
 instead of accumulated. The local SQLite schema epoch makes that explicit for

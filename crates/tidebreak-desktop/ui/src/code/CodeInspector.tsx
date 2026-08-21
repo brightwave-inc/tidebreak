@@ -46,7 +46,6 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { MessageMarkdown } from "@/MessageMarkdown";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
@@ -55,6 +54,7 @@ import { DiffOverview } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { PrCommentCard } from "./PrCommentCard";
 import { prWorkflowStatus, type PrWorkflowState } from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
@@ -884,73 +884,12 @@ function CommentRow({
   onHide: () => void;
   onToggleResolved: () => void;
 }) {
-  const [avatarFailed, setAvatarFailed] = useState(false);
-  const when = comment.created_at
-    ? new Date(comment.created_at).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      })
-    : null;
   const author = comment.author ?? "Unknown";
-  const avatar = comment.avatar_url ?? githubAvatarUrl(comment.author);
-  const anchor =
-    comment.kind === "inline" && comment.path
-      ? `${comment.path}${comment.line !== undefined ? `:${comment.line}` : ""}`
-      : null;
-
   return (
-    <article
-      className={cn(
-        "border-border-subtle group/comment rounded-xl border bg-background/45 px-2.5 py-2.5",
-        resolved && "bg-muted/25 opacity-70",
-      )}
-    >
-      <div className="flex min-w-0 items-start gap-2">
-        <span className="bg-muted text-muted-foreground grid size-7 shrink-0 place-items-center overflow-hidden rounded-full text-[10px] font-semibold uppercase">
-          {avatar && !avatarFailed ? (
-            <img
-              src={avatar}
-              alt=""
-              className="size-full object-cover"
-              onError={() => setAvatarFailed(true)}
-            />
-          ) : (
-            author.slice(0, 2)
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="text-foreground min-w-0 truncate text-xs font-medium">
-              {author}
-            </span>
-            {comment.kind === "review" && comment.review_state && (
-              <span className="text-muted-foreground shrink-0 text-[11px] capitalize">
-                {comment.review_state.replaceAll("_", " ")}
-              </span>
-            )}
-            {resolved && (
-              <span className="text-success-foreground flex shrink-0 items-center gap-1 text-[10px] font-medium">
-                <CircleCheck className="size-3" />
-                Resolved here
-              </span>
-            )}
-            {when && (
-              <span className="text-muted-foreground ml-auto shrink-0 text-[10px] tabular-nums">
-                {when}
-              </span>
-            )}
-          </div>
-          {anchor && (
-            <div
-              className="text-muted-foreground mt-0.5 truncate font-mono text-[10px]"
-              title={anchor}
-            >
-              {anchor}
-            </div>
-          )}
-        </div>
+    <PrCommentCard
+      comment={comment}
+      resolved={resolved}
+      actions={
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -991,13 +930,8 @@ function CommentRow({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
-      <div className="review-comment-markdown mt-2 pl-9 text-[13px] leading-5">
-        <MessageMarkdown>
-          {expandGithubEmojiShortcodes(comment.body)}
-        </MessageMarkdown>
-      </div>
-    </article>
+      }
+    />
   );
 }
 
@@ -1079,11 +1013,6 @@ function togglePreference(values: readonly string[], value: string): string[] {
     : [...values, value];
 }
 
-function githubAvatarUrl(author: string | undefined): string | undefined {
-  if (!author || !/^[A-Za-z0-9-]+$/.test(author)) return undefined;
-  return `https://github.com/${encodeURIComponent(author)}.png?size=64`;
-}
-
 function commentChatContext(comment: PullRequestComment): string {
   const author = comment.author ? `@${comment.author}` : "a reviewer";
   const anchor = comment.path
@@ -1094,43 +1023,6 @@ function commentChatContext(comment: PullRequestComment): string {
     .map((line) => `> ${line}`)
     .join("\n");
   return `Review comment from ${author}${anchor}:\n\n${quote}\n\nHelp me address this feedback.`;
-}
-
-const GITHUB_EMOJI: Readonly<Record<string, string>> = {
-  "+1": "👍",
-  "-1": "👎",
-  bug: "🐛",
-  checkered_flag: "🏁",
-  eyes: "👀",
-  fire: "🔥",
-  heart: "❤️",
-  heavy_check_mark: "✔️",
-  laughing: "😆",
-  memo: "📝",
-  party_parrot: "🦜",
-  rocket: "🚀",
-  shipit: "🐿️",
-  smile: "😄",
-  sparkles: "✨",
-  tada: "🎉",
-  thinking: "🤔",
-  warning: "⚠️",
-  wave: "👋",
-  white_check_mark: "✅",
-  x: "❌",
-};
-
-/** Expand common GitHub emoji shortcodes outside inline and fenced code. */
-export function expandGithubEmojiShortcodes(markdown: string): string {
-  return markdown
-    .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g)
-    .map((part) => {
-      if (part.startsWith("`")) return part;
-      return part.replace(/:([+\-a-z0-9_]+):/gi, (token, name: string) => {
-        return GITHUB_EMOJI[name.toLowerCase()] ?? token;
-      });
-    })
-    .join("");
 }
 
 function CheckList({

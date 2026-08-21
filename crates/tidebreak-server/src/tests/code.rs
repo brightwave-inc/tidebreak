@@ -1367,7 +1367,99 @@ async fn a_workspace_runs_several_agents_that_take_turns_on_one_worktree() {
     .expect("the queued sibling turn never ran");
 }
 
-/// Create `count` interactive sessions in one workspace, returning their ids.
+/// A turn script that always fails, the way an expired credential does.
+fn always_failing_script() -> Vec<HarnessEvent> {
+    vec![
+        HarnessEvent::SessionStarted {
+            harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
+            harness_version: "scripted".into(),
+            resume_ref: Some("scripted-session".into()),
+        },
+        HarnessEvent::TurnStarted,
+        HarnessEvent::TurnFailed {
+            error: tidebreak_core::BoundedError {
+                message: "Auth recovery succeeded but 4 authenticated inference requests \
+                          were still rejected (401); giving up after 3 retries."
+                    .into(),
+            },
+        },
+    ]
+}
+
+/// A credential that stops working fails every turn identically, and the
+/// session went on reporting `idle` — so the next turn, and the one after
+/// that, were invited to fail the same way with no remedy offered.
+#[tokio::test]
+async fn a_session_whose_turns_keep_failing_is_fenced_rather_than_left_idle() {
+    let (router, token, _runtime, dir) =
+        code_app_with(ScriptedAdapter::new(always_failing_script())).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let lifecycle = |session: String| {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            let body: serde_json::Value = client
+                .get(format!("http://{addr}/code/sessions/{session}/debug"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body["session"].clone()
+        }
+    };
+
+    for attempt in 1..=3 {
+        let response = client
+            .post(format!("http://{addr}/code/sessions/{session}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": format!("attempt {attempt}") }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "the turn is accepted even though the engine fails it"
+        );
+
+        let row = lifecycle(session.clone()).await;
+        if attempt < 3 {
+            assert_eq!(
+                row["lifecycle"], "idle",
+                "one or two failures are ordinary; do not fence early: {row}"
+            );
+            assert!(row["fence_reason"].is_null(), "{row}");
+        }
+    }
+
+    let row = lifecycle(session.clone()).await;
+    assert_eq!(
+        row["lifecycle"], "fenced",
+        "three failures in a row is a property of the session: {row}"
+    );
+    assert_eq!(
+        row["fence_reason"]["type"], "repeated_turn_failures",
+        "{row}"
+    );
+    assert_eq!(row["fence_reason"]["count"], 3, "{row}");
+    assert!(
+        row["fence_reason"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("401"),
+        "the fence carries why, which the turn row never stored: {row}"
+    );
+}
+
 /// Plan mode had no exit. The mode was settable only at creation, so once a
 /// user approved a plan the engine kept refusing the edits and the only way
 /// forward was a new session with a new conversation.
@@ -1455,6 +1547,7 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
     );
 }
 
+/// Create `count` interactive sessions in one workspace, returning their ids.
 async fn create_sibling_sessions(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
