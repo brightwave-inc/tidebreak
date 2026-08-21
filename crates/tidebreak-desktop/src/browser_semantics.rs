@@ -765,11 +765,7 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
     use tokio::{sync::oneshot, time::timeout};
 
     extern "C" {
-        fn objc_msgSend(
-            receiver: *mut c_void,
-            selector: *mut c_void,
-            ...
-        ) -> *mut c_void;
+        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> *mut c_void;
         fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
     }
 
@@ -882,13 +878,10 @@ async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
         })
         .map_err(|error| format!("browser host: {error}"))?;
 
-    timeout(
-        Duration::from_secs(SCREENSHOT_TIMEOUT_SECONDS),
-        receiver,
-    )
-    .await
-    .map_err(|_| "screenshot capture timed out".to_owned())?
-    .map_err(|_| "screenshot capture was interrupted".to_owned())?
+    timeout(Duration::from_secs(SCREENSHOT_TIMEOUT_SECONDS), receiver)
+        .await
+        .map_err(|_| "screenshot capture timed out".to_owned())?
+        .map_err(|_| "screenshot capture was interrupted".to_owned())?
 }
 
 #[cfg(not(target_os = "macos"))]

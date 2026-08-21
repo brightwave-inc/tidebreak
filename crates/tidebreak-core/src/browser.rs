@@ -1234,12 +1234,10 @@ mod tests {
             Some("Hi")
         );
         assert_eq!(BrowserAction::Focus.value(), None);
-        assert!(
-            !BrowserAction::Fill {
-                value: String::new(),
-            }
-            .is_well_formed()
-        );
+        assert!(!BrowserAction::Fill {
+            value: String::new(),
+        }
+        .is_well_formed());
     }
 
     #[test]

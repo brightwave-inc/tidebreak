@@ -1294,9 +1294,7 @@ impl BrowserRegistry {
             .ok_or_else(|| "browser session is not registered".to_owned())?;
         ensure_workspace(browser_id, workspace_id, record)?;
         if record.document_epoch != epoch {
-            return Err(
-                "browser document changed while screenshot was being captured".to_owned(),
-            );
+            return Err("browser document changed while screenshot was being captured".to_owned());
         }
         record.screenshot_epoch = Some(epoch);
         Ok(())
