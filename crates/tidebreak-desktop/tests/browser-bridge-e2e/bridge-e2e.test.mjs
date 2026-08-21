@@ -197,6 +197,8 @@ test("absolute harness launch succeeds with PATH unavailable", async () => {
   assert.equal(result.envHasPath, false, "PATH must be absent from the child environment");
   assert.ok(isAbsolute(result.command), "the launched executable must be absolute");
   assert.ok(!result.argv.includes(capfilePath), "capfile path must stay out of argv");
+  assert.ok(!result.stdout.includes(capfilePath), "capfile path must stay out of stdout");
+  assert.ok(!result.stderr.includes(capfilePath), "capfile path must stay out of stderr");
   assert.ok(!result.stdout.includes(token), "token must stay out of stdout");
   assert.ok(!result.stderr.includes(token), "token must stay out of stderr");
 
@@ -206,6 +208,33 @@ test("absolute harness launch succeeds with PATH unavailable", async () => {
   assert.equal(capfile.endpoint, bridgeEndpoint);
 
   assert.ok(!result.argv.join(" ").includes(token), "token must not appear in argv");
+});
+
+test("absolute launch rejects capfile-path output leakage", async () => {
+  const { capfilePath } = await writeCapfile(tmpDir, bridgeEndpoint);
+  const leakingProbe = `
+    import { readFile } from "node:fs/promises";
+    const path = process.env.TIDEBREAK_BROWSER_CAPFILE;
+    const capfile = JSON.parse(await readFile(path, "utf8"));
+    process.stderr.write(path);
+    process.stdout.write(JSON.stringify({
+      endpoint: capfile.endpoint,
+      tools: [
+        { name: "browser_list" },
+        { name: "browser_navigate" },
+        { name: "browser_snapshot" }
+      ]
+    }));
+  `;
+
+  await assert.rejects(
+    simulateAbsoluteLaunch({
+      capfilePath,
+      command: process.execPath,
+      args: ["--input-type=module", "--eval", leakingProbe],
+    }),
+    /capfile path escaped through child process output/
+  );
 });
 
 test("token never appears in capfile path", async () => {
@@ -305,6 +334,43 @@ test("browser capability auth runs before missing-runtime disclosure", async () 
       "tbreak_bt_unknown"
     );
     assert.equal(unknown.status, 401);
+  } finally {
+    await close(noRuntime.server);
+  }
+});
+
+test("argument validation runs before missing-runtime disclosure", async () => {
+  const noRuntime = await startBridgeServer({
+    port: 0,
+    fixtureOrigin: fixture.origin,
+    missingRuntime: true,
+  });
+
+  try {
+    const token = noRuntime.tokenRegistry.issue();
+    const invalidNavigation = await callBrowserRoute(
+      noRuntime.endpoint,
+      "navigate",
+      { browser_id: "browser-1", url: "file:///etc/passwd" },
+      token
+    );
+    assert.equal(invalidNavigation.status, 422);
+
+    const invalidSnapshot = await callBrowserRoute(
+      noRuntime.endpoint,
+      "snapshot",
+      { browser_id: "browser-1", max_nodes: 501 },
+      token
+    );
+    assert.equal(invalidSnapshot.status, 422);
+
+    const validNavigation = await callBrowserRoute(
+      noRuntime.endpoint,
+      "navigate",
+      { browser_id: "browser-1", url: fixture.origin },
+      token
+    );
+    assert.equal(validNavigation.status, 501);
   } finally {
     await close(noRuntime.server);
   }

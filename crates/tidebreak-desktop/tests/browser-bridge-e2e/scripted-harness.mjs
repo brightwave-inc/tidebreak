@@ -328,6 +328,9 @@ export async function simulateAbsoluteLaunch({
   if (allArgv.includes(capfilePath)) {
     throw new Error("capfile path escaped into child process argv");
   }
+  if (result.stdout.includes(capfilePath) || result.stderr.includes(capfilePath)) {
+    throw new Error("capfile path escaped through child process output");
+  }
   if (result.code !== 0) {
     throw new Error(`absolute launch failed (${result.code}): ${result.stderr}`);
   }

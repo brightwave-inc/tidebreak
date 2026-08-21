@@ -176,21 +176,18 @@ export async function startBridgeServer({
         return;
       }
 
-      // Match the real route refusal ladder: authorize the capability first,
-      // then reveal whether a native runtime is attached.
-      if (missingRuntime) {
-        errJson(
-          response,
-          501,
-          "not_implemented",
-          "this server has no in-app browser runtime"
-        );
-        return;
-      }
-
       const route = url.pathname.slice("/code/browser/".length);
 
       if (route === "list" && request.method === "GET") {
+        if (missingRuntime) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "this server has no in-app browser runtime"
+          );
+          return;
+        }
         const controller = defaultController();
         if (stoppedControl) controller.halted = true;
 
@@ -241,12 +238,6 @@ export async function startBridgeServer({
           return;
         }
 
-        // Cross-workspace / unknown browser id → 404
-        if (browser_id !== "browser-1") {
-          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
-          return;
-        }
-
         // Invalid URL → 422
         let parsedNavUrl;
         try {
@@ -278,6 +269,32 @@ export async function startBridgeServer({
             "invalid_browser_arguments",
             "browser arguments are not well-formed"
           );
+          return;
+        }
+
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(browser_id) || navUrl.length > 8192) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        if (missingRuntime) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "this server has no in-app browser runtime"
+          );
+          return;
+        }
+
+        // Cross-workspace / unknown browser id → 404
+        if (browser_id !== "browser-1") {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
           return;
         }
 
@@ -319,12 +336,6 @@ export async function startBridgeServer({
           return;
         }
 
-        // Cross-workspace / unknown browser id → 404
-        if (browser_id !== "browser-1") {
-          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
-          return;
-        }
-
         // Validate max_nodes bounds
         if (max_nodes !== undefined) {
           if (
@@ -341,6 +352,32 @@ export async function startBridgeServer({
             );
             return;
           }
+        }
+
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(browser_id)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        if (missingRuntime) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "this server has no in-app browser runtime"
+          );
+          return;
+        }
+
+        // Cross-workspace / unknown browser id → 404
+        if (browser_id !== "browser-1") {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
         }
 
         // Stale epoch → 409
