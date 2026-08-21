@@ -16,9 +16,9 @@ use crate::child::{turn_outcome, ChildPid};
 use crate::claude::parse::ClaudeStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    filter_child_env, spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
+    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -119,7 +119,7 @@ impl ClaudeSession {
         }
         argv.extend(self.spec.extra_argv.iter().cloned());
         let mut env = self.spec.extra_env.clone();
-        env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+        env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
         let plan = LaunchPlan {
             argv,
             cwd: self.spec.worktree.clone(),
@@ -161,7 +161,7 @@ impl HarnessSession for ClaudeSession {
             command.env(key, value);
         }
         if let Some(ref browser) = self.spec.browser {
-            browser.inject_env(&mut command);
+            browser.inject_env_tokio(&mut command);
         }
         let mut child = spawn_process_tree(&mut command)?;
         let mut stdin = child

@@ -20,9 +20,9 @@ use tidebreak_core::{
     HarnessCommand, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
 };
 
+pub mod browser_channel;
 pub mod budget;
 pub mod child;
-pub mod browser_channel;
 pub mod claude;
 pub mod codex;
 pub mod grok;
@@ -299,7 +299,7 @@ impl ApprovalChannelSpec {
 ///
 /// This struct carries only the metadata adapters need to construct the
 /// launch environment. The mint, write, and revoke lifecycle is owned by
-/// the trusted browser runtime (issue #2344).
+/// the trusted browser runtime (issue #2342).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BrowserChannelSpec {
@@ -310,9 +310,10 @@ pub struct BrowserChannelSpec {
 impl BrowserChannelSpec {
     /// Adapter-owned environment key injected into every engine child.
     ///
-    /// Prefix `TIDEBREAK_` is stripped from user `extra_env` and from
-    /// the probe snapshot, so a user setting cannot shadow or override
-    /// this value.
+    /// Adapters reject `TIDEBREAK_` keys from settings with
+    /// [`Self::is_reserved_env_key`], while [`filter_child_env`] strips the
+    /// same namespace from the shell snapshot. [`Self::inject_env_tokio`]
+    /// then runs after `plan.env`, making this the final child value.
     pub const ENV_KEY: &'static str = "TIDEBREAK_BROWSER_CAPFILE";
 
     /// Construct a new spec.
@@ -321,16 +322,24 @@ impl BrowserChannelSpec {
         Self { capability_file }
     }
 
-    /// Inject the capability-file path into a [`std::process::Command`]
-    /// or [`tokio::process::Command`] as the final value for
-    /// [`Self::ENV_KEY`], after `plan.env` so it wins any shadow attempt.
-    pub fn inject_env(&self, cmd: &mut std::process::Command) {
-        cmd.env(Self::ENV_KEY, self.capability_file.as_os_str());
+    /// Return the exact key/value pair adapters inject into engine children.
+    #[must_use]
+    pub fn env_pair(&self) -> (&'static str, &std::ffi::OsStr) {
+        (Self::ENV_KEY, self.capability_file.as_os_str())
     }
 
-    /// Tokio variant of [`Self::inject_env`].
+    /// Whether a settings environment key belongs to Tidebreak rather than
+    /// the user. Adapters must reject these keys before composing a launch.
+    #[must_use]
+    pub fn is_reserved_env_key(key: &str) -> bool {
+        key.to_ascii_uppercase().starts_with("TIDEBREAK_")
+    }
+
+    /// Inject the capability-file path as the final environment value on a
+    /// Tokio engine command.
     pub fn inject_env_tokio(&self, cmd: &mut tokio::process::Command) {
-        cmd.env(Self::ENV_KEY, self.capability_file.as_os_str());
+        let (key, value) = self.env_pair();
+        cmd.env(key, value);
     }
 }
 

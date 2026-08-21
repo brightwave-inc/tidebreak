@@ -17,9 +17,9 @@ use tokio::time::timeout;
 use crate::launch::{validate_launch_plan, LaunchPlan};
 use crate::opencode::parse::OpencodeStreamParser;
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    filter_child_env, spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
+    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -81,7 +81,7 @@ pub(crate) fn compose_serve_plan(
         )));
     }
     let mut env = extra_env.to_vec();
-    env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
@@ -227,7 +227,7 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, Harness
         command.env(key, value);
     }
     if let Some(ref browser) = session.spec.browser {
-        browser.inject_env(&mut command);
+        browser.inject_env_tokio(&mut command);
     }
     let mut child = spawn_process_tree(&mut command)?;
     let stdout = child

@@ -17,9 +17,9 @@ use crate::child::{turn_outcome, ChildPid};
 use crate::grok::parse::GrokStreamParser;
 use crate::launch::{validate_launch_plan_with, BypassPolicy, LaunchPlan};
 use crate::{
-    filter_child_env, spawn_process_tree, ApprovalDecision, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
-    TurnInput, TurnOutcome,
+    filter_child_env, spawn_process_tree, ApprovalDecision, BrowserChannelSpec, HarnessApprovalRef,
+    HarnessError, HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget,
+    StreamLineBuffer, TurnInput, TurnOutcome,
 };
 use tidebreak_core::CodePermissionMode;
 
@@ -132,7 +132,7 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     }
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
-    env.retain(|(key, _)| !key.to_ascii_uppercase().starts_with("TIDEBREAK_") && key != "PWD");
+    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
     let policy = match launch.mode {
         CodePermissionMode::Allow => BypassPolicy::Permitted,
         CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
@@ -238,7 +238,7 @@ impl GrokSession {
             command.env(key, value);
         }
         if let Some(ref browser) = self.spec.browser {
-            browser.inject_env(&mut command);
+            browser.inject_env_tokio(&mut command);
         }
         let mut child = spawn_process_tree(&mut command)?;
         let stdout = child

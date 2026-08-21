@@ -1,10 +1,12 @@
 //! Browser channel contracts exercised without a live runtime.
 //!
-//! The trusted browser runtime (issue #2344) mints a session-private
+//! The trusted browser runtime (issue #2342) mints a session-private
 //! capability file whose path is injected through a harness-owned
 //! environment key. This module declares the contract adapters rely on
 //! and provides static-validation tests that do not require a browser
 //! process.
+
+use std::ffi::OsStr;
 
 use crate::BrowserChannelSpec;
 
@@ -14,9 +16,17 @@ use crate::BrowserChannelSpec;
 /// so it lives here as the single source of truth.
 pub const BROWSER_CAPFILE_ENV_KEY: &str = BrowserChannelSpec::ENV_KEY;
 
+/// Resolve an optional browser channel to the one environment pair an
+/// adapter may inject. `None` deliberately produces no child environment.
+#[must_use]
+pub fn browser_env_pair(browser: Option<&BrowserChannelSpec>) -> Option<(&'static str, &OsStr)> {
+    browser.map(BrowserChannelSpec::env_pair)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     #[test]
@@ -28,11 +38,6 @@ mod tests {
     }
 
     #[test]
-    fn capfile_key_is_not_empty() {
-        assert!(!BROWSER_CAPFILE_ENV_KEY.is_empty());
-    }
-
-    #[test]
     fn spec_new_roundtrips() {
         let path = PathBuf::from("/tmp/browser-cap.json");
         let spec = BrowserChannelSpec::new(path.clone());
@@ -40,36 +45,40 @@ mod tests {
     }
 
     #[test]
-    fn inject_env_sets_the_key() {
+    fn browser_some_exposes_the_trusted_env_pair() {
         let path = PathBuf::from("/tmp/browser-cap.json");
-        let spec = BrowserChannelSpec::new(path.clone());
-        let mut cmd = std::process::Command::new("true");
-        spec.inject_env(&mut cmd);
-        assert_eq!(spec.capability_file, path);
+        let browser = BrowserChannelSpec::new(path.clone());
+        let (key, value) = browser_env_pair(Some(&browser)).expect("browser env pair");
+
+        assert_eq!(key, BROWSER_CAPFILE_ENV_KEY);
+        assert_eq!(value, path.as_os_str());
     }
 
     #[test]
-    fn inject_env_tokio_sets_the_key() {
-        let path = PathBuf::from("/tmp/browser-cap.json");
-        let spec = BrowserChannelSpec::new(path.clone());
-        let mut cmd = tokio::process::Command::new("true");
-        spec.inject_env_tokio(&mut cmd);
-        assert_eq!(spec.capability_file, path);
+    fn reserved_value_cannot_shadow_the_trusted_pair() {
+        let attacker_path = "/tmp/attacker-cap.json";
+        let mut settings_env = vec![(
+            BROWSER_CAPFILE_ENV_KEY.to_ascii_lowercase(),
+            attacker_path.to_owned(),
+        )];
+        settings_env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key));
+        assert!(settings_env.is_empty(), "settings override must be rejected");
+
+        let snapshot_env = crate::filter_child_env([(
+            OsString::from(BROWSER_CAPFILE_ENV_KEY),
+            OsString::from(attacker_path),
+        )]);
+        assert!(snapshot_env.is_empty(), "snapshot override must be stripped");
+
+        let trusted_path = PathBuf::from("/tmp/trusted-cap.json");
+        let browser = BrowserChannelSpec::new(trusted_path.clone());
+        let (key, value) = browser_env_pair(Some(&browser)).expect("trusted browser env pair");
+        assert_eq!(key, BROWSER_CAPFILE_ENV_KEY);
+        assert_eq!(value, trusted_path.as_os_str());
     }
 
     #[test]
-    fn override_resistance_env_key_is_compile_time_constant() {
-        assert_eq!(
-            std::any::type_name_of_val(&BrowserChannelSpec::ENV_KEY),
-            "&str"
-        );
-    }
-
-    #[test]
-    fn absence_preserves_existing_behavior() {
-        assert!(BROWSER_CAPFILE_ENV_KEY.len() > 8);
-        assert!(BROWSER_CAPFILE_ENV_KEY
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c == '_'));
+    fn browser_none_exposes_no_env_pair() {
+        assert!(browser_env_pair(None).is_none());
     }
 }
