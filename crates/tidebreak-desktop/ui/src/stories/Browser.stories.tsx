@@ -7,7 +7,9 @@ import {
   BrowserNoticeRow,
   BrowserToolbar,
 } from "@/code/browser/BrowserToolbar";
+import { BrowserViewportControl } from "@/code/browser/BrowserViewportControl";
 import { BrowserFallback } from "@/code/browser/CodeBrowserTab";
+import type { BrowserViewport } from "@/code/browser/browserViewport";
 import type {
   BrowserAgentAccess,
   BrowserController,
@@ -27,7 +29,12 @@ type BrowserScenario =
   | "slow"
   | "failure"
   | "popup"
-  | "download";
+  | "download"
+  | "viewport-fit"
+  | "viewport-desktop"
+  | "viewport-tablet"
+  | "viewport-mobile"
+  | "viewport-custom";
 
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   name: "wk_webview",
@@ -120,9 +127,11 @@ function browserSession(
 function BrowserStory({
   scenario,
   compact = false,
+  viewport,
 }: {
   scenario: BrowserScenario;
   compact?: boolean;
+  viewport?: BrowserViewport;
 }) {
   const loadState = scenario === "empty"
     ? "idle"
@@ -133,6 +142,9 @@ function BrowserStory({
         : "ready";
   const session = browserSession(loadState);
   const [address, setAddress] = useState(session.address);
+  const [viewportState, setViewportState] = useState<BrowserViewport>(
+    viewport ?? { preset: "fit", customWidth: 1024 },
+  );
   const controller = scenario === "agent"
     ? activeAgent
     : scenario === "takeover"
@@ -176,6 +188,24 @@ function BrowserStory({
           onSelectHistory={fn()}
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
+          viewportControl={
+            <BrowserViewportControl
+              viewport={viewportState}
+              renderedWidth={
+                viewportState.preset === "fit"
+                  ? null
+                  : viewportState.preset === "custom"
+                    ? viewportState.customWidth
+                    : viewportState.preset === "desktop"
+                      ? 1440
+                      : viewportState.preset === "tablet"
+                        ? 768
+                        : 390
+              }
+              onViewportChange={setViewportState}
+              disabled={!session.url}
+            />
+          }
         />
 
         {scenario === "slow" && (
@@ -204,21 +234,46 @@ function BrowserStory({
           />
         )}
 
-        <div className="min-h-0 flex-1">
-          {scenario === "empty" ? (
-            <BrowserFallback error={null} hasUrl={false} />
-          ) : scenario === "failure" ? (
-            <BrowserFallback
-              error="The local preview stopped responding. Restart the dev server, then try again."
-              hasUrl
-              onRetry={fn()}
-              onOpenExternal={fn()}
-            />
-          ) : scenario === "loading" || scenario === "slow" ? (
-            <LoadingPage />
-          ) : (
-            <DeveloperPage compact={compact} />
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          {viewportState.preset !== "fit" && scenario !== "empty" && scenario !== "failure" && (
+            <div aria-hidden className="absolute inset-0 bg-muted/30" />
           )}
+          <div
+            className={cn(
+              "relative h-full",
+              viewportState.preset === "fit" ? "w-full" : "mx-auto",
+            )}
+            style={
+              viewportState.preset === "fit"
+                ? undefined
+                : {
+                    width:
+                      viewportState.preset === "custom"
+                        ? `${Math.min(viewportState.customWidth, 1120)}px`
+                        : viewportState.preset === "desktop"
+                          ? "1120px"
+                          : viewportState.preset === "tablet"
+                            ? "768px"
+                            : "390px",
+                    maxWidth: "100%",
+                  }
+            }
+          >
+            {scenario === "empty" ? (
+              <BrowserFallback error={null} hasUrl={false} />
+            ) : scenario === "failure" ? (
+              <BrowserFallback
+                error="The local preview stopped responding. Restart the dev server, then try again."
+                hasUrl
+                onRetry={fn()}
+                onOpenExternal={fn()}
+              />
+            ) : scenario === "loading" || scenario === "slow" ? (
+              <LoadingPage />
+            ) : (
+              <DeveloperPage compact={compact} />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -386,6 +441,59 @@ export const PopupBlocked: Story = { args: { scenario: "popup" } };
 export const DownloadBlocked: Story = { args: { scenario: "download" } };
 
 export const Compact: Story = { args: { scenario: "agent", compact: true } };
+
+export const ViewportFit: Story = {
+  args: { scenario: "viewport-fit", viewport: { preset: "fit", customWidth: 1024 } },
+};
+
+export const ViewportDesktop: Story = {
+  args: {
+    scenario: "viewport-desktop",
+    viewport: { preset: "desktop", customWidth: 1024 },
+  },
+};
+
+export const ViewportTablet: Story = {
+  args: {
+    scenario: "viewport-tablet",
+    viewport: { preset: "tablet", customWidth: 1024 },
+  },
+};
+
+export const ViewportMobile: Story = {
+  args: {
+    scenario: "viewport-mobile",
+    viewport: { preset: "mobile", customWidth: 1024 },
+  },
+};
+
+export const ViewportCustom: Story = {
+  args: {
+    scenario: "viewport-custom",
+    viewport: { preset: "custom", customWidth: 480 },
+  },
+};
+
+export const ViewportCompact: Story = {
+  args: {
+    scenario: "viewport-tablet",
+    compact: true,
+    viewport: { preset: "tablet", customWidth: 1024 },
+  },
+};
+
+export const ViewportAgentControlled: Story = {
+  args: {
+    scenario: "viewport-desktop",
+    viewport: { preset: "desktop", customWidth: 1024 },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", { name: /Viewport: Desktop 1440/i }),
+    ).toBeVisible();
+  },
+};
 
 export const ControllerStates: StoryObj<typeof ControlRows> = {
   render: () => <ControlRows />,

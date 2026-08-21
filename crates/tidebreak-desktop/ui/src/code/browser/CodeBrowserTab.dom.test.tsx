@@ -717,4 +717,123 @@ describe("CodeBrowserTab", () => {
     ).toBeInTheDocument();
     fireEvent.submit(screen.getByRole("textbox", { name: "Address or search" }).closest("form")!);
   });
+
+  it("renders the viewport control in the toolbar and disables it without a URL", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+    const viewportButton = screen.getByRole("button", { name: /Viewport: Fit/i });
+    expect(viewportButton).toBeDisabled();
+  });
+
+  it("enables the viewport control once a page loads", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+    const viewportButton = await screen.findByRole("button", { name: /Viewport: Fit/i });
+    expect(viewportButton).toBeEnabled();
+  });
+
+  it("updates the viewport trigger label when the preset changes", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    // Initially shows Fit
+    expect(screen.getByRole("button", { name: /Viewport: Fit/i })).toBeEnabled();
+
+    // Open the viewport popover and switch to mobile
+    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    await userEvent.click(screen.getByRole("radio", { name: /Mobile/i }));
+
+    // The trigger label should now show Mobile
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Viewport: Mobile 390/i })).toBeVisible(),
+    );
+  });
+
+  it("persists the viewport preference to localStorage", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    await userEvent.click(screen.getByRole("radio", { name: /Tablet/i }));
+
+    await waitFor(() => {
+      const raw = window.localStorage.getItem("tidebreak.code-browser-viewport.v1");
+      expect(raw).not.toBeNull();
+      const parsed = JSON.parse(raw!);
+      expect(parsed.preset).toBe("tablet");
+    });
+  });
+
+  it("hides the viewport control trigger alongside the native surface when obscured", async () => {
+    const runtime = browserHost();
+    const view = render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+    );
+
+    // The viewport control button should be present before obscuring
+    expect(screen.getByRole("button", { name: /Viewport: Fit/i })).toBeInTheDocument();
+
+    view.rerender(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+        obscured
+      />,
+    );
+
+    // The set_visible false command should fire
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      }),
+    );
+  });
 });
