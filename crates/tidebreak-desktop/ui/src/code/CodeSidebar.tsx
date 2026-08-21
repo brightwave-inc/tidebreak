@@ -251,14 +251,16 @@ export function CodeSidebar() {
                       action === "open_source" ||
                       action === "push" ||
                       action === "create_pr" ||
-                      action === "merge"
+                      action === "merge" ||
+                      action === "mark_ready"
                     ) {
                       // Local-git stages never arise from the digest-only
                       // model; the workspace page is where they resolve.
-                      // Merging goes there too: decision 42 makes it the
-                      // reader's call, and a card in a rail is the wrong place
-                      // to land a shared branch from — the header puts the
-                      // pull request in front of them first.
+                      // Merging and readying go there too: decision 42 makes
+                      // both the reader's call, and a card in a rail is the
+                      // wrong place to land a shared branch or open work for
+                      // review from — the header puts the pull request in
+                      // front of them first.
                       void navigate({
                         to: "/code/w/$workspaceId",
                         params: { workspaceId: workspace.id },

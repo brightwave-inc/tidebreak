@@ -2408,6 +2408,23 @@ export class ApiClient {
   }
 
   /**
+   * User-initiated draft-to-ready. Decision 42 keeps pull-request state
+   * changes off the agent path, so this is a dedicated endpoint rather than a
+   * prompt. Returns the post-change snapshot.
+   */
+  async markCodePrReady(workspaceId: string): Promise<CodeWorkspacePrSnapshot> {
+    return requireParsed(
+      parseCodeWorkspacePr(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/ready`,
+          { method: "POST", headers: this.headers(true) },
+        ),
+      ),
+      "code pull request",
+    );
+  }
+
+  /**
    * User-initiated merge. auto=true arms host auto-merge instead of merging
    * immediately. Returns the post-merge snapshot.
    */

@@ -370,6 +370,13 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn mark_workspace_pr_ready(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<WorkspaceGitStatus, ServerError> {
+        self.runtime.mark_workspace_pr_ready(&self.owner, id).await
+    }
+
     pub(crate) async fn create_workspace_pr(
         &self,
         id: WorkspaceId,
