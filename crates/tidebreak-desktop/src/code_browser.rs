@@ -326,7 +326,9 @@ pub(crate) async fn navigate_browser_for_agent(
                         });
                     }
                     if tokio::time::Instant::now() >= deadline {
-                        return Err("browser navigation did not start before the deadline".to_owned());
+                        return Err(
+                            "browser navigation did not start before the deadline".to_owned()
+                        );
                     }
                     tokio::time::sleep(AGENT_NAVIGATION_POLL_INTERVAL).await;
                 }

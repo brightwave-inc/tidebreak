@@ -125,13 +125,11 @@ impl SessionCapabilities {
                     SessionCapabilityState::Revoked => false,
                 };
                 if !scope_matches {
-                    let previous = match std::mem::replace(
-                        entry.get_mut(),
-                        SessionCapabilityState::Revoked,
-                    ) {
-                        SessionCapabilityState::Active(active) => active.capability_id,
-                        SessionCapabilityState::Revoked => unreachable!("checked above"),
-                    };
+                    let previous =
+                        match std::mem::replace(entry.get_mut(), SessionCapabilityState::Revoked) {
+                            SessionCapabilityState::Active(active) => active.capability_id,
+                            SessionCapabilityState::Revoked => unreachable!("checked above"),
+                        };
                     registry.revoke_agent_capability(previous);
                     return Err(BrowserRuntimeError::SessionEnded);
                 }
@@ -152,11 +150,7 @@ impl SessionCapabilities {
                 // short TTL. Rotate it atomically under both registries so a
                 // concurrent revoke cannot resurrect the session and active
                 // controller ownership does not become a permanent Stop.
-                match registry.rotate_expired_agent_capability(
-                    previous,
-                    &workspace,
-                    "Code agent",
-                ) {
+                match registry.rotate_expired_agent_capability(previous, &workspace, "Code agent") {
                     Ok(replacement) => {
                         match entry.get_mut() {
                             SessionCapabilityState::Active(active) => {
@@ -310,9 +304,7 @@ mod tests {
 
     #[test]
     fn expired_capability_rotates_without_stranding_agent_control() {
-        use tidebreak_core::{
-            BrowserGrantCapability, BrowserOrigin, BrowserOriginScope,
-        };
+        use tidebreak_core::{BrowserGrantCapability, BrowserOrigin, BrowserOriginScope};
 
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
@@ -340,9 +332,7 @@ mod tests {
             .unwrap();
 
         let previous = sessions.capability_for(&registry, &scope).unwrap();
-        registry
-            .begin_agent_control(previous, "browser-1")
-            .unwrap();
+        registry.begin_agent_control(previous, "browser-1").unwrap();
         registry.expire_agent_capability_for_test(previous);
 
         let replacement = sessions.capability_for(&registry, &scope).unwrap();
