@@ -1422,7 +1422,7 @@ CREATE TABLE "code_approval" (
     "decided_at" timestamp_with_timezone_text,
     FOREIGN KEY ("session_id") REFERENCES "code_session" ("id"),
     FOREIGN KEY ("turn_id") REFERENCES "code_turn" ("id"),
-    CHECK ("state" IN ('pending', 'approved', 'denied'))
+    CHECK ("state" IN ('pending', 'approved', 'denied', 'abandoned'))
 );
 
 CREATE INDEX "idx_code_approval_session_state" ON "code_approval" ("session_id", "state");
