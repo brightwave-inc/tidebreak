@@ -77,15 +77,65 @@ pub(crate) enum WorkerError {
     SteeringRejected(String),
     #[error("{0}")]
     Failed(String),
+    /// A sibling session holds the workspace's turn lock.
+    ///
+    /// Never reaches a caller. `submit_turn` parks the message and answers
+    /// `Queued`, so a send is never left holding its connection open for the
+    /// length of someone else's turn.
+    #[error("another session in this workspace is mid-turn")]
+    WorktreeBusy,
 }
 
 pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
     pub commands: mpsc::Sender<WorkerCommand>,
-    /// Single follow-up parked while a turn is running (queue-default).
-    pub pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
-    pub wake: Arc<Notify>,
+    pub queue: TurnQueue,
     pub sink: Arc<LiveSink>,
+}
+
+/// How a worker gets its next turn, and when it may start one.
+///
+/// `pending` and `wake` are this session's own single follow-up slot
+/// (record 9). `worktree` is shared with every other session in the
+/// workspace, and holding it is what keeps two agents from editing one
+/// checkout at the same time (record 54).
+#[derive(Clone)]
+pub(crate) struct TurnQueue {
+    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
+    wake: Arc<Notify>,
+    worktree: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl TurnQueue {
+    fn new(worktree: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            pending: Arc::new(std::sync::Mutex::new(None)),
+            wake: Arc::new(Notify::new()),
+            worktree,
+        }
+    }
+}
+
+/// Who is waiting on the other end of a turn, which decides how it waits.
+///
+/// A `Send` has an HTTP request open on it, so it may not block on a sibling's
+/// turn — it takes the lock or reports back that it could not. A `Queued` turn
+/// has already been acknowledged, so it can afford to wait.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnWait {
+    Send,
+    Queued,
+}
+
+/// The workspace's turn lock, and this caller's claim on waiting for it.
+///
+/// They travel together because neither answers anything alone: the lock says
+/// which checkout is being reserved, and the wait says what this caller is
+/// allowed to do when somebody else holds it.
+#[derive(Clone, Copy)]
+struct WorktreeTurn<'a> {
+    lock: &'a tokio::sync::Mutex<()>,
+    wait: TurnWait,
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -324,30 +374,34 @@ impl HarnessEventSink for LiveSink {
     }
 }
 
+/// Start the worker for a session.
+///
+/// `worktree_turn` is the workspace's turn lock, shared with every other
+/// session in the same checkout. The worker holds it for the length of a
+/// turn, which is what keeps two agents from editing one worktree at once;
+/// see record 54.
 pub(crate) fn spawn_session_worker(
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     blobs: Option<Arc<dyn BlobStore>>,
+    worktree_turn: Arc<tokio::sync::Mutex<()>>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
-    let pending = Arc::new(std::sync::Mutex::new(None));
-    let wake = Arc::new(Notify::new());
+    let queue = TurnQueue::new(worktree_turn);
     tokio::spawn(run_worker(
         session,
         engine,
         sink.clone(),
-        pending.clone(),
-        wake.clone(),
+        queue.clone(),
         blobs,
         rx,
     ));
     WorkerHandle {
         spawn_epoch,
         commands: tx,
-        pending,
-        wake,
+        queue,
         sink,
     }
 }
@@ -359,7 +413,7 @@ pub(crate) fn queue_follow_up(
     model: Option<String>,
     attachments: Vec<tidebreak_core::CodeTurnAttachment>,
 ) -> bool {
-    let mut pending = handle.pending.lock().expect("code turn queue");
+    let mut pending = handle.queue.pending.lock().expect("code turn queue");
     if pending.is_some() {
         return false;
     }
@@ -368,7 +422,7 @@ pub(crate) fn queue_follow_up(
         model,
         attachments,
     });
-    handle.wake.notify_one();
+    handle.queue.wake.notify_one();
     true
 }
 
@@ -376,8 +430,7 @@ async fn run_worker(
     mut session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
-    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
-    wake: Arc<Notify>,
+    queue: TurnQueue,
     blobs: Option<Arc<dyn BlobStore>>,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
@@ -394,13 +447,13 @@ async fn run_worker(
             &mut session,
             engine.as_ref(),
             &sink,
-            &pending,
+            &queue,
             blobs.as_deref(),
             &mut commands,
         )
         .await;
         tokio::select! {
-            _ = wake.notified() => {}
+            _ = queue.wake.notified() => {}
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn {
                     message,
@@ -414,6 +467,10 @@ async fn run_worker(
                         &sink,
                         blobs.as_deref(),
                         &mut commands,
+                        WorktreeTurn {
+                            lock: &queue.worktree,
+                            wait: TurnWait::Send,
+                        },
                         QueuedFollowUp {
                             message,
                             model,
@@ -466,6 +523,42 @@ async fn next_child_pid(changes: Option<&mut watch::Receiver<Option<i64>>>) -> O
         return std::future::pending().await;
     }
     *changes.borrow()
+}
+
+/// Wait for the workspace's turn lock, still answering control commands.
+///
+/// A queued turn can sit here for as long as a sibling's turn runs. Parking on
+/// a bare `lock()` would leave the worker deaf for that whole stretch: an
+/// interrupt sent while the message was still queued would be delivered to the
+/// engine only once the turn had started, which reads as the stop being
+/// ignored. Returns `None` when the turn should not start at all.
+async fn await_worktree_turn<'a>(
+    engine: &dyn HarnessSession,
+    worktree_turn: &'a tokio::sync::Mutex<()>,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    loop {
+        tokio::select! {
+            guard = worktree_turn.lock() => return Some(guard),
+            command = commands.recv() => match command {
+                // Stopping something that has not started needs no engine
+                // call: dropping the turn here is the stop.
+                Some(WorkerCommand::Interrupt { reply }) => {
+                    let _ = reply.send(Ok(()));
+                    return None;
+                }
+                Some(WorkerCommand::Shutdown) | None => return None,
+                // There is no turn yet, so steering has nothing to steer and
+                // a second RunTurn is a conflict. `apply_control` answers both
+                // that way already.
+                Some(command) => {
+                    if apply_control(engine, command, None).await == ControlFlow::Shutdown {
+                        return None;
+                    }
+                }
+            },
+        }
+    }
 }
 
 async fn apply_control(
@@ -547,16 +640,28 @@ async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    pending: &Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
+    queue: &TurnQueue,
     blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
-        let next = pending.lock().expect("code turn queue").take();
+        let next = queue.pending.lock().expect("code turn queue").take();
         let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(session, engine, sink, blobs, commands, follow_up).await;
+        let _ = drive_turn(
+            session,
+            engine,
+            sink,
+            blobs,
+            commands,
+            WorktreeTurn {
+                lock: &queue.worktree,
+                wait: TurnWait::Queued,
+            },
+            follow_up,
+        )
+        .await;
     }
 }
 
@@ -566,6 +671,7 @@ async fn drive_turn(
     sink: &LiveSink,
     blobs: Option<&dyn BlobStore>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
+    worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
         model,
@@ -588,6 +694,32 @@ async fn drive_turn(
         return Err(WorkerError::Conflict("session has ended".into()));
     }
     let images = hydrate_turn_images(blobs, &attachments).await?;
+
+    // The workspace's checkout takes one turn at a time (record 54). Taking
+    // the lock *is* the reservation: a pre-flight database read cannot be,
+    // because two idle siblings both pass it before either marks itself
+    // running. Blobs are hydrated first so a decode never holds the tree.
+    let _worktree = match worktree.wait {
+        // A send has its request open, so it never waits on a sibling's turn.
+        // The caller parks the message and answers `Queued` instead.
+        TurnWait::Send => worktree
+            .lock
+            .try_lock()
+            .map_err(|_| WorkerError::WorktreeBusy)?,
+        // Already acknowledged, so waiting costs nobody a connection. The wait
+        // still listens for control: an interrupt that arrives while a turn is
+        // queued has to stop it before it starts, not after.
+        TurnWait::Queued => match await_worktree_turn(engine, worktree.lock, commands).await {
+            Some(guard) => guard,
+            None => return Err(WorkerError::Conflict("the queued turn was stopped".into())),
+        },
+    };
+    // Ending a session during that wait has to win. The lifecycle checks above
+    // read a session that may be minutes stale by now.
+    if session_was_ended(&sink.db, session).await {
+        return Err(WorkerError::Conflict("session has ended".into()));
+    }
+
     if let Some(model) = model.clone() {
         session.model = Some(model);
     }

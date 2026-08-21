@@ -791,6 +791,9 @@ impl TurnWorker {
                 model_policy
                     .as_ref()
                     .is_some_and(|policy| policy.supports_vendor_web_search),
+                model_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.supports_search_subrequest),
             )
             .await?
         } else {

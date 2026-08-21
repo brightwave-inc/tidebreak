@@ -93,3 +93,105 @@ test("oversized request bodies are refused before an endpoint acts", async () =>
   assert.equal(response.status, 413);
   assert.deepEqual(await response.json(), { error: "body_too_large" });
 });
+
+// ── Wait condition contracts ────────────────────────────────────────
+
+test("the fixture serves a delayed response on /slow for wait testing", async () => {
+  const fast = await fetch(`${fixture.origin}/slow?ms=5`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(fast, { status: "ready", waitedMs: 5 });
+
+  const moderate = await fetch(`${fixture.origin}/slow?ms=500`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(moderate, { status: "ready", waitedMs: 500 });
+});
+
+test("the fixture has stable titles for URL-change wait detection", async () => {
+  const primary = await fetch(fixture.origin).then((response) => response.text());
+  assert.match(primary, /<title>Agent browser fixture<\/title>/);
+
+  const redirected = await fetch(`${fixture.origin}/redirected?from=redirect`).then(
+    (response) => response.text(),
+  );
+  assert.match(redirected, /<title>Redirect complete<\/title>/);
+});
+
+test("the fixture serves popup-target with stable semantic content for text-presence waits", async () => {
+  const popup = await fetch(`${fixture.origin}/popup-target`).then(
+    (response) => response.text(),
+  );
+  assert.match(popup, /<title>Popup target<\/title>/);
+  assert.match(popup, /Confirm popup/);
+});
+
+test("reset restores deterministic state for repeated wait tests", async () => {
+  await fetch(`${fixture.origin}/api/items`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label: "Pre-wait item" }),
+  });
+
+  const resetResponse = await fetch(`${fixture.origin}/reset`, {
+    method: "POST",
+  });
+  assert.equal(resetResponse.status, 200);
+
+  const items = await fetch(`${fixture.origin}/api/items`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(items.items, [{ id: 1, label: "Inspect the preview" }]);
+});
+
+test("cross-origin frame URL is stable for unsupported-frame contract testing", async () => {
+  const source = await fetch(fixture.origin).then((response) => response.text());
+  assert.match(source, new RegExp(`${fixture.crossOrigin}/cross-frame`));
+
+  const crossFrame = await fetch(`${fixture.crossOrigin}/cross-frame`).then(
+    (response) => response.text(),
+  );
+  assert.match(crossFrame, /Cross-origin frame/);
+  assert.match(crossFrame, /<h1>Cross-origin frame<\/h1>/);
+});
+
+test("the delayed-content endpoint reveals content after timing for element-visible wait simulation", async () => {
+  // Immediate: no content
+  const before = await fetch(`${fixture.origin}/slow?ms=0`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(before, { status: "ready", waitedMs: 0 });
+
+  // After moderate wait: available
+  const after = await fetch(`${fixture.origin}/slow?ms=100`).then(
+    (response) => response.json(),
+  );
+  assert.deepEqual(after, { status: "ready", waitedMs: 100 });
+});
+
+// ── Screenshot contract surface ─────────────────────────────────────
+
+test("the fixture primary page is visual and returns a valid viewport-sized document", async () => {
+  const source = await fetch(fixture.origin).then((response) => response.text());
+  assert.match(source, /viewport/);
+  assert.match(source, /width: min\(980px/);
+  assert.match(source, /Dynamic items/);
+});
+
+// ── Typed error contracts ───────────────────────────────────────────
+
+test("fixture endpoints return structured errors for unknown paths", async () => {
+  const response = await fetch(`${fixture.origin}/nonexistent`);
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "not_found" });
+});
+
+test("fixture refuses an empty label in add-item", async () => {
+  const response = await fetch(`${fixture.origin}/api/items`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ label: "   " }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "label_required" });
+});

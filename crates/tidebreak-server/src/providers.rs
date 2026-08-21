@@ -794,6 +794,16 @@ pub struct ResolvedModelPolicy {
     /// search instead of the host's. Asserts that the routing adapter emits the
     /// vendor tool, so it is never inherited by a pass-through route.
     pub supports_vendor_web_search: bool,
+    /// Whether the host may search on this model's behalf with a dedicated,
+    /// tool-free sub-request to its provider.
+    ///
+    /// Separate from [`Self::supports_vendor_web_search`] because it is a
+    /// different call: the host issues it, bounds it by counting its own calls,
+    /// and never continues it. See
+    /// [`ModelSpec::supports_search_subrequest`](crate::model_registry::ModelSpec::supports_search_subrequest).
+    /// Never inherited by a pass-through route, for the same reason the vendor
+    /// flag is not — the claim is about the adapter, not the vendor.
+    pub supports_search_subrequest: bool,
     /// The reasoning-effort levels this model accepts, ascending. Empty when
     /// the model takes no effort control.
     pub reasoning_efforts: Vec<ReasoningEffort>,
@@ -827,6 +837,7 @@ impl ResolvedModelPolicy {
             supports_structured_output: spec.supports_structured_output(),
             supports_reasoning: spec.supports_reasoning,
             supports_vendor_web_search: spec.supports_vendor_web_search,
+            supports_search_subrequest: spec.supports_search_subrequest(),
             reasoning_efforts: spec.reasoning_efforts.to_vec(),
         }
     }
@@ -902,6 +913,9 @@ impl ResolvedModelPolicy {
             // shape that would enable one is the vendor's own, and this route
             // does not speak it. Deliberately not inherited by `gateway_for`.
             supports_vendor_web_search: false,
+            // Same reasoning, same answer: a search sub-request is the vendor's
+            // own request shape, which this route does not speak.
+            supports_search_subrequest: false,
             reasoning_efforts: if first_party_xai {
                 model.reasoning_efforts.clone()
             } else {

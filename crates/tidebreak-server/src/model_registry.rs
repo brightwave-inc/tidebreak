@@ -187,6 +187,26 @@ impl ModelSpec {
         !self.reasoning_efforts.is_empty()
     }
 
+    /// Whether this model's provider can serve a dedicated web-search
+    /// sub-request: one tool-free call that carries only the provider's own
+    /// hosted search and returns what it cited.
+    ///
+    /// This is deliberately not [`Self::supports_vendor_web_search`], which
+    /// answers a different question — whether the routing adapter hands the
+    /// model a hosted search *during an agent turn*, alongside the host's own
+    /// tools. Both OpenAI and Gemini keep that false, and for good reason:
+    /// neither endpoint can bound how many searches one turn spends. A
+    /// sub-request has no such problem. The host issues it, gets one answer
+    /// back, and never continues it, so the host's own call count is the
+    /// budget.
+    ///
+    /// Anthropic is absent because it needs nothing here: its rows already
+    /// carry a native in-turn search, which is strictly better than a
+    /// round-trip through a second call.
+    pub fn supports_search_subrequest(&self) -> bool {
+        matches!(self.provider, ProviderKind::Openai | ProviderKind::Gemini)
+    }
+
     /// Whether this OpenAI row may run under ChatGPT / Codex subscription auth.
     ///
     /// ChatGPT OAuth routes inference through the Codex backend, which rejects
