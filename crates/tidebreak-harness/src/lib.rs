@@ -287,7 +287,8 @@ impl ApprovalChannelSpec {
     }
 }
 
-/// Session-private browser capability-file path and metadata.
+/// Session-private browser capability-file path and trusted bridge
+/// executable.
 ///
 /// The trusted browser runtime writes a short-lived JSON capability file
 /// at `capability_file` before the engine child is spawned. The adapter
@@ -297,6 +298,19 @@ impl ApprovalChannelSpec {
 /// engine's tool bridge reads it once at startup and the runtime revokes
 /// it when the session ends.
 ///
+/// `bridge_command` is the absolute path to the trusted CLI executable the
+/// engine's MCP server or CLI fallback invokes to reach the browser
+/// channel. The server validates that it is absolute; the desktop sibling
+/// resolver owns existence, file-type, and executable checks. This path
+/// is safe to serialize into engine config because it carries no secret —
+/// the capability file is the only credential, and it travels through the
+/// environment, never argv.
+///
+/// Both halves are required: a `BrowserChannelSpec` cannot exist with a
+/// capability file but no bridge command, or vice versa. The server mints
+/// one only when both the native [`BrowserRuntime`] and the bridge
+/// executable are present (issue #2372).
+///
 /// This struct carries only the metadata adapters need to construct the
 /// launch environment. The mint, write, and revoke lifecycle is owned by
 /// the trusted browser runtime (issue #2342).
@@ -305,6 +319,10 @@ impl ApprovalChannelSpec {
 pub struct BrowserChannelSpec {
     /// Absolute path to the session-private capability file.
     pub capability_file: std::path::PathBuf,
+    /// Absolute path to the trusted bridge executable (the `tidebreak` CLI
+    /// sidecar). The server validates absoluteness; the desktop sibling
+    /// resolver validates existence and executability.
+    pub bridge_command: std::path::PathBuf,
 }
 
 impl BrowserChannelSpec {
@@ -316,10 +334,26 @@ impl BrowserChannelSpec {
     /// then runs after `plan.env`, making this the final child value.
     pub const ENV_KEY: &'static str = "TIDEBREAK_BROWSER_CAPFILE";
 
-    /// Construct a new spec.
+    /// Construct a new spec from both required halves.
+    ///
+    /// The server is the only constructor: it validates that
+    /// `bridge_command` is absolute before calling this. The desktop
+    /// sibling resolver separately checks existence and executability.
     #[must_use]
-    pub fn new(capability_file: std::path::PathBuf) -> Self {
-        Self { capability_file }
+    pub fn new(
+        capability_file: std::path::PathBuf,
+        bridge_command: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            capability_file,
+            bridge_command,
+        }
+    }
+
+    /// Return the trusted bridge executable path.
+    #[must_use]
+    pub fn bridge_command(&self) -> &std::path::Path {
+        &self.bridge_command
     }
 
     /// Return the exact key/value pair adapters inject into engine children.

@@ -41,6 +41,7 @@ mod app_invoke;
 mod app_library;
 mod chat_titling;
 mod code;
+mod code_browser;
 #[cfg(unix)]
 mod code_clone;
 #[cfg(unix)]
