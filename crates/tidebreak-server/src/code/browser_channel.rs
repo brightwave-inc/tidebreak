@@ -423,15 +423,30 @@ fn write_capfile(
     Ok(())
 }
 
+/// An absolute bridge-command path for tests, valid on the host platform.
+///
+/// [`BrowserTokenRegistry::issue`] refuses a bridge command that is not
+/// absolute, and `Path::is_absolute` is platform-defined: `/usr/local/bin`
+/// roots a path on Unix and is merely relative on Windows. Every test that
+/// mints a capability takes its bridge path from here so one definition
+/// stays correct on both hosts. The server never opens this path — the
+/// desktop sibling resolver owns existence and executability — so the
+/// target does not have to exist.
+#[cfg(test)]
+pub(crate) fn test_bridge_command() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Tidebreak\tidebreak.exe")
+    } else {
+        PathBuf::from("/usr/local/bin/tidebreak")
+    }
+}
+
 // ── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
-
-    /// Fixture bridge command path used by every test issuance.
-    const TEST_BRIDGE: &str = "/usr/local/bin/tidebreak";
 
     fn seeded(data_dir: &Path) -> BrowserTokenRegistry {
         let reg = BrowserTokenRegistry::new(data_dir).unwrap();
@@ -461,7 +476,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("indep");
 
-        let spec = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let file_stem = spec.capability_file.file_stem().unwrap().to_string_lossy();
         let token = read_token_from_capfile(&spec.capability_file);
 
@@ -488,7 +503,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("roundtrip");
 
-        let spec = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let token = read_token_from_capfile(&spec.capability_file);
         assert!(!token.is_empty());
 
@@ -504,7 +519,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("transactional");
 
-        let first = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let first = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let first_token = read_token_from_capfile(&first.capability_file);
         let first_path = first.capability_file.clone();
         assert!(first_path.exists());
@@ -514,7 +529,7 @@ mod tests {
             "first token must resolve before reissue"
         );
 
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
 
         // Second token is live.
@@ -535,13 +550,13 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("fileids");
 
-        let first = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let first = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         // Read the token from the first capfile BEFORE second issuance
         // deletes it.
         let first_token = read_token_from_capfile(&first.capability_file);
         let first_path = first.capability_file.clone();
 
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
 
         assert_ne!(first_path, second.capability_file);
@@ -556,7 +571,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("idempotent");
 
-        let spec = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let token = read_token_from_capfile(&spec.capability_file);
         let capfile_path = spec.capability_file.clone();
         assert!(capfile_path.exists());
@@ -583,12 +598,12 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("fresh");
 
-        let first = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let first = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let first_token = read_token_from_capfile(&first.capability_file);
         reg.revoke(sub.session);
         assert!(reg.subject_for_token(&first_token).is_none());
 
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
         assert_ne!(first_token, second_token);
         assert_eq!(reg.subject_for_token(&second_token).as_ref(), Some(&sub));
@@ -602,7 +617,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("schema");
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         let contents = std::fs::read_to_string(&spec.capability_file).expect("read capfile");
         let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
 
@@ -625,7 +640,7 @@ mod tests {
         reg.set_loopback_base("https://tidebreak.local:4567/");
         let sub = subject("endpoint");
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         let contents = std::fs::read_to_string(&spec.capability_file).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
 
@@ -690,7 +705,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("absolute");
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         assert!(spec.capability_file.is_absolute());
         assert!(reg.capfile_dir().is_absolute());
     }
@@ -711,7 +726,7 @@ mod tests {
             Err(error) => panic!("failed to inspect browser capfile directory: {error}"),
         }
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         assert!(spec.capability_file.exists());
     }
 
@@ -720,6 +735,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = BrowserTokenRegistry::new(dir.path()).unwrap();
         assert!(reg.capfile_dir().is_absolute());
+    }
+
+    /// The fixture every issuing test depends on. Without this the whole
+    /// suite fails as a wall of identical `unwrap` panics on the one host
+    /// where the fixture is wrong; with it, one named test says why.
+    #[test]
+    fn the_test_bridge_fixture_is_absolute_on_this_host() {
+        let bridge = test_bridge_command();
+        assert!(
+            bridge.is_absolute(),
+            "the test bridge fixture must be absolute on this platform, got: {}",
+            bridge.display()
+        );
     }
 
     #[cfg(unix)]
@@ -774,7 +802,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("mode");
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         let meta = std::fs::metadata(&spec.capability_file).unwrap();
         let mode = meta.permissions().mode();
 
@@ -790,7 +818,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("dirmode");
 
-        let _spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let _spec = reg.issue(sub, &test_bridge_command()).unwrap();
         let capfile_dir = reg.capfile_dir();
         let meta = std::fs::metadata(capfile_dir).unwrap();
         let mode = meta.permissions().mode();
@@ -806,7 +834,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("atomic");
 
-        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        let spec = reg.issue(sub, &test_bridge_command()).unwrap();
         let parent = spec.capability_file.parent().unwrap();
 
         let tmp_count = std::fs::read_dir(parent)
@@ -827,7 +855,7 @@ mod tests {
         let reg = seeded(dir.path());
         let sub = subject("cleanslate");
 
-        let first = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let first = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let first_token = read_token_from_capfile(&first.capability_file);
         let first_path = first.capability_file.clone();
         assert!(first_path.exists());
@@ -836,7 +864,7 @@ mod tests {
         assert!(reg.subject_for_token(&first_token).is_none());
         assert!(!first_path.exists());
 
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
         let second_path = second.capability_file.clone();
 
@@ -860,7 +888,7 @@ mod tests {
         // Warm up: issue once so the capfile directory exists.
         let warm_subject = subject("warm");
         let warm = reg
-            .issue(warm_subject.clone(), Path::new(TEST_BRIDGE))
+            .issue(warm_subject.clone(), &test_bridge_command())
             .unwrap();
         let warm_token = read_token_from_capfile(&warm.capability_file);
         assert!(warm.capability_file.exists());
@@ -870,7 +898,7 @@ mod tests {
         std::fs::rename(&capdir, &held_capdir).expect("move capfile directory aside");
         std::fs::write(&capdir, b"not a directory").expect("install capfile path blocker");
 
-        let result = reg.issue(sub.clone(), Path::new(TEST_BRIDGE));
+        let result = reg.issue(sub.clone(), &test_bridge_command());
 
         // Restore the original directory before asserting so a failure cannot
         // strand the fixture in a state that obscures the registry invariant.
@@ -888,7 +916,7 @@ mod tests {
 
         // After failure, a fresh issuance for the same session must succeed
         // without stale entries.
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
         assert_eq!(reg.subject_for_token(&second_token).as_ref(), Some(&sub));
 
@@ -905,8 +933,8 @@ mod tests {
         let sub_a = subject("independent-a");
         let sub_b = subject("independent-b");
 
-        let spec_a = reg.issue(sub_a.clone(), Path::new(TEST_BRIDGE)).unwrap();
-        let spec_b = reg.issue(sub_b.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let spec_a = reg.issue(sub_a.clone(), &test_bridge_command()).unwrap();
+        let spec_b = reg.issue(sub_b.clone(), &test_bridge_command()).unwrap();
 
         let token_a = read_token_from_capfile(&spec_a.capability_file);
         let token_b = read_token_from_capfile(&spec_b.capability_file);
@@ -932,11 +960,11 @@ mod tests {
 
         // Issue → revoke → issue in sequence; the final state must be clean
         // with exactly one live entry.
-        let first = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let first = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let first_token = read_token_from_capfile(&first.capability_file);
         reg.revoke(sub.session);
 
-        let second = reg.issue(sub.clone(), Path::new(TEST_BRIDGE)).unwrap();
+        let second = reg.issue(sub.clone(), &test_bridge_command()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
 
         assert!(reg.subject_for_token(&first_token).is_none());

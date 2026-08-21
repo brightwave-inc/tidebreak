@@ -3977,8 +3977,14 @@ async fn committed_cancellation_wakes_container_and_fences_reverse_egress_before
             "the attached container drive is registered under the durable lease"
         );
 
+        // A hang-guard, not a latency contract: the proof is which outcome
+        // the call settles on, and this bound only buys the provider-call
+        // count in the message instead of a bare outer-timeout expect. Five
+        // seconds was tight enough to fire on a loaded runner while the
+        // fence had in fact held, so keep it well clear of both the wake
+        // path and the 30s bound around the test.
         let late = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             sandbox.call(
                 OperationId::new(),
                 ReverseRequest::ModelInference(ModelInferenceParams {

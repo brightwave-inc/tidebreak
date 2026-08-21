@@ -39,6 +39,9 @@ chrono = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+# PNG dimension sniffing for screenshot MCP output so the base-64 payload
+# never enters model-facing text or log data.
+image = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-tungstenite = { workspace = true }
