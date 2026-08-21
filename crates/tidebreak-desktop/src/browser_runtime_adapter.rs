@@ -125,13 +125,11 @@ impl SessionCapabilities {
                     SessionCapabilityState::Revoked => false,
                 };
                 if !scope_matches {
-                    let previous = match std::mem::replace(
-                        entry.get_mut(),
-                        SessionCapabilityState::Revoked,
-                    ) {
-                        SessionCapabilityState::Active(active) => active.capability_id,
-                        SessionCapabilityState::Revoked => unreachable!("checked above"),
-                    };
+                    let previous =
+                        match std::mem::replace(entry.get_mut(), SessionCapabilityState::Revoked) {
+                            SessionCapabilityState::Active(active) => active.capability_id,
+                            SessionCapabilityState::Revoked => unreachable!("checked above"),
+                        };
                     registry.revoke_agent_capability(previous);
                     return Err(BrowserRuntimeError::SessionEnded);
                 }

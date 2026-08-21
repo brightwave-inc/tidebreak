@@ -24,12 +24,12 @@ mod broker;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_control;
+mod browser_runtime_adapter;
 #[allow(
     dead_code,
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_semantics;
-mod browser_runtime_adapter;
 mod channel;
 mod chat_debug;
 mod client_execution;
@@ -941,14 +941,13 @@ async fn boot_server(
     let local_voice = Arc::new(voice_transcription::DesktopLocalVoiceRunner::new(
         data_dir.clone(),
     ));
-    let browser_runtime: Arc<dyn tidebreak_server::BrowserRuntime> = Arc::new(
-        browser_runtime_adapter::DesktopBrowserRuntime::new(
+    let browser_runtime: Arc<dyn tidebreak_server::BrowserRuntime> =
+        Arc::new(browser_runtime_adapter::DesktopBrowserRuntime::new(
             app.clone(),
             app.state::<browser_control::BrowserRegistry>()
                 .inner()
                 .clone(),
-        ),
-    );
+        ));
     let browser_binding = tidebreak_server::BrowserChannelBinding::new(
         browser_runtime,
         desktop_sibling_exe("tidebreak")?,
