@@ -1,6 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { formatDistanceToNowStrict } from "date-fns";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArchiveRestore,
   Check,
@@ -10,10 +16,8 @@ import {
   GitBranch,
   GitPullRequest,
   LoaderCircle,
-  MoreHorizontal,
   Pin,
   PinOff,
-  Play,
   RefreshCw,
   Save,
   Settings2,
@@ -60,8 +64,6 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { RouteFrame } from "@/RouteFrame";
 import type {
-  CodeDeliveryPullRequestAction,
-  CodeDeliveryPullRequestDetail,
   CodeDeliveryPullRequestSummary,
   CodeDeliveryRunDetail,
   CodeDeliveryRunKind,
@@ -81,6 +83,23 @@ import {
   type CodeDeliverySurface,
 } from "./CodeDeliveryStore";
 import { CodeSidebar } from "./CodeSidebar";
+import {
+  CheckTone,
+  DetailSkeleton,
+  PrLifecycleIcon,
+  PullRequestDetailPanel,
+  relativeTime,
+} from "./PullRequestDetail";
+import {
+  checkCounts,
+  checkSummary,
+  pullRequestLifecycle,
+  pullRequestReviewSummary,
+  pullRequestSettledAt,
+  PULL_REQUEST_LIFECYCLE_LABEL,
+  PULL_REQUEST_LIFECYCLE_TONE,
+} from "./pullRequestPresentation";
+import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 
 const PR_BUILT_IN_VIEWS: readonly {
   id: string;
@@ -562,11 +581,21 @@ function PullRequestsSurface({
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [error, setError] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  // Set by Refresh and by a completed action; consumed by the next query that
+  // actually runs. Only those two reach past the server's short list cache —
+  // a filter change reruns against it, which is the whole point of caching a
+  // cross-repository read.
+  const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const selected = items.find((item) => item.id === selectedId) ?? null;
+  const selected = useMemo(
+    () => items.find((item) => item.id === selectedId) ?? null,
+    [items, selectedId],
+  );
   const selectedRepositories = useMemo(
     () => selectedRepositoryTargets(repositories, filters.repositoryKeys),
     [repositories, filters.repositoryKeys],
@@ -574,6 +603,10 @@ function PullRequestsSurface({
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
+    // Paging never rereads: renumbering the aggregate under a cursor would
+    // skip or repeat rows.
+    const refresh = !append && !cursor && forceRefresh.current;
+    if (refresh) forceRefresh.current = false;
     if (append) setLoadingMore(true);
     else setLoading(true);
     setError(null);
@@ -595,12 +628,14 @@ function PullRequestsSurface({
         ready_only: filters.readyOnly,
         tidebreak_linked: filters.tidebreakLinked,
         limit: 100,
+        refresh,
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
       setItems((current) => (append ? dedupeRows([...current, ...page.items]) : page.items));
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
+      setFetchedAt(page.fetched_at);
     } catch (caught) {
       if (token !== generation.current) return;
       setError(friendlyErrorMessage(caught, "Could not load pull requests."));
@@ -619,6 +654,7 @@ function PullRequestsSurface({
       window.clearTimeout(timer);
       generation.current += 1;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, selectedRepositories, filters, revision]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
@@ -629,11 +665,24 @@ function PullRequestsSurface({
 
   return (
     <DeliverySplit selected={Boolean(selected)}>
-      <div className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}>
+      <div
+        ref={scrollRef}
+        className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}
+      >
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
         )}
         {errors.length > 0 && <PartialErrorBanner errors={errors} compact />}
+        <FreshnessBar
+          fetchedAt={fetchedAt}
+          loading={loading}
+          count={items.length}
+          noun="pull request"
+          onRefresh={() => {
+            forceRefresh.current = true;
+            setRevision((value) => value + 1);
+          }}
+        />
         {loading && items.length === 0 ? (
           <DeliveryListSkeleton />
         ) : items.length === 0 ? (
@@ -654,6 +703,7 @@ function PullRequestsSurface({
               items={items}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              scrollRef={scrollRef}
             />
             {nextCursor && (
               <div className="flex justify-center border-t border-border-subtle p-4">
@@ -674,9 +724,13 @@ function PullRequestsSurface({
       </div>
       {selected && (
         <PullRequestDetailPanel
+          client={client}
           summary={selected}
           onClose={() => setSelectedId(null)}
-          onChanged={() => setRevision((value) => value + 1)}
+          onChanged={() => {
+            forceRefresh.current = true;
+            setRevision((value) => value + 1);
+          }}
           onOpenWorkspace={(workspaceId) =>
             void navigate({
               to: "/code/w/$workspaceId",
@@ -708,11 +762,21 @@ function RunsSurface({
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [error, setError] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  // Set by Refresh and by a completed action; consumed by the next query that
+  // actually runs. Only those two reach past the server's short list cache —
+  // a filter change reruns against it, which is the whole point of caching a
+  // cross-repository read.
+  const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const selected = items.find((item) => item.id === selectedId) ?? null;
+  const selected = useMemo(
+    () => items.find((item) => item.id === selectedId) ?? null,
+    [items, selectedId],
+  );
   const selectedRepositories = useMemo(
     () => selectedRepositoryTargets(repositories, filters.repositoryKeys),
     [repositories, filters.repositoryKeys],
@@ -720,6 +784,10 @@ function RunsSurface({
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
+    // Paging never rereads: renumbering the aggregate under a cursor would
+    // skip or repeat rows.
+    const refresh = !append && !cursor && forceRefresh.current;
+    if (refresh) forceRefresh.current = false;
     if (append) setLoadingMore(true);
     else setLoading(true);
     setError(null);
@@ -744,12 +812,14 @@ function RunsSurface({
         attention_only: filters.attentionOnly,
         tidebreak_linked: filters.tidebreakLinked,
         limit: 100,
+        refresh,
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
       setItems((current) => (append ? dedupeRows([...current, ...page.items]) : page.items));
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
+      setFetchedAt(page.fetched_at);
     } catch (caught) {
       if (token !== generation.current) return;
       setError(
@@ -770,6 +840,7 @@ function RunsSurface({
       window.clearTimeout(timer);
       generation.current += 1;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, selectedRepositories, filters, revision]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
@@ -780,11 +851,24 @@ function RunsSurface({
 
   return (
     <DeliverySplit selected={Boolean(selected)}>
-      <div className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}>
+      <div
+        ref={scrollRef}
+        className={cn("min-h-0 flex-1 overflow-auto", selected && "max-lg:hidden")}
+      >
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
         )}
         {errors.length > 0 && <PartialErrorBanner errors={errors} compact />}
+        <FreshnessBar
+          fetchedAt={fetchedAt}
+          loading={loading}
+          count={items.length}
+          noun="run"
+          onRefresh={() => {
+            forceRefresh.current = true;
+            setRevision((value) => value + 1);
+          }}
+        />
         {loading && items.length === 0 ? (
           <DeliveryListSkeleton />
         ) : items.length === 0 ? (
@@ -801,7 +885,12 @@ function RunsSurface({
           </Empty>
         ) : (
           <>
-            <RunList items={items} selectedId={selectedId} onSelect={setSelectedId} />
+            <RunList
+              items={items}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              scrollRef={scrollRef}
+            />
             {nextCursor && (
               <div className="flex justify-center border-t border-border-subtle p-4">
                 <Button
@@ -823,7 +912,10 @@ function RunsSurface({
         <RunDetailPanel
           summary={selected}
           onClose={() => setSelectedId(null)}
-          onChanged={() => setRevision((value) => value + 1)}
+          onChanged={() => {
+            forceRefresh.current = true;
+            setRevision((value) => value + 1);
+          }}
           onOpenWorkspace={(workspaceId) =>
             void navigate({
               to: "/code/w/$workspaceId",
@@ -855,60 +947,222 @@ function DeliverySplit({
   );
 }
 
+const PR_ROW_HEIGHT = 62;
+const RUN_ROW_HEIGHT = 62;
+const PR_GRID = "grid-cols-[minmax(260px,1fr)_150px_120px_110px]";
+const RUN_GRID = "grid-cols-[minmax(260px,1fr)_150px_140px_110px]";
+
+/**
+ * A windowed row list.
+ *
+ * Delivery reads every tracked repository, and a cross-repository "All" view
+ * runs into the thousands of rows once a handful of repos are tracked.
+ * Mounting all of them made selecting a row feel like the app had stalled, so
+ * only the visible window is mounted and the rest is spacer height.
+ *
+ * Rows are spacer-positioned rather than absolutely positioned, so the sticky
+ * column header and the "Load more" footer stay in normal flow. Whatever sits
+ * above the list inside the same scroller — a partial-failure banner, a load
+ * error — shifts the rows down, so the scroll offset that banner occupies is
+ * measured and handed to the virtualizer as `scrollMargin`. Without it the
+ * window is wrong by exactly the banner's height.
+ */
+function VirtualRows<T extends { id: string }>({
+  items,
+  scrollRef,
+  estimateSize,
+  children,
+}: {
+  items: readonly T[];
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  estimateSize: number;
+  children: (item: T) => React.ReactNode;
+}) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const scroller = scrollRef.current;
+      const list = listRef.current;
+      if (!scroller || !list) return;
+      const offset =
+        list.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top +
+        scroller.scrollTop;
+      setScrollMargin((current) =>
+        Math.abs(current - offset) > 0.5 ? offset : current,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    if (scrollRef.current) observer.observe(scrollRef.current);
+    return () => observer.disconnect();
+  }, [scrollRef, items.length]);
+
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => estimateSize,
+    overscan: 8,
+    scrollMargin,
+    getItemKey: (index) => items[index]?.id ?? index,
+  });
+  const rows = virtualizer.getVirtualItems();
+  const paddingTop = (rows[0]?.start ?? scrollMargin) - scrollMargin;
+  const paddingBottom =
+    virtualizer.getTotalSize() -
+    ((rows[rows.length - 1]?.end ?? scrollMargin) - scrollMargin);
+
+  return (
+    <div ref={listRef}>
+      {paddingTop > 0 && <div style={{ height: paddingTop }} aria-hidden />}
+      {rows.map((row) => {
+        const item = items[row.index];
+        if (!item) return null;
+        return (
+          <div
+            key={row.key}
+            data-index={row.index}
+            ref={virtualizer.measureElement}
+          >
+            {children(item)}
+          </div>
+        );
+      })}
+      {paddingBottom > 0 && (
+        <div style={{ height: paddingBottom }} aria-hidden />
+      )}
+    </div>
+  );
+}
+
 function PullRequestList({
   items,
   selectedId,
   onSelect,
+  scrollRef,
 }: {
   items: CodeDeliveryPullRequestSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div role="list" aria-label="Pull requests" className="min-w-[760px]">
-      <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_150px_120px_110px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur">
+      <div
+        className={cn(
+          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur",
+          PR_GRID,
+        )}
+      >
         <span>Pull request</span>
-        <span>Review</span>
+        <span>Status</span>
         <span>Checks</span>
         <span className="text-right">Updated</span>
       </div>
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          role="listitem"
-          data-active={selectedId === item.id || undefined}
-          className="grid w-full cursor-pointer grid-cols-[minmax(260px,1fr)_150px_120px_110px] gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55"
-          onClick={() => onSelect(item.id)}
-        >
-          <span className="min-w-0">
-            <span className="flex min-w-0 items-center gap-2">
-              <PrStateIcon item={item} />
-              <span className="truncate text-sm font-medium">{item.title}</span>
-            </span>
-            <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="truncate">{item.repository.name_with_owner}</span>
-              <span>#{item.number}</span>
-              <span className="truncate font-mono">{item.head_branch}</span>
-              {item.workspace_links.length > 0 && (
-                <span className="rounded bg-info-background px-1.5 py-0.5 text-[10px] text-info-foreground-muted">
-                  Tidebreak
-                </span>
-              )}
-            </span>
-          </span>
-          <span className="flex items-center">
-            <ReviewBadge item={item} />
-          </span>
-          <span className="flex items-center">
-            <ChecksSummary checks={item.checks} />
-          </span>
-          <span className="flex items-center justify-end text-xs text-muted-foreground">
-            {relativeTime(item.updated_at)}
-          </span>
-        </button>
-      ))}
+      <VirtualRows
+        items={items}
+        scrollRef={scrollRef}
+        estimateSize={PR_ROW_HEIGHT}
+      >
+        {(item) => (
+          <PullRequestRow
+            item={item}
+            active={selectedId === item.id}
+            onSelect={() => onSelect(item.id)}
+          />
+        )}
+      </VirtualRows>
     </div>
+  );
+}
+
+function PullRequestRow({
+  item,
+  active,
+  onSelect,
+}: {
+  item: CodeDeliveryPullRequestSummary;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const lifecycle = pullRequestLifecycle(item);
+  const review = pullRequestReviewSummary(item);
+  const checks = checkSummary(checkCounts(item.checks));
+  const settledAt = pullRequestSettledAt(item);
+  return (
+    <button
+      type="button"
+      role="listitem"
+      data-active={active || undefined}
+      className={cn(
+        "grid w-full cursor-pointer gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55",
+        PR_GRID,
+      )}
+      onClick={onSelect}
+    >
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-2">
+          <PrLifecycleIcon
+            lifecycle={lifecycle}
+            className={cn(
+              "size-4",
+              STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
+            )}
+          />
+          <span className="sr-only">
+            {PULL_REQUEST_LIFECYCLE_LABEL[lifecycle]}:
+          </span>
+          <span className="truncate text-sm font-medium">{item.title}</span>
+          {item.attention_reasons.length > 0 ? (
+            <CircleAlert
+              className={cn("size-3.5 shrink-0", STATUS_MARK.critical)}
+              aria-label="Needs attention"
+            />
+          ) : item.ready_to_merge ? (
+            // Tidebreak's own signal, not GitHub's: reviewed, green, and
+            // nothing left blocking the merge. The lifecycle icon cannot
+            // carry it, because a ready pull request is still just open.
+            <Check
+              className={cn("size-3.5 shrink-0", STATUS_MARK.ready)}
+              aria-label="Ready to merge"
+            />
+          ) : null}
+        </span>
+        <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="truncate">{item.repository.name_with_owner}</span>
+          <span className="tabular-nums">#{item.number}</span>
+          <span className="truncate font-mono">{item.head_branch}</span>
+          {item.workspace_links.length > 0 && (
+            <span className="shrink-0 rounded bg-info-background px-1.5 py-0.5 text-[10px] text-info-foreground-muted">
+              Tidebreak
+            </span>
+          )}
+        </span>
+      </span>
+      <span className="flex items-center">
+        <span
+          className={cn("text-xs", STATUS_TEXT[review.tone])}
+          title={
+            settledAt
+              ? `${review.label} ${relativeTime(settledAt)}`
+              : undefined
+          }
+        >
+          {review.label}
+        </span>
+      </span>
+      <span className="flex items-center">
+        <span className={cn("text-xs", STATUS_TEXT[checks.tone])}>
+          {checks.label}
+        </span>
+      </span>
+      <span className="flex items-center justify-end text-xs text-muted-foreground">
+        {relativeTime(item.updated_at)}
+      </span>
+    </button>
   );
 }
 
@@ -916,367 +1170,76 @@ function RunList({
   items,
   selectedId,
   onSelect,
+  scrollRef,
 }: {
   items: CodeDeliveryRunSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div role="list" aria-label="Runs and deployments" className="min-w-[780px]">
-      <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_150px_140px_110px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur">
+      <div
+        className={cn(
+          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur",
+          RUN_GRID,
+        )}
+      >
         <span>Run</span>
         <span>Repository</span>
         <span>Status</span>
         <span className="text-right">Updated</span>
       </div>
-      {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          role="listitem"
-          data-active={selectedId === item.id || undefined}
-          className="grid w-full cursor-pointer grid-cols-[minmax(260px,1fr)_150px_140px_110px] gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55"
-          onClick={() => onSelect(item.id)}
-        >
-          <span className="min-w-0">
-            <span className="flex min-w-0 items-center gap-2">
-              {item.kind === "deployment" ? (
-                <ArchiveRestore className="size-4 shrink-0 text-muted-foreground" />
-              ) : (
-                <Workflow className="size-4 shrink-0 text-muted-foreground" />
-              )}
-              <span className="truncate text-sm font-medium">{item.name}</span>
-            </span>
-            <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              <span>{item.kind === "deployment" ? "Deployment" : item.workflow ?? "Workflow"}</span>
-              {item.environment && <span>{item.environment}</span>}
-              {item.branch && <span className="truncate font-mono">{item.branch}</span>}
-            </span>
-          </span>
-          <span className="flex min-w-0 items-center text-xs text-muted-foreground">
-            <span className="truncate">{item.repository.name_with_owner}</span>
-          </span>
-          <span className="flex items-center">
-            <RunStatusBadge item={item} />
-          </span>
-          <span className="flex items-center justify-end text-xs text-muted-foreground">
-            {relativeTime(item.updated_at)}
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function PullRequestDetailPanel({
-  summary,
-  onClose,
-  onChanged,
-  onOpenWorkspace,
-}: {
-  summary: CodeDeliveryPullRequestSummary;
-  onClose: () => void;
-  onChanged: () => void;
-  onOpenWorkspace: (workspaceId: string) => void;
-}) {
-  const { client } = useApp();
-  const [detail, setDetail] = useState<CodeDeliveryPullRequestDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [mergeMethod, setMergeMethod] = useState<"squash" | "merge" | "rebase">(
-    "squash",
-  );
-  const generation = useRef(0);
-
-  const load = async () => {
-    const token = ++generation.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await client.getCodeDeliveryPullRequestDetail({
-        repository: codeDeliveryRepositoryTarget(summary.repository),
-        number: summary.number,
-      });
-      if (token === generation.current) setDetail(next);
-    } catch (caught) {
-      if (token === generation.current) {
-        setError(
-          friendlyErrorMessage(caught, "Could not load this pull request."),
-        );
-      }
-    } finally {
-      if (token === generation.current) setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void load();
-    return () => {
-      generation.current += 1;
-    };
-  }, [client, summary.id]);
-
-  const runAction = async (name: string, action: CodeDeliveryPullRequestAction) => {
-    if (busy) return;
-    setBusy(name);
-    try {
-      const result = await client.runCodeDeliveryPullRequestAction({
-        target: {
-          repository: codeDeliveryRepositoryTarget(summary.repository),
-          number: summary.number,
-        },
-        action,
-      });
-      toast.success(result.message);
-      await load();
-      onChanged();
-    } catch (caught) {
-      toast.error(friendlyErrorMessage(caught, "The pull request action failed."));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const workflowRunIds = [...new Set(
-    (detail?.summary.checks ?? [])
-      .filter((check) => check.bucket === "fail" && check.workflow_run_id)
-      .map((check) => check.workflow_run_id!),
-  )];
-
-  return (
-    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
-      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{summary.repository.name_with_owner}</span>
-            <span>#{summary.number}</span>
-          </div>
-          <h2 className="mt-1 text-base font-semibold leading-snug">{summary.title}</h2>
-        </div>
-        <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
-          <X />
-          <span className="sr-only">Close pull request details</span>
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        {loading && !detail ? (
-          <DetailSkeleton />
-        ) : error ? (
-          <InlineLoadError message={error} onRetry={() => void load()} />
-        ) : detail ? (
-          <div className="flex flex-col gap-5">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => void openInBrowser(detail.summary.url)}
-              >
-                <ExternalLink />
-                Open on GitHub
-              </Button>
-              {detail.summary.workspace_links.map((workspace) => (
-                <Button
-                  key={workspace.workspace_id}
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onOpenWorkspace(workspace.workspace_id)}
-                >
-                  <GitBranch />
-                  Open {workspace.title}
-                </Button>
-              ))}
-            </div>
-
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
-              <DetailStat label="Author" value={detail.summary.author ?? "Unknown"} />
-              <DetailStat label="Updated" value={relativeTime(detail.summary.updated_at)} />
-              <DetailStat label="Branch" value={detail.summary.head_branch} mono />
-              <DetailStat label="Base" value={detail.summary.base_branch} mono />
-              <DetailStat label="Files" value={String(detail.changed_files)} />
-              <DetailStat
-                label="Diff"
-                value={`+${detail.additions} / -${detail.deletions}`}
-                mono
-              />
-            </dl>
-
-            {(detail.can_mark_ready || detail.can_rerun_failed || detail.can_merge) && (
-              <section className="rounded-lg border border-border-subtle bg-muted/20 p-3">
-                <h3 className="text-sm font-medium">Actions</h3>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  {detail.can_mark_ready && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={Boolean(busy)}
-                      onClick={() => void runAction("ready", { type: "mark_ready" })}
-                    >
-                      {busy === "ready" && <LoaderCircle className="animate-spin" />}
-                      Mark ready
-                    </Button>
-                  )}
-                  {detail.can_rerun_failed && workflowRunIds.length > 0 && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={Boolean(busy)}
-                      onClick={() =>
-                        void runAction("rerun", {
-                          type: "rerun_failed",
-                          workflow_run_ids: workflowRunIds,
-                        })
-                      }
-                    >
-                      {busy === "rerun" ? (
-                        <LoaderCircle className="animate-spin" />
-                      ) : (
-                        <RefreshCw />
-                      )}
-                      Rerun failed
-                    </Button>
-                  )}
-                </div>
-                {detail.can_merge && detail.summary.head_sha && (
-                  <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
-                    <Select
-                      value={mergeMethod}
-                      onValueChange={(value) =>
-                        setMergeMethod(value as typeof mergeMethod)
-                      }
-                    >
-                      <SelectTrigger size="sm" className="w-28">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="squash">Squash</SelectItem>
-                        <SelectItem value="merge">Merge</SelectItem>
-                        <SelectItem value="rebase">Rebase</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={Boolean(busy)}
-                      onClick={() =>
-                        void runAction("merge", {
-                          type: "merge",
-                          method: mergeMethod,
-                          auto: false,
-                          expected_head_sha: detail.summary.head_sha!,
-                        })
-                      }
-                    >
-                      {busy === "merge" && <LoaderCircle className="animate-spin" />}
-                      Merge
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={Boolean(busy)}
-                      onClick={() =>
-                        void runAction("auto-merge", {
-                          type: "merge",
-                          method: mergeMethod,
-                          auto: true,
-                          expected_head_sha: detail.summary.head_sha!,
-                        })
-                      }
-                    >
-                      {busy === "auto-merge" && (
-                        <LoaderCircle className="animate-spin" />
-                      )}
-                      Enable auto-merge
-                    </Button>
-                  </div>
+      <VirtualRows
+        items={items}
+        scrollRef={scrollRef}
+        estimateSize={RUN_ROW_HEIGHT}
+      >
+        {(item) => (
+          <button
+            type="button"
+            role="listitem"
+            data-active={selectedId === item.id || undefined}
+            className={cn(
+              "grid w-full cursor-pointer gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55",
+              RUN_GRID,
+            )}
+            onClick={() => onSelect(item.id)}
+          >
+            <span className="min-w-0">
+              <span className="flex min-w-0 items-center gap-2">
+                {item.kind === "deployment" ? (
+                  <ArchiveRestore className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <Workflow className="size-4 shrink-0 text-muted-foreground" />
                 )}
-              </section>
-            )}
-
-            {detail.summary.workspace_links.length === 0 && (
-              <div className="rounded-lg border border-info-border bg-info-background px-3 py-2.5 text-xs text-info-foreground-muted">
-                This pull request is not linked to a Tidebreak workspace. Global
-                GitHub actions are available here; code changes still need a
-                workspace.
-              </div>
-            )}
-
-            <section>
-              <h3 className="text-sm font-medium">Checks</h3>
-              {detail.summary.checks.length === 0 ? (
-                <p className="mt-2 text-xs text-muted-foreground">No checks reported.</p>
-              ) : (
-                <div className="mt-2 flex flex-col rounded-lg border border-border-subtle">
-                  {detail.summary.checks.map((check, index) => (
-                    <button
-                      key={`${check.name}:${index}`}
-                      type="button"
-                      disabled={!check.url}
-                      className="flex items-center gap-2 border-b border-border-subtle px-3 py-2 text-left text-xs last:border-b-0 enabled:cursor-pointer enabled:hover:bg-muted/30"
-                      onClick={() => check.url && void openInBrowser(check.url)}
-                    >
-                      <CheckTone bucket={check.bucket} />
-                      <span className="min-w-0 flex-1 truncate">{check.name}</span>
-                      {check.detail && (
-                        <span className="max-w-36 truncate text-muted-foreground">
-                          {check.detail}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            {detail.body && (
-              <section>
-                <h3 className="text-sm font-medium">Description</h3>
-                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
-                  {detail.body}
-                </p>
-              </section>
-            )}
-
-            <section>
-              <h3 className="text-sm font-medium">Conversation</h3>
-              {detail.comments.length === 0 ? (
-                <p className="mt-2 text-xs text-muted-foreground">No comments yet.</p>
-              ) : (
-                <div className="mt-2 flex flex-col gap-3">
-                  {detail.comments.map((comment, index) => (
-                    <article
-                      key={`${comment.created_at}:${comment.author}:${index}`}
-                      className="rounded-lg border border-border-subtle px-3 py-2.5"
-                    >
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <span className="font-medium">{comment.author}</span>
-                        <span className="text-muted-foreground">
-                          {relativeTime(comment.created_at)}
-                        </span>
-                      </div>
-                      {comment.kind === "inline" && comment.path && (
-                        <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                          {comment.path}
-                          {comment.line ? `:${comment.line}` : ""}
-                        </p>
-                      )}
-                      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed">
-                        {comment.body}
-                      </p>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-          </div>
-        ) : null}
-      </div>
-    </aside>
+                <span className="truncate text-sm font-medium">{item.name}</span>
+              </span>
+              <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <span>
+                  {item.kind === "deployment"
+                    ? "Deployment"
+                    : item.workflow ?? "Workflow"}
+                </span>
+                {item.environment && <span>{item.environment}</span>}
+                {item.branch && (
+                  <span className="truncate font-mono">{item.branch}</span>
+                )}
+              </span>
+            </span>
+            <span className="flex min-w-0 items-center text-xs text-muted-foreground">
+              <span className="truncate">{item.repository.name_with_owner}</span>
+            </span>
+            <span className="flex items-center">
+              <RunStatusBadge item={item} />
+            </span>
+            <span className="flex items-center justify-end text-xs text-muted-foreground">
+              {relativeTime(item.updated_at)}
+            </span>
+          </button>
+        )}
+      </VirtualRows>
+    </div>
   );
 }
 
@@ -1404,10 +1367,17 @@ function RunDetailPanel({
             </div>
 
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
-              <DetailStat label="Status" value={detail.summary.status} />
+              <DetailStat
+                label="Status"
+                value={humanize(detail.summary.status)}
+              />
               <DetailStat
                 label="Conclusion"
-                value={detail.summary.conclusion ?? "Pending"}
+                value={
+                  detail.summary.conclusion
+                    ? humanize(detail.summary.conclusion)
+                    : "Pending"
+                }
               />
               <DetailStat
                 label="Workflow"
@@ -1417,8 +1387,17 @@ function RunDetailPanel({
                 label="Environment"
                 value={detail.summary.environment ?? "None"}
               />
-              <DetailStat label="Branch" value={detail.summary.branch ?? "Unknown"} mono />
-              <DetailStat label="Event" value={detail.summary.event ?? "Unknown"} />
+              <DetailStat
+                label="Branch"
+                value={detail.summary.branch ?? "Unknown"}
+                mono
+              />
+              <DetailStat
+                label="Event"
+                value={
+                  detail.summary.event ? humanize(detail.summary.event) : "Unknown"
+                }
+              />
             </dl>
 
             {detail.jobs.length > 0 && (
@@ -2174,6 +2153,48 @@ function SaveViewDialog({
   );
 }
 
+/**
+ * How many rows there are, how old they are, and a way to reread them.
+ *
+ * Delivery holds live GitHub state behind a thirty-second server cache and
+ * refetches only when a filter moves, so a reader watching a merge land had
+ * no way to tell whether the list was current and no way to ask.
+ */
+function FreshnessBar({
+  fetchedAt,
+  loading,
+  count,
+  noun,
+  onRefresh,
+}: {
+  fetchedAt: string | null;
+  loading: boolean;
+  count: number;
+  noun: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-5 py-1.5 text-[11px] text-muted-foreground">
+      <span>
+        {count === 0
+          ? ""
+          : `${count} ${noun}${count === 1 ? "" : "s"}`}
+        {fetchedAt && count > 0 && ` · updated ${relativeTime(fetchedAt)}`}
+      </span>
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        disabled={loading}
+        onClick={onRefresh}
+      >
+        {loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+        Refresh
+      </Button>
+    </div>
+  );
+}
+
 function PartialErrorBanner({
   errors,
   compact = false,
@@ -2262,22 +2283,6 @@ function DeliveryListSkeleton() {
   );
 }
 
-function DetailSkeleton() {
-  return (
-    <div className="flex flex-col gap-4" role="status">
-      <span className="sr-only">Loading details</span>
-      <Skeleton className="h-8 w-36" />
-      <div className="grid grid-cols-2 gap-3">
-        {Array.from({ length: 6 }, (_, index) => (
-          <Skeleton key={index} className="h-10" />
-        ))}
-      </div>
-      <Skeleton className="h-28" />
-      <Skeleton className="h-44" />
-    </div>
-  );
-}
-
 function DetailStat({
   label,
   value,
@@ -2293,36 +2298,6 @@ function DetailStat({
       <dd className={cn("mt-0.5 truncate", mono && "font-mono")}>{value}</dd>
     </div>
   );
-}
-
-function PrStateIcon({ item }: { item: CodeDeliveryPullRequestSummary }) {
-  if (item.ready_to_merge) return <Check className="size-4 shrink-0 text-success" />;
-  if (item.attention_reasons.length > 0) {
-    return <CircleAlert className="size-4 shrink-0 text-critical" />;
-  }
-  return <GitPullRequest className="size-4 shrink-0 text-info" />;
-}
-
-function ReviewBadge({ item }: { item: CodeDeliveryPullRequestSummary }) {
-  const value = item.draft ? "Draft" : humanize(item.review_decision ?? "review pending");
-  const tone = item.draft
-    ? "text-muted-foreground"
-    : item.review_decision === "approved"
-      ? "text-success"
-      : item.review_decision === "changes_requested"
-        ? "text-critical"
-        : "text-warning";
-  return <span className={cn("text-xs", tone)}>{value}</span>;
-}
-
-function ChecksSummary({ checks }: { checks: CodeDeliveryPullRequestSummary["checks"] }) {
-  const failed = checks.filter((check) => check.bucket === "fail").length;
-  const pending = checks.filter((check) => check.bucket === "pending").length;
-  const passed = checks.filter((check) => check.bucket === "pass").length;
-  if (failed > 0) return <span className="text-xs text-critical">{failed} failed</span>;
-  if (pending > 0) return <span className="text-xs text-warning">{pending} pending</span>;
-  if (passed > 0) return <span className="text-xs text-success">{passed} passed</span>;
-  return <span className="text-xs text-muted-foreground">No checks</span>;
 }
 
 function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
@@ -2358,13 +2333,6 @@ function RunStateText({ value }: { value: string }) {
       {humanize(value)}
     </span>
   );
-}
-
-function CheckTone({ bucket }: { bucket: "pass" | "pending" | "fail" | "skipped" }) {
-  if (bucket === "pass") return <Check className="size-3.5 shrink-0 text-success" />;
-  if (bucket === "fail") return <X className="size-3.5 shrink-0 text-critical" />;
-  if (bucket === "pending") return <Play className="size-3.5 shrink-0 text-warning" />;
-  return <MoreHorizontal className="size-3.5 shrink-0 text-muted-foreground" />;
 }
 
 function runBucket(
@@ -2453,19 +2421,17 @@ function commaList(value: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * A wire token as a label: `timed_out` reads "Timed out".
+ *
+ * Sentence case, not title case. The repository writes UI text in sentence
+ * case, and title-casing turned "review pending" into "Review Pending", which
+ * read like a proper noun rather than a state.
+ */
 function humanize(value: string): string {
-  return value
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function relativeTime(value: string | undefined): string {
-  if (!value) return "Unknown time";
-  try {
-    return formatDistanceToNowStrict(new Date(value), { addSuffix: true });
-  } catch {
-    return value;
-  }
+  const words = value.replaceAll("_", " ").trim();
+  if (!words) return words;
+  return words[0]!.toUpperCase() + words.slice(1);
 }
 
 function dedupeRows<T extends { id: string }>(items: T[]): T[] {

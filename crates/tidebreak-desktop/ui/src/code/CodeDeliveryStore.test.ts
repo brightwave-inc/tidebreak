@@ -52,6 +52,7 @@ function pullRequest(
     attention_reasons: ["checks_failed"],
     ready_to_merge: false,
     workspace_links: [],
+    labels: [],
     created_at: NOW,
     updated_at: NOW,
     ...overrides,

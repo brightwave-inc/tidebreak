@@ -1525,6 +1525,90 @@ pub(crate) async fn mark_pull_request_ready(
     .map_err(|error| classify_observed_gh(error, &observation))
 }
 
+/// Close one repository-qualified pull request without merging it.
+///
+/// Like `mark_pull_request_ready`, this is a user-initiated state change that
+/// is not a merge, so it stays on the general runner.
+pub(crate) async fn close_pull_request_target(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    run_gh(
+        Path::new("."),
+        &binary,
+        &["pr", "close", &number, "--repo", &repository],
+        GH_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| classify_observed_gh(error, &observation))
+}
+
+/// Reopen one repository-qualified pull request that was closed unmerged.
+pub(crate) async fn reopen_pull_request_target(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    run_gh(
+        Path::new("."),
+        &binary,
+        &["pr", "reopen", &number, "--repo", &repository],
+        GH_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| classify_observed_gh(error, &observation))
+}
+
+/// Post one issue comment on a repository-qualified pull request.
+///
+/// The body reaches `gh` as an argv value, never a shell string, so backticks
+/// and newlines in a review note are inert.
+pub(crate) async fn comment_on_pull_request_target(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    body: &str,
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    run_gh(
+        Path::new("."),
+        &binary,
+        &[
+            "pr",
+            "comment",
+            &number,
+            "--repo",
+            &repository,
+            "--body",
+            body,
+        ],
+        GH_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| classify_observed_gh(error, &observation))
+}
+
 /// Repository-qualified merge for a PR that may not have a local Tidebreak
 /// workspace. The runner still admits only `gh pr merge` argv.
 pub(crate) async fn merge_pull_request_target(

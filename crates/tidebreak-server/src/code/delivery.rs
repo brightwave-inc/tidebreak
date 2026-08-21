@@ -27,14 +27,14 @@ use crate::error::ServerError;
 use crate::routes::code::types::{
     CodeDeliveryActionResult, CodeDeliveryCheck, CodeDeliveryDeploymentStatus,
     CodeDeliveryPrAttentionReason, CodeDeliveryPullRequestAction,
-    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
-    CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
-    CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunAction, CodeDeliveryRunActionBody,
-    CodeDeliveryRunAttentionReason, CodeDeliveryRunDetail, CodeDeliveryRunKind,
-    CodeDeliveryRunQuery, CodeDeliveryRunSummary, CodeDeliveryRunTarget, CodeDeliveryRunsPage,
-    CodeDeliverySourceError, CodeDeliveryWorkflowJob, CodeDeliveryWorkspaceLink,
-    CodeGitHubCapability, CodeGitHubRepositoryRef, CodeGitHubRepositoryTarget, CodePrMergeMethod,
-    ResolveCodeDeliveryRepositoriesBody,
+    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
+    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestTarget,
+    CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunAction,
+    CodeDeliveryRunActionBody, CodeDeliveryRunAttentionReason, CodeDeliveryRunDetail,
+    CodeDeliveryRunKind, CodeDeliveryRunQuery, CodeDeliveryRunSummary, CodeDeliveryRunTarget,
+    CodeDeliveryRunsPage, CodeDeliverySourceError, CodeDeliveryWorkflowJob,
+    CodeDeliveryWorkspaceLink, CodeGitHubCapability, CodeGitHubRepositoryRef,
+    CodeGitHubRepositoryTarget, CodePrMergeMethod, ResolveCodeDeliveryRepositoriesBody,
 };
 
 const GH_READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -44,8 +44,16 @@ const MAX_REPOSITORIES: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MAX_REMOTE_ITEMS_PER_REPO: usize = 100;
 const DELIVERY_CONCURRENCY: usize = 4;
+const MAX_COMMENT_BYTES: usize = 60_000;
+/// Files rendered in the detail panel. The panel is a review aid rather than
+/// a diff viewer, and GitHub itself stops rendering a diff well past this.
+const MAX_DETAIL_FILES: usize = 300;
+/// Transient GitHub failures (502/503/504, gateway timeouts) get one retry
+/// after a short pause. A cross-repository list fans out far enough that one
+/// unlucky repository would otherwise blank a whole column.
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 
-const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,statusCheckRollup";
 
 #[derive(Debug, Clone)]
 struct CachedAggregate<T> {
@@ -275,7 +283,15 @@ pub(crate) async fn query_pull_requests(
     }
 
     let cache_key = aggregate_cache_key(owner, "prs", &targets);
-    let aggregate = match runtime.delivery_cache.pull_requests(&cache_key) {
+    // A user refresh must reach GitHub. Paging must not: following a cursor
+    // against a freshly reread aggregate would renumber the offsets underneath
+    // the reader and skip or repeat rows.
+    let cached = if query.refresh && query.cursor.is_none() {
+        None
+    } else {
+        runtime.delivery_cache.pull_requests(&cache_key)
+    };
+    let aggregate = match cached {
         Some(cached) => cached,
         None => {
             let binary = observation
@@ -369,11 +385,16 @@ pub(crate) async fn pull_request_detail(
         &target.repository,
         &format!("pulls/{}/comments?per_page=100", target.number),
     );
-    let (pull, issue_comments, reviews, inline_comments) = tokio::join!(
+    let files_endpoint = api_endpoint(
+        &target.repository,
+        &format!("pulls/{}/files?per_page=100", target.number),
+    );
+    let (pull, issue_comments, reviews, inline_comments, changed) = tokio::join!(
         run_api_json(binary, &target.repository.host, &pull_endpoint),
         run_api_json(binary, &target.repository.host, &issue_comments_endpoint),
         run_api_json(binary, &target.repository.host, &reviews_endpoint),
         run_api_json(binary, &target.repository.host, &inline_endpoint),
+        run_api_json(binary, &target.repository.host, &files_endpoint),
     );
     let pull = pull.map_err(|message| ServerError::bad_request_kind("github", message))?;
     let mut comments = Vec::new();
@@ -388,21 +409,64 @@ pub(crate) async fn pull_request_detail(
     }
     comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
 
+    let changed_files = u64_field(&pull, "changed_files").unwrap_or(0);
+    let mut files = changed
+        .ok()
+        .map(|value| parse_pull_request_files(&value))
+        .unwrap_or_default();
+    let files_truncated = files.len() > MAX_DETAIL_FILES
+        || (!files.is_empty() && (files.len() as u64) < changed_files);
+    files.truncate(MAX_DETAIL_FILES);
+
+    let open = summary.state == "open";
     Ok(CodeDeliveryPullRequestDetail {
-        can_mark_ready: summary.state == "open" && summary.draft,
-        can_merge: summary.state == "open" && !summary.draft,
+        can_mark_ready: open && summary.draft,
+        can_merge: open && !summary.draft,
         can_rerun_failed: summary.checks.iter().any(|check| {
             check.bucket == PullRequestCheckBucket::Fail && check.workflow_run_id.is_some()
         }),
+        can_close: open,
+        // A merged pull request cannot be reopened; a closed unmerged one can.
+        can_reopen: summary.state == "closed",
+        can_comment: true,
         body: text_field(&pull, "body").unwrap_or_default(),
         labels: string_array_path(&pull, &["labels"], "name"),
         assignees: string_array_path(&pull, &["assignees"], "login"),
-        changed_files: u64_field(&pull, "changed_files").unwrap_or(0),
+        requested_reviewers: string_array_path(&pull, &["requested_reviewers"], "login"),
+        changed_files,
         additions: u64_field(&pull, "additions").unwrap_or(0),
         deletions: u64_field(&pull, "deletions").unwrap_or(0),
+        commits: u64_field(&pull, "commits").unwrap_or(0),
+        merged_by: pull
+            .get("merged_by")
+            .and_then(|author| text_field(author, "login")),
+        files,
+        files_truncated,
         comments,
         summary,
     })
+}
+
+/// Map `GET /pulls/{n}/files` onto the panel's file rows.
+///
+/// `patch` is absent for binary files and for diffs GitHub declines to render;
+/// the panel says so rather than showing an empty diff.
+fn parse_pull_request_files(value: &Value) -> Vec<CodeDeliveryPullRequestFile> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(CodeDeliveryPullRequestFile {
+                path: text_field(item, "filename")?,
+                status: text_field(item, "status").unwrap_or_else(|| "changed".into()),
+                additions: u64_field(item, "additions").unwrap_or(0),
+                deletions: u64_field(item, "deletions").unwrap_or(0),
+                previous_path: text_field(item, "previous_filename"),
+                patch: text_field(item, "patch"),
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn act_on_pull_request(
@@ -493,6 +557,64 @@ pub(crate) async fn act_on_pull_request(
                 message: "Failed workflow jobs queued to rerun".into(),
             })
         }
+        CodeDeliveryPullRequestAction::Close => {
+            gh::close_pull_request_target(
+                &target.repository.host,
+                &target.repository.owner,
+                &target.repository.name,
+                target.number,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error)?;
+            runtime.delivery_cache.invalidate();
+            Ok(CodeDeliveryActionResult {
+                success: true,
+                message: format!("Pull request #{} closed", target.number),
+            })
+        }
+        CodeDeliveryPullRequestAction::Reopen => {
+            gh::reopen_pull_request_target(
+                &target.repository.host,
+                &target.repository.owner,
+                &target.repository.name,
+                target.number,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error)?;
+            runtime.delivery_cache.invalidate();
+            Ok(CodeDeliveryActionResult {
+                success: true,
+                message: format!("Pull request #{} reopened", target.number),
+            })
+        }
+        CodeDeliveryPullRequestAction::Comment { body } => {
+            let body = body.trim();
+            if body.is_empty() {
+                return Err(ServerError::bad_request("a comment needs a body"));
+            }
+            if body.len() > MAX_COMMENT_BYTES {
+                return Err(ServerError::bad_request(format!(
+                    "a comment may be at most {MAX_COMMENT_BYTES} bytes"
+                )));
+            }
+            gh::comment_on_pull_request_target(
+                &target.repository.host,
+                &target.repository.owner,
+                &target.repository.name,
+                target.number,
+                body,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error)?;
+            runtime.delivery_cache.invalidate();
+            Ok(CodeDeliveryActionResult {
+                success: true,
+                message: format!("Comment posted on pull request #{}", target.number),
+            })
+        }
     }
 }
 
@@ -515,7 +637,12 @@ pub(crate) async fn query_runs(
     }
 
     let cache_key = aggregate_cache_key(owner, "runs", &targets);
-    let aggregate = match runtime.delivery_cache.runs(&cache_key) {
+    let cached = if query.refresh && query.cursor.is_none() {
+        None
+    } else {
+        runtime.delivery_cache.runs(&cache_key)
+    };
+    let aggregate = match cached {
         Some(cached) => cached,
         None => {
             let binary = observation
@@ -902,6 +1029,42 @@ async fn workspace_index(
         .await)
 }
 
+/// True for GitHub failures that are worth one more attempt.
+///
+/// A cross-repository list is one `gh` invocation per repository, and the
+/// list query is heavy enough that GitHub's gateway sheds it under load. One
+/// shed request used to blank that repository's rows and surface a raw
+/// `HTTP 504` banner over otherwise good results.
+fn is_transient_github_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+        "connection reset",
+    ]
+    .iter()
+    .any(|token| message.contains(token))
+}
+
+/// Run one GitHub read, retrying a single time on a transient failure.
+async fn with_transient_retry<T, F, Fut>(operation: F) -> Result<T, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    match operation().await {
+        Ok(value) => Ok(value),
+        Err(message) if is_transient_github_error(&message) => {
+            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            operation().await
+        }
+        Err(message) => Err(message),
+    }
+}
+
 async fn fetch_pull_requests(
     binary: &Path,
     target: &CodeGitHubRepositoryTarget,
@@ -910,24 +1073,20 @@ async fn fetch_pull_requests(
     let repository = resolve_repository(binary, target, None).await?;
     let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
     let limit = MAX_REMOTE_ITEMS_PER_REPO.to_string();
-    let raw = gh::run_gh(
-        Path::new("."),
-        binary,
-        &[
-            "pr",
-            "list",
-            "--repo",
-            &cli_repository,
-            "--state",
-            "all",
-            "--limit",
-            &limit,
-            "--json",
-            PR_LIST_FIELDS,
-        ],
-        GH_READ_TIMEOUT,
-    )
-    .await?;
+    let args = [
+        "pr",
+        "list",
+        "--repo",
+        cli_repository.as_str(),
+        "--state",
+        "all",
+        "--limit",
+        limit.as_str(),
+        "--json",
+        PR_LIST_FIELDS,
+    ];
+    let raw =
+        with_transient_retry(|| gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)).await?;
     let value: Value = serde_json::from_str(&raw)
         .map_err(|error| format!("could not parse pull requests: {error}"))?;
     Ok(value
@@ -993,6 +1152,17 @@ fn parse_pull_request(
     let review_decision = normalized_optional(value, "reviewDecision");
     let mergeable = normalized_optional(value, "mergeable");
     let merge_state_status = normalized_optional(value, "mergeStateStatus");
+    let merged_at = datetime_field(value, "mergedAt");
+    let closed_at = datetime_field(value, "closedAt");
+    // `gh` reports MERGED as its own state, but a host that only reports
+    // OPEN/CLOSED still carries `mergedAt`. Trust the timestamp either way so
+    // a merged pull request never renders as merely closed.
+    let state = if merged_at.is_some() {
+        "merged".to_owned()
+    } else {
+        state
+    };
+    let labels = string_array_path(value, &["labels"], "name");
     let checks: Vec<CodeDeliveryCheck> = value
         .get("statusCheckRollup")
         .and_then(Value::as_array)
@@ -1043,8 +1213,11 @@ fn parse_pull_request(
         attention_reasons,
         ready_to_merge,
         workspace_links,
+        labels,
         created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
         updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
+        merged_at,
+        closed_at,
     })
 }
 
@@ -1659,8 +1832,22 @@ fn source_error(
         "not_found"
     } else if lower.contains("forbidden") || lower.contains("http 403") {
         "forbidden"
+    } else if is_transient_github_error(&message) {
+        "transient"
     } else {
         "github"
+    };
+    // A shed gateway request already survived a retry by the time it lands
+    // here. `HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)`
+    // tells a reader nothing they can act on, so say what it means instead.
+    let message = if kind == "transient" {
+        let name = repository
+            .as_ref()
+            .map(|target| format!("{}/{}", target.owner, target.name))
+            .unwrap_or_else(|| "A repository".into());
+        format!("{name} did not answer in time. The next refresh retries it.")
+    } else {
+        message
     };
     CodeDeliverySourceError {
         repository,
@@ -1812,6 +1999,127 @@ mod tests {
             let parsed = parse_repository_input(input).unwrap();
             assert_eq!(repository_key(&parsed), expected);
         }
+    }
+
+    fn repository_ref() -> CodeGitHubRepositoryRef {
+        CodeGitHubRepositoryRef {
+            host: "github.com".into(),
+            owner: "brightwave-inc".into(),
+            name: "tidebreak".into(),
+            name_with_owner: "brightwave-inc/tidebreak".into(),
+            url: "https://github.com/brightwave-inc/tidebreak".into(),
+            default_branch: Some("main".into()),
+            tidebreak_repo_id: None,
+        }
+    }
+
+    #[test]
+    fn a_merged_pull_request_carries_its_merge_time() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "number": 2240,
+                "title": "Cache the workspace digest",
+                "state": "MERGED",
+                "url": "https://github.com/brightwave-inc/tidebreak/pull/2240",
+                "isDraft": false,
+                "headRefName": "mara/cache",
+                "baseRefName": "main",
+                "labels": [{"name": "performance"}, {"name": "desktop"}],
+                "mergedAt": "2026-08-19T11:41:00Z",
+                "closedAt": "2026-08-19T11:41:00Z",
+                "createdAt": "2026-08-17T09:05:00Z",
+                "updatedAt": "2026-08-19T11:41:00Z"
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
+        assert_eq!(parsed.state, "merged");
+        assert!(parsed.merged_at.is_some());
+        assert!(parsed.closed_at.is_some());
+        assert_eq!(parsed.labels, vec!["performance", "desktop"]);
+        // A settled pull request never asks for attention and is never ready.
+        assert!(parsed.attention_reasons.is_empty());
+        assert!(!parsed.ready_to_merge);
+    }
+
+    #[test]
+    fn a_merge_time_outranks_a_closed_state() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "number": 2233,
+                "title": "Split the workspace route",
+                "state": "CLOSED",
+                "url": "https://github.com/brightwave-inc/tidebreak/pull/2233",
+                "headRefName": "ines/split",
+                "baseRefName": "main",
+                "mergedAt": "2026-08-15T16:02:00Z",
+                "closedAt": "2026-08-15T16:02:00Z"
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
+        assert_eq!(parsed.state, "merged");
+    }
+
+    #[test]
+    fn an_open_pull_request_has_no_settled_timestamps() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "number": 2251,
+                "title": "Build the delivery center",
+                "state": "OPEN",
+                "url": "https://github.com/brightwave-inc/tidebreak/pull/2251",
+                "headRefName": "thet/delivery-center",
+                "baseRefName": "main",
+                "mergedAt": null,
+                "closedAt": null,
+                "labels": []
+            }"#,
+        )
+        .unwrap();
+        let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
+        assert_eq!(parsed.state, "open");
+        assert!(parsed.merged_at.is_none());
+        assert!(parsed.closed_at.is_none());
+    }
+
+    #[test]
+    fn transient_github_failures_are_the_ones_worth_retrying() {
+        for message in [
+            "HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)",
+            "HTTP 502: Bad Gateway",
+            "gh timed out after 45s",
+            "connection reset by peer",
+        ] {
+            assert!(is_transient_github_error(message), "{message}");
+        }
+        for message in [
+            "HTTP 404: Not Found",
+            "GraphQL: Could not resolve to a Repository",
+            "gh auth login required",
+        ] {
+            assert!(!is_transient_github_error(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn pull_request_files_drop_the_shapes_the_panel_cannot_draw() {
+        let value: Value = serde_json::from_str(
+            r#"[
+                {"filename": "a.rs", "status": "modified", "additions": 3, "deletions": 1,
+                 "patch": "@@ -1 +1 @@\n-old\n+new"},
+                {"filename": "logo.png", "status": "added", "additions": 0, "deletions": 0},
+                {"filename": "b.rs", "status": "renamed", "previous_filename": "old.rs",
+                 "additions": 0, "deletions": 0},
+                {"status": "modified"}
+            ]"#,
+        )
+        .unwrap();
+        let files = parse_pull_request_files(&value);
+        assert_eq!(files.len(), 3, "the entry without a filename is dropped");
+        assert_eq!(files[0].patch.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+        assert!(files[1].patch.is_none(), "a binary file has no text diff");
+        assert_eq!(files[2].previous_path.as_deref(), Some("old.rs"));
     }
 
     #[test]

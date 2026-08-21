@@ -38,6 +38,7 @@ import {
   type CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
   type CodeDeliveryPullRequestQuery as WireCodeDeliveryPullRequestQuery,
   type CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
+  type CodeDeliveryPullRequestFile as WireCodeDeliveryPullRequestFile,
   type CodeDeliveryPullRequestTarget as WireCodeDeliveryPullRequestTarget,
   type CodeDeliveryPullRequestsPage as WireCodeDeliveryPullRequestsPage,
   type CodeDeliveryRepositoriesSnapshot as WireCodeDeliveryRepositoriesSnapshot,
@@ -1086,6 +1087,7 @@ export type CodeDeliveryPullRequestDetail = WireCodeDeliveryPullRequestDetail;
 export type CodeDeliveryPullRequestQuery = WireCodeDeliveryPullRequestQuery;
 export type CodeDeliveryPullRequestsPage = WireCodeDeliveryPullRequestsPage;
 export type CodeDeliveryPullRequestTarget = WireCodeDeliveryPullRequestTarget;
+export type CodeDeliveryPullRequestFile = WireCodeDeliveryPullRequestFile;
 export type CodeDeliveryPullRequestAction = WireCodeDeliveryPullRequestAction;
 export type CodeDeliveryPullRequestActionBody = WireCodeDeliveryPullRequestActionBody;
 export type CodeDeliveryRunKind = WireCodeDeliveryRunKind;

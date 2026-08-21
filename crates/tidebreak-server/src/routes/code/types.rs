@@ -659,8 +659,18 @@ pub struct CodeDeliveryPullRequestSummary {
     pub attention_reasons: Vec<CodeDeliveryPrAttentionReason>,
     pub ready_to_merge: bool,
     pub workspace_links: Vec<CodeDeliveryWorkspaceLink>,
+    pub labels: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Set only once the pull request merged. `state` alone cannot separate a
+    /// merged pull request from a closed one on every host response, and the
+    /// row says *when* it settled rather than when it was last touched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Server-side PR query. Saved views are client-owned; their resolved filters
@@ -696,6 +706,12 @@ pub struct CodeDeliveryPullRequestQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub limit: Option<u16>,
+    /// Skip the short list cache and reread GitHub.
+    ///
+    /// Set only by an explicit user refresh. Paging never sets it, so
+    /// following a cursor stays on the aggregate the first page came from.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 /// One page of pull requests, with repository-local failures kept alongside
@@ -719,6 +735,25 @@ pub struct CodeDeliveryPullRequestTarget {
     pub number: u64,
 }
 
+/// One file in a pull request's diff.
+///
+/// `patch` is the host's unified hunk text and is absent for binary files and
+/// for diffs GitHub declines to render. It is bounded by the host, not stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryPullRequestFile {
+    pub path: String,
+    /// `added`, `modified`, `removed`, `renamed`, `copied`, or `changed`.
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub patch: Option<String>,
+}
+
 /// Full PR drawer payload. Conversation entries retain the existing bounded
 /// comment contract used by workspace PRs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -727,13 +762,25 @@ pub struct CodeDeliveryPullRequestDetail {
     pub body: String,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
+    pub requested_reviewers: Vec<String>,
     pub changed_files: u64,
     pub additions: u64,
     pub deletions: u64,
+    pub commits: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_by: Option<String>,
+    /// Empty when the diff could not be read. Truncated by `files_truncated`
+    /// rather than paged: the panel is a review aid, not a diff viewer.
+    pub files: Vec<CodeDeliveryPullRequestFile>,
+    pub files_truncated: bool,
     pub comments: Vec<tidebreak_core::PullRequestComment>,
     pub can_mark_ready: bool,
     pub can_merge: bool,
     pub can_rerun_failed: bool,
+    pub can_close: bool,
+    pub can_reopen: bool,
+    pub can_comment: bool,
 }
 
 /// User-initiated global PR action. Code-changing actions deliberately do not
@@ -750,6 +797,11 @@ pub enum CodeDeliveryPullRequestAction {
     },
     RerunFailed {
         workflow_run_ids: Vec<u64>,
+    },
+    Close,
+    Reopen,
+    Comment {
+        body: String,
     },
 }
 
@@ -858,6 +910,9 @@ pub struct CodeDeliveryRunQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub limit: Option<u16>,
+    /// Skip the short list cache and reread GitHub. See the pull-request query.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

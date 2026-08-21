@@ -143,6 +143,10 @@ async function monitorPullRequests(
       ready_only: false,
       updated_after: updatedAfter,
       limit: 100,
+      // The background poll rides the server's short list cache on purpose:
+      // forcing a reread every tick would spend the GitHub rate limit that
+      // the reader's own Refresh needs.
+      refresh: false,
       ...(cursor ? { cursor } : {}),
     });
     items.push(...page.items);
@@ -173,6 +177,7 @@ async function monitorRuns(
       attention_only: true,
       created_after: createdAfter,
       limit: 100,
+      refresh: false,
       ...(cursor ? { cursor } : {}),
     });
     items.push(...page.items);
