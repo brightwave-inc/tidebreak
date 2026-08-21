@@ -1972,6 +1972,30 @@ done
         // The surrounding command="..." delimiter must still close properly.
         assert!(value.starts_with("mcp_servers.tb-browser="));
         assert!(value.contains("command=\""));
-        assert!(value.ends_with("]"));
+        assert!(value.ends_with("]}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from(OsString::from_vec(
+                b"/tmp/tidebreak-\xff".to_vec(),
+            )),
+        );
+        let error = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .expect_err("non-UTF-8 bridge paths must fail closed");
+
+        assert!(error.to_string().contains("not valid UTF-8"));
     }
 }
