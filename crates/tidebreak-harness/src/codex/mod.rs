@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
+use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -279,9 +279,35 @@ fn parse_model_list(result: &Value) -> Vec<ListedHarnessModel> {
                     .get("isDefault")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                reasoning_efforts: parse_reasoning_efforts(row),
             })
         })
         .collect()
+}
+
+/// The effort ladder one `model/list` row advertises, ascending.
+///
+/// Codex states this per model rather than per engine: a gateway row and its
+/// own rows do not offer the same rungs, and only some reach `ultra`. A token
+/// this build has no level for is dropped, so a newer catalog cannot make the
+/// picker offer something nothing downstream can spell.
+fn parse_reasoning_efforts(row: &Value) -> Vec<ReasoningEffort> {
+    let mut levels: Vec<ReasoningEffort> = row
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| {
+            option
+                .get("reasoningEffort")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())
+        })
+        .filter_map(|token| ReasoningEffort::from_str(token.trim()))
+        .collect();
+    levels.sort_unstable();
+    levels.dedup();
+    levels
 }
 
 /// `codex login status` — "Logged in…" vs "Not logged in". Never reads tokens.
@@ -556,7 +582,14 @@ mod tests {
                     "model": "gpt-5.6-luna",
                     "displayName": "GPT-5.6-Luna",
                     "hidden": false,
-                    "isDefault": true
+                    "isDefault": true,
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "high", "description": ""},
+                        {"reasoningEffort": "low", "description": ""},
+                        {"reasoningEffort": "ultra", "description": ""},
+                        {"reasoningEffort": "sideways", "description": ""}
+                    ]
                 },
                 {
                     "id": "catalog-row-2",
@@ -573,6 +606,12 @@ mod tests {
                 id: "gpt-5.6-luna".into(),
                 label: "GPT-5.6-Luna".into(),
                 default: true,
+                // Ascending, and a token this build cannot spell is dropped.
+                reasoning_efforts: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Ultra,
+                ],
             }]
         );
     }

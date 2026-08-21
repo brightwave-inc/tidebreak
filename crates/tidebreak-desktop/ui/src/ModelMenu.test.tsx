@@ -559,10 +559,24 @@ describe("reasoningEffortOptions", () => {
 
   it("drops a level this build cannot label", () => {
     expect(
-      reasoningEffortOptions(["low", "ultra" as never, "max"]).map(
+      reasoningEffortOptions(["low", "sideways" as never, "max"]).map(
         (option) => option.value,
       ),
     ).toEqual(["low", "max"]);
+  });
+
+  /**
+   * `ultra` sits above `max`. No chat model offers it — it is there for the
+   * code engines, whose own top rungs differ (Codex `ultra`, Claude Code
+   * ultracode) and are given one name.
+   */
+  it("puts ultra at the top of the scale", () => {
+    expect(
+      reasoningEffortOptions(["ultra", "low", "max"]).map(
+        (option) => option.value,
+      ),
+    ).toEqual(["low", "max", "ultra"]);
+    expect(reasoningEffortOptions(["ultra"])[0].label).toBe("Ultra");
   });
 
   it("labels the off level as Off, distinct from the menu's Default entry", () => {

@@ -1343,6 +1343,7 @@ CREATE TABLE "code_session" (
     "harness_resume_ref" text,
     "permission_mode" text NOT NULL,
     "model" text,
+    "reasoning_effort" text,
     "lifecycle" text NOT NULL,
     "fence_reason" jsonb_text,
     "child_pid" integer,
@@ -1356,6 +1357,7 @@ CREATE TABLE "code_session" (
     CHECK ("lifecycle" IN ('created', 'idle', 'running', 'fenced', 'ended')),
     CHECK ("kind" IN ('interactive', 'watch')),
     CHECK ("permission_mode" IN ('plan', 'ask', 'auto', 'allow')),
+    CHECK ("reasoning_effort" IS NULL OR "reasoning_effort" IN ('none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
     CHECK ("spawn_epoch" >= 0),
     CHECK ("unrecognized_event_count" >= 0)
 );

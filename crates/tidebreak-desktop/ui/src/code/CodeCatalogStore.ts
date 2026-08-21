@@ -7,6 +7,7 @@ import type {
   CodeWorkspaceSnapshot,
   HarnessDoctorReport,
   HarnessKind,
+  ReasoningEffort,
 } from "../api/types";
 import { harnessCodeModels, type CodeModelOption } from "./labels";
 
@@ -37,6 +38,11 @@ type CodeCatalogState = {
   sessionsByWorkspace: Record<string, CodeSessionSnapshot>;
   doctor: HarnessDoctorReport | null;
   modelsByHarness: Partial<Record<HarnessKind, CodeModelOption[]>>;
+  /**
+   * Each engine's own effort ladder, which is what a code session runs on
+   * whatever catalog the model row came from.
+   */
+  effortsByHarness: Partial<Record<HarnessKind, ReasoningEffort[]>>;
   loaded: boolean;
   error: string | null;
 };
@@ -59,7 +65,11 @@ type CodeCatalogStore = CodeCatalogState & {
     client: Pick<ApiClient, "listCodeHarnessModels">,
     kind: HarnessKind,
   ) => Promise<CodeModelOption[]>;
-  rememberHarnessModels: (kind: HarnessKind, models: CodeModelOption[]) => void;
+  rememberHarnessModels: (
+    kind: HarnessKind,
+    models: CodeModelOption[],
+    reasoningEfforts?: ReasoningEffort[],
+  ) => void;
   rememberSession: (session: CodeSessionSnapshot) => void;
   forgetWorkspaceSession: (workspaceId: string) => void;
   upsertRepo: (repo: CodeRepoSnapshot) => void;
@@ -84,7 +94,7 @@ function loadHarnessModels(
     .listCodeHarnessModels(kind)
     .then((listed) => {
       const models = harnessCodeModels(listed.models, kind);
-      get().rememberHarnessModels(kind, models);
+      get().rememberHarnessModels(kind, models, listed.reasoning_efforts);
       return models;
     })
     .catch(() => [])
@@ -101,6 +111,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   sessionsByWorkspace: {},
   doctor: null,
   modelsByHarness: {},
+  effortsByHarness: {},
   loaded: false,
   error: null,
   refresh: (client) => {
@@ -157,9 +168,17 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   },
   ensureHarnessModels: (client, kind) =>
     loadHarnessModels(client, kind, get, false),
-  rememberHarnessModels: (kind, models) => {
+  rememberHarnessModels: (kind, models, reasoningEfforts) => {
     set({
       modelsByHarness: { ...get().modelsByHarness, [kind]: models },
+      ...(reasoningEfforts
+        ? {
+            effortsByHarness: {
+              ...get().effortsByHarness,
+              [kind]: reasoningEfforts,
+            },
+          }
+        : {}),
     });
   },
   rememberSession: (session) => {
@@ -200,6 +219,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       sessionsByWorkspace: {},
       doctor: null,
       modelsByHarness: {},
+      effortsByHarness: {},
       loaded: false,
       error: null,
     });

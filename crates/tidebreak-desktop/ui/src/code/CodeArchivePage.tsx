@@ -108,8 +108,8 @@ function CodeArchiveBody() {
     }
   };
 
-  const totalArchived = workspaces.filter(
-    (workspace) => isPutAway(workspace),
+  const totalArchived = workspaces.filter((workspace) =>
+    isPutAway(workspace),
   ).length;
 
   return (

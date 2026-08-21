@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CodeWorkspaceSnapshot } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import type { ReasoningEffort } from "../api/types";
+import type { ParsedHarnessModel } from "./parsers";
 
 function workspace(
   id: string,
@@ -48,6 +50,7 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
       listCodeHarnessModels: vi.fn(async () => ({
         kind: "codex" as const,
         models: [],
+        reasoning_efforts: [],
       })),
     };
 
@@ -61,7 +64,8 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
   it("shares one in-flight native model probe across pickers", async () => {
     let resolve!: (value: {
       kind: "opencode";
-      models: { id: string; label: string; default: boolean }[];
+      models: ParsedHarnessModel[];
+      reasoning_efforts: ReasoningEffort[];
     }) => void;
     const response = new Promise<Parameters<typeof resolve>[0]>((done) => {
       resolve = done;
@@ -78,7 +82,15 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
       .ensureHarnessModels(client, "opencode");
     resolve({
       kind: "opencode",
-      models: [{ id: "glm-5.2", label: "GLM 5.2", default: true }],
+      models: [
+        {
+          id: "glm-5.2",
+          label: "GLM 5.2",
+          default: true,
+          reasoning_efforts: [],
+        },
+      ],
+      reasoning_efforts: [],
     });
 
     expect(await first).toEqual(await second);
@@ -129,7 +141,14 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
         kind,
         models:
           kind === "codex"
-            ? [{ id: "gpt-5.6-luna", label: "GPT-5.6 Luna", default: true }]
+            ? [
+                {
+                  id: "gpt-5.6-luna",
+                  label: "GPT-5.6 Luna",
+                  default: true,
+                  reasoning_efforts: [],
+                },
+              ]
             : [],
       })),
     };

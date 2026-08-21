@@ -1723,6 +1723,7 @@ pub mod code_session {
         pub harness_resume_ref: Option<String>,
         pub permission_mode: String,
         pub model: Option<String>,
+        pub reasoning_effort: Option<String>,
         pub lifecycle: String,
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub fence_reason: Option<Json>,

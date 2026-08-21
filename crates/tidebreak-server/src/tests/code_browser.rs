@@ -285,6 +285,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
         harness_resume_ref: None,
         permission_mode: CodePermissionMode::Ask,
         model: None,
+        reasoning_effort: None,
         lifecycle: lc,
         fence_reason: None,
         child_pid: None,

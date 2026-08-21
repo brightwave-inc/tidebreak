@@ -47,6 +47,14 @@ pub enum ReasoningEffort {
     XHigh,
     /// The most reasoning a model will do, at the highest latency and cost.
     Max,
+    /// The top of the ladder, above `Max`.
+    ///
+    /// Not a plain "even more tokens" step. Engines that offer it spend the
+    /// level on something structural: Codex advertises `ultra` per model, and
+    /// Claude Code's own top rung is ultracode, which pairs `xhigh` with
+    /// multi-agent orchestration. Chat models do not accept it, so
+    /// [`Self::clamp_to`] degrades it to whatever the row does take.
+    Ultra,
 }
 
 impl ReasoningEffort {
@@ -58,6 +66,7 @@ impl ReasoningEffort {
         Self::High,
         Self::XHigh,
         Self::Max,
+        Self::Ultra,
     ];
 
     /// The wire/storage token for this effort level.
@@ -73,6 +82,7 @@ impl ReasoningEffort {
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
@@ -252,12 +262,42 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_orders_from_none_to_max() {
+    fn reasoning_effort_orders_from_none_to_ultra() {
         assert!(ReasoningEffort::ALL
             .windows(2)
             .all(|pair| pair[0] < pair[1]));
         assert_eq!(ReasoningEffort::ALL.first(), Some(&ReasoningEffort::None));
-        assert_eq!(ReasoningEffort::ALL.last(), Some(&ReasoningEffort::Max));
+        assert_eq!(ReasoningEffort::ALL.last(), Some(&ReasoningEffort::Ultra));
+    }
+
+    /// `Ultra` is above `Max`, and no chat model accepts it: every catalog row
+    /// stops at `max` or lower. A session that carried the level over from an
+    /// engine that does offer it degrades to the row's own top rather than
+    /// failing the turn on a hint.
+    #[test]
+    fn ultra_degrades_for_a_model_whose_ladder_stops_lower() {
+        assert!(ReasoningEffort::Ultra > ReasoningEffort::Max);
+        assert_eq!(
+            ReasoningEffort::Ultra.clamp_to(&[
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ]),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            ReasoningEffort::Ultra.clamp_to(&[ReasoningEffort::Low, ReasoningEffort::XHigh]),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            ReasoningEffort::Ultra.clamp_to(&[ReasoningEffort::Ultra]),
+            Some(ReasoningEffort::Ultra)
+        );
+        assert_eq!(ReasoningEffort::Ultra.clamp_to(&[]), None);
+        assert_eq!(
+            ReasoningEffort::from_str("ultra"),
+            Some(ReasoningEffort::Ultra)
+        );
     }
 
     #[test]

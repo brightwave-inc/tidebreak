@@ -91,7 +91,11 @@ export const PERMISSION_MODE_LABELS: Record<CodePermissionMode, string> = {
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
   "this harness cannot honor that mode";
 
-/** Mid-session picker: there is no PATCH permission-mode route. */
+/**
+ * Shown where the mode is fixed for the life of the surface — a create form
+ * that has already posted, a read-only view of someone else's session. A live
+ * session's picker is not locked: `POST /code/sessions/{id}/mode` moves it.
+ */
 export const SESSION_PERMISSION_MODE_LOCKED =
   "Set when the session started — start a new session to change it";
 
@@ -194,9 +198,28 @@ export type CodeModelOption = {
   /** The vendor the id is branded as, for icons and grouping. */
   vendor?: ProviderKind | null;
   default?: boolean;
-  /** Levels the catalog model accepts. Absent or empty hides the effort control. */
+  /**
+   * Levels this row accepts, when the engine states a ladder per model.
+   * Absent falls back to the engine's own ladder; see [`effortLadder`].
+   */
   reasoning_efforts?: readonly ReasoningEffort[];
 };
+
+/**
+ * The levels to offer for one row of a code-mode picker.
+ *
+ * A row the engine listed itself may narrow the offer — Codex advertises a
+ * different ladder per model, and only some of its rows reach the top rung.
+ * Anything else (a gateway catalog row, a session still on a model the engine
+ * has dropped) falls back to the engine's ladder, which is the outer bound.
+ */
+export function effortLadder(
+  option: CodeModelOption | undefined,
+  engine: readonly ReasoningEffort[],
+): readonly ReasoningEffort[] {
+  const row = option?.reasoning_efforts ?? [];
+  return row.length > 0 ? row : engine;
+}
 
 /**
  * The vendors a harness can actually drive, or `null` for any. This confines
@@ -246,12 +269,21 @@ export function gatewayCodeModels(
       source,
       vendor: model.vendor ?? vendorForModelId(model.id),
       default: defaultKey === model.key || defaultKey === model.id,
-      reasoning_efforts: model.reasoning_efforts,
+      // Deliberately not `model.reasoning_efforts`: that is the chat catalog's
+      // ladder for this model, and a code session's ladder belongs to the
+      // engine driving it. Claude Code reaches a rung the chat route has no
+      // equivalent for, and grok stops below one it does. The caller supplies
+      // the engine's ladder instead.
     }));
 }
 
 export function harnessCodeModels(
-  listed: readonly { id: string; label: string; default?: boolean }[],
+  listed: readonly {
+    id: string;
+    label: string;
+    default?: boolean;
+    reasoning_efforts?: readonly ReasoningEffort[];
+  }[],
   kind: HarnessKind,
 ): CodeModelOption[] {
   const source = HARNESS_LABELS[kind];
@@ -261,6 +293,7 @@ export function harnessCodeModels(
     source,
     vendor: vendorForModelId(option.id),
     default: option.default,
+    reasoning_efforts: option.reasoning_efforts,
   }));
 }
 

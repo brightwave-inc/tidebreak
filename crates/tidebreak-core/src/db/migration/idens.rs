@@ -839,6 +839,7 @@ pub(crate) enum CodeSession {
     HarnessResumeRef,
     PermissionMode,
     Model,
+    ReasoningEffort,
     Lifecycle,
     FenceReason,
     ChildPid,

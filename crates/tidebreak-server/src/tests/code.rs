@@ -22,7 +22,7 @@ use tidebreak_core::{
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
     BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent,
     CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus,
-    CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, WorkspaceId,
+    CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, ReasoningEffort, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -1681,6 +1681,195 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
     );
 }
 
+/// The engines set an effort per turn, so a level chosen mid-conversation has
+/// to reach the next turn without a new session. Before this the picker was a
+/// local map that forgot on reload and never left the renderer.
+#[tokio::test]
+async fn reasoning_effort_is_chosen_mid_conversation_and_reaches_the_next_turn() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_live_mode_switch();
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let turn = |body: serde_json::Value| {
+        let client = client.clone();
+        let token = token.clone();
+        let session = session.clone();
+        async move {
+            let response = client
+                .post(format!("http://{addr}/code/sessions/{session}/turns"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        }
+    };
+    let set_effort = |effort: serde_json::Value| {
+        let client = client.clone();
+        let token = token.clone();
+        let session = session.clone();
+        async move {
+            let response = client
+                .post(format!("http://{addr}/code/sessions/{session}/effort"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "reasoning_effort": effort }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        }
+    };
+
+    // Nothing chosen: the engine's own default is left in force.
+    turn(serde_json::json!({ "message": "one" })).await;
+
+    let (status, body) = set_effort(serde_json::json!("ultra")).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["reasoning_effort"], "ultra", "{body}");
+    turn(serde_json::json!({ "message": "two" })).await;
+
+    // A turn may carry its own level, and that choice sticks the way a model
+    // chosen in the composer does.
+    turn(serde_json::json!({ "message": "three", "reasoning_effort": "low" })).await;
+    turn(serde_json::json!({ "message": "four" })).await;
+
+    // Back to the engine's default: `null` is a choice, not an omission, and
+    // the turn body must read it the same way the route does.
+    turn(serde_json::json!({ "message": "five", "reasoning_effort": null })).await;
+    let (status, body) = set_effort(serde_json::Value::Null).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the turn already cleared it, so this is a no-op: {body}"
+    );
+    assert!(body["reasoning_effort"].is_null(), "{body}");
+
+    assert_eq!(
+        engine.turn_efforts(),
+        vec![
+            None,
+            Some(ReasoningEffort::Ultra),
+            Some(ReasoningEffort::Low),
+            Some(ReasoningEffort::Low),
+            None,
+        ],
+        "each turn runs at the level in force when it was sent",
+    );
+
+    // It survives a reload: the level is on the session row, not in a renderer.
+    let reread: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(reread["session"]["reasoning_effort"].is_null(), "{reread}");
+}
+
+/// An engine with no effort control says so, rather than storing a level that
+/// would silently do nothing.
+#[tokio::test]
+async fn an_engine_without_an_effort_ladder_refuses_the_route() {
+    let (router, token, _runtime, dir) =
+        code_app_with(ScriptedAdapter::new(plain_text_script())).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/effort"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "reasoning_effort": "high" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+}
+
+/// An engine with its own re-posture channel keeps its child and its context.
+/// The relaunch is the fallback, not the mechanism.
+#[tokio::test]
+async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_auto_mode(CapLevel::Supported)
+        .with_live_mode_switch();
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["permission_mode"], "auto", "{body}");
+    assert_eq!(
+        engine.live_modes(),
+        vec![CodePermissionMode::Auto],
+        "the engine was told, not replaced",
+    );
+
+    // And the turn after it still runs on the same session, without writing
+    // the old mode back: the worker holds its own copy of the row, and every
+    // turn persists the whole thing.
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "after the switch" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+
+    let reread: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reread["session"]["permission_mode"], "auto", "{reread}");
+    assert_eq!(
+        engine.live_modes(),
+        vec![CodePermissionMode::Auto],
+        "one switch, and no relaunch behind it: {reread}",
+    );
+}
+
 /// Create `count` interactive sessions in one workspace, returning their ids.
 async fn create_sibling_sessions(
     client: &reqwest::Client,
@@ -2023,6 +2212,7 @@ async fn a_workspace_still_holds_only_one_watch_session() {
             tidebreak_core::CodeSessionKind::Watch,
             HarnessKind::ClaudeCode,
             CodePermissionMode::Plan,
+            None,
             None,
         )
     };

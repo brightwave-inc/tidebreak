@@ -420,6 +420,27 @@ pub struct ListedHarnessModel {
     pub label: String,
     /// Whether this row is the engine's current or default model.
     pub default: bool,
+    /// Effort levels this row accepts, ascending. Empty means the engine
+    /// takes no effort control for it, and the picker hides the choice.
+    ///
+    /// Per model, not per engine: Codex advertises a different ladder for a
+    /// gateway row than for its own, and only some rows reach `ultra`.
+    pub reasoning_efforts: Vec<tidebreak_core::ReasoningEffort>,
+}
+
+/// Stamp one engine-wide effort ladder over every listed row.
+///
+/// For an engine whose `--effort` flag takes the same levels whatever model is
+/// selected. Codex is the exception and states a ladder per row instead.
+#[must_use]
+pub fn with_reasoning_efforts(
+    mut models: Vec<ListedHarnessModel>,
+    levels: &[tidebreak_core::ReasoningEffort],
+) -> Vec<ListedHarnessModel> {
+    for model in &mut models {
+        model.reasoning_efforts = levels.to_vec();
+    }
+    models
 }
 
 /// Run `<binary> models` (or `args`) and parse one model per remaining line.
@@ -561,6 +582,9 @@ fn push_listed(models: &mut Vec<ListedHarnessModel>, id: String, default: bool) 
         label: display_model_label(&id),
         id,
         default,
+        // A line of `<engine> models` output says nothing about effort. An
+        // adapter with a ladder fills this in over the parsed rows.
+        reasoning_efforts: Vec::new(),
     });
 }
 

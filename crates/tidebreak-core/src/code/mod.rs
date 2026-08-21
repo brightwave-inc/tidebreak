@@ -724,6 +724,10 @@ pub struct CodeSession {
     pub permission_mode: CodePermissionMode,
     /// Engine model id for this session, when the user chose one.
     pub model: Option<String>,
+    /// Reasoning effort for this session. `None` leaves the engine's own
+    /// default in force, which no level on the ladder is equivalent to.
+    #[serde(default)]
+    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
     /// Session lifecycle.
     pub lifecycle: CodeSessionLifecycle,
     /// Why the session is fenced, when it is.

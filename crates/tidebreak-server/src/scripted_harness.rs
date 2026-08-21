@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
+use tidebreak_core::{CapLevel, CodePermissionMode, HarnessCaps, HarnessKind, ReasoningEffort};
 use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
@@ -82,6 +82,13 @@ pub(crate) struct ScriptedAdapter {
     auto_mode: CapLevel,
     allow_mode: CapLevel,
     image_input: CapLevel,
+    reasoning_levels: CapLevel,
+    /// Whether this engine takes a new mode without being relaunched.
+    live_mode_switch: bool,
+    /// The effort each turn ran at, and every mode a live switch moved this
+    /// engine onto. Shared with the session so both survive a relaunch.
+    turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
+    modes: Arc<std::sync::Mutex<Vec<CodePermissionMode>>>,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
@@ -107,6 +114,10 @@ impl ScriptedAdapter {
             auto_mode: CapLevel::Unsupported,
             allow_mode: CapLevel::Unsupported,
             image_input: CapLevel::Unknown,
+            reasoning_levels: CapLevel::Unsupported,
+            live_mode_switch: false,
+            turns: Arc::new(std::sync::Mutex::new(Vec::new())),
+            modes: Arc::new(std::sync::Mutex::new(Vec::new())),
             child_pid: None,
             unrecognized_per_turn: 0,
             silent_interrupt: false,
@@ -166,6 +177,29 @@ impl ScriptedAdapter {
     pub(crate) fn with_image_input(mut self, level: CapLevel) -> Self {
         self.image_input = level;
         self
+    }
+
+    /// Declares an effort ladder, the way every adapter but opencode has one.
+    pub(crate) fn with_reasoning_levels(mut self, level: CapLevel) -> Self {
+        self.reasoning_levels = level;
+        self
+    }
+
+    /// Model an engine that re-postures a live session on its own channel,
+    /// the way Claude Code and Codex do. Left off, the runtime relaunches.
+    pub(crate) fn with_live_mode_switch(mut self) -> Self {
+        self.live_mode_switch = true;
+        self
+    }
+
+    /// The effort each turn actually ran at, in order.
+    pub(crate) fn turn_efforts(&self) -> Vec<Option<ReasoningEffort>> {
+        self.turns.lock().expect("scripted turns").clone()
+    }
+
+    /// Every mode a live switch moved this engine onto, in order.
+    pub(crate) fn live_modes(&self) -> Vec<CodePermissionMode> {
+        self.modes.lock().expect("scripted modes").clone()
     }
 
     #[allow(dead_code)]
@@ -255,7 +289,7 @@ impl HarnessAdapter for ScriptedAdapter {
             plan_mode: CapLevel::Supported,
             auto_mode: self.auto_mode,
             allow_mode: self.allow_mode,
-            reasoning_levels: CapLevel::Unsupported,
+            reasoning_levels: self.reasoning_levels,
             native_file_change_events: CapLevel::Unsupported,
             native_interrupt: CapLevel::Supported,
             image_input: self.image_input,
@@ -288,6 +322,9 @@ impl HarnessAdapter for ScriptedAdapter {
             unrecognized: AtomicU64::new(0),
             unrecognized_per_turn: self.unrecognized_per_turn,
             approver: self.approver.clone(),
+            live_mode_switch: self.live_mode_switch,
+            turns: self.turns.clone(),
+            modes: self.modes.clone(),
         }))
     }
 }
@@ -308,6 +345,11 @@ struct ScriptedSession {
     unrecognized: AtomicU64,
     unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
+    live_mode_switch: bool,
+    /// Shared with the adapter so a test can read what the engine was told
+    /// after the runtime has dropped and relaunched the session.
+    turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
+    modes: Arc<std::sync::Mutex<Vec<CodePermissionMode>>>,
 }
 
 impl ScriptedSession {
@@ -369,6 +411,10 @@ impl ScriptedSession {
 #[async_trait]
 impl HarnessSession for ScriptedSession {
     async fn run_turn(&self, _input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        self.turns
+            .lock()
+            .expect("scripted turns")
+            .push(_input.reasoning_effort);
         if let Some(detail) = &self.lost_resume {
             return Err(HarnessError::ResumeLost(detail.clone()));
         }
@@ -390,6 +436,14 @@ impl HarnessSession for ScriptedSession {
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
         self.approver.complete(&approval.call_id, decision).await
+    }
+
+    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+        if !self.live_mode_switch {
+            return Err(HarnessError::PermissionModeSwitchUnsupported);
+        }
+        self.modes.lock().expect("scripted modes").push(mode);
+        Ok(())
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {

@@ -1287,7 +1287,11 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, 
+/**
+ * Absent means the engine's own default, which is not any level.
+ */
+reasoning_effort?: ReasoningEffort, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
 
 /**
  * Status of a harness subagent, derived from its spanning `Task` call
@@ -2261,12 +2265,26 @@ export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
 /**
  * One model a harness CLI listed.
  */
-export type HarnessModel = { id: string, label: string, default: boolean, };
+export type HarnessModel = { id: string, label: string, default: boolean, 
+/**
+ * Effort levels this row accepts, ascending. Empty hides the control.
+ */
+reasoning_efforts: Array<ReasoningEffort>, };
 
 /**
  * `GET /code/harnesses/{kind}/models`.
  */
-export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>, };
+export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>, 
+/**
+ * Every effort level this engine accepts, ascending, across all models.
+ *
+ * The outer bound, for a client holding a model row this list does not
+ * contain — a gateway catalog row, or a session still on a model the
+ * engine has since dropped. A row's own `reasoning_efforts` is narrower
+ * and wins where it exists. Empty means the engine takes no effort
+ * control at all.
+ */
+reasoning_efforts: Array<ReasoningEffort>, };
 
 /**
  * Severity of a visible-degradation notice.
@@ -3305,7 +3323,7 @@ auto_run_on_create: boolean, };
  * Persisted per chat as the token from [`Self::as_str`] and threaded into the
  * model request for each turn.
  */
-export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**

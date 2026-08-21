@@ -273,6 +273,10 @@ impl CodeRuntime {
                 harness,
                 CodePermissionMode::Auto,
                 model,
+                // A watch task inherits the engine and model of the session
+                // that spawned it, but not an effort a person picked for their
+                // own conversation.
+                None,
             )
             .await?;
         let now = Utc::now();
@@ -519,7 +523,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             // Running and stand by.
             tokio::spawn(async move {
                 if let Err(err) = task_runtime
-                    .submit_turn(&task_owner, session_id, instruction, None, Vec::new())
+                    .submit_turn(&task_owner, session_id, instruction, None, None, Vec::new())
                     .await
                 {
                     warn!(

@@ -207,7 +207,7 @@ pub struct CompactionSettingsUpdate {
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
 /// supplies `None` when the field is absent.
-pub(super) fn double_option<'de, D, T>(
+pub(crate) fn double_option<'de, D, T>(
     deserializer: D,
 ) -> std::result::Result<Option<Option<T>>, D::Error>
 where

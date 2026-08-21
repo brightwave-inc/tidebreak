@@ -13,7 +13,8 @@ use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
-    SequencedCodeEventFrame, SetAttentionBody, SetPermissionModeBody, SteerBody, SubmitTurnBody,
+    SequencedCodeEventFrame, SetAttentionBody, SetPermissionModeBody, SetReasoningEffortBody,
+    SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::SubmitTurnOutcome;
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
@@ -24,7 +25,13 @@ pub async fn create_session(
     Json(body): Json<CreateSessionBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let session = code
-        .create_session(workspace_id, body.harness, body.permission_mode, body.model)
+        .create_session(
+            workspace_id,
+            body.harness,
+            body.permission_mode,
+            body.model,
+            body.reasoning_effort,
+        )
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -66,7 +73,13 @@ pub async fn submit_turn(
     // while the engine works, not after.
     crate::code::titling::spawn_for_turn(&state, code.owner(), id, message.clone());
     match code
-        .submit_turn(id, message.clone(), body.model, attachments)
+        .submit_turn(
+            id,
+            message.clone(),
+            body.model,
+            body.reasoning_effort,
+            attachments,
+        )
         .await?
     {
         SubmitTurnOutcome::Ran(turn) => {
@@ -188,6 +201,20 @@ pub async fn set_session_permission_mode(
     Json(body): Json<SetPermissionModeBody>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.set_permission_mode(id, body.permission_mode).await?;
+    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+}
+
+/// `POST /code/sessions/{id}/effort` — change a session's reasoning effort.
+///
+/// No relaunch: every adapter reads the level off the turn, so the next turn
+/// carries it. Refused while a turn is running and after the session ends, on
+/// the same rule the mode route applies.
+pub async fn set_session_reasoning_effort(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+    Json(body): Json<SetReasoningEffortBody>,
+) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+    let session = code.set_reasoning_effort(id, body.reasoning_effort).await?;
     Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
 }
 

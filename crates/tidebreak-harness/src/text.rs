@@ -24,9 +24,29 @@ pub(crate) fn truncate_on_char_boundary(text: &mut String, max_bytes: usize) {
     text.truncate(end);
 }
 
+/// Whether `needle` appears in `text` as a whole word.
+///
+/// Engines that read a keyword out of a prompt tokenize it, so a substring of
+/// a longer word is not a match. Comparison is case-insensitive because the
+/// engines that do this lowercase the token first.
+pub(crate) fn contains_word(text: &str, needle: &str) -> bool {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_word_match_ignores_case_and_refuses_a_substring() {
+        assert!(contains_word("please ultracode this", "ultracode"));
+        assert!(contains_word("Ultracode!", "ultracode"));
+        assert!(contains_word("do it\nultracode", "ultracode"));
+        assert!(!contains_word("ultracodex", "ultracode"));
+        assert!(!contains_word("superultracode", "ultracode"));
+        assert!(!contains_word("nothing here", "ultracode"));
+    }
 
     #[test]
     fn cap_landing_inside_a_character_drops_that_character() {

@@ -21,6 +21,8 @@ import type {
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
+import type { ReasoningEffort } from "../api/types";
+import type { ParsedHarnessModel } from "./parsers";
 
 const toastError = vi.hoisted(() => vi.fn());
 vi.mock("sonner", () => ({
@@ -179,8 +181,14 @@ describe("NewWorkspaceDialog", () => {
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "codex" as const,
             models: [
-              { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
+              {
+                id: "gpt-5.6-sol",
+                label: "GPT 5.6 Sol",
+                default: true,
+                reasoning_efforts: [],
+              },
             ],
+            reasoning_efforts: [],
           })),
         })}
       >
@@ -249,7 +257,15 @@ describe("NewWorkspaceDialog", () => {
         value={app({
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "claude_code" as const,
-            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+            models: [
+              {
+                id: "sonnet",
+                label: "Sonnet",
+                default: true,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
           })),
         })}
       >
@@ -298,7 +314,15 @@ describe("NewWorkspaceDialog", () => {
           createCodeSession,
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "claude_code" as const,
-            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+            models: [
+              {
+                id: "sonnet",
+                label: "Sonnet",
+                default: true,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
           })),
         })}
       >
@@ -334,14 +358,23 @@ describe("NewWorkspaceDialog", () => {
     });
     const codex = deferred<{
       kind: "codex";
-      models: { id: string; label: string; default: boolean }[];
+      models: ParsedHarnessModel[];
+      reasoning_efforts: ReasoningEffort[];
     }>();
     const listCodeHarnessModels = vi.fn((kind: HarnessKind) =>
       kind === "codex"
         ? codex.promise
         : Promise.resolve({
             kind: "claude_code" as const,
-            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+            models: [
+              {
+                id: "sonnet",
+                label: "Sonnet",
+                default: true,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
           }),
     );
     await renderWithRouter(
@@ -368,7 +401,15 @@ describe("NewWorkspaceDialog", () => {
     await act(async () => {
       codex.resolve({
         kind: "codex",
-        models: [{ id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true }],
+        models: [
+          {
+            id: "gpt-5.6-luna",
+            label: "GPT 5.6 Luna",
+            default: true,
+            reasoning_efforts: [],
+          },
+        ],
+        reasoning_efforts: [],
       });
     });
     expect(
@@ -390,7 +431,15 @@ describe("NewWorkspaceDialog", () => {
         value={app({
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "claude_code" as const,
-            models: [{ id: "sonnet", label: "Sonnet", default: true }],
+            models: [
+              {
+                id: "sonnet",
+                label: "Sonnet",
+                default: true,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
           })),
         })}
       >
@@ -435,8 +484,14 @@ describe("NewWorkspaceDialog", () => {
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "codex" as const,
             models: [
-              { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
+              {
+                id: "gpt-5.6-luna",
+                label: "GPT 5.6 Luna",
+                default: true,
+                reasoning_efforts: [],
+              },
             ],
+            reasoning_efforts: [],
           })),
         })}
       >
@@ -478,10 +533,26 @@ describe("NewWorkspaceDialog", () => {
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "opencode" as HarnessKind,
             models: [
-              { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
-              { id: "claude-opus-5", label: "Claude Opus 5", default: false },
-              { id: "grok-4.5", label: "Grok 4.5", default: false },
+              {
+                id: "gpt-5.6-sol",
+                label: "GPT 5.6 Sol",
+                default: true,
+                reasoning_efforts: [],
+              },
+              {
+                id: "claude-opus-5",
+                label: "Claude Opus 5",
+                default: false,
+                reasoning_efforts: [],
+              },
+              {
+                id: "grok-4.5",
+                label: "Grok 4.5",
+                default: false,
+                reasoning_efforts: [],
+              },
             ],
+            reasoning_efforts: [],
           })),
         })}
       >

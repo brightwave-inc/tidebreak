@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
     BoundedError, CodePermissionMode, CodeUsage, Diffstat, FileChangeKind, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    HarnessCommand, HarnessKind, HarnessNoticeLevel, ReasoningEffort, ToolDetail, ToolOutcome,
 };
 
 pub mod browser_channel;
@@ -40,8 +40,8 @@ pub use launch::{
 pub use pin::{ensure_installed, managed_binary, pin_for, HarnessPin, PINS};
 pub use probe::{
     display_model_label, filter_child_env, infer_listed_default, list_cli_models, observe_version,
-    prefer_gateway_models, probe_shell, resolve_binary, HostEnv, ListedHarnessModel, ProbeCapture,
-    ProbeError,
+    prefer_gateway_models, probe_shell, resolve_binary, with_reasoning_efforts, HostEnv,
+    ListedHarnessModel, ProbeCapture, ProbeError,
 };
 
 /// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::CodeEvent`]
@@ -192,6 +192,10 @@ pub struct TurnInput {
     pub text: String,
     /// Model for this turn, when the engine takes one per child.
     pub model: Option<String>,
+    /// Reasoning effort for this turn. `None` leaves the engine's own default
+    /// alone. The adapter maps the level onto whatever its engine spells, and
+    /// degrades one the engine does not offer rather than refusing the turn.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Images already published to the blob store and hydrated for this turn.
     pub images: Vec<TurnImage>,
 }
@@ -382,6 +386,8 @@ pub struct SessionSpec {
     pub permission_mode: CodePermissionMode,
     /// Engine model id, when the session chose one.
     pub model: Option<String>,
+    /// Reasoning effort the session starts on, when it chose one.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Engine-native resume token, when continuing a prior session.
     pub resume_ref: Option<String>,
     /// Extra argv from settings. Still subject to the bypass-flag denylist.
@@ -424,6 +430,16 @@ pub trait HarnessAdapter: Send + Sync {
     /// legal; silence is not.
     fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps;
 
+    /// Every effort level this engine accepts, ascending, across all models.
+    ///
+    /// The ladder a *model* takes can be narrower — Codex states one per row —
+    /// so this is the outer bound, for a caller holding a model row the engine
+    /// did not list. Empty means the engine takes no effort control.
+    fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        let _ = probe;
+        Vec::new()
+    }
+
     /// Models this engine currently lists. Empty when the CLI has no catalog.
     async fn list_models(&self, probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
         let Some(binary) = probe.binary_path.as_deref() else {
@@ -461,6 +477,23 @@ pub trait HarnessSession: Send + Sync {
 
     /// Ask the engine to stop the current turn.
     async fn interrupt(&self) -> Result<(), HarnessError>;
+
+    /// Move a live session onto a new permission mode.
+    ///
+    /// The default refuses, and the caller relaunches the engine against the
+    /// new mode. Override it when the engine has a channel that re-postures a
+    /// running session — a control request it honors on an open child, or a
+    /// per-turn policy field it reads on the next turn. Either way the new
+    /// mode governs from the next turn on; this is not a way to re-posture the
+    /// turn already in flight.
+    ///
+    /// An adapter that accepts the change owns remembering it: a later
+    /// relaunch of the same session must compose the new mode, not the one the
+    /// spec was built with.
+    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+        let _ = mode;
+        Err(HarnessError::PermissionModeSwitchUnsupported)
+    }
 
     /// Inject a mid-turn user message, when the engine accepts one.
     ///
@@ -556,6 +589,13 @@ pub enum HarnessError {
     /// rather than treat this as one failed turn.
     #[error("the engine no longer has this session: {0}")]
     ResumeLost(String),
+    /// The engine cannot change permission mode on a live session.
+    ///
+    /// Distinct from [`Self::PermissionModeUnsupported`]: the mode itself is
+    /// fine, the engine just fixes its posture at launch. The caller relaunches
+    /// against the new mode instead of giving up.
+    #[error("this engine sets its permission mode at launch")]
+    PermissionModeSwitchUnsupported,
     /// The adapter has no verified same-turn steering channel.
     #[error("mid-turn steering is not available on this engine")]
     SteeringUnsupported,

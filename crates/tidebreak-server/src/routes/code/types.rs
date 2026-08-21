@@ -8,8 +8,8 @@ use tidebreak_core::{
     CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle,
     CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch,
     CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
-    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest, QuickAction, RepoId,
-    WorkspaceId,
+    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest, QuickAction,
+    ReasoningEffort, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -114,6 +114,10 @@ pub struct CodeSessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model: Option<String>,
+    /// Absent means the engine's own default, which is not any level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub lifecycle: CodeSessionLifecycle,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -134,6 +138,7 @@ impl From<CodeSession> for CodeSessionSnapshot {
             harness_resume_ref: session.harness_resume_ref,
             permission_mode: session.permission_mode,
             model: session.model,
+            reasoning_effort: session.reasoning_effort,
             lifecycle: session.lifecycle,
             fence_reason: session.fence_reason,
             attention: session.attention,
@@ -237,6 +242,9 @@ pub struct HarnessModel {
     pub id: String,
     pub label: String,
     pub default: bool,
+    /// Effort levels this row accepts, ascending. Empty hides the control.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<ReasoningEffort>,
 }
 
 /// `GET /code/harnesses/{kind}/models`.
@@ -244,6 +252,15 @@ pub struct HarnessModel {
 pub struct HarnessModelList {
     pub kind: HarnessKind,
     pub models: Vec<HarnessModel>,
+    /// Every effort level this engine accepts, ascending, across all models.
+    ///
+    /// The outer bound, for a client holding a model row this list does not
+    /// contain — a gateway catalog row, or a session still on a model the
+    /// engine has since dropped. A row's own `reasoning_efforts` is narrower
+    /// and wins where it exists. Empty means the engine takes no effort
+    /// control at all.
+    #[serde(default)]
+    pub reasoning_efforts: Vec<ReasoningEffort>,
 }
 
 /// Body of `POST /code/repos/clone`.
@@ -1019,6 +1036,8 @@ pub struct CreateSessionBody {
     pub permission_mode: CodePermissionMode,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Body of `POST /code/sessions/{id}/mode`.
@@ -1028,6 +1047,16 @@ pub struct SetPermissionModeBody {
     pub permission_mode: CodePermissionMode,
 }
 
+/// Body of `POST /code/sessions/{id}/effort`.
+///
+/// `null` is a choice, not an omission: it hands the level back to the
+/// engine's own default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetReasoningEffortBody {
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 /// Body of `POST /code/sessions/{id}/turns`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1035,6 +1064,12 @@ pub struct SubmitTurnBody {
     pub message: String,
     #[serde(default)]
     pub model: Option<String>,
+    /// Present at all means "use this from now on"; an explicit `null` is the
+    /// engine default. Absent leaves the session's stored choice alone, which
+    /// is why plain `Option<Option<_>>` will not do: serde reads `null` and an
+    /// absent field the same way without the helper.
+    #[serde(default, deserialize_with = "crate::routes::code::double_option")]
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
     #[serde(default)]
     pub attachments: Vec<SubmitTurnAttachment>,
 }
