@@ -39,6 +39,7 @@
       },
       "suspicious": {
         "noDebugger": "error",
+        "noDuplicateCase": "error",
         "noDuplicateClassMembers": "error",
         "noDuplicateJsxProps": "error",
         "noDuplicateObjectKeys": "error",
