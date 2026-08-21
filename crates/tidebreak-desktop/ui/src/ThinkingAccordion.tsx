@@ -25,12 +25,23 @@ import { cn } from "@/lib/utils";
 export function ThinkingAccordion({
   text,
   streaming,
+  expandWhileStreaming = true,
 }: {
   text: string;
   /** Reasoning is still arriving and no answer has started. */
   streaming: boolean;
+  /**
+   * Whether live reasoning opens itself.
+   *
+   * A surface that pauses to think several times in one turn — code mode does,
+   * between every pair of tool calls — would otherwise stack open blocks until
+   * they are the whole viewport. It passes false: the line still says
+   * "Thinking" and still pulses, so the work is legible, but the text is one
+   * click away rather than in the way.
+   */
+  expandWhileStreaming?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(streaming);
+  const [expanded, setExpanded] = useState(streaming && expandWhileStreaming);
   const toggledByReader = useRef(false);
 
   useEffect(() => {
