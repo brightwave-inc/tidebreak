@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
+import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -15,7 +16,16 @@ import {
 import { AppContextProvider } from "./AppContext";
 
 import { resolveServerInfo } from "./boot";
-import { remoteMachineAccessToken } from "./remoteMachine";
+import {
+  BootFailure,
+  type BootAttachment,
+  type BootStage,
+} from "./BootFailure";
+import {
+  disconnectRemoteMachine,
+  remoteMachineAccessToken,
+  remoteMachineState,
+} from "./remoteMachine";
 import {
   deletionDescription,
   detachChatFolders,
@@ -132,7 +142,22 @@ function GatedShellHooks({
  */
 export function AppShell() {
   const navigate = useNavigate();
-  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootFailure, setBootFailure] = useState<{
+    stage: BootStage;
+    error: unknown;
+  } | null>(null);
+  // Bumped by the boot screen's "Try again". Boot is otherwise a mount-once
+  // effect, so without this a reader who fixed the cause — reconnected the
+  // VPN, woke the other machine — had no way to act on it but to quit.
+  const [bootAttempt, setBootAttempt] = useState(0);
+  // What the shell says this window is attached to. Read separately from
+  // `info` because the connect stage can fail before `info` exists, and the
+  // boot screen's whole job in that case is to name the machine it could not
+  // reach.
+  const [bootAttachment, setBootAttachment] = useState<BootAttachment | null>(
+    null,
+  );
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -269,12 +294,49 @@ export function AppShell() {
     "show-shortcuts": () => setShortcutsOpen(true),
   };
 
+  // The app version, for the boot screen's debug report. Only the packaged
+  // host can report one; a browser dev build simply has none.
+  useEffect(() => {
+    if (!hasNativeHost()) return;
+    let cancelled = false;
+    void getVersion()
+      .then((value) => {
+        if (!cancelled) setAppVersion(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Asked before the connection, and independently of it: this is the
+      // shell's own record of the address, so it still answers when the
+      // attachment it describes is exactly what failed to connect.
+      try {
+        const state = await remoteMachineState();
+        if (!cancelled) {
+          setBootAttachment({
+            attachment: state.attachment,
+            baseUrl: state.baseUrl,
+            gatewayAuth: null,
+          });
+        }
+      } catch {
+        // Not knowing the attachment costs the boot screen one sentence. It
+        // must never be the reason boot itself reports a failure.
+      }
       try {
         const server = await resolveServerInfo();
         if (cancelled) return;
+        setBootFailure(null);
+        setBootAttachment({
+          attachment: server.attachment,
+          baseUrl: server.attachment === "remote" ? server.baseUrl : null,
+          gatewayAuth: server.gatewayAuth,
+        });
         setInfo(server);
         setClient(new ApiClient(server.baseUrl, server.token));
         // Outputs are read over the same API; their module holds the
@@ -282,13 +344,13 @@ export function AppShell() {
         connectOutputs(server.baseUrl, server.token);
         setStatus(`connected ${server.baseUrl}`);
       } catch (err) {
-        if (!cancelled) setBootError(String(err));
+        if (!cancelled) setBootFailure({ stage: "connect", error: err });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bootAttempt]);
 
   useEffect(() => {
     if (!client || !info?.gatewayAuth) return;
@@ -323,8 +385,9 @@ export function AppShell() {
         setModels(catalog.models);
         setDefaultModelKey(resolvedRoleKey(catalog.roles, "chat"));
         setProviders(providerList.providers);
+        setBootFailure(null);
       } catch (err) {
-        if (!cancelled) setBootError(String(err));
+        if (!cancelled) setBootFailure({ stage: "catalog", error: err });
       }
     })();
     return () => {
@@ -706,16 +769,53 @@ export function AppShell() {
     if (confirmed) await desktopUpdates.restart();
   }
 
-  if (bootError) {
+  /**
+   * Run boot again from the top.
+   *
+   * Clearing the client as well as the failure matters: a catalog-stage
+   * failure leaves a client built against a machine that just proved
+   * unreachable, and re-running connect is the only thing that replaces it —
+   * after a detach it has to, because the address it holds is gone.
+   */
+  function retryBoot() {
+    setBootFailure(null);
+    setClient(null);
+    setInfo(null);
+    setStatus("starting…");
+    setBootAttempt((attempt) => attempt + 1);
+  }
+
+  /**
+   * Forget the attached machine and boot against the server inside this app.
+   *
+   * The same command the Machine settings panel runs, offered here because a
+   * reader whose remote machine is unreachable cannot get to that panel — the
+   * panel lives behind the client that failed to reach it.
+   */
+  async function workOnThisComputer() {
+    try {
+      await disconnectRemoteMachine();
+      setBootAttachment({
+        attachment: "local",
+        baseUrl: null,
+        gatewayAuth: null,
+      });
+      retryBoot();
+    } catch (err) {
+      setBootFailure({ stage: "connect", error: err });
+    }
+  }
+
+  if (bootFailure) {
     return (
-      <div className="boot">
-        <WindowDragStrip />
-        <div className="boot-brand">
-          <Logomark />
-          <h1>Tidebreak</h1>
-        </div>
-        <p>{bootError}</p>
-      </div>
+      <BootFailure
+        stage={bootFailure.stage}
+        error={bootFailure.error}
+        attachment={bootAttachment}
+        appVersion={appVersion}
+        onRetry={retryBoot}
+        onWorkLocally={workOnThisComputer}
+      />
     );
   }
 
