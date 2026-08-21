@@ -1064,8 +1064,8 @@ mod resource_dir_tests {
     #[test]
     fn desktop_sibling_exe_rejects_missing_file() {
         let dir = temp_dir("sibling-missing");
-        let err = desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak")
-            .expect_err("should fail");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
         assert!(
             err.contains("not found"),
             "error should mention not found: {err}"
@@ -1088,8 +1088,8 @@ mod resource_dir_tests {
         let dir = temp_dir("sibling-noexec");
         let exe_path = sibling_path(&dir);
         fs::write(&exe_path, []).expect("write");
-        let err = desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak")
-            .expect_err("should fail");
+        let err =
+            desktop_sibling_exe_from(&desktop_path(&dir), "tidebreak").expect_err("should fail");
         assert!(err.contains("not executable"), "error: {err}");
         let _ = fs::remove_dir_all(dir);
     }
