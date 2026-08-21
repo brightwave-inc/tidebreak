@@ -1983,9 +1983,7 @@ done
 
         let spec = BrowserChannelSpec::new(
             std::path::PathBuf::from("/tmp/browser-cap.json"),
-            std::path::PathBuf::from(OsString::from_vec(
-                b"/tmp/tidebreak-\xff".to_vec(),
-            )),
+            std::path::PathBuf::from(OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec())),
         );
         let error = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
