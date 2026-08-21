@@ -140,8 +140,9 @@ use tidebreak_core::{
     validate_list_folder_arguments, validate_read_connected_file_arguments,
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
     write_output_to_connected_folder_tool_spec, AgentConfig, AgentError, ApprovalClass, BlobStore,
-    CachingSecretProvider, Config, CreateAppTool, DbStore, FsBlobStore, KeychainSecretProvider,
-    ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool, ToolRegistry, WriteFile,
+    BundledSecretProvider, CachingSecretProvider, Config, CreateAppTool, DbStore, FsBlobStore,
+    KeychainSecretProvider, ListDir, Profile, ReadFile, Result, SecretProvider, Store, Tool,
+    ToolRegistry, WriteFile,
 };
 
 /// Public contract for desktop browser adapters. The desktop implements
@@ -1428,10 +1429,13 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 
 /// The secret store the configured profile keeps its credentials in.
 ///
-/// Wrapped in a [`CachingSecretProvider`] so a key costs one keychain read per
-/// process rather than one per turn: [`resolver::ConfiguredResolver`] rebuilds
-/// its route set on every turn, and each candidate route reads its provider's
-/// credential to decide whether it exists.
+/// Two decorators over the OS keychain, and the order matters.
+/// [`BundledSecretProvider`] puts every key in one stored item, so an app
+/// update costs one access prompt rather than one per credential.
+/// [`CachingSecretProvider`] sits above it so a key costs one read of that
+/// item per process rather than one per turn: [`resolver::ConfiguredResolver`]
+/// rebuilds its route set on every turn, and each candidate route reads its
+/// provider's credential to decide whether it exists.
 ///
 /// The gateway session key is the one exception to memoized misses: a session
 /// can land in the keychain without this cache observing the write — a
@@ -1440,15 +1444,27 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// cached `None` would then hide the session from the sync loop until
 /// restart. Its misses re-ask the store instead; an absent item answers
 /// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
-fn secret_provider(config: &Config) -> Arc<dyn SecretProvider> {
+fn secret_provider(config: &Config) -> ProfileSecrets {
     let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
         Some(service) => KeychainSecretProvider::with_service(service),
         None => KeychainSecretProvider::new(),
     });
-    Arc::new(
-        CachingSecretProvider::new(keychain)
+    let bundle = Arc::new(BundledSecretProvider::new(keychain));
+    let provider = Arc::new(
+        CachingSecretProvider::new(bundle.clone())
             .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
-    )
+    );
+    ProfileSecrets { bundle, provider }
+}
+
+/// The profile's credential store, at the two layers callers need.
+struct ProfileSecrets {
+    /// The single stored item. Held apart from `provider` because re-homing
+    /// and migration act on the item itself, which is below what the
+    /// `SecretProvider` contract can express.
+    bundle: Arc<BundledSecretProvider>,
+    /// What every consumer uses: the bundle behind the per-process read cache.
+    provider: Arc<dyn SecretProvider>,
 }
 
 /// Re-home the configured profile's credentials — see [`secret_rehome`].
@@ -1460,7 +1476,7 @@ pub async fn rehome_configured_secrets(
     config: &Config,
 ) -> Result<Vec<(String, secret_rehome::RehomeOutcome)>> {
     let store = connect_store(config).await?;
-    secret_rehome::rehome_secrets(&*store, &*secret_provider(config)).await
+    secret_rehome::rehome_secrets(&*store, &secret_provider(config).bundle).await
 }
 
 // Every parameter is one optional native bridge an embedding may supply;
@@ -1491,16 +1507,19 @@ async fn bind_inner(
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let db = connect_db(&config).await?;
     let store: Arc<dyn Store> = db.clone();
-    let secrets = secret_provider(&config);
-    // An app update replaces this binary, and macOS pins each keychain
-    // item's access to the creating binary's signature — so the first boot
-    // of a new binary re-homes every stored credential before any consumer
-    // reads one. Inline, not spawned: a concurrent pass could interleave
-    // with token refresh and strand a session (see the function), and the
-    // pass is cheap — one read+rewrite per stored credential, once per
-    // binary, with later boots of the same binary skipping it entirely.
+    let ProfileSecrets {
+        bundle: secret_bundle,
+        provider: secrets,
+    } = secret_provider(&config);
+    // An app update replaces this binary, and macOS pins a keychain item's
+    // access to the creating binary's signature — so the first boot of a new
+    // binary re-homes the credential bundle before any consumer reads from
+    // it. Inline, not spawned: a concurrent pass could interleave with token
+    // refresh and strand a session (see the function), and the pass is cheap —
+    // one read+rewrite of one item, once per binary, with later boots of the
+    // same binary skipping it entirely.
     // Best-effort: a failure here must not take boot down with it.
-    if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &*secrets).await {
+    if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &secret_bundle).await {
         tracing::warn!("could not re-home stored credentials: {error}");
     }
     // The product boot path is where this platform's OS-managed (MDM) policy

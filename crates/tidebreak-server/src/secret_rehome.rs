@@ -1,4 +1,10 @@
-//! Re-home stored credentials so the running binary owns their keychain items.
+//! Re-home stored credentials so the running binary owns their keychain item.
+//!
+//! Every credential this profile stores lives in one item — see
+//! [`BundledSecretProvider`] for why. This pass does two things to it: it
+//! rewrites that item so the running binary owns it, and it sweeps up any
+//! per-key items left behind by a build that predates the bundle, moving each
+//! value in and removing the old item.
 //!
 //! macOS grants keychain access on the code signature of the process that
 //! *created* an item. An item created by a binary carrying the dev designated
@@ -10,13 +16,16 @@
 //! rebuild invalidates it. Credentials stored before a machine had a stable dev
 //! identity therefore prompt once per credential on every launch, forever.
 //!
-//! Rewriting each value from a signed binary is the durable repair: delete the
+//! Rewriting the value from a signed binary is the durable repair: delete the
 //! item, then store the value again so the new item belongs to the current
 //! signature. Read the value first and hold it in memory, so a failure to
-//! delete leaves the credential in place.
+//! delete leaves the credentials in place.
 //!
-//! Two entry points run that rewrite. Server boot calls
-//! [`rehome_once_per_binary`], which re-homes once per binary (an app update
+//! Because there is one item, that repair now costs one approval rather than
+//! one per credential — which is the whole reason the bundle exists.
+//!
+//! Two entry points run the pass. Server boot calls
+//! [`rehome_once_per_binary`], which runs once per binary (an app update
 //! always replaces the binary, so that is once per update) before any
 //! credential consumer is constructed. And `tidebreak rehome-secrets` runs
 //! [`rehome_secrets`] on demand — the manual repair for a dev machine whose
@@ -25,7 +34,10 @@
 use crate::web_search::WebSearchProviderKind;
 use tidebreak_code_execution::{DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY};
 use tidebreak_core::connected_app::ConnectedAppKind;
-use tidebreak_core::{Result, SecretProvider, Store};
+use tidebreak_core::{
+    AbsorbOutcome, BundledSecretProvider, RehomeItemOutcome, Result, Store, BUNDLE_KEY,
+    DESKTOP_REMOTE_MACHINE_TOKEN_KEY,
+};
 
 use crate::connectors::{CHATGPT_SECRET_KEY, GATEWAY_SECRET_KEY};
 use crate::mcp_config::env_secret_key;
@@ -121,6 +133,10 @@ fn static_secret_keys() -> Vec<String> {
     // the user re-pairs — so they must not be missed here.
     keys.push(GATEWAY_SECRET_KEY.to_string());
     keys.push(CHATGPT_SECRET_KEY.to_string());
+    // The desktop shell's bearer for a machine attached with a static token.
+    // Written by the shell, not the server, and missing from this list until
+    // the bundle landed — so it was the one credential the pass never swept.
+    keys.push(DESKTOP_REMOTE_MACHINE_TOKEN_KEY.to_string());
     keys.extend(
         WEB_SEARCH_CREDENTIAL_KEYS
             .iter()
@@ -130,13 +146,63 @@ fn static_secret_keys() -> Vec<String> {
     keys
 }
 
-/// Re-home every stored credential, reporting each key in the order of
+/// Re-home the credential bundle, then sweep any per-key items into it.
+///
+/// The bundle is re-homed first. On a profile that has already migrated that
+/// is the entire pass; on one that has not, the item does not exist yet and
+/// the sweep creates it — from this binary, so it is owned from birth and
+/// there is nothing to re-home afterwards.
+///
+/// Reports the bundle item first, then each key in the order of
 /// [`stored_secret_keys`].
 pub async fn rehome_secrets(
     store: &dyn Store,
-    secrets: &dyn SecretProvider,
+    secrets: &BundledSecretProvider,
 ) -> Result<Vec<(String, RehomeOutcome)>> {
     Ok(rehome_keys(secrets, stored_secret_keys(store).await?).await)
+}
+
+/// The pass itself, over an already-enumerated key list.
+async fn rehome_keys(
+    secrets: &BundledSecretProvider,
+    keys: Vec<String>,
+) -> Vec<(String, RehomeOutcome)> {
+    let mut outcomes = vec![(
+        BUNDLE_KEY.to_string(),
+        match secrets.rehome_bundle_item().await {
+            RehomeItemOutcome::Absent => RehomeOutcome::Absent,
+            RehomeItemOutcome::Rehomed => RehomeOutcome::Rehomed,
+            RehomeItemOutcome::Skipped(reason) => RehomeOutcome::Skipped(reason),
+            RehomeItemOutcome::Lost(reason) => RehomeOutcome::Lost(reason),
+        },
+    )];
+    outcomes.extend(
+        secrets
+            .absorb_legacy_items(&keys)
+            .await
+            .into_iter()
+            .map(|(key, outcome)| (key, absorbed(outcome))),
+    );
+    outcomes
+}
+
+/// What a swept per-key item means in this module's vocabulary.
+///
+/// [`RehomeOutcome::Lost`] is deliberately unreachable here. The sweep stores
+/// the value in the bundle and reads it back *before* touching the old item,
+/// so the "removed, then could not store it again" state the per-item repair
+/// could reach simply does not exist for it. A value that reached the bundle
+/// but whose old item survives is reported as skipped: harmless, because the
+/// bundle wins on read, and retried on the next launch.
+fn absorbed(outcome: AbsorbOutcome) -> RehomeOutcome {
+    match outcome {
+        AbsorbOutcome::Absent => RehomeOutcome::Absent,
+        AbsorbOutcome::Absorbed => RehomeOutcome::Rehomed,
+        AbsorbOutcome::CopiedNotRemoved(reason) => RehomeOutcome::Skipped(format!(
+            "it is stored in the credential bundle, but the old item remains — {reason}"
+        )),
+        AbsorbOutcome::Skipped(reason) => RehomeOutcome::Skipped(reason),
+    }
 }
 
 /// The settings key recording which binary last completed a re-home pass.
@@ -189,7 +255,7 @@ fn binary_stamp() -> String {
 /// stamped).
 pub(crate) async fn rehome_once_per_binary(
     store: &dyn Store,
-    secrets: &dyn SecretProvider,
+    secrets: &BundledSecretProvider,
 ) -> Result<bool> {
     let stamp = binary_stamp();
     if store
@@ -237,44 +303,15 @@ pub(crate) async fn rehome_once_per_binary(
     Ok(true)
 }
 
-async fn rehome_keys(
-    secrets: &dyn SecretProvider,
-    keys: Vec<String>,
-) -> Vec<(String, RehomeOutcome)> {
-    let mut outcomes = Vec::new();
-    for key in keys {
-        let outcome = rehome_one(secrets, &key).await;
-        outcomes.push((key, outcome));
-    }
-    outcomes
-}
-
-async fn rehome_one(secrets: &dyn SecretProvider, key: &str) -> RehomeOutcome {
-    let value = match secrets.get_secret(key).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return RehomeOutcome::Absent,
-        Err(error) => return RehomeOutcome::Skipped(format!("could not read it: {error}")),
-    };
-    if let Err(error) = secrets.delete_secret(key).await {
-        return RehomeOutcome::Skipped(format!("could not remove the old item: {error}"));
-    }
-    if let Err(error) = secrets.set_secret(key, &value).await {
-        return RehomeOutcome::Lost(format!("could not store it again: {error}"));
-    }
-    match secrets.get_secret(key).await {
-        Ok(Some(stored)) if stored == value => RehomeOutcome::Rehomed,
-        Ok(_) => RehomeOutcome::Lost("it did not read back unchanged".to_string()),
-        Err(error) => RehomeOutcome::Lost(format!("it could not be read back: {error}")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use std::sync::Arc;
+
     use async_trait::async_trait;
-    use tidebreak_core::Result;
+    use tidebreak_core::{Result, SecretProvider};
 
     use super::*;
 
@@ -283,6 +320,19 @@ mod tests {
         values: Mutex<BTreeMap<String, String>>,
         ops: Mutex<Vec<String>>,
         fail_delete: bool,
+    }
+
+    impl RecordingSecrets {
+        /// The keys the store actually holds — the count this change is about.
+        fn item_keys(&self) -> Vec<String> {
+            self.values.lock().unwrap().keys().cloned().collect()
+        }
+    }
+
+    /// The pass under test operates on the bundle, so a test store has to be
+    /// wrapped the way boot wraps the real keychain.
+    fn bundled(secrets: Arc<RecordingSecrets>) -> BundledSecretProvider {
+        BundledSecretProvider::new(secrets)
     }
 
     #[async_trait]
@@ -310,23 +360,19 @@ mod tests {
         }
     }
 
-    /// The repair only works if the item is removed before the value is stored
-    /// again — an in-place update keeps the original item, and with it the
-    /// ownership that makes macOS prompt.
+    /// The point of the pass: a credential left in its own item is moved into
+    /// the bundle and the old item is removed, so the profile is down to one
+    /// item — and one access prompt — afterwards.
     #[tokio::test]
-    async fn stored_values_are_deleted_then_written_back_intact() {
+    async fn a_per_key_item_is_swept_into_the_bundle_and_removed() {
         let key = ProviderKind::Anthropic.credential_key();
-        let secrets = RecordingSecrets::default();
-        secrets
-            .set_secret(&key, "test-anthropic-key")
-            .await
-            .unwrap();
-        secrets.ops.lock().unwrap().clear();
+        let store = Arc::new(RecordingSecrets::default());
+        store.set_secret(&key, "test-anthropic-key").await.unwrap();
+        let secrets = bundled(store.clone());
 
         let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
 
-        let ops = secrets.ops.lock().unwrap().clone();
-        assert_eq!(ops, vec![format!("delete {key}"), format!("set {key}")]);
+        assert_eq!(store.item_keys(), vec![BUNDLE_KEY.to_string()]);
         assert_eq!(
             secrets.get_secret(&key).await.unwrap().as_deref(),
             Some("test-anthropic-key")
@@ -344,19 +390,54 @@ mod tests {
             .all(|(_, outcome)| *outcome == RehomeOutcome::Absent));
     }
 
-    /// A credential we cannot remove is left alone rather than reported as
-    /// repaired: the prompt will return, which is better than losing the value.
+    /// Once migrated, the pass rewrites one item however many credentials the
+    /// profile holds. This is the whole prompt reduction, asserted directly.
     #[tokio::test]
-    async fn an_undeletable_credential_is_kept_and_reported() {
+    async fn a_migrated_profile_re_homes_exactly_one_item() {
+        let store = Arc::new(RecordingSecrets::default());
+        for key in [
+            ProviderKind::Anthropic.credential_key(),
+            ProviderKind::Openai.credential_key(),
+            GATEWAY_SECRET_KEY.to_string(),
+            CHATGPT_SECRET_KEY.to_string(),
+        ] {
+            store.set_secret(&key, "value").await.unwrap();
+        }
+        let secrets = bundled(store.clone());
+        rehome_keys(&secrets, static_secret_keys()).await;
+        assert_eq!(store.item_keys(), vec![BUNDLE_KEY.to_string()]);
+        store.ops.lock().unwrap().clear();
+
+        // A second pass is what the next app update runs.
+        let outcomes = rehome_keys(&bundled(store.clone()), static_secret_keys()).await;
+
+        assert_eq!(
+            *store.ops.lock().unwrap(),
+            vec![format!("delete {BUNDLE_KEY}"), format!("set {BUNDLE_KEY}"),],
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, outcome)| *outcome != RehomeOutcome::Absent)
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec![BUNDLE_KEY],
+        );
+    }
+
+    /// A per-key item we cannot remove never costs the credential: the value
+    /// is stored in the bundle and read back before the old item is touched,
+    /// so a failed removal leaves it in both places and the bundle wins.
+    /// Reported as skipped so the next launch tries the removal again.
+    #[tokio::test]
+    async fn an_undeletable_item_keeps_the_credential_and_is_reported() {
         let key = ProviderKind::Anthropic.credential_key();
-        let secrets = RecordingSecrets {
+        let store = Arc::new(RecordingSecrets {
             fail_delete: true,
             ..RecordingSecrets::default()
-        };
-        secrets
-            .set_secret(&key, "test-anthropic-key")
-            .await
-            .unwrap();
+        });
+        store.set_secret(&key, "test-anthropic-key").await.unwrap();
+        let secrets = bundled(store.clone());
 
         let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
 
@@ -370,6 +451,8 @@ mod tests {
             .map(|(_, outcome)| outcome)
             .unwrap();
         assert!(matches!(outcome, RehomeOutcome::Skipped(_)), "{outcome:?}");
+        // Never `Lost`: the sweep stores before it removes, so the state where
+        // the value is gone from both places is unreachable.
     }
 
     /// A provider whose credential key is missing here would keep prompting
@@ -409,6 +492,16 @@ mod tests {
         assert!(keys.iter().any(|key| key == CHATGPT_SECRET_KEY));
     }
 
+    /// The desktop shell writes its remote-machine bearer, and this list is
+    /// what sweeps it. It was missing here for as long as the key existed, so
+    /// that credential kept its own item — and its own prompt — forever.
+    #[test]
+    fn the_desktop_remote_machine_token_is_covered() {
+        assert!(static_secret_keys()
+            .iter()
+            .any(|key| key == DESKTOP_REMOTE_MACHINE_TOKEN_KEY));
+    }
+
     /// MCP server environment values live under per-record `mcp.{id}.env_v1`
     /// keys; a re-home pass that skipped them would leave every MCP
     /// credential owned by the old signature.
@@ -440,32 +533,37 @@ mod tests {
         assert!(keys.contains(&expected), "{keys:?}");
     }
 
-    /// Re-homing is idempotent: a second pass over an already re-homed value
-    /// rewrites it again (the implementation cannot tell "already owned"
-    /// apart cheaply, so it rewrites unconditionally) and the value reads
-    /// back unchanged both times.
+    /// Re-homing is idempotent. The second pass finds nothing left to sweep
+    /// and rewrites the bundle item alone, and the value reads back unchanged
+    /// both times.
     #[tokio::test]
     async fn rehoming_twice_keeps_the_value_intact() {
         let key = ProviderKind::Anthropic.credential_key();
-        let secrets = RecordingSecrets::default();
-        secrets
-            .set_secret(&key, "test-anthropic-key")
-            .await
-            .unwrap();
+        let store = Arc::new(RecordingSecrets::default());
+        store.set_secret(&key, "test-anthropic-key").await.unwrap();
 
-        for _ in 0..2 {
+        for pass in 0..2 {
+            // A fresh provider each time: a second launch has no decoded copy
+            // of the item, and neither should the second pass here.
+            let secrets = bundled(store.clone());
             let outcomes = rehome_keys(&secrets, static_secret_keys()).await;
+            let swept = outcomes
+                .iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, outcome)| outcome);
             assert_eq!(
-                outcomes
-                    .iter()
-                    .find(|(candidate, _)| *candidate == key)
-                    .map(|(_, outcome)| outcome),
-                Some(&RehomeOutcome::Rehomed)
+                swept,
+                Some(&if pass == 0 {
+                    RehomeOutcome::Rehomed
+                } else {
+                    RehomeOutcome::Absent
+                }),
             );
             assert_eq!(
                 secrets.get_secret(&key).await.unwrap().as_deref(),
                 Some("test-anthropic-key")
             );
+            assert_eq!(store.item_keys(), vec![BUNDLE_KEY.to_string()]);
         }
     }
 
@@ -481,11 +579,9 @@ mod tests {
         .await
         .unwrap();
         let key = ProviderKind::Anthropic.credential_key();
-        let secrets = RecordingSecrets::default();
-        secrets
-            .set_secret(&key, "test-anthropic-key")
-            .await
-            .unwrap();
+        let items = Arc::new(RecordingSecrets::default());
+        items.set_secret(&key, "test-anthropic-key").await.unwrap();
+        let secrets = bundled(items.clone());
 
         assert!(rehome_once_per_binary(&store, &secrets).await.unwrap());
         assert_eq!(
@@ -493,9 +589,9 @@ mod tests {
             Some("test-anthropic-key")
         );
 
-        secrets.ops.lock().unwrap().clear();
+        items.ops.lock().unwrap().clear();
         assert!(!rehome_once_per_binary(&store, &secrets).await.unwrap());
-        assert!(secrets.ops.lock().unwrap().is_empty());
+        assert!(items.ops.lock().unwrap().is_empty());
     }
 
     /// A credential that could not be re-homed leaves the binary unstamped,
@@ -511,19 +607,17 @@ mod tests {
         .await
         .unwrap();
         let key = ProviderKind::Anthropic.credential_key();
-        let secrets = RecordingSecrets {
+        let items = Arc::new(RecordingSecrets {
             fail_delete: true,
             ..RecordingSecrets::default()
-        };
-        secrets
-            .set_secret(&key, "test-anthropic-key")
-            .await
-            .unwrap();
+        });
+        items.set_secret(&key, "test-anthropic-key").await.unwrap();
+        let secrets = bundled(items.clone());
 
         assert!(rehome_once_per_binary(&store, &secrets).await.unwrap());
         // Not stamped: the very next boot takes the pass again.
-        secrets.ops.lock().unwrap().clear();
+        items.ops.lock().unwrap().clear();
         assert!(rehome_once_per_binary(&store, &secrets).await.unwrap());
-        assert!(!secrets.ops.lock().unwrap().is_empty());
+        assert!(!items.ops.lock().unwrap().is_empty());
     }
 }
