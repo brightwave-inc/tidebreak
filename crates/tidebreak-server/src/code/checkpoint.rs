@@ -297,35 +297,29 @@ pub(crate) async fn produce_diff(
         });
     }
 
-    let mut body = String::new();
+    // One `git diff` for every included path rather than one spawn per file.
+    // `collect_changes` has already capped `listed.files` at `max_files` and
+    // set `listed.truncated` when it did, so passing those paths as a single
+    // pathspec preserves both bounds and the output order (git sorts by path,
+    // as does `--name-status -z`) while paying one process instead of N.
     let mut truncated = listed.truncated;
-    for (included, entry) in listed.files.iter().enumerate() {
-        if included >= bounds.max_files {
-            truncated = true;
-            break;
-        }
-        let remaining = bounds.max_bytes.saturating_sub(body.len());
-        if remaining == 0 {
-            truncated = true;
-            break;
-        }
-        let raw = git_bytes(
-            worktree,
-            &["diff", "--find-renames", from, to, "--", &entry.path],
-            GIT_SNAPSHOT_TIMEOUT,
-        )
+    if listed.files.is_empty() {
+        return Ok(BoundedDiff {
+            diff: String::new(),
+            truncated,
+            stat: Diffstat {
+                truncated,
+                ..listed.stat
+            },
+        });
+    }
+    let mut args: Vec<&str> = vec!["diff", "--find-renames", from, to, "--"];
+    args.extend(listed.files.iter().map(|entry| entry.path.as_str()));
+    let raw = git_bytes(worktree, &args, GIT_SNAPSHOT_TIMEOUT)
         .await
         .map_err(CheckpointError::internal)?;
-        let (chunk, chunk_truncated) = truncate_bytes(&raw, remaining);
-        if !body.is_empty() && !chunk.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push_str(&chunk);
-        if chunk_truncated {
-            truncated = true;
-            break;
-        }
-    }
+    let (body, body_truncated) = truncate_bytes(&raw, bounds.max_bytes);
+    truncated |= body_truncated;
     Ok(BoundedDiff {
         diff: body,
         truncated,
@@ -341,6 +335,24 @@ pub(crate) async fn produce_diff(
 /// The user's index is never opened. A temporary index file is used and
 /// deleted before this returns.
 pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointError> {
+    // Reuse one index per worktree so git's stat cache survives between turns
+    // and `add -A` re-hashes only what changed. A cold index re-hashes the
+    // whole worktree every time: ~0.85s versus ~0.20s on a 20k-file tree.
+    if let Some(index_path) = checkpoint_index_path(worktree).await {
+        match snapshot_tree_with_index(worktree, &index_path, false).await {
+            Ok(tree) => return Ok(tree),
+            Err(err) => {
+                // A concurrent snapshot holding `<index>.lock`, or an index
+                // this git refuses to read, must not fail the turn. Fall back
+                // to a private index that nothing else can contend for.
+                warn!(
+                    error = %err,
+                    "reusable checkpoint index unusable; falling back to a temporary one"
+                );
+            }
+        }
+    }
+
     let temp = tempfile::NamedTempFile::new().map_err(|err| {
         CheckpointError::internal(format!("could not create temporary index: {err}"))
     })?;
@@ -349,24 +361,52 @@ pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointE
     drop(temp);
     let _ = tokio::fs::remove_file(&index_path).await;
 
-    let result = snapshot_tree_with_index(worktree, &index_path).await;
+    let result = snapshot_tree_with_index(worktree, &index_path, true).await;
     let _ = tokio::fs::remove_file(&index_path).await;
     result
 }
 
-async fn snapshot_tree_with_index(
-    worktree: &Path,
-    index_path: &Path,
-) -> Result<String, CheckpointError> {
-    let index = index_path.to_string_lossy();
-    git_text_env(
+/// Path of this worktree's reusable checkpoint index.
+///
+/// `--git-path` resolves into the worktree's own git dir, so linked worktrees
+/// each get their own file and none of them is the user's `index`. Returns
+/// `None` outside a repository, where the caller falls back to a temp index.
+async fn checkpoint_index_path(worktree: &Path) -> Option<PathBuf> {
+    let raw = git_text(
         worktree,
-        &["read-tree", "HEAD"],
-        &[("GIT_INDEX_FILE", index.as_ref())],
+        &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
         GIT_TIMEOUT,
     )
     .await
-    .map_err(CheckpointError::internal)?;
+    .ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// Snapshot the worktree through `index_path`.
+///
+/// `reset_from_head` seeds a fresh index with `read-tree HEAD`. A reused index
+/// must skip that: `read-tree` overwrites the index wholesale and throws away
+/// the stat cache, which is the entire reason for keeping the file. `add -A`
+/// reconciles whatever the index already holds against the worktree — adding,
+/// updating, and staging deletions — so the resulting tree is the same either
+/// way, and it stays the same after `HEAD` moves.
+async fn snapshot_tree_with_index(
+    worktree: &Path,
+    index_path: &Path,
+    reset_from_head: bool,
+) -> Result<String, CheckpointError> {
+    let index = index_path.to_string_lossy();
+    if reset_from_head {
+        git_text_env(
+            worktree,
+            &["read-tree", "HEAD"],
+            &[("GIT_INDEX_FILE", index.as_ref())],
+            GIT_TIMEOUT,
+        )
+        .await
+        .map_err(CheckpointError::internal)?;
+    }
     git_text_env(
         worktree,
         &["add", "-A"],
@@ -1141,6 +1181,71 @@ mod tests {
         // first in the ref path.
         let removed = delete_workspace_refs(&repo, workspace).await.unwrap();
         assert_eq!(removed, 2);
+    }
+
+    /// The reused index keeps git's stat cache, which is only safe if it
+    /// still yields the tree a cold index would. Check that after every kind
+    /// of mutation, including one that moves HEAD underneath it.
+    #[tokio::test]
+    async fn reused_index_matches_a_cold_snapshot_through_every_mutation() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "reuse");
+
+        async fn cold(worktree: &Path) -> String {
+            let temp = TempDir::new().unwrap();
+            let index = temp.path().join("cold-index");
+            snapshot_tree_with_index(worktree, &index, true)
+                .await
+                .unwrap()
+        }
+
+        type Mutation = (&'static str, Box<dyn Fn(&Path)>);
+        let mutate: Vec<Mutation> = vec![
+            (
+                "add a file",
+                Box::new(|t: &Path| std::fs::write(t.join("a.txt"), "one\n").unwrap()),
+            ),
+            (
+                "add a second file",
+                Box::new(|t: &Path| std::fs::write(t.join("b.txt"), "two\n").unwrap()),
+            ),
+            (
+                "modify a tracked file",
+                Box::new(|t: &Path| std::fs::write(t.join("a.txt"), "one changed\n").unwrap()),
+            ),
+            (
+                "delete a file",
+                Box::new(|t: &Path| std::fs::remove_file(t.join("b.txt")).unwrap()),
+            ),
+            (
+                "move HEAD out from under the index",
+                Box::new(|t: &Path| {
+                    std::fs::write(t.join("c.txt"), "three\n").unwrap();
+                    run(t, &["git", "add", "c.txt"]);
+                    run(t, &["git", "commit", "-m", "commit c"]);
+                }),
+            ),
+        ];
+
+        for (label, apply) in mutate {
+            apply(&tree);
+            let warm = snapshot_tree(&tree).await.unwrap();
+            let cold = cold(&tree).await;
+            assert_eq!(warm, cold, "reused index diverged after: {label}");
+        }
+
+        // The reusable index lives in the worktree's git dir and is not the
+        // user's index.
+        let path = checkpoint_index_path(&tree).await.unwrap();
+        assert!(
+            path.to_string_lossy()
+                .contains("tidebreak-checkpoint-index"),
+            "{path:?}"
+        );
+        let user_index = git_text(&tree, &["rev-parse", "--git-path", "index"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(path.to_string_lossy().trim(), user_index.trim());
     }
 
     #[tokio::test]
