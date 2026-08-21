@@ -4,10 +4,11 @@
 //! `#[non_exhaustive]`, bounded payloads. Large bodies (diffs, raw engine
 //! payloads) never ride these events — they carry hints.
 
+use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AttentionSource, AttentionState, CodeApprovalId, CodeTurnId, HarnessKind};
+use super::{CodeApprovalId, CodeTurnId, HarnessKind};
 
 /// Longest assistant / reasoning / steer text stored on one event.
 pub const MAX_EVENT_TEXT_CHARS: usize = 8_192;
@@ -391,7 +392,8 @@ pub struct SequencedCodeEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code::{AttentionSource, AttentionState, FenceReason, HarnessKind};
+    use crate::attention::FenceReason;
+    use crate::code::HarnessKind;
     use uuid::Uuid;
 
     #[test]

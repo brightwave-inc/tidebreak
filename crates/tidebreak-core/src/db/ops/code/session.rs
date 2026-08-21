@@ -3,9 +3,10 @@ use sea_orm::{
     TransactionTrait,
 };
 
+use crate::attention::{Attention, AttentionSource, AttentionState, FenceReason};
 use crate::code::{
-    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentSummary, FenceReason, HarnessKind, WorkspaceId,
+    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
+    HarnessKind, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
