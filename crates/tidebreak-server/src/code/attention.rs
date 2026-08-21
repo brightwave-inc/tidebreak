@@ -59,6 +59,10 @@ pub(crate) async fn persist_session(
 ) -> Result<bool, tidebreak_core::AgentError> {
     let ok = save_session(db, session).await?;
     if ok {
+        bus.set_maybe_stalled(
+            session.id,
+            matches!(session.attention.state, AttentionState::Stalled { .. }),
+        );
         emit_digest(db, bus, session).await;
     }
     Ok(ok)
@@ -106,6 +110,7 @@ impl Default for ComputeOpts {
 /// clear, never to second-guess a live Manual pin.
 pub(crate) async fn compute_attention(
     db: &DbStore,
+    bus: &CodeEventBus,
     session: &CodeSession,
     opts: ComputeOpts,
 ) -> Result<Attention, tidebreak_core::AgentError> {
@@ -131,7 +136,7 @@ pub(crate) async fn compute_attention(
         ));
     }
     if session.lifecycle == CodeSessionLifecycle::Running {
-        let last = last_activity_at(db, session).await?;
+        let last = last_activity_at(db, bus, session).await?;
         let idle = opts.now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle >= opts.stall_idle_secs {
             return Ok(Attention::new(
@@ -201,6 +206,7 @@ pub(crate) async fn user_set_attention(
     let next = if clear {
         compute_attention(
             db,
+            bus,
             &session,
             ComputeOpts {
                 reviewed: true,
@@ -225,7 +231,7 @@ pub(crate) async fn sweep_stalled(
     let now = Utc::now();
     let running = list_sessions_by_lifecycle_all_owners(db, CodeSessionLifecycle::Running).await?;
     for session in running {
-        let last = last_activity_at(db, &session).await?;
+        let last = last_activity_at(db, bus, &session).await?;
         let idle = now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle < idle_secs {
             continue;
@@ -240,19 +246,30 @@ pub(crate) async fn sweep_stalled(
 }
 
 /// Activity on a running session clears a stall.
+///
+/// Called for every event a session produces, so the cheap answer comes
+/// first: the bus remembers whether this session might be stalled, and the
+/// common case — a session that is plainly working — returns without reading
+/// the row at all. The hint starts pessimistic and every read corrects it,
+/// so a wrong guess costs one query, never a missed clear.
 pub(crate) async fn note_activity(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
     session_id: CodeSessionId,
 ) -> Result<(), tidebreak_core::AgentError> {
+    if !bus.maybe_stalled(session_id) {
+        return Ok(());
+    }
     let Some(session) = get_session(db, owner, session_id).await? else {
         return Ok(());
     };
+    let stalled = matches!(session.attention.state, AttentionState::Stalled { .. });
+    bus.set_maybe_stalled(session_id, stalled);
     if session.lifecycle != CodeSessionLifecycle::Running {
         return Ok(());
     }
-    if !matches!(session.attention.state, AttentionState::Stalled { .. }) {
+    if !stalled {
         return Ok(());
     }
     let _ = apply_attention(
@@ -425,17 +442,28 @@ fn classify_activity(name: &str, detail: &ToolDetail) -> CodeSessionActivity {
     }
 }
 
+/// When this session last showed a sign of life.
+///
+/// The journal answers for anything durable. It cannot answer for assistant
+/// deltas, which stream and are never written down, so the live bus is asked
+/// first: a session pouring out a long answer and touching nothing else is
+/// working, not silent, and the stall sweep must not call it stalled.
 async fn last_activity_at(
     db: &DbStore,
+    bus: &CodeEventBus,
     session: &CodeSession,
 ) -> Result<DateTime<Utc>, tidebreak_core::AgentError> {
-    if let Some(at) = latest_event_created_at(db, &session.owner, session.id).await? {
-        return Ok(at);
-    }
-    if let Some(turn) = latest_turn(db, &session.owner, session.id).await? {
-        return Ok(turn.started_at);
-    }
-    Ok(session.created_at)
+    let journaled = match latest_event_created_at(db, &session.owner, session.id).await? {
+        Some(at) => at,
+        None => match latest_turn(db, &session.owner, session.id).await? {
+            Some(turn) => turn.started_at,
+            None => session.created_at,
+        },
+    };
+    Ok(match bus.last_activity(session.id) {
+        Some(live) => journaled.max(live),
+        None => journaled,
+    })
 }
 
 /// Abort the stall sweep when the runtime is dropped.

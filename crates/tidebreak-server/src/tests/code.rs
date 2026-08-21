@@ -308,14 +308,30 @@ async fn approvals_for(
         .unwrap()
 }
 
+/// Every event a session journaled, in order.
+async fn journaled_events(
+    db: &DbStore,
+    session_id: CodeSessionId,
+) -> Vec<tidebreak_core::SequencedCodeEvent> {
+    tidebreak_core::db::code::list_events(
+        db,
+        &tidebreak_core::OwnerId::local(),
+        session_id,
+        0,
+        tidebreak_core::db::code::MAX_REPLAY_EVENTS,
+    )
+    .await
+    .unwrap()
+    .events
+}
+
 /// The outcome carried on every `ApprovalResolved` the session journaled.
 async fn journaled_resolutions(
     db: &DbStore,
     session_id: CodeSessionId,
 ) -> Vec<tidebreak_core::ApprovalDecisionKind> {
-    tidebreak_core::db::code::list_events(db, &tidebreak_core::OwnerId::local(), session_id, 0)
+    journaled_events(db, session_id)
         .await
-        .unwrap()
         .into_iter()
         .filter_map(|framed| match framed.event {
             CodeEvent::ApprovalResolved { decision, .. } => Some(decision),
@@ -965,7 +981,7 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
 
     let session_id: CodeSessionId = json_id(&session).parse().unwrap();
     let browser_token = browser_token_for_session(&runtime, session_id);
-    let mut events = runtime.bus.subscribe(session_id);
+    let (mut events, _) = runtime.bus.attach(session_id);
 
     let turn_req = client
         .post(format!(
@@ -1160,7 +1176,7 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         .unwrap();
 
     let session_id: CodeSessionId = json_id(&session).parse().unwrap();
-    let mut events = runtime.bus.subscribe(session_id);
+    let (mut events, _) = runtime.bus.attach(session_id);
 
     let turn_req = client
         .post(format!(
@@ -2125,7 +2141,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         .unwrap();
     let session_id = json_id(&session).to_owned();
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let mut events = runtime.bus.subscribe(parsed);
+    let (mut events, _) = runtime.bus.attach(parsed);
 
     let turn = tokio::spawn({
         let client = client.clone();
@@ -2403,14 +2419,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
     assert_eq!(body["kind"], "stale_turn");
     assert_eq!(turn.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
 
-    let events = tidebreak_core::db::code::list_events(
-        &runtime.db,
-        &tidebreak_core::OwnerId::local(),
-        parsed,
-        0,
-    )
-    .await
-    .unwrap();
+    let events = journaled_events(&runtime.db, parsed).await;
     assert!(
         events
             .iter()
@@ -2557,7 +2566,7 @@ async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted()
         .unwrap();
     let session_id = json_id(&session).to_owned();
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let mut events = runtime.bus.subscribe(parsed);
+    let (mut events, _) = runtime.bus.attach(parsed);
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -2631,7 +2640,7 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
         .unwrap();
     let session_id = json_id(&session).to_owned();
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let mut events = runtime.bus.subscribe(parsed);
+    let (mut events, _) = runtime.bus.attach(parsed);
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -3293,12 +3302,20 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
         .unwrap();
 
     let mut seqs = Vec::new();
+    let mut streamed = String::new();
     let read = async {
         while let Some(frame) = socket.next().await {
             let WsMessage::Text(text) = frame.unwrap() else {
                 continue;
             };
             let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            // Deltas ride the live stream without a row, so they repeat the
+            // cursor rather than advancing it. The ordering contract is about
+            // the journal.
+            if value["transient"] == true {
+                streamed.push_str(value["event"]["text"].as_str().unwrap());
+                continue;
+            }
             let seq = value["seq"].as_i64().unwrap();
             seqs.push(seq);
             if value["event"]["type"] == "turn_completed" {
@@ -3309,6 +3326,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     tokio::time::timeout(Duration::from_secs(5), read)
         .await
         .expect("turn did not complete over the socket");
+    assert_eq!(streamed, "onetwo", "deltas must still stream live");
     assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
     assert_eq!(
         seqs.iter()
@@ -3373,6 +3391,9 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     assert_eq!(recovered, vec![current + 1, current + 2]);
 }
 
+/// Delta rows are no longer written, but journals that already hold them
+/// must still read back. This appends them the way a pre-record-57 session
+/// did and replays the result.
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
@@ -3398,16 +3419,10 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
         .unwrap();
     let session_id = json_id(&session).to_owned();
     let parsed: CodeSessionId = session_id.parse().unwrap();
-    let replay_after_seq = tidebreak_core::db::code::list_events(
-        &runtime.db,
-        &tidebreak_core::OwnerId::local(),
-        parsed,
-        0,
-    )
-    .await
-    .unwrap()
-    .last()
-    .map_or(0, |event| event.seq);
+    let replay_after_seq = journaled_events(&runtime.db, parsed)
+        .await
+        .last()
+        .map_or(0, |event| event.seq);
 
     let first_delta_seq = tidebreak_core::db::code::append_event(
         &runtime.db,
@@ -3460,6 +3475,587 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
     assert_eq!(replayed[1]["event"]["text"], "lo");
     assert_eq!(replayed[0]["replayed"], true);
     assert_eq!(replayed[1]["replayed"], true);
+}
+
+/// Record 57: the message states the whole answer, so the deltas that built
+/// it are streamed and dropped. A plausible wrong implementation stops
+/// publishing them too and passes every durable assertion here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_journals_its_message_and_none_of_the_deltas_that_built_it() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "half a ".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: "sentence".into(),
+            },
+            HarnessEvent::AssistantMessage {
+                text: "half a sentence".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(10)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "hi" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+
+    let mut streamed = Vec::new();
+    let read = async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            if value["event"]["type"] == "assistant_delta" {
+                assert_eq!(value["transient"], true, "a delta must not claim a row");
+                streamed.push(value["event"]["text"].as_str().unwrap().to_owned());
+            }
+            if value["event"]["type"] == "turn_completed" {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .expect("turn did not complete over the socket");
+    assert_eq!(streamed, vec!["half a ", "sentence"]);
+
+    let journaled = journaled_events(&runtime.db, parsed).await;
+    assert!(
+        !journaled
+            .iter()
+            .any(|framed| matches!(framed.event, CodeEvent::AssistantDelta { .. })),
+        "a delta reached the journal: {journaled:?}"
+    );
+    let messages: Vec<&str> = journaled
+        .iter()
+        .filter_map(|framed| match &framed.event {
+            CodeEvent::AssistantMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec!["half a sentence"]);
+}
+
+/// Interrupt an answer mid-sentence and the words the reader watched arrive
+/// must survive a reload. The engine never sent a message for them, so the
+/// server writes the one it owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn text_streamed_before_an_interrupt_is_written_down() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "thinking out ".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: "loud".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: " and on".into(),
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(150)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let (mut events, _) = runtime.bus.attach(parsed);
+
+    let turn_req = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "go" }));
+    let interrupt = async {
+        // Wait for the first delta so there is streamed text to lose.
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event.event, CodeEvent::AssistantDelta { .. }) {
+                break;
+            }
+        }
+        client
+            .post(format!(
+                "http://{addr}/code/sessions/{session_id}/interrupt"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+    };
+    let (turn, interrupted) = tokio::join!(turn_req.send(), interrupt);
+    assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(turn.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let journaled = journaled_events(&runtime.db, parsed).await;
+            let text = journaled.iter().find_map(|framed| match &framed.event {
+                CodeEvent::AssistantMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            });
+            if let Some(text) = text {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("streamed text must survive the interrupt");
+    assert!(
+        recovered.starts_with("thinking out"),
+        "expected the streamed text, got {recovered:?}"
+    );
+}
+
+/// Replay is capped, and the client is told when the cap bit. Silently
+/// dropping the head would let a long session open on its middle and read as
+/// if that were where it began.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capped_replay_tells_the_socket_that_history_was_dropped() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let overflow = tidebreak_core::db::code::MAX_REPLAY_EVENTS + 2;
+    let epoch = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .spawn_epoch;
+    for index in 0..overflow {
+        tidebreak_core::db::code::append_event(
+            &runtime.db,
+            &tidebreak_core::OwnerId::local(),
+            parsed,
+            epoch,
+            &tidebreak_core::CodeEvent::HarnessNotice {
+                level: tidebreak_core::HarnessNoticeLevel::Info,
+                message: format!("notice {index}"),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("replay timed out")
+        .expect("socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = frame else {
+        panic!("expected a text frame");
+    };
+    let first: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(first["truncated"], true, "{first}");
+    // The window keeps the newest events, so it starts a cap's worth below
+    // the head of the journal rather than at the cursor the client asked
+    // from.
+    let newest = journaled_events(&runtime.db, parsed)
+        .await
+        .last()
+        .expect("the session journaled something")
+        .seq;
+    assert_eq!(
+        first["seq"].as_i64().unwrap(),
+        newest - tidebreak_core::db::code::MAX_REPLAY_EVENTS as i64 + 1
+    );
+
+    let second = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("second frame timed out")
+        .expect("socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = second else {
+        panic!("expected a text frame");
+    };
+    let second: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert!(
+        second.get("truncated").is_none(),
+        "only the first frame of the window carries the flag: {second}"
+    );
+}
+
+/// A reader who opens the pane mid-answer must see the sentence from its
+/// start, not from wherever they happened to arrive. Nothing durable holds
+/// that text yet, so the live tail is the only source.
+#[tokio::test(flavor = "multi_thread")]
+async fn connecting_mid_answer_replays_the_text_that_already_streamed() {
+    let (router, token, runtime, dir) = code_app_with(
+        ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "first ".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: "second ".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: "third".into(),
+            },
+            HarnessEvent::AssistantMessage {
+                text: "first second third".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: Default::default(),
+            },
+        ])
+        .with_delay(Duration::from_millis(200)),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let (mut events, _) = runtime.bus.attach(parsed);
+
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "go" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    // Let two deltas go by, then connect as a second reader would.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = 0;
+        while seen < 2 {
+            if matches!(
+                events.recv().await.unwrap().event,
+                CodeEvent::AssistantDelta { .. }
+            ) {
+                seen += 1;
+            }
+        }
+    })
+    .await
+    .expect("no deltas streamed");
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    let mut assembled = String::new();
+    let mut finalized = None;
+    let read = async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            match value["event"]["type"].as_str() {
+                Some("assistant_delta") => {
+                    assembled.push_str(value["event"]["text"].as_str().unwrap());
+                }
+                Some("assistant_message") => {
+                    finalized = Some(value["event"]["text"].as_str().unwrap().to_owned());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("the late reader never saw the message");
+    assert_eq!(
+        assembled, "first second third",
+        "a mid-answer reader must be caught up before the message lands"
+    );
+    assert_eq!(finalized.as_deref(), Some("first second third"));
+    let _ = turn.await;
+}
+
+/// A reconnect may keep a prefix and miss later deltas while the socket is
+/// down. The server sends the complete tail as a replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    let epoch = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .spawn_epoch;
+    let marker = CodeEvent::HarnessNotice {
+        level: tidebreak_core::HarnessNoticeLevel::Info,
+        message: "reconnect cursor".into(),
+    };
+    let cursor = tidebreak_core::db::code::append_event(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+        epoch,
+        &marker,
+    )
+    .await
+    .unwrap();
+    runtime.bus.publish(
+        parsed,
+        tidebreak_core::SequencedCodeEvent {
+            seq: cursor,
+            event: marker,
+        },
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = socket.next().await {
+            let WsMessage::Text(text) = frame.unwrap() else {
+                continue;
+            };
+            let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            if value["seq"] == cursor {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the socket did not reach the reconnect cursor");
+
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "first ".into(),
+        },
+    );
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "second ".into(),
+        },
+    );
+
+    let mut assembled = String::new();
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("a live delta timed out")
+            .expect("the live socket closed")
+            .unwrap();
+        let WsMessage::Text(text) = frame else {
+            panic!("expected a text frame");
+        };
+        let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(value["seq"], cursor);
+        assert_eq!(value["transient"], true);
+        assembled.push_str(value["event"]["text"].as_str().unwrap());
+    }
+    assert_eq!(assembled, "first second ");
+    drop(socket);
+
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "third".into(),
+        },
+    );
+
+    let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after={cursor}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut resumed, _) = connect_async(request).await.unwrap();
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+        .await
+        .expect("the replacement tail timed out")
+        .expect("the resumed socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = frame else {
+        panic!("expected a text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(value["seq"], cursor);
+    assert_eq!(value["event"]["type"], "assistant_delta");
+    assert_eq!(value["event"]["text"], "first second third");
+    assert_eq!(value["transient"], true);
+    assert_eq!(value["replacement"], true);
+    assembled = value["event"]["text"].as_str().unwrap().to_owned();
+
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: " fourth".into(),
+        },
+    );
+    let frame = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+        .await
+        .expect("the resumed delta timed out")
+        .expect("the resumed socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = frame else {
+        panic!("expected a text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(value["event"]["type"], "assistant_delta");
+    assert_eq!(value["event"]["text"], " fourth");
+    assert!(value.get("replacement").is_none());
+    assembled.push_str(value["event"]["text"].as_str().unwrap());
+    assert_eq!(assembled, "first second third fourth");
 }
 
 #[tokio::test]
@@ -3602,14 +4198,7 @@ async fn a_completed_turn_records_a_checkpoint_and_serves_bounded_review() {
     );
     assert_eq!(diff["truncated"], false);
 
-    let events = tidebreak_core::db::code::list_events(
-        &_runtime.db,
-        &tidebreak_core::OwnerId::local(),
-        json_id(&session).parse().unwrap(),
-        0,
-    )
-    .await
-    .unwrap();
+    let events = journaled_events(&_runtime.db, json_id(&session).parse().unwrap()).await;
     assert!(
         events.iter().any(|framed| {
             matches!(
@@ -3700,14 +4289,7 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
     assert_eq!(turn["status"], "completed");
     assert!(turn["checkpoint_ref"].is_null());
 
-    let events = tidebreak_core::db::code::list_events(
-        &runtime.db,
-        &tidebreak_core::OwnerId::local(),
-        json_id(&session).parse().unwrap(),
-        0,
-    )
-    .await
-    .unwrap();
+    let events = journaled_events(&runtime.db, json_id(&session).parse().unwrap()).await;
     assert!(
         events.iter().any(|framed| {
             matches!(
@@ -3849,33 +4431,32 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
     let body: serde_json::Value = finished.json().await.unwrap();
     assert_eq!(body["status"], "completed");
-    let events = tidebreak_core::db::code::list_events(
-        &runtime.db,
-        &tidebreak_core::OwnerId::local(),
-        parsed,
-        0,
-    )
-    .await
-    .unwrap();
+    let events = journaled_events(&runtime.db, parsed).await;
     let kinds: Vec<&str> = events
         .iter()
         .map(|framed| match &framed.event {
             tidebreak_core::CodeEvent::ApprovalRequested { .. } => "requested",
             tidebreak_core::CodeEvent::ApprovalResolved { .. } => "resolved",
-            tidebreak_core::CodeEvent::AssistantDelta { .. } => "delta",
+            // Deltas stream and are never journaled; the message that states
+            // the same text is what the turn leaves behind (record 57).
+            tidebreak_core::CodeEvent::AssistantMessage { .. } => "message",
             tidebreak_core::CodeEvent::TurnCompleted { .. } => "completed",
             _ => "other",
         })
         .collect();
     assert!(kinds.contains(&"requested"));
     assert!(kinds.contains(&"resolved"));
-    assert!(kinds.contains(&"delta"));
+    assert!(kinds.contains(&"message"));
     assert!(kinds.contains(&"completed"));
+    assert!(events.iter().any(|framed| matches!(
+        &framed.event,
+        tidebreak_core::CodeEvent::AssistantMessage { text, .. } if text == "after the decision"
+    )));
     let requested = kinds.iter().position(|k| *k == "requested").unwrap();
-    let delta = kinds.iter().position(|k| *k == "delta").unwrap();
+    let message = kinds.iter().position(|k| *k == "message").unwrap();
     let completed = kinds.iter().position(|k| *k == "completed").unwrap();
-    assert!(requested < delta);
-    assert!(delta < completed);
+    assert!(requested < message);
+    assert!(message < completed);
 }
 
 #[tokio::test]

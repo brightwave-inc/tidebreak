@@ -3583,9 +3583,33 @@ error: string, };
 export type RootAttachmentOrigin = "project_default" | "conversation";
 
 /**
- * One journaled event on the per-session WebSocket.
+ * One event on the per-session WebSocket.
  */
-export type SequencedCodeEventFrame = { seq: number, event: CodeEvent, replayed?: boolean, };
+export type SequencedCodeEventFrame = { 
+/**
+ * Journal position. On a `transient` frame this is the cursor the event
+ * streamed behind, not a position the frame occupies — resume from it
+ * and you lose nothing, because no row holds this event.
+ */
+seq: number, event: CodeEvent, replayed?: boolean, 
+/**
+ * Set on a live-only event the journal does not hold: assistant deltas,
+ * and the catch-up delta a mid-turn reader gets on connect. Apply it but
+ * do not advance the resume cursor. A reconnect may receive the complete
+ * current tail with `replacement` set (record 57).
+ */
+transient?: boolean, 
+/**
+ * Set on a transient assistant delta that contains the complete live
+ * tail. Replace the current assistant buffer instead of appending it.
+ */
+replacement?: boolean, 
+/**
+ * Set on the first replayed frame of a capped window: older events above
+ * the requested cursor were dropped, and the history in front of this
+ * frame is not coming.
+ */
+truncated?: boolean, };
 
 /**
  * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.

@@ -10,7 +10,7 @@ use crate::db::code::{
     get_turn, get_workspace, insert_approval, insert_repo, insert_session, insert_turn,
     insert_workspace, list_approvals, list_events, list_repos, list_sessions, list_turns,
     mark_repo_removed, save_session, set_session_subagents, set_workspace_title_if,
-    CodeJournalError,
+    CodeJournalError, MAX_REPLAY_EVENTS,
 };
 use crate::OwnerId;
 use chrono::Utc;
@@ -386,12 +386,12 @@ async fn journal_rejects_stale_spawn_epoch() {
     append_event(&store, &OwnerId::local(), session_id, 1, &event)
         .await
         .unwrap();
-    let events = list_events(&store, &OwnerId::local(), session_id, 0)
+    let events = list_events(&store, &OwnerId::local(), session_id, 0, MAX_REPLAY_EVENTS)
         .await
         .unwrap();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].seq, 1);
-    assert_eq!(events[1].seq, 2);
+    assert_eq!(events.events.len(), 2);
+    assert_eq!(events.events[0].seq, 1);
+    assert_eq!(events.events[1].seq, 2);
 }
 
 #[tokio::test]
@@ -445,11 +445,67 @@ async fn journal_seq_is_monotonic_under_concurrent_appends() {
     }
     seqs.sort_unstable();
     assert_eq!(seqs, (1..=n).collect::<Vec<_>>());
-    let events = list_events(&store, &OwnerId::local(), session_id, 0)
+    let events = list_events(&store, &OwnerId::local(), session_id, 0, MAX_REPLAY_EVENTS)
         .await
         .unwrap();
-    assert_eq!(events.len(), n as usize);
-    assert!(events.windows(2).all(|pair| pair[0].seq + 1 == pair[1].seq));
+    assert_eq!(events.events.len(), n as usize);
+    assert!(events
+        .events
+        .windows(2)
+        .all(|pair| pair[0].seq + 1 == pair[1].seq));
+}
+
+/// A capped replay keeps the newest events and says the head is missing.
+///
+/// Dropping the tail instead would be worse than useless — a reader would
+/// resume before the live stream and never catch up — and dropping the head
+/// silently would let a session open on its middle and read as if that were
+/// the beginning.
+#[tokio::test]
+async fn a_capped_replay_keeps_the_newest_events_and_admits_the_head_is_gone() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    for index in 0..6 {
+        append_event(
+            &store,
+            &owner,
+            session_id,
+            0,
+            &CodeEvent::HarnessNotice {
+                level: crate::code::HarnessNoticeLevel::Info,
+                message: format!("notice {index}"),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let capped = list_events(&store, &owner, session_id, 0, 4).await.unwrap();
+    assert!(capped.truncated);
+    assert_eq!(
+        capped
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 6]
+    );
+
+    // A window that fits says nothing was dropped, including the exact fit.
+    let exact = list_events(&store, &owner, session_id, 0, 6).await.unwrap();
+    assert!(!exact.truncated);
+    assert_eq!(exact.events.len(), 6);
+
+    // The cursor still applies: the cap windows what is above it.
+    let tail = list_events(&store, &owner, session_id, 4, 4).await.unwrap();
+    assert!(!tail.truncated);
+    assert_eq!(
+        tail.events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
 }
 
 /// ADR 0030: no chat entity references a code-mode table or id type, and no
@@ -594,16 +650,20 @@ async fn owner_scoped_code_queries_partition_every_table() {
     .await
     .unwrap();
     assert_eq!(
-        list_events(&store, &alice, alice_session, 0)
+        list_events(&store, &alice, alice_session, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap()
+            .events
             .len(),
         1
     );
-    assert!(list_events(&store, &bob, alice_session, 0)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        list_events(&store, &bob, alice_session, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
 
     // Approvals.
     let approval_id = CodeApprovalId::new();

@@ -79,6 +79,110 @@ describe("seq cursor", () => {
     expect(replay.effects).toEqual([]);
   });
 
+  it("applies a transient frame without moving the cursor", () => {
+    // Assistant deltas are live-only (record 57): no row holds them, so the
+    // duplicate check does not apply and the resume cursor must stay where
+    // the journal left it. Gating them on `seq` would drop every one.
+    const clock = deps();
+    const { state } = play(
+      [{ type: "turn_started", turn_id: "t1" }],
+      initialCodeSessionState(),
+      clock,
+    );
+    const first = reduceCodeSessionEvent(
+      state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "half a " },
+        transient: true,
+      },
+      clock,
+    );
+    const second = reduceCodeSessionEvent(
+      first.state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "sentence" },
+        transient: true,
+      },
+      clock,
+    );
+    expect(second.state.assistantBuffer).toBe("half a sentence");
+    expect(second.state.lastSeq).toBe(state.lastSeq);
+  });
+
+  it("replaces streamed text with a catch-up tail after reconnect", () => {
+    const clock = deps();
+    const { state } = play(
+      [{ type: "turn_started", turn_id: "t1" }],
+      initialCodeSessionState(),
+      clock,
+    );
+    const streamed = reduceCodeSessionEvent(
+      state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "first second " },
+        transient: true,
+      },
+      clock,
+    );
+    const caughtUp = reduceCodeSessionEvent(
+      streamed.state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "first second third" },
+        transient: true,
+        replacement: true,
+      },
+      clock,
+    );
+    const continued = reduceCodeSessionEvent(
+      caughtUp.state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "." },
+        transient: true,
+      },
+      clock,
+    );
+
+    expect(continued.state.assistantBuffer).toBe("first second third.");
+    expect(continued.state.lastSeq).toBe(state.lastSeq);
+  });
+
+  it("says so when the replay started partway through", () => {
+    const clock = deps();
+    const first = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      {
+        seq: 900,
+        event: { type: "turn_started", turn_id: "t9" },
+        replayed: true,
+        truncated: true,
+      },
+      clock,
+    );
+    expect(first.state.items[0]).toMatchObject({
+      kind: "notice",
+      level: "info",
+    });
+    // A reconnect that truncates again must not stack a second line.
+    const again = reduceCodeSessionEvent(
+      first.state,
+      {
+        seq: 901,
+        event: { type: "turn_started", turn_id: "t10" },
+        replayed: true,
+        truncated: true,
+      },
+      clock,
+    );
+    expect(
+      again.state.items.filter((item) => item.kind === "notice"),
+    ).toHaveLength(1);
+  });
+
   it("advances the cursor for unknown event kinds", () => {
     const { state, effects } = reduceCodeSessionEvent(
       initialCodeSessionState(),
